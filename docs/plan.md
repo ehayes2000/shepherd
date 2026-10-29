@@ -175,6 +175,16 @@ acceptance:
   `abort()`s, and the parent reopens and sees the entry.
 scope: crates/adapters
 
+### F12: Continuation prompts don't count as user turns
+status: todo
+depends: T15
+touches: core::session
+goal: `SessionState::turns()` counts prompts the user actually sent.
+acceptance:
+- Prompts marked `_meta.shepherd.continuation: true` (T15's continuations of a blocked Stop) open a turn for activity purposes,
+  but don't increment `turns()` or change `last_prompt()`. There's a table test.
+scope: crates/core
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
