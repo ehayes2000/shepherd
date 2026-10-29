@@ -31,12 +31,18 @@
 //! the fold) or at an `idle_prompt` notification. The reference documents `idle_prompt` as "about 60 seconds" after
 //! Claude finishes responding with no typing since, but not whether an interrupted turn counts.
 
-mod frames;
-
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::acpp::{Dir, Frame, FrameDraft, RequestId, Source, SourceKind};
+use crate::acpp::acp::{
+    CompactionStatus, CompactionUpdate, ContentBlock, ContentChunk, PromptRequest, PromptResponse,
+    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolKind,
+};
+use crate::acpp::{
+    AgentExited, AgentIdle, AgentStarted, Dir, Frame, FrameDraft, RequestId, ShepherdFrame, Source,
+    SourceKind,
+};
 use crate::ids::SessionId;
 
 /// The agent name in `source.agent` and `_shepherd/agent/started`.
@@ -128,9 +134,16 @@ pub fn translate(state: &mut ClaudeTranslation, payload: &Value) -> Vec<FrameDra
     let frames = match name {
         "UserPromptSubmit" => user_prompt_submit(state, &hook),
         "PreToolUse" => pre_tool_use(state, &hook),
-        "PostToolUse" => tool_done(state, &hook, "completed", hook.field("tool_response")),
-        "PostToolUseFailure" => tool_done(state, &hook, "failed", hook.field("error")),
-        "PermissionDenied" => tool_done(state, &hook, "failed", hook.field("reason")),
+        "PostToolUse" => tool_done(
+            state,
+            &hook,
+            ToolCallStatus::Completed,
+            hook.field("tool_response"),
+        ),
+        "PostToolUseFailure" => {
+            tool_done(state, &hook, ToolCallStatus::Failed, hook.field("error"))
+        }
+        "PermissionDenied" => tool_done(state, &hook, ToolCallStatus::Failed, hook.field("reason")),
         "PermissionRequest" => permission_request(state, &hook),
         "Notification" => notification(state, &hook),
         "Stop" => stop(state, &hook),
@@ -176,11 +189,33 @@ fn hook_name(payload: &Value) -> Option<&str> {
         .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
+/// `_claude-code/<hook>` carrying the payload: as the params if it is an object, else under `payload`.
 fn vendor(state: &ClaudeTranslation, hook: &str, payload: &Value) -> Vec<FrameDraft> {
-    frames::vendor(hook, payload)
-        .map(|f| state.draft(Dir::FromAgent, f))
-        .into_iter()
-        .collect()
+    vec![state.draft(Dir::FromAgent, vendor_frame(hook, payload))]
+}
+
+fn vendor_frame(hook: &str, payload: &Value) -> Frame {
+    let params = match payload {
+        Value::Object(_) => payload.clone(),
+        other => json!({ "payload": other }),
+    };
+    Frame::notification(&format!("_claude-code/{hook}"), params)
+}
+
+/// A synthesized `session/update`. `None` only if marking fails, which a `_meta`-less notification never does.
+fn update(agent_session: &str, update: SessionUpdate) -> Option<Frame> {
+    SessionNotification {
+        session_id: agent_session.to_owned(),
+        update,
+        meta: None,
+    }
+    .to_frame()
+    .into_synthesized()
+    .ok()
+}
+
+fn agent_idle() -> Frame {
+    ShepherdFrame::AgentIdle(AgentIdle {}).to_frame()
 }
 
 /// The agent session id ACP frames carry: the payload's, else the last `SessionStart`'s.
@@ -196,15 +231,18 @@ fn user_prompt_submit(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let text = hook.str("prompt");
     let mut out = vec![open_prompt(state, &agent_session, text, false)?];
     if let Some(text) = text {
-        out.push((
-            Dir::FromAgent,
-            frames::user_message_chunk(&agent_session, text)?,
-        ));
+        let chunk = SessionUpdate::UserMessageChunk(ContentChunk {
+            content: ContentBlock::text(text),
+            message_id: None,
+            meta: None,
+        });
+        out.push((Dir::FromAgent, update(&agent_session, chunk)?));
     }
     Some(out)
 }
 
-/// Starts a turn with a new `session/prompt` request, which the next `Stop` answers.
+/// Starts a turn with a new `session/prompt` request, which the next `Stop` answers. A `continuation` (work a
+/// Stop hook kept going, not a user prompt) is marked `_meta.shepherd.continuation: true`.
 fn open_prompt(
     state: &mut ClaudeTranslation,
     agent_session: &str,
@@ -212,12 +250,14 @@ fn open_prompt(
     continuation: bool,
 ) -> Option<(Dir, Frame)> {
     let id = state.new_id("prompt");
-    let frame = frames::prompt(
-        &RequestId::from(id.clone()),
-        agent_session,
-        text,
-        continuation,
-    )?;
+    let frame = PromptRequest {
+        session_id: agent_session.to_owned(),
+        prompt: text.map(ContentBlock::text).into_iter().collect(),
+        meta: continuation.then(|| json!({ "shepherd": { "continuation": true } })),
+    }
+    .to_frame(RequestId::from(id.clone()))
+    .into_synthesized()
+    .ok()?;
     state.end_turn();
     state.prompt = Some(id);
     Some((Dir::ToAgent, frame))
@@ -243,13 +283,16 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let mut out = continuation(state, hook)?;
     let name = hook.str("tool_name").unwrap_or("Tool");
     let input = hook.field("tool_input");
-    let frame = frames::tool_call(
-        &agent_session(state, hook),
-        id,
-        &tool_title(name, input),
-        tool_kind(name),
-        input,
-    )?;
+    let call = SessionUpdate::ToolCall(ToolCall {
+        tool_call_id: id.to_owned(),
+        title: tool_title(name, input),
+        name: None,
+        kind: tool_kind(name),
+        status: ToolCallStatus::InProgress,
+        raw_input: input.cloned(),
+        meta: None,
+    });
+    let frame = update(&agent_session(state, hook), call)?;
     state.tools.retain(|t| t.id != id);
     state.tools.push(OpenTool {
         id: id.to_owned(),
@@ -261,14 +304,23 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     Some(out)
 }
 
+/// A tool call that finished with `status` (`completed` or `failed`).
 fn tool_done(
     state: &mut ClaudeTranslation,
     hook: &Hook,
-    status: &str,
+    status: ToolCallStatus,
     raw_output: Option<&Value>,
 ) -> Frames {
     let id = hook.str("tool_use_id")?;
-    let frame = frames::tool_call_done(&agent_session(state, hook), id, status, raw_output)?;
+    let patch = SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+        tool_call_id: id.to_owned(),
+        title: None,
+        kind: None,
+        status: Some(status),
+        raw_output: raw_output.cloned(),
+        meta: None,
+    });
+    let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
     state.permission_open = false;
     Some(vec![(Dir::FromAgent, frame)])
@@ -303,14 +355,15 @@ fn notification(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         }
         "idle_prompt" => {
             state.end_turn();
-            Some(vec![(Dir::Internal, frames::agent_idle()?)])
+            Some(vec![(Dir::Internal, agent_idle())])
         }
         _ => None,
     }
 }
 
 /// A `session/request_permission` for `tool`, or for its own id when no open tool matches. The fold then clears
-/// it on that tool's activity, or on any tool activity.
+/// it on that tool's activity, or on any tool activity. The options stay empty: hooks don't say what the dialog
+/// offers.
 fn permission(
     state: &mut ClaudeTranslation,
     hook: &Hook,
@@ -319,23 +372,40 @@ fn permission(
 ) -> Frames {
     let id = state.new_id("permission");
     let tool_call_id = tool.unwrap_or_else(|| id.clone());
-    let frame = frames::request_permission(
-        &RequestId::from(id),
-        &agent_session(state, hook),
-        &tool_call_id,
-        title,
-    )?;
+    let frame = RequestPermissionRequest {
+        session_id: agent_session(state, hook),
+        tool_call: ToolCallUpdate {
+            tool_call_id,
+            title: Some(title.to_owned()),
+            kind: None,
+            status: None,
+            raw_output: None,
+            meta: None,
+        },
+        options: json!([]),
+        meta: None,
+    }
+    .to_frame(RequestId::from(id))
+    .into_synthesized()
+    .ok()?;
     state.permission_open = true;
     Some(vec![(Dir::FromAgent, frame)])
 }
 
 fn stop(state: &mut ClaudeTranslation, _hook: &Hook) -> Frames {
     let frame = match &state.prompt {
-        Some(id) => (
-            Dir::FromAgent,
-            frames::prompt_end_turn(&RequestId::from(id.as_str()))?,
-        ),
-        None => (Dir::Internal, frames::agent_idle()?),
+        Some(id) => {
+            let end_turn = PromptResponse {
+                stop_reason: StopReason::EndTurn,
+                meta: None,
+            };
+            let frame = end_turn
+                .to_frame(RequestId::from(id.as_str()))
+                .into_synthesized()
+                .ok()?;
+            (Dir::FromAgent, frame)
+        }
+        None => (Dir::Internal, agent_idle()),
     };
     state.end_turn();
     Some(vec![frame])
@@ -345,8 +415,8 @@ fn stop(state: &mut ClaudeTranslation, _hook: &Hook) -> Frames {
 /// `result` to carry the synthesized mark, so the turn ends with idle and the payload is kept as a vendor frame.
 fn stop_failure(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let out = vec![
-        (Dir::FromAgent, frames::vendor("StopFailure", hook.payload)?),
-        (Dir::Internal, frames::agent_idle()?),
+        (Dir::FromAgent, vendor_frame("StopFailure", hook.payload)),
+        (Dir::Internal, agent_idle()),
     ];
     state.end_turn();
     Some(out)
@@ -359,7 +429,13 @@ fn session_start(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         return None;
     }
     let agent_session_id = hook.str("session_id");
-    let frame = frames::agent_started(AGENT, agent_session_id)?;
+    let frame = ShepherdFrame::AgentStarted(AgentStarted {
+        agent: AGENT.to_owned(),
+        agent_session_id: agent_session_id.map(str::to_owned),
+        pid: None,
+        command: None,
+    })
+    .to_frame();
     state.end_turn();
     state.compaction = None;
     state.agent_session_id = agent_session_id.map(str::to_owned);
@@ -372,7 +448,7 @@ fn session_end(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     if matches!(hook.str("reason"), Some("clear" | "resume")) {
         return None;
     }
-    let frame = frames::agent_exited()?;
+    let frame = ShepherdFrame::AgentExited(AgentExited::default()).to_frame();
     state.end_turn();
     state.compaction = None;
     Some(vec![(Dir::Internal, frame)])
@@ -384,30 +460,31 @@ fn pre_compact(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let agent_session = agent_session(state, hook);
     let mut out = Vec::new();
     if let Some(old) = &state.compaction {
-        out.push((
-            Dir::FromAgent,
-            frames::compaction(&agent_session, old, "cancelled", None)?,
-        ));
+        let cancel = compaction(old, CompactionStatus::Cancelled, None);
+        out.push((Dir::FromAgent, update(&agent_session, cancel)?));
     }
     let id = state.new_id("compaction");
-    out.push((
-        Dir::FromAgent,
-        frames::compaction(&agent_session, &id, "in_progress", None)?,
-    ));
+    let start = compaction(&id, CompactionStatus::InProgress, None);
+    out.push((Dir::FromAgent, update(&agent_session, start)?));
     state.compaction = Some(id);
     Some(out)
 }
 
 fn post_compact(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let id = state.compaction.as_deref()?;
-    let frame = frames::compaction(
-        &agent_session(state, hook),
-        id,
-        "completed",
-        hook.str("compact_summary"),
-    )?;
+    let done = compaction(id, CompactionStatus::Completed, hook.str("compact_summary"));
+    let frame = update(&agent_session(state, hook), done)?;
     state.compaction = None;
     Some(vec![(Dir::FromAgent, frame)])
+}
+
+fn compaction(id: &str, status: CompactionStatus, summary: Option<&str>) -> SessionUpdate {
+    SessionUpdate::CompactionUpdate(CompactionUpdate {
+        compaction_id: id.to_owned(),
+        status,
+        summary: summary.map(|s| json!([ContentBlock::text(s)])),
+        error: None,
+    })
 }
 
 /// `<tool>: <the first line of its main argument>`, or just the tool name.
@@ -435,13 +512,13 @@ fn tool_title(name: &str, input: Option<&Value>) -> String {
 }
 
 /// The ACP tool kind for a Claude Code tool.
-fn tool_kind(name: &str) -> &'static str {
+fn tool_kind(name: &str) -> ToolKind {
     match name {
-        "Bash" | "PowerShell" => "execute",
-        "Read" => "read",
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "edit",
-        "Glob" | "Grep" => "search",
-        "WebFetch" | "WebSearch" => "fetch",
-        _ => "other",
+        "Bash" | "PowerShell" => ToolKind::Execute,
+        "Read" => ToolKind::Read,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => ToolKind::Edit,
+        "Glob" | "Grep" => ToolKind::Search,
+        "WebFetch" | "WebSearch" => ToolKind::Fetch,
+        _ => ToolKind::default(),
     }
 }

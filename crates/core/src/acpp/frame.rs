@@ -94,6 +94,14 @@ impl RequestId {
         }
     }
 
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Number(n) => Value::Number(n.clone()),
+            Self::String(s) => Value::String(s.clone()),
+        }
+    }
+
     fn rank(&self) -> u8 {
         match self {
             Self::Null => 0,
@@ -219,6 +227,47 @@ impl Frame {
         Ok(Self::Unknown(raw))
     }
 
+    /// Builds a request: `{"jsonrpc", "id", "method", "params"}`, in that key order.
+    pub fn request(id: RequestId, method: &str, params: Value) -> Self {
+        Self::built(Map::from_iter([
+            jsonrpc(),
+            ("id".to_owned(), id.to_value()),
+            ("method".to_owned(), Value::from(method)),
+            ("params".to_owned(), params),
+        ]))
+    }
+
+    /// Builds a notification: `{"jsonrpc", "method", "params"}`, in that key order.
+    pub fn notification(method: &str, params: Value) -> Self {
+        Self::built(Map::from_iter([
+            jsonrpc(),
+            ("method".to_owned(), Value::from(method)),
+            ("params".to_owned(), params),
+        ]))
+    }
+
+    /// Builds a successful response: `{"jsonrpc", "id", "result"}`, in that key order.
+    pub fn response(id: RequestId, result: Value) -> Self {
+        Self::built(Map::from_iter([
+            jsonrpc(),
+            ("id".to_owned(), id.to_value()),
+            ("result".to_owned(), result),
+        ]))
+    }
+
+    /// A message the builders above assembled. It always has `"jsonrpc": "2.0"`, a string method or a result, and
+    /// a valid id if any, so it always parses.
+    fn built(raw: Map<String, Value>) -> Self {
+        Self::from_value(Value::Object(raw))
+            .unwrap_or_else(|e| unreachable!("built frame failed to parse: {e}"))
+    }
+
+    /// [`Frame::synthesized`] for a frame that is already built, e.g. by a typed builder like
+    /// [`ShepherdFrame::to_frame`]. Fails only if its params, result or `_meta` is not an object.
+    pub fn into_synthesized(self) -> Result<Self, FrameError> {
+        Self::synthesized(self.into_raw())
+    }
+
     /// Marks a producer-built frame as synthesized (see "Synthesized frames" in `docs/acpp.md`), then parses it.
     /// The mark is `_meta.shepherd.synthesized: true` in a request's or notification's `params` (created if
     /// absent), or in a response's `result`. Existing `_meta` keys are kept.
@@ -300,6 +349,10 @@ impl<'de> Deserialize<'de> for Frame {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Frame::from_value(Value::deserialize(d)?).map_err(serde::de::Error::custom)
     }
+}
+
+fn jsonrpc() -> (String, Value) {
+    ("jsonrpc".to_owned(), Value::from("2.0"))
 }
 
 /// What a response means, given the request it answers.

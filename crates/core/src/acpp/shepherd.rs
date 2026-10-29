@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::Frame;
 use crate::ids::MachineId;
 
 /// One frame from the initial `_shepherd/*` table, by method.
@@ -38,6 +39,23 @@ impl ShepherdFrame {
         }
     }
 
+    /// Builds the notification for this frame. It parses back to an equal `ShepherdFrame`, except that an
+    /// `AgentStarted::command` of `Some(Value::Null)` reads back as `None`.
+    pub fn to_frame(&self) -> Frame {
+        let params = match self {
+            Self::SessionCreated(p) => to_params(p),
+            Self::SessionRenamed(p) => to_params(p),
+            Self::SessionClosed(p) => to_params(p),
+            Self::AgentStarted(p) => to_params(p),
+            Self::AgentIdle(p) => to_params(p),
+            Self::AgentExited(p) => to_params(p),
+            Self::WorktreeCreated(p) => to_params(p),
+            Self::WorktreeHook(p) => to_params(p),
+            Self::WorkspaceSelected(p) => to_params(p),
+        };
+        Frame::notification(self.method(), params)
+    }
+
     /// Parses the params of a `_shepherd/*` method. `None` for a method outside the table or params of the wrong
     /// shape.
     pub(crate) fn parse(method: &str, params: Value) -> Option<Self> {
@@ -57,6 +75,13 @@ impl ShepherdFrame {
             _ => return None,
         })
     }
+}
+
+/// Serializes a frame's params. Params hold only strings, numbers, bools and already-parsed JSON, which always
+/// serialize.
+pub(super) fn to_params<T: Serialize>(p: &T) -> Value {
+    serde_json::to_value(p)
+        .unwrap_or_else(|e| unreachable!("frame params failed to serialize: {e}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

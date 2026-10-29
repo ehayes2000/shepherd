@@ -2,7 +2,9 @@
 //!
 //! An [`Envelope`] wraps exactly one JSON-RPC 2.0 [`Frame`]. Frames are lossless: each one keeps the raw JSON it
 //! was parsed from and always serializes back to it. The typed parse is a read-only view next to the raw value.
-//! Producers create a [`FrameDraft`]. Only the host process's append path seals a draft into an envelope,
+//! Producers build frames from typed values ([`ShepherdFrame::to_frame`], the `to_frame` methods in [`acp`], and
+//! [`Frame::notification`] for vendor frames), mark them with [`Frame::into_synthesized`] when they reconstruct
+//! ACP, and wrap them in a [`FrameDraft`]. Only the host process's append path seals a draft into an envelope,
 //! because only it knows `seq`, `id`, `ts` and `machine`.
 
 /// A string enum that never fails to parse. Known wire values get a variant, anything else lands in

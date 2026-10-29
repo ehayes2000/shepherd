@@ -6,9 +6,6 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
-use serde_json::{Value, json};
-
 use crate::acpp::{
     AgentExited, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated, SessionRenamed,
     ShepherdFrame, Source, SourceKind, Timestamp,
@@ -301,33 +298,12 @@ impl Host {
 
 /// An `Append` of a frame the host produces about session `id`.
 fn append(id: &SessionId, frame: ShepherdFrame) -> HostCommand {
-    // F03: replace this hand-built JSON with acpp's typed frame builders (`ShepherdFrame::to_frame()`).
-    let params = match &frame {
-        ShepherdFrame::SessionCreated(p) => params(p),
-        ShepherdFrame::SessionRenamed(p) => params(p),
-        ShepherdFrame::SessionClosed(p) => params(p),
-        ShepherdFrame::AgentStarted(p) => params(p),
-        ShepherdFrame::AgentIdle(p) => params(p),
-        ShepherdFrame::AgentExited(p) => params(p),
-        ShepherdFrame::WorktreeCreated(p) => params(p),
-        ShepherdFrame::WorktreeHook(p) => params(p),
-        ShepherdFrame::WorkspaceSelected(p) => params(p),
-    };
-    let raw = json!({ "jsonrpc": "2.0", "method": frame.method(), "params": params });
-    let frame = Frame::from_value(raw)
-        .unwrap_or_else(|e| unreachable!("host-built frame failed to parse: {e}"));
     HostCommand::Append(Box::new(FrameDraft::new(
-        frame,
+        frame.to_frame(),
         Source::new(SourceKind::Shepherd, None),
         Dir::Internal,
         Some(id.clone()),
     )))
-}
-
-/// `_shepherd/*` params hold only strings, numbers, bools and already-parsed JSON, which always serialize.
-fn params<T: Serialize>(p: &T) -> Value {
-    serde_json::to_value(p)
-        .unwrap_or_else(|e| unreachable!("frame params failed to serialize: {e}"))
 }
 
 fn ack(to: ReplyTo) -> HostCommand {
