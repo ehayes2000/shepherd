@@ -25,15 +25,31 @@ impl EventListener for Listener {
     }
 }
 
-/// The reply bytes for `events`, in order. Colour queries report colours the program set, else the defaults below.
-/// Events that aren't replies (title, bell, clipboard, ...) are dropped.
-pub(crate) fn answer(events: Vec<Event>, colors: &Colors) -> Vec<u8> {
+/// Default foreground and background to report when the program hasn't set its own.
+pub(crate) struct ReportedColors {
+    pub(crate) fg: (u8, u8, u8),
+    pub(crate) bg: (u8, u8, u8),
+}
+
+impl Default for ReportedColors {
+    fn default() -> Self {
+        Self {
+            fg: (0xff, 0xff, 0xff),
+            bg: (0, 0, 0),
+        }
+    }
+}
+
+/// The reply bytes for `events`, in order. Colour queries report colours the program set, else `reported` for
+/// the default foreground and background, else xterm's palette. Events that aren't replies (title, bell,
+/// clipboard, ...) are dropped.
+pub(crate) fn answer(events: Vec<Event>, colors: &Colors, reported: &ReportedColors) -> Vec<u8> {
     let mut out = Vec::new();
     for event in events {
         match event {
             Event::PtyWrite(text) => out.extend_from_slice(text.as_bytes()),
             Event::ColorRequest(index, format) => {
-                let color = colors[index].unwrap_or_else(|| default_color(index));
+                let color = colors[index].unwrap_or_else(|| default_color(index, reported));
                 out.extend_from_slice(format(color).as_bytes());
             }
             _ => {}
@@ -42,8 +58,8 @@ pub(crate) fn answer(events: Vec<Event>, colors: &Colors) -> Vec<u8> {
     out
 }
 
-/// White on black, and xterm's default 256-colour palette.
-fn default_color(index: usize) -> Rgb {
+/// `reported` for the default colours, and xterm's default 256-colour palette.
+fn default_color(index: usize, reported: &ReportedColors) -> Rgb {
     const ANSI: [(u8, u8, u8); 16] = [
         (0x00, 0x00, 0x00),
         (0xcd, 0x00, 0x00),
@@ -74,8 +90,8 @@ fn default_color(index: usize) -> Rgb {
             let gray = 8 + 10 * (index - 232) as u8;
             rgb((gray, gray, gray))
         }
-        _ if index == NamedColor::Background as usize => rgb((0, 0, 0)),
-        _ => rgb((0xff, 0xff, 0xff)),
+        _ if index == NamedColor::Background as usize => rgb(reported.bg),
+        _ => rgb(reported.fg),
     }
 }
 
@@ -86,18 +102,19 @@ mod tests {
     #[test]
     fn default_palette_matches_xterm() {
         let rgb = |c: Rgb| (c.r, c.g, c.b);
-        assert_eq!(rgb(default_color(1)), (0xcd, 0, 0));
-        assert_eq!(rgb(default_color(16)), (0, 0, 0));
-        assert_eq!(rgb(default_color(196)), (0xff, 0, 0));
-        assert_eq!(rgb(default_color(231)), (0xff, 0xff, 0xff));
-        assert_eq!(rgb(default_color(232)), (8, 8, 8));
-        assert_eq!(rgb(default_color(255)), (0xee, 0xee, 0xee));
+        let d = ReportedColors::default();
+        assert_eq!(rgb(default_color(1, &d)), (0xcd, 0, 0));
+        assert_eq!(rgb(default_color(16, &d)), (0, 0, 0));
+        assert_eq!(rgb(default_color(196, &d)), (0xff, 0, 0));
+        assert_eq!(rgb(default_color(231, &d)), (0xff, 0xff, 0xff));
+        assert_eq!(rgb(default_color(232, &d)), (8, 8, 8));
+        assert_eq!(rgb(default_color(255, &d)), (0xee, 0xee, 0xee));
         assert_eq!(
-            rgb(default_color(NamedColor::Foreground as usize)),
+            rgb(default_color(NamedColor::Foreground as usize, &d)),
             (0xff, 0xff, 0xff)
         );
         assert_eq!(
-            rgb(default_color(NamedColor::Background as usize)),
+            rgb(default_color(NamedColor::Background as usize, &d)),
             (0, 0, 0)
         );
     }

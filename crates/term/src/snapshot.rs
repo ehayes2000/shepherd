@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use alacritty_terminal::grid::{Cursor, Dimensions};
+use alacritty_terminal::grid::{Cursor, Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Term, TermMode};
@@ -135,6 +135,12 @@ impl Writer {
         }
     }
 
+    /// DECRC: back to the cursor (and pen) saved by DECSC when the pen was `pen`.
+    fn restore(&mut self, pen: Pen) {
+        self.raw("\x1b8");
+        self.pen = pen;
+    }
+
     /// Writes a cell's character at the target's cursor.
     fn put(&mut self, cell: &Cell) {
         self.pen(&Pen::of(cell));
@@ -173,6 +179,11 @@ fn cells<T>(out: &mut Writer, term: &Term<T>) {
                 .find(|&col| line[Column(col)] != blank)
                 .map_or(0, |col| col + 1)
         };
+        // A leading spacer is re-created by printing the wide char that starts the next row, but only when that
+        // row is a continuation starting with a wide char drawn with the same pen. Otherwise draw it as a blank.
+        let next = (wraps && row + 1 < grid.screen_lines())
+            .then(|| &grid[Line(row as i32 + 1)][Column(0)]);
+        let recreated = next.is_some_and(|next| next.flags.contains(Flags::WIDE_CHAR));
         if continues {
             // The target's cursor is waiting to wrap from the row above; printing one cell makes it wrap.
             end = end.max(1);
@@ -181,29 +192,163 @@ fn cells<T>(out: &mut Writer, term: &Term<T>) {
         }
         for col in 0..end {
             let cell = &line[Column(col)];
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                // Written together with the wide char before it.
+            if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                && col + 1 == cols
+                && cell.c == ' '
+                && recreated
+                && next.is_some_and(|next| Pen::of(next) == Pen::of(cell))
+            {
                 continue;
             }
-            if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
-                // Re-created when the wide char starting the next row doesn't fit here.
-                continue;
-            }
-            if cell.c == '\t' {
-                // A tab moves the cursor instead of printing; draw the cell's style first, then mark it as a tab.
-                out.put(&Cell {
-                    c: ' ',
-                    ..cell.clone()
-                });
-                out.goto(row, col);
-                out.raw("\t");
-                out.goto(row, col + 1);
-                continue;
-            }
-            out.put(cell);
+            draw_cell(out, row, line, col, 0, false);
         }
         continues = wraps;
     }
+}
+
+/// Draws `line[col]` at column `col - shift`, where the target's cursor is. Wide-char halves that lost their other
+/// half (ECH, EL, ICH or DCH over one) are rebuilt with the same edits. `shift` is 1 while redrawing the end of a
+/// row one column early for [`last_column`]. `nested` means a caller has saved the cursor, so this must not.
+fn draw_cell(
+    out: &mut Writer,
+    row: usize,
+    line: &Row<Cell>,
+    col: usize,
+    shift: usize,
+    nested: bool,
+) {
+    let cols = line.len();
+    let at = col - shift;
+    let cell = &line[Column(col)];
+    let wide_before = col > 0 && line[Column(col - 1)].flags.contains(Flags::WIDE_CHAR);
+    let spacer_after = col + 1 < cols
+        && line[Column(col + 1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER);
+    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        if !wide_before {
+            if at + 1 < cols {
+                // Draw a wide char here and delete its first half, which pulls the spacer into this column. Only
+                // blank, not-yet-drawn cells shift in behind it.
+                out.put(&Cell {
+                    c: FILLER,
+                    ..cell.clone()
+                });
+                out.goto(row, at);
+                out.pen(&Pen::of(&Cell::default()));
+                out.raw("\x1b[P");
+                out.goto(row, at + 1);
+            } else {
+                last_column(out, row, line, col);
+            }
+        }
+        // Otherwise it was written together with its wide char. A tab over a spacer keeps the spacer.
+        if cell.c == '\t' {
+            tab_at(out, row, at, !nested);
+        }
+        return;
+    }
+    if cell.flags.contains(Flags::WIDE_CHAR) && !spacer_after {
+        if at + 1 < cols {
+            // Draw it, then erase its spacer.
+            out.put(cell);
+            out.goto(row, at + 1);
+            out.pen(&Pen::of(&Cell::default()));
+            out.raw("\x1b[X");
+        } else {
+            last_column(out, row, line, col);
+        }
+        return;
+    }
+    if cell.c == '\t' {
+        // A tab moves the cursor instead of printing. Draw the cell's style with a space, then mark it as a tab.
+        out.put(&Cell {
+            c: ' ',
+            ..cell.clone()
+        });
+        tab_at(out, row, at, !nested);
+        return;
+    }
+    out.put(cell);
+}
+
+/// A broken wide-char half in the last column, where there's no room to draw a wide char. Picks the last cell `p`
+/// before it that is plain or starts a whole wide char, redraws everything after that one column early, then
+/// erases `p`, shifts the rest into place with ICH at `p`, and redraws `p`. The cursor is saved with a pending wrap
+/// first, so a row that wraps still does. With no such `p`, the cell comes out as a blank with the same style.
+fn last_column(out: &mut Writer, row: usize, line: &Row<Cell>, col: usize) {
+    let cell = &line[Column(col)];
+    // A leading spacer away from the last column is just a blank; redrawing it as one loses nothing visible.
+    let narrow = |p: usize| {
+        let cell = &line[Column(p)];
+        plain(cell) || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+    };
+    let starts_whole = |p: usize| {
+        narrow(p)
+            || (line[Column(p)].flags.contains(Flags::WIDE_CHAR)
+                && p + 1 < col
+                && line[Column(p + 1)].flags.contains(Flags::WIDE_CHAR_SPACER))
+    };
+    let Some(p) = (0..col).rev().find(|&p| starts_whole(p)) else {
+        out.put(&blank_like(cell));
+        return;
+    };
+    let rest = if narrow(p) { p + 1 } else { p + 2 };
+    // A narrow char in the last column leaves the cursor waiting to wrap; save that. ICH shifts it out below.
+    out.goto(row, col);
+    out.put(&blank_like(cell));
+    out.raw("\x1b7");
+    let pen = out.pen.clone();
+    out.goto(row, rest - 1);
+    for src in rest..=col {
+        draw_cell(out, row, line, src, 1, true);
+    }
+    out.goto(row, p);
+    out.pen(&Pen::of(&Cell::default()));
+    if rest == p + 2 {
+        // The old wide char at `p`, whose spacer the redraw overwrote.
+        out.raw("\x1b[X");
+    }
+    out.raw("\x1b[@");
+    draw_cell(out, row, line, p, 0, true);
+    out.restore(pen);
+}
+
+/// Turns the blank at `(row, col)` into a tab cell, which is what a tab does to a blank it passes over, leaving the
+/// cursor just after it. With `keep_wrap` it saves and restores the cursor instead, so a pending wrap survives.
+fn tab_at(out: &mut Writer, row: usize, col: usize, keep_wrap: bool) {
+    if keep_wrap {
+        out.raw("\x1b7");
+    }
+    out.goto(row, col);
+    out.raw("\t");
+    if keep_wrap {
+        out.raw("\x1b8");
+    } else {
+        out.goto(row, col + 1);
+    }
+}
+
+/// A cell with no wide-char bookkeeping, safe to write next to a broken half without disturbing it.
+fn plain(cell: &Cell) -> bool {
+    !cell
+        .flags
+        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+}
+
+/// Any two-column character, used to create a spacer whose own wide char is then deleted.
+const FILLER: char = '\u{3000}';
+
+/// A one-column blank with the same style as `cell`.
+fn blank_like(cell: &Cell) -> Cell {
+    let mut blank = Cell {
+        fg: cell.fg,
+        bg: cell.bg,
+        flags: cell.flags & STYLE,
+        ..Cell::default()
+    };
+    blank.set_underline_color(cell.underline_color());
+    blank
 }
 
 fn saved_cursor<T>(out: &mut Writer, term: &Term<T>) {
@@ -217,19 +362,24 @@ fn saved_cursor<T>(out: &mut Writer, term: &Term<T>) {
 fn cursor<T>(out: &mut Writer, term: &Term<T>) {
     let grid = term.grid();
     let (row, col) = clamped(term, &grid.cursor);
-    if !grid.cursor.input_needs_wrap {
+    // A widening resize can leave the wrap flag set away from the last column; it has no effect there.
+    if !grid.cursor.input_needs_wrap || col + 1 != term.columns() {
         out.goto(row, col);
         return;
     }
-    // The cursor sits past the last column. Re-printing the last character puts the target in the same state.
+    // The cursor sits past the last column. Redrawing the last cell puts the target in the same state. For a tab or
+    // a broken wide-char half that uses DECSC/DECRC, which replaces the saved cursor set just before.
     let line = &grid[Line(row as i32)];
-    let start = if col > 0 && line[Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+    let start = if col > 0
+        && line[Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER)
+        && line[Column(col - 1)].flags.contains(Flags::WIDE_CHAR)
+    {
         col - 1
     } else {
         col
     };
     out.goto(row, start);
-    out.put(&line[Column(start)]);
+    draw_cell(out, row, line, start, 0, false);
 }
 
 fn clamped<T, C>(term: &Term<T>, cursor: &Cursor<C>) -> (usize, usize) {

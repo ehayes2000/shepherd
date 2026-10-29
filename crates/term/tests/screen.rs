@@ -3,7 +3,8 @@
 mod support;
 
 use shepherd_term::{
-    Attrs, Color, CursorShape, MouseEncoding, MouseMode, MouseTracking, Screen, Underline, Width,
+    Attrs, Color, CursorShape, MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, MouseEncoding, MouseMode,
+    MouseTracking, Screen, Underline, Width,
 };
 use support::text;
 
@@ -102,11 +103,38 @@ fn resize_changes_the_grid_size() {
 }
 
 #[test]
-fn zero_size_is_clamped_to_one_cell() {
+fn sizes_below_the_minimum_are_clamped_to_two_columns_and_one_row() {
     let mut screen = Screen::new(0, 0);
-    assert_eq!(screen.size(), (1, 1));
-    screen.resize(0, 5);
-    assert_eq!(screen.size(), (1, 5));
+    assert_eq!(screen.size(), (MIN_COLS, MIN_ROWS));
+    assert_eq!((MIN_COLS, MIN_ROWS), (2, 1));
+    screen.resize(1, 5);
+    assert_eq!(screen.size(), (2, 5));
+}
+
+#[test]
+fn sizes_above_the_maximum_are_clamped() {
+    let mut screen = Screen::new(u16::MAX, u16::MAX);
+    assert_eq!(screen.size(), (MAX_COLS, MAX_ROWS));
+    assert_eq!((MAX_COLS, MAX_ROWS), (1000, 500));
+    screen.resize(2000, 3);
+    assert_eq!(screen.size(), (1000, 3));
+}
+
+#[test]
+fn a_wide_char_on_the_narrowest_screen_does_not_panic() {
+    let mut screen = Screen::new(0, 0);
+    screen.feed("日".as_bytes());
+    let mut narrow = Screen::new(1, 3);
+    narrow.feed("日日日".as_bytes());
+    assert_eq!(narrow.size(), (2, 3));
+}
+
+#[test]
+fn resizing_to_one_column_with_wide_chars_in_scrollback_terminates() {
+    let mut screen = Screen::new(8, 5);
+    screen.feed("日\r\n\r\n\r\n\r\n\r\n\r\n".as_bytes());
+    screen.resize(1, 5);
+    assert_eq!(screen.size(), (2, 5));
 }
 
 #[test]
@@ -309,4 +337,25 @@ fn queries_inside_a_sync_update_are_answered_when_it_ends() {
 fn screen_can_move_between_threads() {
     fn assert_send<T: Send>() {}
     assert_send::<Screen>();
+}
+
+#[test]
+fn reported_colors_can_be_set_by_the_caller() {
+    let mut screen = Screen::new(10, 3);
+    screen.set_reported_colors((0x11, 0x22, 0x33), (0xfe, 0xdc, 0xba));
+    screen.feed(b"\x1b]10;?\x07\x1b]11;?\x07");
+    let replies = String::from_utf8(screen.take_replies()).unwrap();
+    assert_eq!(
+        replies,
+        "\x1b]10;rgb:1111/2222/3333\x07\x1b]11;rgb:fefe/dcdc/baba\x07"
+    );
+}
+
+#[test]
+fn colors_the_program_set_win_over_reported_colors() {
+    let mut screen = Screen::new(10, 3);
+    screen.set_reported_colors((1, 1, 1), (2, 2, 2));
+    screen.feed(b"\x1b]11;rgb:12/34/56\x07\x1b]11;?\x07");
+    let replies = String::from_utf8(screen.take_replies()).unwrap();
+    assert_eq!(replies, "\x1b]11;rgb:1212/3434/5656\x07");
 }

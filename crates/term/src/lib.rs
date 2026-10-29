@@ -18,8 +18,15 @@ use alacritty_terminal::vte::ansi::Processor;
 
 pub use types::*;
 
-use replies::Listener;
+use replies::{Listener, ReportedColors};
 use sync::ManualTimeout;
+
+/// Smallest grid: alacritty needs two columns to place a wide character.
+pub const MIN_COLS: u16 = 2;
+pub const MIN_ROWS: u16 = 1;
+/// Largest grid. Bigger sizes are clamped so a bogus resize can't allocate gigabytes.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 500;
 
 /// Primary-screen lines kept above the viewport, so reflow on resize can bring them back.
 const SCROLLBACK_LINES: usize = 1000;
@@ -31,6 +38,10 @@ pub struct Screen {
     /// The same queue the `Term` sends its events to.
     events: Listener,
     replies: Vec<u8>,
+    /// A copy of the bytes the parser is holding for an open synchronized update, so a snapshot can carry them.
+    /// alacritty keeps them private; they are always the tail of what was fed.
+    held: Vec<u8>,
+    reported: ReportedColors,
 }
 
 struct Size {
@@ -39,11 +50,10 @@ struct Size {
 }
 
 impl Size {
-    /// alacritty needs at least one cell.
     fn new(cols: u16, rows: u16) -> Self {
         Self {
-            cols: usize::from(cols.max(1)),
-            rows: usize::from(rows.max(1)),
+            cols: usize::from(cols.clamp(MIN_COLS, MAX_COLS)),
+            rows: usize::from(rows.clamp(MIN_ROWS, MAX_ROWS)),
         }
     }
 }
@@ -63,7 +73,7 @@ impl Dimensions for Size {
 }
 
 impl Screen {
-    /// A blank screen. Sizes of zero are clamped to one.
+    /// A blank screen. `cols` is clamped to `MIN_COLS..=MAX_COLS` and `rows` to `MIN_ROWS..=MAX_ROWS`.
     pub fn new(cols: u16, rows: u16) -> Self {
         let config = Config {
             scrolling_history: SCROLLBACK_LINES,
@@ -76,6 +86,8 @@ impl Screen {
             parser: Processor::new(),
             events,
             replies: Vec::new(),
+            held: Vec::new(),
+            reported: ReportedColors::default(),
         }
     }
 
@@ -90,10 +102,11 @@ impl Screen {
     /// Parses PTY output. Escape sequences and UTF-8 may be split across calls.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.track_held(bytes);
         self.collect_replies();
     }
 
-    /// Resizes the grid, reflowing the primary screen. Sizes of zero are clamped to one.
+    /// Resizes the grid, reflowing the primary screen. Sizes are clamped as in [`Screen::new`].
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(Size::new(cols, rows));
     }
@@ -102,6 +115,12 @@ impl Screen {
     /// OSC 10/11 colours, in the order they were asked.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
+    }
+
+    /// The default foreground and background reported to OSC 10 / 11 queries when the program hasn't set its
+    /// own. Starts as white on black.
+    pub fn set_reported_colors(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+        self.reported = ReportedColors { fg, bg };
     }
 
     pub fn modes(&self) -> Modes {
@@ -146,6 +165,7 @@ impl Screen {
     pub fn expire_sync(&mut self, id: u64) {
         if self.sync_hold().is_some_and(|hold| hold.id == id) {
             self.parser.stop_sync(&mut self.term);
+            self.held.clear();
             self.collect_replies();
         }
     }
@@ -153,14 +173,38 @@ impl Screen {
     /// An escape sequence that redraws this screen. Fed into a screen of the same size, it reproduces the visible
     /// cells, cursor, input modes and pen, so a client attaching mid-session can then follow live output.
     ///
+    /// Output held by an open synchronized update is appended after a begin marker, so the copy is left holding
+    /// the same bytes.
+    ///
     /// Not carried over: the primary screen while the alt screen is active, scrollback, the scroll region, tab
-    /// stops, hyperlinks, the title, and output still held by a synchronized update.
+    /// stops, hyperlinks, the title, and the charset state. Only the top of the active screen's kitty keyboard stack
+    /// is re-pushed; deeper entries and the inactive screen's stack are lost.
+    ///
+    /// Wide characters with a half erased (by ECH, EL, ICH or DCH) are rebuilt with the same edits, with two gaps:
+    /// a broken half in the last column with only broken halves before it comes out as a blank, and when the
+    /// cursor is waiting to wrap after a tab or broken half in the last column, the saved cursor (DECSC) is lost.
     pub fn snapshot_ansi(&self) -> Vec<u8> {
-        snapshot::ansi(&self.term)
+        let mut out = snapshot::ansi(&self.term);
+        if self.sync_hold().is_some() {
+            out.extend_from_slice(b"\x1b[?2026h");
+            out.extend_from_slice(&self.held);
+        }
+        out
+    }
+
+    fn track_held(&mut self, bytes: &[u8]) {
+        if self.sync_hold().is_none() {
+            self.held.clear();
+            return;
+        }
+        self.held.extend_from_slice(bytes);
+        let keep = self.parser.sync_bytes_count();
+        let drop = self.held.len().saturating_sub(keep);
+        self.held.drain(..drop);
     }
 
     fn collect_replies(&mut self) {
-        let answers = replies::answer(self.events.drain(), self.term.colors());
+        let answers = replies::answer(self.events.drain(), self.term.colors(), &self.reported);
         self.replies.extend(answers);
     }
 }
