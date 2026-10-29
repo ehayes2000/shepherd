@@ -20,6 +20,10 @@ A port isn't done until all five pieces exist. Build them in this order, because
 Copy `contracts/pty.rs`. It has one `pub fn <case>(make: ...)` per case, and a `#[macro_export] <name>_contract!(make)`
 that expands to one `#[test]` per case. `make` builds the port from whatever it needs (the Pty port takes an event
 sink). **Adding a case means adding it to the macro's list.** There's a comment in the template saying so.
+
+If the port has to be built in several states (missing, failing, holding data, ...), use a fixture trait instead of one
+`make` closure. See `contracts/config.rs`: a `ConfigFixture` for the shared cases, and an extra `TextConfigFixture` for
+cases only the real adapter can satisfy.
 Each case is a plain function that panics on failure. Cover the behavior core relies on, error cases included.
 This suite *is* the spec of the port.
 
