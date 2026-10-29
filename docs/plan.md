@@ -52,6 +52,17 @@ acceptance:
 - Applies to every existing contract.
 scope: crates/testkit
 
+### F03: Typed frame builders in acpp
+status: todo
+depends: T06
+touches: core::acpp
+goal: Producers (host, hook translators) build frames from typed values instead of hand-written JSON.
+acceptance:
+- `ShepherdFrame::to_frame()` (and builders for the synthesized ACP frames T15 needs) produce a `Frame` that parses back
+  to the same typed value. There's a round-trip property test.
+- `core::host` uses them instead of private JSON construction.
+scope: crates/core
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
