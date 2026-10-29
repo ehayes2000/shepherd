@@ -58,7 +58,9 @@ The full version, with reasons, is in `docs/architecture.md`.
 6. **Never weaken a test to get green.** Don't delete it, add `#[ignore]`, loosen an assertion or blindly
    accept a snapshot. Changing an existing assertion must be justified in the commit message and the report.
 7. **Deterministic.** No sleeps, no wall clock, and no network in core or tui tests. Real-adapter tests use
-   tempdirs and clean up after themselves.
+   tempdirs and clean up after themselves. **No wall-clock performance assertions anywhere in the gate.** To prove
+   complexity, count the work (bytes processed, calls made). Timeouts in adapter tests are generous upper bounds on
+   liveness, never measurements.
 8. **UI is snapshot-tested** with `insta` and ratatui's `TestBackend`. Read every new or changed `.snap.new`
    before accepting it. Never bulk-accept.
 

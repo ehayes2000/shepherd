@@ -16,21 +16,23 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
 2. **Spec coverage.** For each acceptance criterion, find the test that proves it. A criterion with no test
    means CHANGES. Read the test. Would it actually fail if the behavior broke? A test that asserts nothing
    meaningful, or only mirrors the implementation, doesn't count.
-3. **Test integrity.** Look for deleted or modified assertions, loosened matchers, `#[ignore]`, changed
+3. **Flakiness.** Tests that assert on wall-clock time, depend on scheduling or sleeps, or are tuned tightly against
+   timeouts. Run new tests under parallel load. A flaky test is blocking.
+4. **Test integrity.** Look for deleted or modified assertions, loosened matchers, `#[ignore]`, changed
    snapshots (`*.snap`), and tests rewritten to fit new behavior. Each needs a justification in the commit
    message. Unjustified changes mean CHANGES.
-4. **Architecture.**
+5. **Architecture.**
    - Is there logic in adapters or tui that belongs in core (policy, decisions, state transitions)?
    - Does core touch the world directly, or reach for a concrete adapter type?
    - Do port traits speak in domain terms, not implementation terms?
    - For a new port: does it have a fake, a contract suite, and an adapter that runs that suite?
    - Are tests built from testkit builders rather than big inline structs?
-5. **Reinvention.** Hand-rolled code for something a well-known crate does (dates and times, encodings, parsers,
+6. **Reinvention.** Hand-rolled code for something a well-known crate does (dates and times, encodings, parsers,
    retry and backoff, ...), or structured values handled as strings (comparing timestamps, paths or versions as text,
    building JSON with `format!`). This is blocking even if the spec seemed to require it. Flag it so the PM fixes the spec.
-6. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
+7. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
    abstractions.
-7. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
+8. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
    For real adapters, run their contract tests under parallel load (about 24 copies of the whole test binary at once;
    macOS caps ptys at 511) and
    hunt for races, lost output, leaked threads, fds and processes, and signals that don't actually kill.
