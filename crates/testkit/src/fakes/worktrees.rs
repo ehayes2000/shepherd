@@ -289,15 +289,24 @@ impl State {
         self.parents.len() - 1
     }
 
-    fn repo_of(&self, path: &Path) -> Option<usize> {
+    /// The repo and checkout that `path` is in (the checkout itself or any path under it), as git finds them.
+    fn locate(&self, path: &Path) -> Option<(usize, PathBuf)> {
         self.repos
             .iter()
-            .position(|r| r.checkouts.contains_key(path))
+            .enumerate()
+            .flat_map(|(r, repo)| repo.checkouts.keys().map(move |c| (r, c)))
+            .filter(|(_, c)| path.starts_with(c))
+            .max_by_key(|(_, c)| c.components().count())
+            .map(|(r, c)| (r, c.clone()))
+    }
+
+    fn repo_of(&self, path: &Path) -> Option<usize> {
+        self.locate(path).map(|(r, _)| r)
     }
 
     fn checkout(&self, path: &Path) -> Option<(usize, Head)> {
-        let r = self.repo_of(path)?;
-        Some((r, self.repos[r].checkouts[path].head.clone()))
+        let (r, top) = self.locate(path)?;
+        Some((r, self.repos[r].checkouts[&top].head.clone()))
     }
 
     fn reachable(&self, from: Commit) -> BTreeSet<Commit> {
@@ -467,7 +476,9 @@ impl Worktrees for FakeWorktrees {
         };
         let ahead = s.ahead(tip, Some(default));
         Ok(WorktreeStatus {
-            dirty: rp.checkouts[path].dirty,
+            dirty: s
+                .locate(path)
+                .is_some_and(|(_, top)| rp.checkouts[&top].dirty),
             ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
             pushed: upstream_tip.is_some_and(|u| s.ahead(tip, Some(u)) == 0),
             merged_into_default: ahead == 0,
@@ -481,7 +492,9 @@ impl Worktrees for FakeWorktrees {
         let root = normalize_lexically(&self.root).ok_or_else(outside)?;
         managed_parts(&root, &normal).ok_or_else(outside)?;
         let r = s
-            .repo_of(&normal)
+            .repos
+            .iter()
+            .position(|r| r.checkouts.contains_key(&normal))
             .ok_or_else(|| State::not_a_repo(&normal))?;
         let rp = &mut s.repos[r];
         if rp.main == normal {

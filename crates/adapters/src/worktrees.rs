@@ -1,15 +1,40 @@
 //! `Worktrees` over the `git` CLI. Every call runs `git -C <dir> ...` and parses only porcelain or plumbing output.
 //!
-//! Each git process runs in its own process group with stdin closed and `GIT_TERMINAL_PROMPT=0`, so it can never wait
-//! on a prompt. One that runs past its timeout is killed with its whole group (an ssh child included).
+//! # Never waiting on a person
+//!
+//! Each git process starts a new session (`setsid`), so it has no controlling terminal and neither do its children:
+//! ssh can't open `/dev/tty` to ask for a passphrase or host key. Stdin is closed, and the environment turns off the
+//! prompts that don't need a terminal: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential Manager) and
+//! `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
+//! ssh included. Output goes to temp files rather than pipes, so a background process left behind by a hook can't hold
+//! a call open.
+//!
+//! # The user's config
+//!
+//! In production git runs with the user's real config, so every option that changes what we observe or do is pinned
+//! on the command line:
+//!
+//! - `status`: `--untracked-files=all --ignore-submodules=none` (beats `status.showUntrackedFiles`,
+//!   `diff.ignoreSubmodules`, `submodule.<name>.ignore`). `remove` checks this status itself before calling
+//!   `git worktree remove`, so untracked files are never deleted without `force`.
+//! - `fetch`: an explicit refspec `+refs/heads/<default>:refs/remotes/origin/<default>` (beats a custom or
+//!   single-branch `remote.origin.fetch`), `--no-tags --no-prune --no-recurse-submodules --no-auto-gc` (beats
+//!   `remote.origin.tagOpt`, `fetch.prune`, `fetch.pruneTags`, `fetch.recurseSubmodules`, `gc.auto`).
+//! - `worktree add`: `--no-track --no-guess-remote` (beats `branch.autoSetupMerge`, `worktree.guessRemote`).
+//! - Config injected through the environment (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its
+//!   `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`) is removed, as are variables that point git at another repo
+//!   (`GIT_DIR`, ...).
+//!
+//! Left to the user on purpose: hooks (`core.hooksPath`, `post-checkout` on `worktree add`), ssh and credential
+//! settings. Nothing here pushes, so `push.default` doesn't matter.
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
-use std::thread;
 use std::time::Duration;
 
 use shepherd_core::ports::worktrees::{
@@ -25,9 +50,9 @@ use wait_timeout::ChildExt;
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Variables that would point git at some other repo than the `-C` directory, e.g. when shepherd itself runs from a
-/// git hook.
-const REPO_ENV: &[&str] = &[
+/// Variables that would point git at some other repo than the `-C` directory (e.g. when shepherd itself runs from a
+/// git hook), or inject config.
+const REMOVED_ENV: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -36,11 +61,17 @@ const REPO_ENV: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_NAMESPACE",
     "GIT_PREFIX",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
 ];
+/// Prefixes of the numbered variables that go with `GIT_CONFIG_COUNT`.
+const REMOVED_ENV_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 pub struct GitWorktrees {
     root: PathBuf,
-    env: Vec<(OsString, OsString)>,
+    /// `Some(vars)`: git sees only `PATH` plus `vars`. `None`: the inherited environment, cleaned.
+    isolated_env: Option<Vec<(OsString, OsString)>>,
     git_timeout: Duration,
     fetch_timeout: Duration,
     /// Serializes fetch + `worktree add`: concurrent fetches into one repo race on ref locks.
@@ -52,16 +83,17 @@ impl GitWorktrees {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            env: Vec::new(),
+            isolated_env: None,
             git_timeout: GIT_TIMEOUT,
             fetch_timeout: FETCH_TIMEOUT,
             create_lock: Mutex::new(()),
         }
     }
 
-    /// Extra environment for every git call, on top of the inherited one (tests use it to isolate git).
-    pub fn with_env(mut self, env: Vec<(OsString, OsString)>) -> Self {
-        self.env = env;
+    /// Runs git with only `PATH` and `env`, instead of the inherited environment (tests use it to isolate git from
+    /// the user's machine).
+    pub fn with_isolated_env(mut self, env: Vec<(OsString, OsString)>) -> Self {
+        self.isolated_env = Some(env);
         self
     }
 
@@ -87,40 +119,73 @@ impl GitWorktrees {
         args: &[S],
         timeout: Duration,
     ) -> Result<String, Failure> {
+        let io = |e: io::Error| Failure::Io(e.to_string());
+        let mut stdout = tempfile::tempfile().map_err(io)?;
+        let mut stderr = tempfile::tempfile().map_err(io)?;
         let mut command = Command::new("git");
         command
             .arg("-C")
             .arg(dir)
             .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        for var in REPO_ENV {
-            command.env_remove(var);
+            .stdout(stdout.try_clone().map_err(io)?)
+            .stderr(stderr.try_clone().map_err(io)?);
+        match &self.isolated_env {
+            Some(env) => {
+                command.env_clear();
+                if let Some(path) = std::env::var_os("PATH") {
+                    command.env("PATH", path);
+                }
+                command.envs(env.iter().map(|(k, v)| (k, v)));
+            }
+            None => {
+                for (key, _) in std::env::vars_os() {
+                    let key_str = key.to_string_lossy();
+                    if REMOVED_ENV.contains(&key_str.as_ref())
+                        || REMOVED_ENV_PREFIXES.iter().any(|p| key_str.starts_with(p))
+                    {
+                        command.env_remove(&key);
+                    }
+                }
+            }
         }
-        command.envs(self.env.iter().map(|(k, v)| (k, v)));
-        let mut child = command.spawn().map_err(|e| Failure::Io(e.to_string()))?;
-        let stdout = drain(child.stdout.take());
-        let stderr = drain(child.stderr.take());
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GCM_INTERACTIVE", "never")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        // SAFETY: `setsid` is async-signal-safe, and the closure touches nothing else.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(io)?;
+        drop(command);
         let waited = child.wait_timeout(timeout);
         if !matches!(waited, Ok(Some(_))) {
             kill_group(child.id());
+            // Kill the group again once git is dead but not yet reaped, for a hook it forked while the first kill
+            // was being delivered. Until git is reaped its pid (the group id) can't be reused by another process.
+            wait_unreaped(child.id());
+            kill_group(child.id());
             let _ = child.wait();
         }
-        let stdout = stdout.join().unwrap_or_default();
-        let stderr = stderr.join().unwrap_or_default();
         match waited {
             Err(e) => Err(Failure::Io(e.to_string())),
             Ok(None) => Err(Failure::Timeout),
             Ok(Some(status)) if status.success() => {
-                String::from_utf8(stdout).map_err(|e| Failure::Io(e.to_string()))
+                String::from_utf8(read_all(&mut stdout).map_err(io)?)
+                    .map_err(|e| Failure::Io(e.to_string()))
             }
             Ok(Some(status)) => Err(Failure::Exit {
                 code: status.code(),
-                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+                stderr: String::from_utf8_lossy(&read_all(&mut stderr).map_err(io)?)
+                    .trim()
+                    .to_owned(),
             }),
         }
     }
@@ -208,7 +273,17 @@ impl GitWorktrees {
     /// The checkout's uncommitted changes and branch headers, from `status --porcelain=v2 --branch`.
     fn porcelain_status(&self, dir: &Path) -> Result<Porcelain, WorktreeError> {
         let out = self
-            .git(dir, &["status", "--porcelain=v2", "--branch", "-z"])
+            .git(
+                dir,
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "--branch",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )
             .map_err(|f| f.into_error("status"))?;
         let mut status = Porcelain::default();
         for field in out.split('\0').filter(|f| !f.is_empty()) {
@@ -288,7 +363,16 @@ impl Worktrees for GitWorktrees {
         }
         let fetch = self.git_within(
             dir,
-            &["fetch", "--quiet", "origin", default.as_str()],
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-prune",
+                "--no-recurse-submodules",
+                "--no-auto-gc",
+                "origin",
+                &format!("+refs/heads/{default}:refs/remotes/origin/{default}"),
+            ],
             self.fetch_timeout,
         );
         let (start, base) = match fetch {
@@ -325,11 +409,12 @@ impl Worktrees for GitWorktrees {
                 WorktreeError::Other(format!("can't create {}: {e}", parent.display()))
             })?;
         }
-        let args: [&OsStr; 8] = [
+        let args: [&OsStr; 9] = [
             "worktree".as_ref(),
             "add".as_ref(),
             "--quiet".as_ref(),
             "--no-track".as_ref(),
+            "--no-guess-remote".as_ref(),
             "-b".as_ref(),
             branch.as_str().as_ref(),
             path.as_os_str(),
@@ -480,35 +565,54 @@ struct Porcelain {
     ahead_of_upstream: Option<u32>,
 }
 
-/// Reads a pipe to the end on its own thread, so a chatty child can't block on a full pipe.
-fn drain(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    })
+/// Everything written to `file` so far, from the start.
+fn read_all(file: &mut File) -> io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 fn kill_group(pid: u32) {
     if let Ok(pid) = libc::pid_t::try_from(pid) {
-        // SAFETY: plain syscall. The child is not reaped yet, so its group still exists.
+        // SAFETY: plain syscall. The leader is not reaped yet, so the group id still names our group; if the group
+        // has no members left it fails with ESRCH, which is fine.
         unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+}
+
+/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken.
+fn wait_unreaped(pid: u32) {
+    let pid = libc::id_t::from(pid);
+    loop {
+        // SAFETY: `info` is a valid out-pointer; `pid` is our own unreaped child.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc =
+            unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if rc == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::fs::Permissions;
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{Command, Output};
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use shepherd_core::ports::{RepoRef, WorktreePath};
+    use portable_pty::{CommandBuilder, native_pty_system};
+    use shepherd_core::ports::{
+        BaseSpec, BaseUsed, BranchName, RepoRef, WorktreeError, WorktreeName, WorktreePath,
+        Worktrees,
+    };
     use shepherd_testkit::contracts::worktrees::{
-        DEFAULT, FsWorktreesFixture, REPO_NAME, WorktreesFixture,
+        DEFAULT, FsWorktreesFixture, REPO_NAME, SUBDIR, WorktreesFixture,
     };
     use tempfile::TempDir;
 
@@ -539,6 +643,9 @@ mod tests {
             );
             fixture.git(&tmp, &["init", "--quiet", "-b", DEFAULT, "seed"]);
             let seed = tmp.join("seed");
+            std::fs::create_dir(seed.join(SUBDIR)).unwrap();
+            std::fs::write(seed.join(SUBDIR).join("lib.txt"), "lib\n").unwrap();
+            fixture.git(&seed, &["add", SUBDIR]);
             fixture.commit_in(&seed);
             let origin = tmp.join("origin.git");
             fixture.git(
@@ -558,8 +665,8 @@ mod tests {
             self.tmp().join(REPO_NAME)
         }
 
-        fn git(&self, dir: &Path, args: &[&str]) -> String {
-            let out = Command::new("git")
+        fn git_output(&self, dir: &Path, args: &[&str]) -> Output {
+            Command::new("git")
                 .arg("-C")
                 .arg(dir)
                 .args(args)
@@ -567,7 +674,11 @@ mod tests {
                 .envs(std::env::vars_os().filter(|(k, _)| k == "PATH"))
                 .envs(env(self.dir.path()))
                 .output()
-                .unwrap();
+                .unwrap()
+        }
+
+        fn git(&self, dir: &Path, args: &[&str]) -> String {
+            let out = self.git_output(dir, args);
             assert!(
                 out.status.success(),
                 "git {args:?} in {}: {}",
@@ -592,7 +703,7 @@ mod tests {
 
     fn port(tmp: &Path, fetch_timeout: Duration) -> GitWorktrees {
         GitWorktrees::new(tmp.join("root"))
-            .with_env(env(tmp))
+            .with_isolated_env(env(tmp))
             .with_git_timeout(TEST_TIMEOUT)
             .with_fetch_timeout(fetch_timeout)
     }
@@ -751,4 +862,277 @@ mod tests {
     }
 
     shepherd_testkit::worktrees_contract!(fs: GitFixture::new());
+
+    // ---------- adapter only ----------
+
+    fn name(s: &str) -> WorktreeName {
+        WorktreeName::new(s).unwrap()
+    }
+
+    fn create(f: &GitFixture, n: &str) -> WorktreePath {
+        f.port
+            .create(&f.repo(), &name(n), BaseSpec::OriginDefault)
+            .unwrap()
+            .path
+    }
+
+    /// Installs a hook in the clone (hooks are shared by its worktrees).
+    fn hook(f: &GitFixture, hook: &str, script: &str) {
+        let path = f.app().join(".git").join("hooks").join(hook);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Set in a re-run of this test binary that should run the child half of a test.
+    const CHILD_VAR: &str = "SHEPHERD_WORKTREES_TEST_CHILD";
+
+    fn in_child() -> bool {
+        std::env::var_os(CHILD_VAR).is_some()
+    }
+
+    /// Arguments that re-run only the test `name` of this binary.
+    fn rerun_args(name: &str) -> [String; 4] {
+        [
+            "--exact".into(),
+            format!("worktrees::tests::{name}"),
+            "--test-threads=1".into(),
+            "--nocapture".into(),
+        ]
+    }
+
+    /// `PATH`, the isolation variables for `tmp`, and [`CHILD_VAR`].
+    fn child_env(tmp: &Path) -> Vec<(OsString, OsString)> {
+        std::fs::create_dir_all(tmp.join("home")).unwrap();
+        let mut vars: Vec<_> = std::env::vars_os().filter(|(k, _)| k == "PATH").collect();
+        vars.extend(env(tmp));
+        vars.push((CHILD_VAR.into(), "1".into()));
+        vars
+    }
+
+    /// `status.showUntrackedFiles=no` would make untracked files invisible, and `git worktree remove` would then
+    /// delete them.
+    #[test]
+    fn hidden_untracked_files_still_count_as_dirty() {
+        let f = GitFixture::new();
+        f.git(&f.app(), &["config", "status.showUntrackedFiles", "no"]);
+        let path = create(&f, "messy");
+        f.make_dirty(&path);
+        assert!(f.port.status(&path).unwrap().dirty);
+        assert_eq!(
+            f.port.remove(&path, false),
+            Err(WorktreeError::Dirty(path.clone()))
+        );
+        assert!(path.as_path().join("untracked.txt").exists());
+    }
+
+    #[test]
+    fn auto_setup_merge_always_still_gives_no_upstream() {
+        let f = GitFixture::new();
+        f.git(&f.app(), &["config", "branch.autoSetupMerge", "always"]);
+        let path = create(&f, "fresh");
+        assert!(!f.port.status(&path).unwrap().pushed);
+        let upstream = f.git_output(&f.app(), &["config", "--get", "branch.fresh.merge"]);
+        assert!(!upstream.status.success(), "{upstream:?}");
+    }
+
+    #[test]
+    fn a_custom_fetch_refspec_still_fetches_the_default_branch() {
+        let f = GitFixture::new();
+        let refspec = "+refs/heads/nothing:refs/remotes/origin/nothing";
+        f.git(&f.app(), &["config", "remote.origin.fetch", refspec]);
+        f.advance_origin();
+        let created = f
+            .port
+            .create(&f.repo(), &name("fresh"), BaseSpec::OriginDefault)
+            .unwrap();
+        assert_eq!(
+            created.base,
+            BaseUsed::Origin {
+                branch: BranchName::new(DEFAULT)
+            }
+        );
+        assert_eq!(f.head(created.path.as_path()), f.origin_tip());
+    }
+
+    #[test]
+    fn a_slow_git_call_is_a_typed_timeout() {
+        let f = GitFixture::new();
+        hook(&f, "post-checkout", "sleep 900");
+        let port = port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(Duration::from_secs(2));
+        let started = Instant::now();
+        let result = port.create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
+        assert!(
+            matches!(result, Err(WorktreeError::Timeout(_))),
+            "{result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The background `sleep` keeps git's stdout and stderr open long after git exits.
+    #[test]
+    fn a_hook_that_leaves_a_background_process_does_not_hold_the_call() {
+        let f = GitFixture::new();
+        let pid_file = f.tmp().join("background.pid");
+        hook(
+            &f,
+            "post-checkout",
+            &format!("sleep 900 &\necho $! > '{}'", pid_file.display()),
+        );
+        let started = Instant::now();
+        let result = f
+            .port
+            .create(&f.repo(), &name("bg"), BaseSpec::OriginDefault);
+        let elapsed = started.elapsed();
+        if let Ok(pid) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+        {
+            // SAFETY: plain syscall on the pid the hook reported.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(result.is_ok(), "{result:?}");
+        assert!(elapsed < Duration::from_secs(300), "took {elapsed:?}");
+    }
+
+    /// Where the injected hook in [`config_injected_through_the_environment_is_ignored`] leaves its mark.
+    const MARKER_VAR: &str = "SHEPHERD_WORKTREES_TEST_MARKER";
+
+    /// Re-runs itself with `core.hooksPath` injected through the environment (both ways git reads it from there),
+    /// pointing at a `post-checkout` hook that leaves a marker, and a port that inherits that environment.
+    #[test]
+    fn config_injected_through_the_environment_is_ignored() {
+        if in_child() {
+            let marker = PathBuf::from(std::env::var_os(MARKER_VAR).unwrap());
+            let f = GitFixture::new();
+            let port = GitWorktrees::new(f.root())
+                .with_git_timeout(TEST_TIMEOUT)
+                .with_fetch_timeout(TEST_TIMEOUT);
+            port.create(&f.repo(), &name("x"), BaseSpec::OriginDefault)
+                .unwrap();
+            assert!(!marker.exists(), "the injected hooksPath was used");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = tmp.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let marker = tmp.path().join("injected");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
+        let hooks = hooks.to_str().unwrap();
+        let injections: [Vec<(&str, String)>; 2] = [
+            vec![
+                ("GIT_CONFIG_COUNT", "1".into()),
+                ("GIT_CONFIG_KEY_0", "core.hooksPath".into()),
+                ("GIT_CONFIG_VALUE_0", hooks.into()),
+            ],
+            vec![(
+                "GIT_CONFIG_PARAMETERS",
+                format!("'core.hookspath'='{hooks}'"),
+            )],
+        ];
+        for injection in injections {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args(rerun_args(
+                    "config_injected_through_the_environment_is_ignored",
+                ))
+                .env_clear()
+                .envs(child_env(tmp.path()))
+                .env(MARKER_VAR, &marker)
+                .envs(injection.iter().map(|(k, v)| (k, v)))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{injection:?}\n{stdout}\n{stderr}");
+            assert!(stdout.contains("1 passed"), "{stdout}");
+        }
+    }
+
+    /// Re-runs itself in a pty, so it has a controlling terminal that ssh could prompt on, then checks that the "ssh"
+    /// git runs can't open `/dev/tty`.
+    #[test]
+    fn ssh_runs_without_a_controlling_terminal() {
+        if in_child() {
+            assert!(
+                std::fs::File::open("/dev/tty").is_ok(),
+                "the re-run should have a controlling terminal"
+            );
+            let f = GitFixture::new();
+            let report = f.tmp().join("tty-report");
+            let ssh = format!(
+                "sh -c 'if (exec 3</dev/tty) 2>/dev/null; then echo tty; else echo none; fi > \"{}\"; exit 1' --",
+                report.display()
+            );
+            let app = f.app();
+            f.git(&app, &["config", "core.sshCommand", &ssh]);
+            f.git(&app, &["config", "ssh.variant", "simple"]);
+            f.git(
+                &app,
+                &["remote", "set-url", "origin", "ssh://tty.invalid/x.git"],
+            );
+            let created = f
+                .port
+                .create(&f.repo(), &name("no-tty"), BaseSpec::OriginDefault)
+                .unwrap();
+            assert!(
+                matches!(created.base, BaseUsed::Stale { .. }),
+                "{:?}",
+                created.base
+            );
+            assert_eq!(std::fs::read_to_string(&report).unwrap().trim(), "none");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let pty = native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(std::env::current_exe().unwrap());
+        cmd.args(rerun_args("ssh_runs_without_a_controlling_terminal"));
+        cmd.cwd(tmp.path());
+        cmd.env_clear();
+        for (k, v) in child_env(tmp.path()) {
+            cmd.env(k, v);
+        }
+        let mut child = pty.slave.spawn_command(cmd).unwrap();
+        drop(pty.slave);
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let output = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf);
+            buf
+        });
+        let status = child.wait().unwrap();
+        drop(pty.master);
+        let output = String::from_utf8_lossy(&output.join().unwrap()).into_owned();
+        assert!(status.success(), "{output}");
+        assert!(output.contains("1 passed"), "{output}");
+    }
+
+    #[test]
+    fn accepted_worktree_names_are_valid_branch_names() {
+        let f = GitFixture::new();
+        for n in [
+            "fix-login",
+            "a",
+            "T20.worktrees",
+            "s_01abc",
+            "head",
+            "v1.2.3-rc_1",
+            "0lead",
+            "x-",
+            "a_",
+        ] {
+            assert!(WorktreeName::new(n).is_ok(), "{n}");
+            f.git(&f.tmp(), &["check-ref-format", "--branch", n]);
+        }
+    }
 }

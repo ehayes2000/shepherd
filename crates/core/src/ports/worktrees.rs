@@ -33,7 +33,8 @@ pub struct BranchName(String);
 
 /// The name of a managed worktree (a session slug). It names both the worktree's directory and its branch, so it is
 /// restricted to what is safe as both: 1 to 64 characters of `[A-Za-z0-9._-]`, starting with a letter or digit, with no
-/// `..` and not ending in `.` or `.lock`.
+/// `..`, not ending in `.` or `.lock`, and not `HEAD`. Within that character set, these are git's branch name rules
+/// (`git check-ref-format --branch`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorktreeName(String);
 
@@ -85,7 +86,8 @@ impl WorktreeName {
             && name.starts_with(|c: char| c.is_ascii_alphanumeric())
             && !name.contains("..")
             && !name.ends_with('.')
-            && !name.ends_with(".lock");
+            && !name.ends_with(".lock")
+            && name != "HEAD";
         if valid {
             Ok(Self(name))
         } else {
@@ -301,6 +303,7 @@ mod tests {
             "a..b",
             "trailing.",
             "x.lock",
+            "HEAD",
             "sp ace",
             "ünï",
             &"x".repeat(65),

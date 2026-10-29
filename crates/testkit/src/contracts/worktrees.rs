@@ -41,6 +41,7 @@ macro_rules! worktrees_contract {
             create_branches_from_freshly_fetched_origin_default,
             create_branch_has_no_upstream,
             create_from_inside_a_worktree_uses_the_same_repo_name,
+            a_subdirectory_of_the_repo_names_the_repo,
             create_with_a_taken_name_is_branch_exists,
             create_after_remove_is_still_branch_exists,
             create_in_a_non_repo_is_not_a_repo,
@@ -61,6 +62,7 @@ macro_rules! worktrees_contract {
             remove_forgets_the_worktree,
             remove_dirty_without_force_is_dirty_and_keeps_it,
             remove_dirty_with_force_removes_it,
+            remove_of_a_missing_managed_path_is_not_a_repo,
             remove_refuses_paths_outside_the_root,
             remove_refuses_dotdot_escapes,
             remove_refuses_the_root_and_repo_dirs,
@@ -88,6 +90,8 @@ use shepherd_core::ports::{
 pub const DEFAULT: &str = "trunk";
 /// The directory name of the fixture's clone, which is also its repo name under the root.
 pub const REPO_NAME: &str = "app";
+/// A directory inside the clone.
+pub const SUBDIR: &str = "src";
 
 /// One repo (a clone of an origin) plus a port managing worktrees for it.
 pub trait WorktreesFixture {
@@ -96,7 +100,8 @@ pub trait WorktreesFixture {
     fn port(&self) -> &Self::Port;
     /// The managed root the port was built with.
     fn root(&self) -> PathBuf;
-    /// The clone's main checkout: a directory named [`REPO_NAME`], a sibling of [`WorktreesFixture::root`].
+    /// The clone's main checkout: a directory named [`REPO_NAME`], a sibling of [`WorktreesFixture::root`]. It has a
+    /// tracked subdirectory [`SUBDIR`].
     fn repo(&self) -> RepoRef;
     /// A directory that is not inside any repo.
     fn not_a_repo(&self) -> RepoRef;
@@ -263,6 +268,28 @@ pub fn create_from_inside_a_worktree_uses_the_same_repo_name<F: WorktreesFixture
         WorktreePath::new(f.root().join(REPO_NAME).join("second"))
     );
     assert_eq!(listed_paths(f).len(), 2);
+}
+
+/// Like git, any path inside a checkout names its repo.
+pub fn a_subdirectory_of_the_repo_names_the_repo<F: WorktreesFixture>(f: &F) {
+    let sub = RepoRef::new(f.repo().as_path().join(SUBDIR));
+    assert_eq!(f.port().default_branch(&sub), Ok(default()));
+    let created = f
+        .port()
+        .create(&sub, &name("from-sub"), BaseSpec::OriginDefault)
+        .unwrap();
+    assert_eq!(
+        created.path,
+        WorktreePath::new(f.root().join(REPO_NAME).join("from-sub"))
+    );
+    let listed: Vec<_> = f
+        .port()
+        .list_managed(&sub)
+        .unwrap()
+        .into_iter()
+        .map(|w| w.path)
+        .collect();
+    assert_eq!(listed, vec![created.path]);
 }
 
 pub fn create_with_a_taken_name_is_branch_exists<F: WorktreesFixture>(f: &F) {
@@ -548,6 +575,22 @@ pub fn remove_dirty_with_force_removes_it<F: WorktreesFixture>(f: &F) {
     f.make_dirty(&path);
     f.port().remove(&path, true).unwrap();
     assert!(listed_paths(f).is_empty());
+}
+
+pub fn remove_of_a_missing_managed_path_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let path = create(f, "once");
+    f.port().remove(&path, false).unwrap();
+    let again = f.port().remove(&path, false);
+    assert!(
+        matches!(again, Err(WorktreeError::NotARepo(_))),
+        "{again:?}"
+    );
+    let never = WorktreePath::new(f.root().join(REPO_NAME).join("never-created"));
+    let result = f.port().remove(&never, true);
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
 }
 
 pub fn remove_refuses_paths_outside_the_root<F: WorktreesFixture>(f: &F) {
