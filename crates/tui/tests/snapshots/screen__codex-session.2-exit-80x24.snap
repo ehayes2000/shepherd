@@ -1,0 +1,42 @@
+---
+source: crates/tui/tests/screen.rs
+expression: render(&screen)
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 80, height: 24 },
+    content: [
+        "Token usage: total=17,858 input=17,843 output=15                                ",
+        "To continue this session, run:                                                  ",
+        "  codex resume 00000000-0000-0000-0000-000000000000                             ",
+        "Or run codex resume and select 返す 指定の一行.                                 ", // hidden by multi-width symbols: [(32, " "), (34, " "), (37, " "), (39, " "), (41, " "), (43, " "), (45, " ")]
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+        "                                                                                ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 2, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 51, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 7, y: 3, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 19, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 31, y: 3, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+        x: 46, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}

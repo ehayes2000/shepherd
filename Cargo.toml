@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 shepherd-core = { path = "crates/core" }
 shepherd-tui = { path = "crates/tui" }
+shepherd-term = { path = "crates/term" }
 shepherd-adapters = { path = "crates/adapters" }
 shepherd-testkit = { path = "crates/testkit" }
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +19,7 @@ thiserror = "2"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 base64 = "0.22"
 ratatui = "0.30"
+alacritty_terminal = { version = "0.26", default-features = false }
 insta = "1"
 portable-pty = "0.9"
 libc = "0.2"
