@@ -130,16 +130,34 @@ fn timestamp_rejects_non_rfc3339() {
     for s in [
         "",
         "2026-10-29",
-        "2026-10-29 12:00:00Z",
         "2026-13-01T00:00:00Z",
         "2026-02-30T00:00:00Z",
         "2026-10-29T24:00:00Z",
         "2026-10-29T12:00:00",
         "2026-10-29T12:00:00.Z",
-        "2026-10-29T12:00:00+0530",
     ] {
         assert!(Timestamp::parse(s).is_err(), "{s:?} should be rejected");
     }
+}
+
+/// jiff reads ISO 8601 / RFC 9557 forms that are not strict RFC 3339. They name a definite instant, so they're
+/// accepted, and the original string is still kept.
+#[test]
+fn timestamp_accepts_iso8601_forms_beyond_rfc3339_and_keeps_the_string() {
+    for s in ["2026-10-29 12:00:00Z", "2026-10-29T12:00:00+0530"] {
+        assert_eq!(Timestamp::parse(s).unwrap().as_str(), s);
+    }
+}
+
+#[test]
+fn timestamps_compare_by_instant_not_by_string() {
+    let ts = |s: &str| Timestamp::parse(s).unwrap();
+    assert_eq!(
+        ts("2026-10-29T12:30:00+01:00"),
+        ts("2026-10-29T11:30:00.000Z")
+    );
+    assert!(ts("2026-10-29T12:00:00Z") < ts("2026-10-29T12:00:00.500Z"));
+    assert!(ts("2026-10-29T12:30:00+01:00") < ts("2026-10-29T12:00:00Z"));
 }
 
 #[test]
