@@ -217,3 +217,17 @@ Decision: the workspace `serde_json` dependency enables `preserve_order` for eve
 order, which fits the lossless rule better.
 Consequences: a dev-dependency can never again change production serialization this way. In general, a feature a
 dev-dependency switches on that changes behavior must be enabled in normal builds or not at all.
+
+### 0013: Subscribe catch-up is paced by link backpressure (2026-10-29)
+Context: T11 review. Decision 0011's "catch-up in one loop iteration" pushes the whole log history into the link at once. The
+Link adapter disconnects any peer with more than `MAX_QUEUED` (8 MiB) pending, so a host with more than about 8 MB of history
+can't be attached to. Reproduced on the real adapters.
+Decision: the `Link` port gains `fn queued_bytes(&self, conn) -> Option<usize>` (additive). The host keeps a per-connection
+catch-up cursor (a `(log, seq)` per subscribed log) and sends entries from `EventLog::read` while `queued_bytes` is below a
+low-water mark (e.g. `MAX_QUEUED / 4`). It resumes on a short deadline while any catch-up is pending. Live entries for a log
+whose cursor hasn't reached the end are **not** sent live: the cursor will read them from the log, so there's no buffering
+and no gap or duplicate by construction. When a cursor reaches the end of its log in the same iteration it switches that log to
+live. PTY output for a connection starts (snapshot first, then live bytes) only after its log catch-up completes. The ack is sent
+when catch-up completes.
+Consequences: attaching works with any history size. A truly slow client is still disconnected as `SlowConsumer` by the adapter.
+Amends 0011.
