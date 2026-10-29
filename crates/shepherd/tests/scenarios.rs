@@ -1,10 +1,7 @@
 //! Scenario tests: user flows across a host and client runtime, wired with testkit fakes.
 //! One scenario per user-visible feature. Edge cases belong in core tests.
 
-mod support {
-    pub mod fake_host;
-    pub mod fake_terminal;
-}
+mod support;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
