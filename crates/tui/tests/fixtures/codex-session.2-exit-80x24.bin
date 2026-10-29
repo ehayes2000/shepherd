@@ -1,0 +1,4 @@
+[?2026h[39m[49m[0m[21;3H[?25h[?2026l]7501;state=idle:app=codex\[?2026h[?25l[21;19H[0m[48;2;57;57;57m[K[24;2H[0m[49m[K[21;1H[2m[39;48;2;57;57;57m›[21;3HShutting down...[39m[49m[0m[?2026l[1;1H[J]0;[?1006l[?1015l[?1003l[?1002l[?1000l[<1u[?1007l[?1049l[<1u[<u[>4;0m[?2004l[?1004l[0 q[?25h]7501;state=clear\[0 q[?25hToken usage: total=17,858 input=17,843 output=15
+To continue this session, run:
+  [36mcodex resume 00000000-0000-0000-0000-000000000000[39m
+Or run [36mcodex resume[39m and select [36m返す 指定の一行[39m.

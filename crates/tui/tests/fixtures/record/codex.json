@@ -1,0 +1,23 @@
+{"cmd": ["codex", "-c", "check_for_update_on_startup=false"], "cwd": "/tmp/shepherd-demo", "cols": 100, "rows": 30,
+ "out": "./codex",
+ "steps": [
+  ["wait", "forshortcuts", 20],
+  ["sleep", 3],
+  ["send", "\u001b"],
+  ["sleep", 1],
+  ["send", "Reply with exactly this line and nothing else, do not run any commands: 日本語 テスト 🐑 ✅ café — done"],
+  ["sleep", 1],
+  ["mark"],
+  ["send", "\r"],
+  ["wait", "(Worked|•)[^›]*done", 90],
+  ["sleep", 3],
+  ["resize", 80, 24],
+  ["sleep", 3],
+  ["split"],
+  ["send", "\u0003"],
+  ["sleep", 0.5],
+  ["send", "\u0003"],
+  ["sleep", 0.5],
+  ["send", "\u0003"],
+  ["sleep", 4]
+ ]}
