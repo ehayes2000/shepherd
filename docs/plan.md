@@ -22,7 +22,7 @@ dependencies are done.
 |---|---|---|---|
 | `EventLog` | host | T04 | JSONL files in `~/.shepherd` |
 | `Pty` | host | T08 | portable-pty |
-| `HostLink` / `ClientLink` | both | T10 | unix socket (M1), iroh (M4) |
+| `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
 | `Worktrees` | host | T20 | git CLI |
 | `Commands` (run hook scripts) | host | T23 | tokio::process |

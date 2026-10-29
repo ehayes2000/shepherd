@@ -1911,6 +1911,7 @@ dependencies = [
  "shepherd-core",
  "shepherd-testkit",
  "tempfile",
+ "thiserror 2.0.21",
  "toml",
  "wait-timeout",
 ]
