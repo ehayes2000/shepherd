@@ -64,13 +64,16 @@ acceptance:
 scope: crates/core
 
 ### F04: Replace hand-rolled base64 with the base64 crate
-status: todo
+status: in-progress
 depends: T06
-touches: core::wire
+touches: core::wire, core::acpp::envelope (docs and tests only)
 goal: Remove reinvented code (decision 0008). The Timestamp half was folded into T06's review fixes.
 acceptance:
 - `core::wire` base64 uses the `base64` crate (standard alphabet, padded, strict decoding with canonical trailing bits).
   The hand-rolled module is deleted, and the existing behavior tests still pass unchanged (they're the spec).
+- `acpp::Timestamp` docs and error messages say what's actually accepted: "an ISO 8601 instant as jiff parses it; writers
+  emit RFC 3339 UTC with ms". The accept test lists representative extra forms (basic format, reduced precision,
+  bracketed annotations), and a test pins that fractions longer than 9 digits are rejected.
 scope: crates/core, workspace Cargo.toml
 
 ## Out of scope for the initial feature set
@@ -205,7 +208,7 @@ scope: crates/core
 out of scope: hook translation (T15).
 
 ### T06: Host session registry
-status: in-progress
+status: done (93cd863)
 depends: T03
 touches: core::host
 goal: Host state built only by folding `_shepherd/session/*` frames, plus the commands for creating, renaming, and closing.
