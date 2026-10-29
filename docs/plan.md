@@ -177,7 +177,7 @@ acceptance:
 scope: crates/core
 
 ### T07: Wire protocol
-status: in-progress
+status: done (0777b72)
 depends: T03
 touches: core::wire
 goal: Client↔host messages as JSON-RPC, with encode and decode as pure functions.
