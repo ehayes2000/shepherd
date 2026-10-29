@@ -24,20 +24,21 @@
 //! seek to the first wanted entry and appends check the file is still the length it left it at.
 //!
 //! The logs hold prompts and tool output, so the store is private (decision 0010), whatever the umask: the root
-//! and `sessions/` are created `0700`, and the lock and log files `0600` (set exactly through the new file's
-//! descriptor, since a umask can only remove bits). Anything that already exists and is accessible to group or
-//! others, the root included, is [`LogError::InsecurePermissions`] and is never chmodded: it is the user's data,
-//! and they fix it.
+//! and `sessions/` are created `0700`, and the lock and log files `0600`, exactly (see [`crate::private_fs`]).
+//! Anything that already exists and is accessible to group or others, the root included, is
+//! [`LogError::InsecurePermissions`] and is never chmodded: it is the user's data, and they fix it. A symlink
+//! where the root, a dir or a file goes is refused, never followed.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use shepherd_core::acpp::{Envelope, FrameDraft, Seq, Stamp};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogError, LogId};
+
+use crate::private_fs::{self, PrivateFsError};
 
 const EXT: &str = "jsonl";
 
@@ -80,49 +81,23 @@ fn open_append_file(path: &Path) -> Result<Box<dyn AppendFile>, LogError> {
     Ok(Box::new(open_append(path)?))
 }
 
-/// Refuses `path` if group or others can access it.
+fn private_err(e: PrivateFsError) -> LogError {
+    match e {
+        PrivateFsError::Insecure { path, mode } => LogError::InsecurePermissions { path, mode },
+        other => LogError::Io(other.to_string()),
+    }
+}
+
 fn check_private(path: &Path, meta: &fs::Metadata) -> Result<(), LogError> {
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(LogError::InsecurePermissions {
-            path: path.to_path_buf(),
-            mode,
-        });
-    }
-    Ok(())
+    private_fs::check_private(path, meta).map_err(private_err)
 }
 
-/// Creates `dir` (and missing parents) `0700`, or checks an existing one is private.
 fn ensure_private_dir(dir: &Path) -> Result<(), LogError> {
-    match fs::metadata(dir) {
-        Ok(meta) => check_private(dir, &meta),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(io_err)?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(io_err)
-        }
-        Err(e) => Err(io_err(e)),
-    }
+    private_fs::ensure_private_dir(dir).map_err(private_err)
 }
 
-/// Opens `path` with `opts`, creating it `0600` if missing, or checking an existing file is private.
 fn open_private(path: &Path, opts: &OpenOptions) -> Result<File, LogError> {
-    match opts.clone().create_new(true).mode(0o600).open(path) {
-        Ok(file) => {
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(io_err)?;
-            Ok(file)
-        }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let file = opts.open(path).map_err(io_err)?;
-            check_private(path, &file.metadata().map_err(io_err)?)?;
-            Ok(file)
-        }
-        Err(e) => Err(io_err(e)),
-    }
+    private_fs::create_or_open_private_file(path, opts).map_err(private_err)
 }
 
 /// Where a log's entries are in its file.
@@ -555,6 +530,29 @@ mod tests {
             assert_eq!(mode(&root), open_mode);
             assert!(!root.join("lock").exists());
             assert!(!root.join("sessions").exists());
+        }
+    }
+
+    /// A symlink planted where the root goes is refused even when it points at a private dir: it is never
+    /// followed, and its target is never chmodded or written into.
+    #[test]
+    fn a_root_that_is_a_symlink_is_refused_and_not_followed() {
+        for target_mode in [0o700, 0o755] {
+            let dir = private_tempdir();
+            let target = dir.path().join("elsewhere");
+            fs::create_dir(&target).unwrap();
+            chmod(&target, target_mode);
+            let root = dir.path().join("shepherd");
+            std::os::unix::fs::symlink(&target, &root).unwrap();
+
+            let result = JsonlEventLog::open(&root).map(|_| ());
+            assert!(
+                matches!(&result, Err(LogError::Io(msg)) if msg.contains("symlink")),
+                "{result:?}"
+            );
+            assert_eq!(mode(&target), target_mode);
+            assert!(fs::read_dir(&target).unwrap().next().is_none());
+            assert!(fs::symlink_metadata(&root).unwrap().is_symlink());
         }
     }
 
