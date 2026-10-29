@@ -44,6 +44,27 @@ fn every_fixture_segment_round_trips() {
 }
 
 #[test]
+fn a_copy_taken_anywhere_in_a_fixture_follows_the_rest_of_it() {
+    for agent in AGENTS {
+        let first = &segments(agent)[0];
+        // An odd stride, so the cuts land inside escape sequences and UTF-8 chars as well as between them.
+        for cut in (0..first.bytes.len()).step_by(97) {
+            let mut screen = Screen::new(first.cols, first.rows);
+            screen.feed(&first.bytes[..cut]);
+            let mut copy = copy_of(&screen);
+            screen.feed(&first.bytes[cut..]);
+            copy.feed(&first.bytes[cut..]);
+            assert_eq!(
+                observe(&copy),
+                observe(&screen),
+                "{} cut at byte {cut}",
+                first.name
+            );
+        }
+    }
+}
+
+#[test]
 fn snapshot_of_a_blank_screen_round_trips() {
     assert_round_trips(&Screen::new(10, 3), "blank");
 }
@@ -396,4 +417,188 @@ fn a_broken_wide_half_with_nothing_whole_before_it_comes_out_blank() {
     let copy = copy_of(&screen);
     let widths: Vec<_> = copy.row(0).map(|c| (c.ch, c.width)).collect();
     assert_eq!(widths, [('日', Width::Wide), (' ', Width::Single)]);
+}
+
+/// Feeds `chunks` one call each, snapshots, then feeds `rest` to both the original and the copy. They must match
+/// right after, and again once any held sync update is expired on both.
+fn assert_continues(cols: u16, rows: u16, chunks: &[&[u8]], rest: &[u8]) {
+    let mut screen = Screen::new(cols, rows);
+    for chunk in chunks {
+        screen.feed(chunk);
+    }
+    let mut copy = copy_of(&screen);
+    screen.feed(rest);
+    copy.feed(rest);
+    assert_eq!(
+        observe(&copy),
+        observe(&screen),
+        "after {chunks:?} + {rest:?}"
+    );
+    for s in [&mut screen, &mut copy] {
+        if let Some(hold) = s.sync_hold() {
+            s.expire_sync(hold.id);
+        }
+    }
+    assert_eq!(
+        observe(&copy),
+        observe(&screen),
+        "after {chunks:?} + {rest:?} and expiring"
+    );
+}
+
+#[test]
+fn a_snapshot_mid_escape_sequence_carries_the_unfinished_sequence() {
+    // Splits a sync begin marker, so the copy must start holding at the same byte as the original.
+    assert_continues(10, 3, &[b"x\x1b[?20"], b"26hab");
+    assert_continues(10, 3, &[b"ab\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"ab\x1b"], b"[2Dc");
+    assert_continues(10, 3, &[b"ab\x1b]0;tit"], b"le\x07c");
+    assert_continues(10, 3, &[b"ab\x1b]0;title\x1b"], b"\\c");
+    assert_continues(10, 3, &[b"ab\x1bP1$"], b"qm\x1b\\c");
+}
+
+#[test]
+fn controls_inside_an_unfinished_sequence_are_not_run_twice() {
+    assert_continues(10, 3, &[b"ab\x1b[3\t\x08"], b"Dc");
+    assert_continues(10, 3, &[b"ab\x1b\r\n"], b"7c\x1b8d");
+}
+
+#[test]
+fn sequences_ending_in_a_later_feed_are_followed() {
+    // An ignored CSI ends without a callback.
+    assert_continues(10, 3, &[b"ab\x1b[<", b"<5", b"mc\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b", b"[<<mc\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b[<", b"<5", b"m\n"], b"c");
+    assert_continues(10, 3, &[b"ab\x1b]0;t", b"itle", b"\x07c\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b]0;t", b"it\x18c"], b"d");
+    assert_continues(10, 3, &[b"ab\x1bP1$", b"q", b"m\x9cc"], b"d");
+    assert_continues(10, 3, &[b"ab\x1b[3", b"1", b"mc\x1b[1"], b"Cd");
+}
+
+#[test]
+fn a_snapshot_mid_utf8_char_carries_the_unfinished_char() {
+    assert_continues(10, 3, &["a日".as_bytes(), b"\xe6\x97"], b"\xa5b");
+    assert_continues(10, 3, &[b"a\xf0"], b"\x9f\x90\x91b");
+    assert_continues(10, 3, &[b"a\xf0\x9f"], b"\x1b[31mb");
+}
+
+#[test]
+fn finished_sequences_before_an_unfinished_one_are_not_replayed() {
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@\x1b[1"], b"Cx");
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@", b"\x1b[1"], b"Cx");
+}
+
+#[test]
+fn an_unfinished_sequence_inside_a_sync_update_is_carried_over() {
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"\x1b[?2026h", b"ab\xe6\x97"], b"\xa5");
+    // The end marker itself split across feeds.
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[?20"], b"26lc");
+}
+
+#[test]
+fn an_unfinished_sequence_left_when_a_sync_update_ends_is_carried_over() {
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[?2026l\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"\x1b[?2026hab", b"\x1b[?2026lc\xe6"], b"\x97\xa5");
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[?2026hab\x1b[3");
+    let id = screen.sync_hold().unwrap().id;
+    screen.expire_sync(id);
+    let mut copy = copy_of(&screen);
+    screen.feed(b"1mc");
+    copy.feed(b"1mc");
+    assert_eq!(observe(&copy), observe(&screen));
+}
+
+#[test]
+fn an_unfinished_sequence_before_a_new_sync_begin_is_carried_over() {
+    // The end marker makes the parser run up to the new begin marker, leaving it inside the sequence.
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026l\x1b]0;ti\x1b[?2026hzz"],
+        b"\x1b[?2026l",
+    );
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026lb\x1b[3\x1b[?2026hzz"],
+        b"y",
+    );
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026lb\xe6\x1b[?2026hzz"],
+        b"y",
+    );
+}
+
+/// Feeds `intro` and then `len` bytes of `body`, `chunk` bytes at a time.
+fn open_sequence(intro: &[u8], body: u8, len: usize, chunk: usize) -> Screen {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(intro);
+    let piece = vec![body; chunk];
+    for _ in 0..len / chunk {
+        screen.feed(&piece);
+    }
+    screen
+}
+
+#[test]
+fn a_sequence_that_never_ends_costs_linear_work_and_a_bounded_snapshot() {
+    let cases: [(&str, &[u8], u8); 6] = [
+        ("OSC", b"\x1b]0;", b'x'),
+        ("DCS", b"\x1bPq", b'x'),
+        ("APC", b"\x1b_", b'x'),
+        ("CSI params", b"\x1b[", b'1'),
+        ("CSI ignored", b"\x1b[<", b'<'),
+        ("ESC intermediates", b"\x1b", b' '),
+    ];
+    for (label, intro, body) in cases {
+        for (len, chunk) in [(8 << 20, 4096), (256 << 10, 1)] {
+            let screen = open_sequence(intro, body, len, chunk);
+            let fed = (intro.len() + len) as u64;
+            // Probing the start of the sequence, then one tracking parser reading every byte once.
+            assert!(
+                screen.tracking_work() <= 3 * fed,
+                "{label} in {chunk}-byte feeds: {} bytes of work for {fed} fed",
+                screen.tracking_work()
+            );
+            let snapshot = screen.snapshot_ansi();
+            assert!(
+                snapshot.len() < 80 * 1024,
+                "{label}: snapshot is {} bytes",
+                snapshot.len()
+            );
+        }
+    }
+}
+
+/// Opens a sequence with `intro` and 70 000 bytes of `body` (past the carried cap), feeds `mid`, then snapshots and
+/// feeds more `body` and `end` to both. The copy must match and the first row read `text`.
+fn assert_over_long_ends_alike(intro: &[u8], body: u8, mid: &[u8], end: &[u8], text: &str) {
+    let mut screen = open_sequence(intro, body, 70_000, 4096);
+    screen.feed(mid);
+    let mut copy = copy_of(&screen);
+    for s in [&mut screen, &mut copy] {
+        s.feed(&[body; 100]);
+        s.feed(end);
+    }
+    let label = format!("{intro:?} {mid:?} {end:?}");
+    assert_eq!(observe(&copy), observe(&screen), "{label}");
+    assert_eq!(support::text(&screen)[0], text, "{label}");
+}
+
+#[test]
+fn a_copy_taken_inside_an_over_long_sequence_ends_it_on_the_same_byte() {
+    assert_over_long_ends_alike(b"\x1b]0;", b'x', b"", b"\x07ab", "ab");
+    assert_over_long_ends_alike(b"\x1bPq", b'x', b"", b"\x1b\\ab", "ab");
+    assert_over_long_ends_alike(b"\x1b[", b'1', b"", b"mab", "ab");
+    assert_over_long_ends_alike(b"\x1b", b' ', b"", b"Bab", "ab");
+    // A byte past the cap that sends the DCS header to its ignore state, so the 8-bit ST doesn't end it.
+    assert_over_long_ends_alike(b"\x1bP", b'1', b"<q", b"data\x9cvisible", "");
+    // A byte past the cap that makes the CSI ignored, so it doesn't turn bracketed paste on.
+    assert_over_long_ends_alike(b"\x1b[?2004;", b'0', b"<", b"hX", "X");
+    assert_over_long_ends_alike(b"\x1b[", b'0', b" ", b"5mX", "X");
 }

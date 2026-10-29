@@ -362,7 +362,9 @@ fn saved_cursor<T>(out: &mut Writer, term: &Term<T>) {
 fn cursor<T>(out: &mut Writer, term: &Term<T>) {
     let grid = term.grid();
     let (row, col) = clamped(term, &grid.cursor);
-    // A widening resize can leave the wrap flag set away from the last column; it has no effect there.
+    // A widening resize can leave the wrap flag set away from the last column, where the next character or tab
+    // still starts a new line. No sequence puts a cursor in that state, so it is dropped (documented on
+    // `Screen::snapshot_ansi`).
     if !grid.cursor.input_needs_wrap || col + 1 != term.columns() {
         out.goto(row, col);
         return;

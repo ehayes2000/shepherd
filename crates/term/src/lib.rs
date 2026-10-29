@@ -10,6 +10,7 @@ mod replies;
 mod snapshot;
 mod sync;
 mod types;
+mod unfinished;
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -20,6 +21,7 @@ pub use types::*;
 
 use replies::{Listener, ReportedColors};
 use sync::ManualTimeout;
+use unfinished::Unfinished;
 
 /// Smallest grid: alacritty needs two columns to place a wide character.
 pub const MIN_COLS: u16 = 2;
@@ -41,6 +43,8 @@ pub struct Screen {
     /// A copy of the bytes the parser is holding for an open synchronized update, so a snapshot can carry them.
     /// alacritty keeps them private; they are always the tail of what was fed.
     held: Vec<u8>,
+    /// The escape sequence or UTF-8 char the parser is in the middle of, so a snapshot can carry it.
+    unfinished: Unfinished,
     reported: ReportedColors,
 }
 
@@ -87,6 +91,7 @@ impl Screen {
             events,
             replies: Vec::new(),
             held: Vec::new(),
+            unfinished: Unfinished::default(),
             reported: ReportedColors::default(),
         }
     }
@@ -102,7 +107,7 @@ impl Screen {
     /// Parses PTY output. Escape sequences and UTF-8 may be split across calls.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
-        self.track_held(bytes);
+        self.track_parsed(bytes);
         self.collect_replies();
     }
 
@@ -165,7 +170,8 @@ impl Screen {
     pub fn expire_sync(&mut self, id: u64) {
         if self.sync_hold().is_some_and(|hold| hold.id == id) {
             self.parser.stop_sync(&mut self.term);
-            self.held.clear();
+            let held = std::mem::take(&mut self.held);
+            self.unfinished.advance(&held);
             self.collect_replies();
         }
     }
@@ -174,11 +180,19 @@ impl Screen {
     /// cells, cursor, input modes and pen, so a client attaching mid-session can then follow live output.
     ///
     /// Output held by an open synchronized update is appended after a begin marker, so the copy is left holding
-    /// the same bytes.
+    /// the same bytes. An escape sequence or UTF-8 char the parser is in the middle of is carried too, so the copy
+    /// reads the rest of it the same way. Past 64 KiB only the bytes that change where a sequence ends are carried,
+    /// so its parameters or payload may be cut short.
     ///
     /// Not carried over: the primary screen while the alt screen is active, scrollback, the scroll region, tab
-    /// stops, hyperlinks, the title, and the charset state. Only the top of the active screen's kitty keyboard stack
-    /// is re-pushed; deeper entries and the inactive screen's stack are lost.
+    /// stops, hyperlinks, the title, the charset state, colours set with OSC 4 / 10 / 11 (so colour queries can get
+    /// different answers), the last printed character that REP repeats, and whether the saved cursor (DECSC) was
+    /// waiting to wrap. Only the top of the active screen's kitty keyboard stack is re-pushed; deeper entries and the
+    /// inactive screen's stack are lost, and flags set with `CSI = u` on an empty stack are pushed, so the copy
+    /// reports them to `CSI ? u` where the original reports 0. A widening resize can leave the cursor
+    /// waiting to wrap away from the last column, so the next character or tab starts a new line; the copy's cursor
+    /// doesn't wait. After a widening resize alacritty can also stop resetting the blank cells of a row erased with
+    /// a background colour, so a later erase, insert or reset leaves that colour in the original but not the copy.
     ///
     /// Wide characters with a half erased (by ECH, EL, ICH or DCH) are rebuilt with the same edits, with two gaps:
     /// a broken half in the last column with only broken halves before it comes out as a blank, and when the
@@ -186,21 +200,41 @@ impl Screen {
     pub fn snapshot_ansi(&self) -> Vec<u8> {
         let mut out = snapshot::ansi(&self.term);
         if self.sync_hold().is_some() {
+            // The parser reads the unfinished bytes before the held ones when the update ends, so the copy holds
+            // them too. Fed before the marker, a broken UTF-8 char would be drawn while the original still holds it.
             out.extend_from_slice(b"\x1b[?2026h");
+            out.extend_from_slice(self.unfinished.bytes());
             out.extend_from_slice(&self.held);
+        } else {
+            out.extend_from_slice(self.unfinished.bytes());
         }
         out
     }
 
-    fn track_held(&mut self, bytes: &[u8]) {
-        if self.sync_hold().is_none() {
-            self.held.clear();
-            return;
+    /// Bytes fed to the extra parsers that follow unfinished sequences for [`Screen::snapshot_ansi`]. Only for tests
+    /// that check this work stays linear in the output.
+    #[doc(hidden)]
+    pub fn tracking_work(&self) -> u64 {
+        self.unfinished.work()
+    }
+
+    /// Splits what was not yet parsed before this feed (`held`, then `bytes`) into what the parser has now read
+    /// and what an open synchronized update still holds. The parser always reads a prefix of it.
+    fn track_parsed(&mut self, bytes: &[u8]) {
+        let keep = match self.sync_hold() {
+            Some(_) => self.parser.sync_bytes_count(),
+            None => 0,
+        };
+        if self.held.is_empty() {
+            let split = bytes.len().saturating_sub(keep);
+            self.unfinished.advance(&bytes[..split]);
+            self.held.extend_from_slice(&bytes[split..]);
+        } else {
+            self.held.extend_from_slice(bytes);
+            let split = self.held.len().saturating_sub(keep);
+            let parsed: Vec<u8> = self.held.drain(..split).collect();
+            self.unfinished.advance(&parsed);
         }
-        self.held.extend_from_slice(bytes);
-        let keep = self.parser.sync_bytes_count();
-        let drop = self.held.len().saturating_sub(keep);
-        self.held.drain(..drop);
     }
 
     fn collect_replies(&mut self) {
