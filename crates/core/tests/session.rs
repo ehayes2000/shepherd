@@ -40,9 +40,13 @@ fn update(update: Value) -> (Dir, Value) {
 }
 
 fn tool_call(tool_id: &str, title: &str) -> (Dir, Value) {
+    tool_call_of(tool_id, title, "execute")
+}
+
+fn tool_call_of(tool_id: &str, title: &str, kind: &str) -> (Dir, Value) {
     update(
         json!({ "sessionUpdate": "tool_call", "toolCallId": tool_id, "title": title,
-                   "kind": "execute", "status": "in_progress" }),
+                   "kind": kind, "status": "in_progress" }),
     )
 }
 
@@ -307,6 +311,134 @@ fn activity_transitions() {
             vec![prompt(1, "a"), prompt_done(1), prompt(2, "b")],
             working(),
         ),
+        (
+            "working shows the most recently started tool in flight",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                tool_call("t2", "cat"),
+            ],
+            working_on("t2", "cat"),
+        ),
+        (
+            "finishing the latest tool falls back to the earlier one in flight",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                tool_call("t2", "cat"),
+                tool_update("t2", "completed"),
+            ],
+            working_on("t1", "ls"),
+        ),
+        (
+            "permission for an unknown tool does not create a phantom tool",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                permission(7, "x", "Allow Bash?"),
+                tool_update("t1", "completed"),
+            ],
+            working(),
+        ),
+        (
+            "permission for one parallel tool keeps the other tool's title and kind",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                tool_call_of("t2", "grep foo", "search"),
+                permission(7, "t1", "Allow ls?"),
+                permission_answered(7),
+            ],
+            Activity::Working {
+                tool: Some(ToolSummary {
+                    id: "t2".to_owned(),
+                    title: "grep foo".to_owned(),
+                    kind: ToolKind::Search,
+                }),
+            },
+        ),
+        (
+            "permission for a known tool ignores other tools' updates",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                tool_call("t2", "cat"),
+                permission(7, "t1", "Allow ls?"),
+                tool_update("t2", "completed"),
+            ],
+            needs_permission("Allow ls?"),
+        ),
+        (
+            "permission for a known tool ignores other tool calls",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                permission(7, "t1", "Allow ls?"),
+                tool_call("t2", "cat"),
+            ],
+            needs_permission("Allow ls?"),
+        ),
+        (
+            "permission for a known tool clears on that tool's update",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                tool_call("t2", "cat"),
+                permission(7, "t1", "Allow ls?"),
+                tool_update("t1", "in_progress"),
+            ],
+            working_on("t2", "cat"),
+        ),
+        (
+            "permission for an unknown tool clears on any tool update",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                permission(7, "x", "Allow Bash?"),
+                tool_update("t1", "in_progress"),
+            ],
+            working_on("t1", "ls"),
+        ),
+        (
+            "agent idle clears permission",
+            vec![prompt(1, "hi"), permission(7, "x", "ok?"), idle()],
+            Activity::Idle,
+        ),
+        (
+            "new prompt clears permission",
+            vec![prompt(1, "hi"), permission(7, "x", "ok?"), prompt(2, "go")],
+            working(),
+        ),
+        (
+            "tool call while starting is ignored",
+            vec![started(), tool_call("t1", "ls")],
+            Activity::Starting,
+        ),
+        (
+            "tool call while idle is ignored",
+            vec![prompt(1, "hi"), prompt_done(1), tool_call("t1", "ls")],
+            Activity::Idle,
+        ),
+        (
+            "tool update while idle is ignored",
+            vec![
+                prompt(1, "hi"),
+                tool_call("t1", "ls"),
+                prompt_done(1),
+                tool_update("t1", "in_progress"),
+            ],
+            Activity::Idle,
+        ),
+        (
+            "tools from a finished turn do not leak into the next",
+            vec![
+                prompt(1, "a"),
+                tool_call("t1", "ls"),
+                prompt_done(1),
+                prompt(2, "b"),
+            ],
+            working(),
+        ),
     ];
     for (name, steps, expected) in cases {
         assert_eq!(fold(&steps).activity(), &expected, "case: {name}");
@@ -345,6 +477,23 @@ fn unknown_frames_do_not_change_state() {
             assert_eq!(fold(&steps), before, "noise {n:?} after {prefix:?}");
         }
     }
+}
+
+#[test]
+fn inferred_permission_clears_do_not_accumulate_pending_requests() {
+    // Each permission here is cleared by a tool update, never answered. If the fold kept every unanswered
+    // permission request, the state after many cycles would differ from the state with none.
+    let mut cycles = vec![prompt(1, "hi"), tool_call("t1", "ls")];
+    for i in 0..20 {
+        cycles.push(permission(100 + i, "x", "Allow?"));
+        cycles.push(tool_update("t1", "in_progress"));
+    }
+    let without = fold(&[
+        prompt(1, "hi"),
+        tool_call("t1", "ls"),
+        tool_update("t1", "in_progress"),
+    ]);
+    assert_eq!(fold(&cycles), without);
 }
 
 // ---------- attention ----------
@@ -495,11 +644,49 @@ fn arb_frame() -> impl Strategy<Value = (Dir, Value)> {
     (dir, prop_oneof![request, notification, result, error])
 }
 
+/// Frames the fold reads, from small id pools so prompts, permissions and tools collide and correlate.
+fn arb_known_frame() -> impl Strategy<Value = (Dir, Value)> {
+    let id = 0i64..3;
+    let tool = prop_oneof![Just("t0"), Just("t1"), Just("t2"), Just("x")];
+    let status = prop_oneof![
+        Just("pending"),
+        Just("in_progress"),
+        Just("completed"),
+        Just("failed")
+    ];
+    prop_oneof![
+        id.clone().prop_map(|id| prompt(id, "go")),
+        id.clone().prop_map(prompt_done),
+        id.clone().prop_map(prompt_failed),
+        (tool.clone(), status.clone()).prop_map(|(t, s)| update(
+            json!({ "sessionUpdate": "tool_call", "toolCallId": t, "title": t, "status": s })
+        )),
+        (tool.clone(), status).prop_map(|(t, s)| tool_update(t, s)),
+        (id.clone(), tool).prop_map(|(id, t)| permission(id, t, "ok?")),
+        id.prop_map(permission_answered),
+        Just(idle()),
+        Just(started()),
+        (0i32..3).prop_map(exited),
+    ]
+}
+
+fn arb_step() -> impl Strategy<Value = (Dir, Value)> {
+    prop_oneof![3 => arb_known_frame(), 1 => arb_frame()]
+}
+
 proptest! {
     #[test]
-    fn folding_arbitrary_frames_never_panics(steps in prop::collection::vec(arb_frame(), 0..32)) {
-        let state = fold(&steps);
-        let _ = state.attention(Seq::new(0));
-        let _ = (state.activity(), state.turns(), state.last_prompt());
+    fn folding_frames_never_panics_and_shows_only_tools_in_flight(
+        steps in prop::collection::vec(arb_step(), 0..48)
+    ) {
+        let mut log = EnvelopeBuilder::new();
+        let mut state = SessionState::default();
+        for (dir, frame) in steps {
+            state.apply(&log.envelope(dir, frame));
+            let _ = (state.attention(Seq::new(0)), state.turns(), state.last_prompt());
+            if let Activity::Working { tool } = state.activity() {
+                prop_assert_eq!(tool.as_ref(), state.tools().last());
+            }
+        }
     }
 }

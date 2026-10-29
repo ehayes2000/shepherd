@@ -788,3 +788,17 @@ fn request_ids_are_scoped_by_direction() {
         Correlated::Prompt(PromptOutcome::Completed(_))
     ));
 }
+
+#[test]
+fn forgotten_request_no_longer_correlates() {
+    let mut pending = PendingRequests::default();
+    pending.record(&Dir::ToAgent, &prompt_request(json!(0)));
+    pending.forget(&Dir::ToAgent, &RequestId::from(0));
+    assert!(pending.is_empty());
+    let answer =
+        response(json!({ "jsonrpc": "2.0", "id": 0, "result": { "stopReason": "end_turn" } }));
+    assert_eq!(
+        pending.correlate(&Dir::FromAgent, &answer),
+        Correlated::Unmatched
+    );
+}

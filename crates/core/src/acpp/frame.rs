@@ -359,6 +359,12 @@ impl PendingRequests {
         Correlated::Prompt(outcome)
     }
 
+    /// Forgets a request that will get no response worth reading, e.g. one a fold has already inferred the
+    /// outcome of. `dir` is the request's own direction. Its response, if one arrives, is then `Unmatched`.
+    pub fn forget(&mut self, dir: &Dir, id: &RequestId) {
+        self.pending.remove(&(dir.as_str().to_owned(), id.clone()));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }

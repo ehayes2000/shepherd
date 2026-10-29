@@ -1,6 +1,9 @@
 //! Test support shared by every crate: fakes, contract suites, and builders.
 //!
 //! Depend on this crate only under `[dev-dependencies]`.
+//!
+//! `shepherd-core` may use it only from integration tests in `crates/core/tests/`, never from `#[cfg(test)]` unit
+//! tests: a core unit test would link two copies of `shepherd-core`, and their types would not match.
 
 /// Builders for domain values (`AppBuilder`, `SessionBuilder`, ...), so tests don't construct large structs inline.
 pub mod builders {
