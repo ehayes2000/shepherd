@@ -25,9 +25,12 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
    - Do port traits speak in domain terms, not implementation terms?
    - For a new port: does it have a fake, a contract suite, and an adapter that runs that suite?
    - Are tests built from testkit builders rather than big inline structs?
-5. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
+5. **Reinvention.** Hand-rolled code for something a well-known crate does (dates and times, encodings, parsers,
+   retry and backoff, ...), or structured values handled as strings (comparing timestamps, paths or versions as text,
+   building JSON with `format!`). This is blocking even if the spec seemed to require it. Flag it so the PM fixes the spec.
+6. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
    abstractions.
-6. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
+7. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
    For real adapters, run their contract tests under parallel load (many copies of the test binary at once) and
    hunt for races, lost output, leaked threads, fds and processes, and signals that don't actually kill.
 

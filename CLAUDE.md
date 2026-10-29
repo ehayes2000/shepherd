@@ -41,7 +41,9 @@ The full version, with reasons, is in `docs/architecture.md`.
 3. **Dependencies point inward.** `core` depends on no internal crate. `tui` and `adapters` depend only on
    `core`. Only the `shepherd` binary crate wires everything together. `scripts/check-arch.sh` enforces this.
 4. **Rendering is a pure function of state.** The TUI never mutates domain state. Input is mapped to `Event`s.
-5. If a task seems to need breaking a rule, **stop and escalate to the PM**. Don't work around it. The PM
+5. **Don't reinvent.** Use well-known crates for solved problems (time, encodings, parsing, ...). If the crate
+   isn't allowed where you need it, ask the PM to allow it. Never hand-roll it and never compare structured values as strings.
+6. If a task seems to need breaking a rule, **stop and escalate to the PM**. Don't work around it. The PM
    either changes the task or records a decision in `docs/architecture.md`.
 
 ## Testing rules

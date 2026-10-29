@@ -20,6 +20,8 @@ You are a builder on shepherd. You implement **one** task, given to you by the P
 - New capability that touches the world → `new-port` skill.
 - Found a bug along the way → `fix-bug` skill, and mention it in your report.
 - Match the surrounding code: naming, comment density, module layout.
+- Don't reinvent. If a well-known crate solves it but isn't allowed where you need it, stop and ask the PM.
+  Don't hand-roll it.
 - Keep the diff focused. No drive-by refactors outside scope. No new dependencies unless the spec allows them.
 
 ## Don't touch the user's machine

@@ -65,6 +65,9 @@ the multi-machine work doesn't change core's shape.
 
 Other crates may use `shepherd-testkit` only under `[dev-dependencies]`.
 
+Core may use **pure, well-established crates** (allowlist in the script). Never hand-roll what one of them does
+(dates and times, encodings, parsing). Adding one is a PM decision: ask, don't reimplement.
+
 Core purity is also enforced by `crates/core/clippy.toml` `disallowed-methods`/`disallowed-types`: `std::fs`,
 `std::process`, `std::net`, `std::thread`, `std::env`, `Instant::now`, `SystemTime::now`.
 
@@ -166,3 +169,13 @@ The sync-update timeout comes from the runtime clock, not from a clock read insi
 Consequences: PTY bytes are parsed twice (host and client), which is cheap. Agents behave correctly with no client
 attached, and reattaching shows the right screen immediately. Known gaps we accept: `❤️`-style emoji are 1 cell
 wide, multi-person emoji are split across cells, and XTVERSION gets no answer.
+
+### 0008: Allow pure, established crates in core instead of hand-rolling (2026-10-29)
+Context: the core allowlist (serde, serde_json, thiserror) pushed builders to hand-roll base64 and RFC 3339 timestamps.
+The ordering by timestamp string comparison that followed in T06 is wrong for timestamps with offsets. Purity is
+about IO, not about having few dependencies.
+Decision: core may use pure, widely used crates through `CORE_ALLOWED`. Added now: `jiff` (with
+`default-features = false` and features `std` and `serde` only, so no system timezone database reads) and `base64`. Their
+clock-reading functions are in core's clippy `disallowed-methods`. Hand-rolling something a standard crate does is
+a review finding. Builders ask the PM to add the crate rather than reimplementing it.
+Consequences: a slightly bigger dependency tree. Timestamps get real ordering and arithmetic. F04 replaces the hand-rolled code.
