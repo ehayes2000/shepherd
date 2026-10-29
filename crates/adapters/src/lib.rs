@@ -2,6 +2,8 @@
 //!
 //! Adapters are thin: translate domain calls to IO and back. No policy.
 
+pub mod config;
 pub mod pty;
 
+pub use config::TomlConfigSource;
 pub use pty::PortablePty;
