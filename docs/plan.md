@@ -401,6 +401,8 @@ acceptance:
 - Keeps a `shepherd_term::Screen` per PTY. PTY output is fed into it, and `take_replies()` is written back to the PTY, so
   agents get their terminal-query answers with no client attached (decision 0007).
 - Session ids are generated as `s_<lowercase ulid>` (they must match `[a-z0-9_-]{1,64}`). Timestamps are stamped as RFC 3339 UTC with ms.
+- Port event sinks (`PtyEventSink`, `LinkEventSink`) are unbounded channels into the runtime loop. A sink must never block on
+  the loop that owns the port (deadlock with `close`).
 - Live log fan-out uses the `Envelope` returned by `append`. `EventLog::read(log, from)` is only for catching up a client
   on subscribe and for startup replay.
 - Attach: subscribing to a session's output first sends `snapshot_ansi()`, then live bytes. A scenario test shows a
