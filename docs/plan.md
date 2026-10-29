@@ -222,7 +222,7 @@ with `wait_for(predicate, timeout)` (std mpsc `recv_timeout`; no sleeps). Exactl
 its `Output`. Use `SessionId` from `shepherd_core::ids`. New deps allowed: `portable-pty` (adapters).
 
 ### T09: `shepherd-term` screen + TUI rendering
-status: todo
+status: in-progress
 depends: T02
 touches: term (new crate), tui::screen
 goal: Turn PTY bytes into a screen, answer terminal queries, snapshot for attach, and render into ratatui (decision 0007).
