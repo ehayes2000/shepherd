@@ -22,10 +22,17 @@
 //! A store has a single writer: `open` takes an exclusive lock on `<root>/lock` for the adapter's lifetime, and
 //! a second `open` gets [`LogError::Locked`]. The adapter keeps an index of where each entry starts, so reads
 //! seek to the first wanted entry and appends check the file is still the length it left it at.
+//!
+//! The logs hold prompts and tool output, so the store is private (decision 0010), whatever the umask: the root
+//! and `sessions/` are created `0700`, and the lock and log files `0600` (set exactly through the new file's
+//! descriptor, since a umask can only remove bits). Anything that already exists and is accessible to group or
+//! others, the root included, is [`LogError::InsecurePermissions`] and is never chmodded: it is the user's data,
+//! and they fix it.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use shepherd_core::acpp::{Envelope, FrameDraft, Seq, Stamp};
@@ -63,14 +70,59 @@ impl AppendFile for File {
     }
 }
 
-type OpenAppendFile = fn(&Path) -> io::Result<Box<dyn AppendFile>>;
+type OpenAppendFile = fn(&Path) -> Result<Box<dyn AppendFile>, LogError>;
 
-fn open_append(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+fn open_append(path: &Path) -> Result<File, LogError> {
+    open_private(path, OpenOptions::new().append(true))
 }
 
-fn open_append_file(path: &Path) -> io::Result<Box<dyn AppendFile>> {
+fn open_append_file(path: &Path) -> Result<Box<dyn AppendFile>, LogError> {
     Ok(Box::new(open_append(path)?))
+}
+
+/// Refuses `path` if group or others can access it.
+fn check_private(path: &Path, meta: &fs::Metadata) -> Result<(), LogError> {
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(LogError::InsecurePermissions {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+/// Creates `dir` (and missing parents) `0700`, or checks an existing one is private.
+fn ensure_private_dir(dir: &Path) -> Result<(), LogError> {
+    match fs::metadata(dir) {
+        Ok(meta) => check_private(dir, &meta),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(io_err)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(io_err)
+        }
+        Err(e) => Err(io_err(e)),
+    }
+}
+
+/// Opens `path` with `opts`, creating it `0600` if missing, or checking an existing file is private.
+fn open_private(path: &Path, opts: &OpenOptions) -> Result<File, LogError> {
+    match opts.clone().create_new(true).mode(0o600).open(path) {
+        Ok(file) => {
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(io_err)?;
+            Ok(file)
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let file = opts.open(path).map_err(io_err)?;
+            check_private(path, &file.metadata().map_err(io_err)?)?;
+            Ok(file)
+        }
+        Err(e) => Err(io_err(e)),
+    }
 }
 
 /// Where a log's entries are in its file.
@@ -103,20 +155,17 @@ impl Drop for JsonlEventLog {
 
 impl JsonlEventLog {
     /// Opens (creating if needed) the logs under `root`, repairing their ends. Fails with
-    /// [`LogError::Locked`] if another `JsonlEventLog` has `root` open.
+    /// [`LogError::Locked`] if another `JsonlEventLog` has `root` open, and with
+    /// [`LogError::InsecurePermissions`] if the root or anything in it is accessible to group or others.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LogError> {
         Self::open_with(root, open_append_file)
     }
 
     fn open_with(root: impl AsRef<Path>, open_append: OpenAppendFile) -> Result<Self, LogError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("sessions")).map_err(io_err)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(root.join("lock"))
-            .map_err(io_err)?;
+        ensure_private_dir(&root)?;
+        ensure_private_dir(&root.join("sessions"))?;
+        let lock = open_private(&root.join("lock"), OpenOptions::new().write(true))?;
         match lock.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(LogError::Locked),
@@ -173,12 +222,18 @@ impl JsonlEventLog {
     /// Indexes one log, truncating leftovers at its end.
     fn recover(&mut self, log: LogId) -> Result<(), LogError> {
         let path = self.path(&log);
-        let bytes = fs::read(&path).map_err(io_err)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(io_err)?;
+        check_private(&path, &file.metadata().map_err(io_err)?)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(io_err)?;
         let scan = scan(&log, &bytes, 1, Mode::Recover)?;
         let end = scan.valid_len as u64;
         let removed = bytes.len() as u64 - end;
         if removed > 0 {
-            let file = OpenOptions::new().write(true).open(&path).map_err(io_err)?;
             file.set_len(end).map_err(io_err)?;
             file.sync_all().map_err(io_err)?;
             self.recovered.push(TornTail {
@@ -220,7 +275,7 @@ impl EventLog for JsonlEventLog {
         let mut line = serde_json::to_vec(&env).map_err(|e| LogError::Io(e.to_string()))?;
         line.push(b'\n');
 
-        let mut file = (self.open_append)(&path).map_err(io_err)?;
+        let mut file = (self.open_append)(&path)?;
         let found = file.len().map_err(io_err)?;
         if found != index.end {
             return Err(LogError::ChangedOnDisk {
@@ -351,7 +406,9 @@ fn io_err(e: io::Error) -> LogError {
 mod tests {
     use std::fs::{self, File};
     use std::io::{self, Write};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::process::Command;
 
     use serde_json::json;
     use shepherd_core::acpp::Seq;
@@ -361,9 +418,24 @@ mod tests {
 
     use super::{AppendFile, JsonlEventLog, TornTail};
 
+    /// A fresh tempdir, chmodded 0700 so it passes the store's private-root check whatever the umask.
+    fn private_tempdir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        chmod(dir.path(), 0o700);
+        dir
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     /// A log in a fresh tempdir. Reopening drops the old adapter and opens a new one on the same dir.
     fn temp_harness() -> EventLogHarness<JsonlEventLog> {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         EventLogHarness::new(move |old| {
             drop(old);
             JsonlEventLog::open(dir.path()).unwrap()
@@ -423,9 +495,117 @@ mod tests {
         );
     }
 
+    /// Run directly under the caller's umask, and again in child processes under extreme umasks by
+    /// `modes_are_exact_whatever_the_umask`.
+    #[test]
+    fn open_creates_the_root_and_sessions_0700_and_files_0600() {
+        let dir = private_tempdir();
+        let root = dir.path().join("shepherd");
+        let mut log = JsonlEventLog::open(&root).unwrap();
+        push(&mut log, &LogId::Host, 1);
+        push(&mut log, &session("s1"), 2);
+
+        assert_eq!(mode(&root), 0o700, "root");
+        assert_eq!(mode(&root.join("sessions")), 0o700, "sessions");
+        assert_eq!(mode(&root.join("lock")), 0o600, "lock");
+        assert_eq!(mode(&root.join("host.jsonl")), 0o600, "host log");
+        assert_eq!(mode(&s1_path(&root)), 0o600, "session log");
+    }
+
+    /// The process umask is never changed (it's process-wide), so this reruns the test above in a child under a
+    /// permissive umask (000) and one that strips owner bits (277): modes must come out exact either way.
+    #[test]
+    fn modes_are_exact_whatever_the_umask() {
+        let exe = std::env::current_exe().unwrap();
+        for umask in ["000", "277"] {
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "umask {umask} && exec \"$0\" --exact --test-threads=1 \"$1\""
+                ))
+                .arg(&exe)
+                .arg("event_log::tests::open_creates_the_root_and_sessions_0700_and_files_0600")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "umask {umask}: {stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn an_existing_root_open_to_group_or_others_is_refused_and_left_alone() {
+        for open_mode in [0o755, 0o770, 0o701] {
+            let dir = private_tempdir();
+            let root = dir.path().join("shepherd");
+            fs::create_dir(&root).unwrap();
+            chmod(&root, open_mode);
+
+            let result = JsonlEventLog::open(&root).map(|_| ());
+            assert_eq!(
+                result,
+                Err(LogError::InsecurePermissions {
+                    path: root.clone(),
+                    mode: open_mode
+                })
+            );
+            assert_eq!(mode(&root), open_mode);
+            assert!(!root.join("lock").exists());
+            assert!(!root.join("sessions").exists());
+        }
+    }
+
+    /// Existing files and dirs inside the root are user data: one open to others is refused, never chmodded.
+    #[test]
+    fn existing_sessions_dir_lock_or_log_open_to_others_is_refused_and_left_alone() {
+        for (rel, open_mode) in [
+            ("sessions", 0o755),
+            ("lock", 0o644),
+            ("host.jsonl", 0o644),
+            ("sessions/s1.jsonl", 0o640),
+        ] {
+            let dir = private_tempdir();
+            let mut log = JsonlEventLog::open(dir.path()).unwrap();
+            push(&mut log, &LogId::Host, 1);
+            push(&mut log, &session("s1"), 2);
+            drop(log);
+            let path = dir.path().join(rel);
+            chmod(&path, open_mode);
+
+            let result = JsonlEventLog::open(dir.path()).map(|_| ());
+            assert_eq!(
+                result,
+                Err(LogError::InsecurePermissions {
+                    path: path.clone(),
+                    mode: open_mode
+                }),
+                "{rel}"
+            );
+            assert_eq!(mode(&path), open_mode, "{rel}");
+        }
+    }
+
+    /// A log file that appears after open (another writer, a restore) is checked before the first append to it.
+    #[test]
+    fn append_refuses_a_new_log_file_someone_else_created_open_to_others() {
+        let dir = private_tempdir();
+        let mut log = JsonlEventLog::open(dir.path()).unwrap();
+        let path = s1_path(dir.path());
+        fs::write(&path, b"").unwrap();
+        chmod(&path, 0o644);
+
+        assert_eq!(
+            try_push(&mut log, &session("s1"), 1),
+            Err(LogError::InsecurePermissions { path, mode: 0o644 })
+        );
+    }
+
     #[test]
     fn logs_are_host_jsonl_and_one_file_per_session() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let mut log = JsonlEventLog::open(dir.path()).unwrap();
         push(&mut log, &LogId::Host, 1);
         push(&mut log, &session("s_1"), 2);
@@ -440,7 +620,7 @@ mod tests {
 
     #[test]
     fn open_creates_a_missing_root() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let root = dir.path().join("nested/shepherd");
         let mut log = JsonlEventLog::open(&root).unwrap();
         push(&mut log, &session("s1"), 1);
@@ -449,7 +629,7 @@ mod tests {
 
     #[test]
     fn a_second_open_on_the_same_root_is_locked_until_the_first_is_dropped() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let first = JsonlEventLog::open(dir.path()).unwrap();
         assert!(matches!(
             JsonlEventLog::open(dir.path()),
@@ -463,7 +643,7 @@ mod tests {
     /// store must release the lock anyway, or the next open in this process fails at random.
     #[test]
     fn dropping_the_store_releases_the_lock_even_if_a_child_inherited_it() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let first = JsonlEventLog::open(dir.path()).unwrap();
         let inherited = first.lock.try_clone().unwrap();
         drop(first);
@@ -473,7 +653,7 @@ mod tests {
 
     #[test]
     fn torn_tail_without_newline_is_truncated_on_open_and_the_log_stays_usable() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let s = session("s1");
         let mut log = JsonlEventLog::open(dir.path()).unwrap();
         push(&mut log, &s, 1);
@@ -501,7 +681,7 @@ mod tests {
 
     #[test]
     fn a_complete_entry_missing_its_newline_is_torn() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let mut log = JsonlEventLog::open(dir.path()).unwrap();
         push(&mut log, &LogId::Host, 1);
         push(&mut log, &LogId::Host, 2);
@@ -518,7 +698,7 @@ mod tests {
     /// A complete line is never torn: truncating it could destroy data, so it's an error and the file is kept.
     #[test]
     fn an_unparseable_final_line_is_corrupt_on_open() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         append_raw(&s1_path(dir.path()), b"{not json\n");
         let before = fs::read(s1_path(dir.path())).unwrap();
@@ -530,7 +710,7 @@ mod tests {
     /// An entry from a newer shepherd must survive a downgrade.
     #[test]
     fn a_final_entry_with_a_newer_envelope_version_is_corrupt_not_torn() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         let path = s1_path(dir.path());
         let text = fs::read_to_string(&path).unwrap();
@@ -548,7 +728,7 @@ mod tests {
 
     #[test]
     fn a_trailing_region_of_nuls_and_newlines_is_torn_after_power_loss() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         let tail = b"\0\0\0\0\n\0\0\0\0";
         append_raw(&s1_path(dir.path()), tail);
@@ -570,7 +750,7 @@ mod tests {
 
     #[test]
     fn nuls_followed_by_a_valid_entry_are_corrupt() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         let path = s1_path(dir.path());
         let text = fs::read_to_string(&path).unwrap();
@@ -582,9 +762,11 @@ mod tests {
 
     #[test]
     fn a_torn_only_entry_leaves_an_empty_usable_log() {
-        let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let dir = private_tempdir();
+        fs::create_dir(dir.path().join("sessions")).unwrap();
+        chmod(&dir.path().join("sessions"), 0o700);
         fs::write(s1_path(dir.path()), b"{\"acpp\":").unwrap();
+        chmod(&s1_path(dir.path()), 0o600);
 
         let mut log = JsonlEventLog::open(dir.path()).unwrap();
         assert_eq!(log.recovered().len(), 1);
@@ -595,7 +777,7 @@ mod tests {
 
     #[test]
     fn corruption_before_the_last_line_is_an_error_on_open() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         scribble_on_line(&s1_path(dir.path()), 2);
 
@@ -609,7 +791,7 @@ mod tests {
 
     #[test]
     fn corruption_in_the_region_read_is_an_error_on_read() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let log = three_entries(dir.path());
         scribble_on_line(&s1_path(dir.path()), 2);
 
@@ -620,7 +802,7 @@ mod tests {
     /// Reads seek to the first wanted entry instead of re-parsing the whole log.
     #[test]
     fn read_from_a_seq_skips_the_entries_before_it() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let log = three_entries(dir.path());
         scribble_on_line(&s1_path(dir.path()), 1);
 
@@ -633,7 +815,7 @@ mod tests {
 
     #[test]
     fn a_bad_line_followed_by_a_torn_tail_is_corrupt_not_torn() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         append_raw(&s1_path(dir.path()), b"{bad\n{\"ac");
 
@@ -642,7 +824,7 @@ mod tests {
 
     #[test]
     fn a_seq_gap_is_corrupt() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         let path = s1_path(dir.path());
         let text = fs::read_to_string(&path).unwrap();
@@ -654,7 +836,7 @@ mod tests {
 
     #[test]
     fn an_entry_filed_under_the_wrong_log_is_corrupt() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let mut log = JsonlEventLog::open(dir.path()).unwrap();
         push(&mut log, &session("a"), 1);
         push(&mut log, &session("a"), 2);
@@ -670,9 +852,10 @@ mod tests {
 
     #[test]
     fn stray_files_next_to_the_logs_are_ignored() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let sessions = dir.path().join("sessions");
         fs::create_dir_all(sessions.join("subdir.jsonl")).unwrap();
+        chmod(&sessions, 0o700);
         fs::write(sessions.join(".DS_Store"), b"\0\0junk").unwrap();
         fs::write(sessions.join("notes.txt"), b"hello").unwrap();
         fs::write(sessions.join(".hidden.jsonl"), b"junk").unwrap();
@@ -686,7 +869,7 @@ mod tests {
 
     #[test]
     fn append_refuses_to_write_when_the_file_changed_on_disk() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let mut log = three_entries(dir.path());
         let path = s1_path(dir.path());
         append_raw(&path, b"someone else\n");
@@ -702,7 +885,7 @@ mod tests {
 
     #[test]
     fn read_refuses_when_the_file_shrank_on_disk() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let log = three_entries(dir.path());
         fs::write(s1_path(dir.path()), b"").unwrap();
 
@@ -735,14 +918,16 @@ mod tests {
         }
     }
 
-    fn open_failing<const ROLLBACK_FAILS: bool>(path: &Path) -> io::Result<Box<dyn AppendFile>> {
+    fn open_failing<const ROLLBACK_FAILS: bool>(
+        path: &Path,
+    ) -> Result<Box<dyn AppendFile>, LogError> {
         let file = super::open_append(path)?;
         Ok(Box::new(FailingFile::<ROLLBACK_FAILS>(file)))
     }
 
     #[test]
     fn a_failed_append_that_rolls_back_leaves_the_log_unchanged_and_usable() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
         let before = fs::read(s1_path(dir.path())).unwrap();
 
@@ -766,7 +951,7 @@ mod tests {
 
     #[test]
     fn a_failed_append_that_cannot_roll_back_poisons_the_log_until_reopen() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         drop(three_entries(dir.path()));
 
         let mut log = JsonlEventLog::open_with(dir.path(), open_failing::<true>).unwrap();
