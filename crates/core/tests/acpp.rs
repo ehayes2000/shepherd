@@ -144,9 +144,35 @@ fn timestamp_rejects_non_rfc3339() {
 /// accepted, and the original string is still kept.
 #[test]
 fn timestamp_accepts_iso8601_forms_beyond_rfc3339_and_keeps_the_string() {
-    for s in ["2026-10-29 12:00:00Z", "2026-10-29T12:00:00+0530"] {
+    for s in [
+        "2026-10-29 12:00:00Z",
+        "2026-10-29T12:00:00+0530",
+        // Basic format.
+        "20261029T120000Z",
+        "20261029T120000.123+0530",
+        // Reduced precision.
+        "2026-10-29T12:00Z",
+        "2026-10-29T12Z",
+        // Bracketed annotations (RFC 9557); the offset alone fixes the instant.
+        "2026-10-29T12:00:00Z[America/New_York]",
+        "2026-10-29T12:00:00+05:30[Asia/Kolkata]",
+        "2026-10-29T12:00:00Z[u-ca=gregory]",
+    ] {
         assert_eq!(Timestamp::parse(s).unwrap().as_str(), s);
     }
+}
+
+#[test]
+fn timestamp_rejects_fractions_longer_than_nanoseconds() {
+    assert!(Timestamp::parse("2026-10-29T12:00:00.123456789Z").is_ok());
+    assert!(Timestamp::parse("2026-10-29T12:00:00.1234567890Z").is_err());
+}
+
+#[test]
+fn timestamp_error_says_what_is_accepted() {
+    let err = Timestamp::parse("yesterday").unwrap_err().to_string();
+    assert!(err.contains("ISO 8601"), "{err}");
+    assert!(!err.contains("RFC 3339"), "{err}");
 }
 
 #[test]

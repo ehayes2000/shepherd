@@ -276,8 +276,10 @@ impl fmt::Display for EntryId {
     }
 }
 
-/// An RFC 3339 timestamp. Parsed by `jiff` on construction, so a `Timestamp` is always a valid instant. Core never
-/// reads the clock: the runtime formats the time.
+/// An ISO 8601 instant as `jiff` parses it: RFC 3339, plus forms such as the basic format, reduced precision and
+/// RFC 9557 bracketed annotations, as long as an offset or `Z` fixes the instant. Fractions longer than 9 digits are
+/// rejected. Writers emit RFC 3339 UTC with milliseconds (`2026-10-29T12:00:00.000Z`). Parsed on construction, so a
+/// `Timestamp` is always a valid instant. Core never reads the clock: the runtime formats the time.
 ///
 /// It keeps the exact string it was parsed from: [`Timestamp::as_str`], `Display` and serialization all give back
 /// that original text, so an envelope round-trips unchanged. Equality, ordering and hashing are by **instant**:
@@ -288,9 +290,9 @@ pub struct Timestamp {
     instant: jiff::Timestamp,
 }
 
-/// The string is not an RFC 3339 date-time.
+/// The string is not an ISO 8601 instant that `jiff` can parse.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("not an RFC 3339 timestamp: {0:?}")]
+#[error("not an ISO 8601 instant (date, time and offset): {0:?}")]
 pub struct TimestampError(String);
 
 impl Timestamp {
