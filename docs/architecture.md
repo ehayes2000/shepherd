@@ -85,6 +85,9 @@ A port is a trait in `shepherd-core::ports`. It describes a capability in domain
 
 See the `new-port` skill. A port isn't done until all five exist.
 
+Conventions for new ports: prefer an error enum **per operation** over one per port, so callers only handle what that call
+can return. Never derive `Deserialize` on a type that validates in its constructor; use `#[serde(try_from = ...)]`.
+
 The list of ports is created during planning and kept in `docs/plan.md`.
 
 ## Test layers

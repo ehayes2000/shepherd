@@ -107,15 +107,19 @@ acceptance:
   bracketed annotations), and a test pins that fractions longer than 9 digits are rejected.
 scope: crates/core, workspace Cargo.toml
 
-### F05: Validate SessionId at construction
+### F05: Validated types can't be deserialized around their validation
 status: todo
 depends: T04
 touches: core::ids, every SessionId::new call site
-goal: An invalid session id can't exist, so the log can't reject one at runtime.
+goal: An invalid session id can't exist, so the log can't reject one at runtime. More broadly, no validated domain type can be
+built by deserialization without its validation (the howtocodeit hexagonal guide's "serde on validated models" anti-pattern).
 acceptance:
 - `SessionId` construction validates `[a-z0-9_-]{1,64}` (`TryFrom<String>`/`parse`, a typed error, and serde deserialize
   validates too). `LogId::validate` relies on it or is removed.
 - Ids coming from outside (hook env, wire requests, logs) fail cleanly at the boundary with a typed error.
+- Audit every core and adapter type that validates in its constructor (`SessionId`, `MachineId`, `WorktreeName`, `KeyPrefix`,
+  `Timestamp`, `RepoRef`, ...). Each either deserializes through its validating constructor (`#[serde(try_from = ...)]`) or
+  doesn't derive `Deserialize`. There's a test per type that invalid JSON is rejected.
 scope: crates/core, crates/testkit, crates/adapters
 
 ### F06: Snapshots preserve partial parser input
