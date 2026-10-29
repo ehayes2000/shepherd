@@ -368,6 +368,8 @@ depends: T04, T06, T08, T09, T10, F06
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
+- Startup order: open the `EventLog` first, which takes its exclusive root lock, and only then bind the host socket. The lock
+  makes "a second host" fail cleanly before it can treat the live socket as stale and replace it.
 - On start, it folds every log from `EventLog` to rebuild state. Sessions whose PTY no longer exists become Exited
   (an exited frame is appended).
 - Executes `Append` (stamping it with id, ts, and machine), `SpawnPty`, `WritePty`, `ResizePty`, `KillPty`, and `Reply`.
