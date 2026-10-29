@@ -137,7 +137,8 @@ acceptance:
   usable. Corruption in the middle is a typed error.
 - Wired into the testkit harness defaults.
 scope: core::ports, testkit, adapters
-notes: The trait is sync (append+flush is fast). `stamp` = `{ id, ts, machine }` comes from the runtime, so core stays pure.
+notes: The trait is sync (append+flush is fast). `Stamp { id, ts, machine }` (from `core::acpp`) comes from the runtime, so core
+stays pure. The log assigns `seq` and seals with `FrameDraft::seal(seq, stamp)`.
 `trait EventLog { fn append(&mut self, log: LogId, draft: FrameDraft, stamp: Stamp) -> Result<Envelope, LogError>; fn read(&self, log: LogId, from: Seq) -> Result<Vec<Envelope>, LogError>; fn logs(&self) -> Result<Vec<LogId>, LogError>; }`
 with `LogId = Host | Session(SessionId)`.
 
@@ -326,6 +327,8 @@ acceptance:
   `_shepherd/agent/idle`. `SessionStart` → `_shepherd/agent/started { agent_session_id }`. `SessionEnd` →
   `_shepherd/agent/exited`. `PreCompact` → the ACP compaction update if T01 pins it, otherwise `_claude-code/compact`.
   Any other hook → `_claude-code/<hook_name>` with the raw payload.
+- Direction rule (from `PendingRequests`): synthesized `session/prompt` requests are `dir: to_agent` and their responses
+  are `dir: from_agent`. Otherwise the response doesn't correlate and the session stays Working. Test this through the T05 fold.
 - The prompt request `id` is derived deterministically from state carried between calls (pass in the session's
   translation state and get it back) so that request and response pair up.
 - Folding the translated fixtures through T05 produces the expected Activity sequence.
