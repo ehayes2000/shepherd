@@ -27,7 +27,8 @@
 //! and `sessions/` are created `0700`, and the lock and log files `0600`, exactly (see [`crate::private_fs`]).
 //! Anything that already exists and is accessible to group or others, the root included, is
 //! [`LogError::InsecurePermissions`] and is never chmodded: it is the user's data, and they fix it. A symlink
-//! where the root, a dir or a file goes is refused, never followed.
+//! where the root, `sessions/`, the lock or a log goes is refused with [`LogError::Io`] and never followed (not
+//! skipped, so the user notices), whether it is found on open, read or append.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -88,16 +89,20 @@ fn private_err(e: PrivateFsError) -> LogError {
     }
 }
 
-fn check_private(path: &Path, meta: &fs::Metadata) -> Result<(), LogError> {
-    private_fs::check_private(path, meta).map_err(private_err)
-}
-
 fn ensure_private_dir(dir: &Path) -> Result<(), LogError> {
     private_fs::ensure_private_dir(dir).map_err(private_err)
 }
 
 fn open_private(path: &Path, opts: &OpenOptions) -> Result<File, LogError> {
     private_fs::create_or_open_private_file(path, opts).map_err(private_err)
+}
+
+fn open_existing(path: &Path, opts: &OpenOptions) -> Result<File, LogError> {
+    private_fs::open_existing_private_file(path, opts).map_err(private_err)
+}
+
+fn refuse_symlink(path: &Path, file_type: fs::FileType) -> Result<(), LogError> {
+    private_fs::refuse_symlink(path, file_type).map_err(private_err)
 }
 
 /// Where a log's entries are in its file.
@@ -172,22 +177,36 @@ impl JsonlEventLog {
     }
 
     /// Every log file under the root. Files that can't be a log (wrong extension, invalid session id,
-    /// directories) are ignored.
+    /// directories) are ignored. A symlink named like a log is an error, never followed.
     fn stored_logs(&self) -> Result<Vec<LogId>, LogError> {
         let mut logs = Vec::new();
-        if self.path(&LogId::Host).is_file() {
-            logs.push(LogId::Host);
+        let host = self.path(&LogId::Host);
+        match fs::symlink_metadata(&host) {
+            Ok(meta) => {
+                refuse_symlink(&host, meta.file_type())?;
+                if meta.is_file() {
+                    logs.push(LogId::Host);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(e)),
         }
         for entry in fs::read_dir(self.root.join("sessions")).map_err(io_err)? {
-            let path = entry.map_err(io_err)?.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some(EXT) {
+            let entry = entry.map_err(io_err)?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(EXT) {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
             let log = LogId::Session(SessionId::new(stem));
-            if log.validate().is_ok() {
+            if log.validate().is_err() {
+                continue;
+            }
+            let file_type = entry.file_type().map_err(io_err)?;
+            refuse_symlink(&path, file_type)?;
+            if file_type.is_file() {
                 logs.push(log);
             }
         }
@@ -197,12 +216,7 @@ impl JsonlEventLog {
     /// Indexes one log, truncating leftovers at its end.
     fn recover(&mut self, log: LogId) -> Result<(), LogError> {
         let path = self.path(&log);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(io_err)?;
-        check_private(&path, &file.metadata().map_err(io_err)?)?;
+        let mut file = open_existing(&path, OpenOptions::new().read(true).write(true))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(io_err)?;
         let scan = scan(&log, &bytes, 1, Mode::Recover)?;
@@ -281,7 +295,7 @@ impl EventLog for JsonlEventLog {
             return Ok(Vec::new());
         };
 
-        let mut file = File::open(self.path(&log)).map_err(io_err)?;
+        let mut file = open_existing(&self.path(&log), OpenOptions::new().read(true))?;
         let found = file.metadata().map_err(io_err)?.len();
         // Bytes past `end` can only be a poisoned append's leftovers; they aren't entries.
         if found < index.end {
@@ -531,6 +545,82 @@ mod tests {
             assert!(!root.join("lock").exists());
             assert!(!root.join("sessions").exists());
         }
+    }
+
+    fn assert_symlink_refused<T: std::fmt::Debug>(result: Result<T, LogError>) {
+        assert!(
+            matches!(&result, Err(LogError::Io(msg)) if msg.contains("symlink")),
+            "{result:?}"
+        );
+    }
+
+    /// Replaces `rel` under `dir` with a symlink to a private file or dir outside the store. A file target holds a
+    /// secret with no trailing newline, which recovery would take for a torn tail if it followed the link.
+    fn plant_symlink(dir: &Path, outside: &Path, rel: &str) -> std::path::PathBuf {
+        let path = dir.join(rel);
+        let target = outside.join("target");
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            fs::create_dir(&target).unwrap();
+            chmod(&target, 0o700);
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::write(&target, b"ghp_secrettoken").unwrap();
+            chmod(&target, 0o600);
+            let _ = fs::remove_file(&path);
+        }
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        target
+    }
+
+    /// A store with entries in the host log and session `s1`.
+    fn populated_store(dir: &Path) {
+        let mut log = JsonlEventLog::open(dir).unwrap();
+        push(&mut log, &LogId::Host, 1);
+        push(&mut log, &session("s1"), 2);
+    }
+
+    /// A symlink anywhere in the store is refused on open, never followed: following one could truncate
+    /// whatever file it points at as a "torn tail".
+    #[test]
+    fn a_symlinked_dir_lock_or_log_in_the_store_is_refused_on_open_and_its_target_untouched() {
+        for rel in ["sessions", "lock", "host.jsonl", "sessions/s1.jsonl"] {
+            let (dir, outside) = (private_tempdir(), private_tempdir());
+            populated_store(dir.path());
+            let target = plant_symlink(dir.path(), outside.path(), rel);
+
+            assert_symlink_refused(JsonlEventLog::open(dir.path()).map(|_| ()));
+            if target.is_file() {
+                assert_eq!(fs::read(&target).unwrap(), b"ghp_secrettoken", "{rel}");
+                assert_eq!(mode(&target), 0o600, "{rel}");
+            } else {
+                assert!(fs::read_dir(&target).unwrap().next().is_none(), "{rel}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_log_swapped_for_a_symlink_after_open_is_refused_by_read_and_append() {
+        let (dir, outside) = (private_tempdir(), private_tempdir());
+        let mut log = JsonlEventLog::open(dir.path()).unwrap();
+        push(&mut log, &session("s1"), 1);
+        let target = plant_symlink(dir.path(), outside.path(), "sessions/s1.jsonl");
+
+        assert_symlink_refused(log.read(session("s1"), Seq::ZERO));
+        assert_symlink_refused(try_push(&mut log, &session("s1"), 2));
+        assert_eq!(fs::read(&target).unwrap(), b"ghp_secrettoken");
+    }
+
+    /// `link/` resolves through the link, so a trailing slash must not get a symlinked root past the check.
+    #[test]
+    fn a_symlinked_root_given_with_a_trailing_slash_is_still_refused() {
+        let (dir, outside) = (private_tempdir(), private_tempdir());
+        let root = dir.path().join("shepherd");
+        std::os::unix::fs::symlink(outside.path(), &root).unwrap();
+
+        let mut with_slash = root.into_os_string();
+        with_slash.push("/");
+        assert_symlink_refused(JsonlEventLog::open(&with_slash).map(|_| ()));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     /// A symlink planted where the root goes is refused even when it points at a private dir: it is never

@@ -5,7 +5,10 @@
 //!   with `O_NOFOLLOW`, since a umask can only remove bits. Only what this call created is ever chmodded.
 //! - Anything that already exists is the user's: if group or others can access it, it is
 //!   [`PrivateFsError::Insecure`] and left alone. A symlink at the final part of the path is
-//!   [`PrivateFsError::Symlink`] and is never followed. Symlinks in the parents are fine (macOS's `/tmp` is one).
+//!   [`PrivateFsError::Symlink`] and is never followed, for a directory, a file being created or an existing file
+//!   being opened ([`open_existing_private_file`]). Symlinks in the parents are fine (macOS's `/tmp` is one).
+//! - Paths are normalised first, so a trailing `/` (which makes the OS resolve `link/` through the link) or a
+//!   trailing `/.` can't get a symlink past the check.
 //! - There is no check-then-create gap: the final part is created with a plain `mkdir` (or `O_CREAT|O_EXCL`), and
 //!   `AlreadyExists` means someone else got there first, so the existing entry is checked instead.
 //!
@@ -45,7 +48,7 @@ fn io_err(path: &Path, e: io::Error) -> PrivateFsError {
 
 /// Refuses `path` if group or others can access it. `meta` is `path`'s metadata, from an open descriptor or
 /// `symlink_metadata`.
-pub fn check_private(path: &Path, meta: &Metadata) -> Result<(), PrivateFsError> {
+fn check_private(path: &Path, meta: &Metadata) -> Result<(), PrivateFsError> {
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(PrivateFsError::Insecure {
@@ -56,9 +59,23 @@ pub fn check_private(path: &Path, meta: &Metadata) -> Result<(), PrivateFsError>
     Ok(())
 }
 
+/// `path` without a trailing `/` or `/.`, which would make the OS resolve a symlink at its final part.
+fn normalize(path: &Path) -> PathBuf {
+    path.components().collect()
+}
+
+/// Refuses `path` if it is a symlink. `file_type` must not follow links (`symlink_metadata`, `DirEntry::file_type`).
+pub fn refuse_symlink(path: &Path, file_type: fs::FileType) -> Result<(), PrivateFsError> {
+    if file_type.is_symlink() {
+        return Err(PrivateFsError::Symlink(path.to_path_buf()));
+    }
+    Ok(())
+}
+
 /// Creates `dir` exactly `0700` (and missing parents, see the module docs), or checks that an existing one is a
 /// real directory, not a symlink, that group and others can't access.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), PrivateFsError> {
+    let dir = &normalize(dir);
     match fs::symlink_metadata(dir) {
         Ok(meta) => return check_existing_dir(dir, &meta),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -93,9 +110,7 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PrivateFsError> {
 }
 
 fn check_existing_dir(dir: &Path, meta: &Metadata) -> Result<(), PrivateFsError> {
-    if meta.file_type().is_symlink() {
-        return Err(PrivateFsError::Symlink(dir.to_path_buf()));
-    }
+    refuse_symlink(dir, meta.file_type())?;
     if !meta.is_dir() {
         return Err(PrivateFsError::WrongType(dir.to_path_buf()));
     }
@@ -108,25 +123,37 @@ pub fn create_or_open_private_file(
     path: &Path,
     opts: &OpenOptions,
 ) -> Result<File, PrivateFsError> {
-    let mut opts = opts.clone();
-    opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    match opts.clone().create_new(true).mode(FILE_MODE).open(path) {
+    let path = &normalize(path);
+    let mut new = opts.clone();
+    new.create_new(true)
+        .mode(FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    match new.open(path) {
         Ok(file) => {
             file.set_permissions(fs::Permissions::from_mode(FILE_MODE))
                 .map_err(|e| io_err(path, e))?;
             Ok(file)
         }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let file = opts.open(path).map_err(|e| open_err(path, e))?;
-            let meta = file.metadata().map_err(|e| io_err(path, e))?;
-            if !meta.is_file() {
-                return Err(PrivateFsError::WrongType(path.to_path_buf()));
-            }
-            check_private(path, &meta)?;
-            Ok(file)
-        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => open_existing_private_file(path, opts),
         Err(e) => Err(open_err(path, e)),
     }
+}
+
+/// Opens an existing `path` with `opts` (which must not create it), refusing a symlink at its final part, and
+/// checking through the open descriptor that it is a regular file that group and others can't access.
+pub fn open_existing_private_file(path: &Path, opts: &OpenOptions) -> Result<File, PrivateFsError> {
+    let path = &normalize(path);
+    let file = opts
+        .clone()
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| open_err(path, e))?;
+    let meta = file.metadata().map_err(|e| io_err(path, e))?;
+    if !meta.is_file() {
+        return Err(PrivateFsError::WrongType(path.to_path_buf()));
+    }
+    check_private(path, &meta)?;
+    Ok(file)
 }
 
 /// `O_NOFOLLOW` reports a symlink as `ELOOP`.
@@ -150,7 +177,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{PrivateFsError, create_or_open_private_file, ensure_private_dir};
+    use super::{
+        PrivateFsError, create_or_open_private_file, ensure_private_dir, open_existing_private_file,
+    };
 
     fn private_tempdir() -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -216,7 +245,66 @@ mod tests {
         let deep = dir.path().join("a/b/c");
         ensure_private_dir(&deep).unwrap();
         assert_eq!(mode(&deep), 0o700);
-        assert!(dir.path().join("a/b").is_dir());
+        // 0700 minus the umask, and test umasks don't strip owner bits.
+        assert_eq!(mode(&dir.path().join("a")), 0o700);
+        assert_eq!(mode(&dir.path().join("a/b")), 0o700);
+    }
+
+    /// Set by `parents_created_under_umask_277_are_0500` for the child it runs under that umask.
+    const UMASK_277: &str = "SHEPHERD_TEST_UMASK_277";
+
+    /// Only meaningful in the child of the test below; passes trivially anywhere else.
+    #[test]
+    fn under_umask_277_a_created_parent_is_0500_and_blocks_the_next_part() {
+        if std::env::var_os(UMASK_277).is_none() {
+            return;
+        }
+        let dir = private_tempdir();
+        let result = ensure_private_dir(&dir.path().join("a/b"));
+        assert!(
+            matches!(&result, Err(PrivateFsError::Io { message, .. }) if message.contains("ermission denied")),
+            "{result:?}"
+        );
+        assert_eq!(mode(&dir.path().join("a")), 0o500);
+        chmod(&dir.path().join("a"), 0o700);
+    }
+
+    /// Documents the module-doc note: parents are not chmodded, so under umask 277 they come out 0500.
+    #[test]
+    fn parents_created_under_umask_277_are_0500() {
+        let exe = std::env::current_exe().unwrap();
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg("umask 277 && exec \"$0\" --exact --test-threads=1 \"$1\"")
+            .arg(&exe)
+            .arg("private_fs::tests::under_umask_277_a_created_parent_is_0500_and_blocks_the_next_part")
+            .env(UMASK_277, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `link/` and `link/.` resolve through the link for both `lstat` and `O_NOFOLLOW`, so they are normalised away.
+    #[test]
+    fn a_trailing_slash_or_dot_does_not_get_a_symlink_past_the_check() {
+        for suffix in ["/", "/.", "//"] {
+            let (dir, outside) = (private_tempdir(), private_tempdir());
+            let link = dir.path().join("d");
+            symlink(outside.path(), &link).unwrap();
+            let mut given = link.clone().into_os_string();
+            given.push(suffix);
+
+            assert_eq!(
+                ensure_private_dir(Path::new(&given)),
+                Err(PrivateFsError::Symlink(link.clone())),
+                "{suffix}"
+            );
+        }
     }
 
     #[test]
@@ -353,6 +441,62 @@ mod tests {
             })
         );
         assert_eq!(mode(&path), 0o644);
+    }
+
+    #[test]
+    fn open_existing_refuses_a_symlink_and_leaves_its_target_untouched() {
+        let dir = private_tempdir();
+        let target = dir.path().join("target");
+        fs::write(&target, b"ghp_secrettoken").unwrap();
+        chmod(&target, 0o600);
+        let link = dir.path().join("f");
+        symlink(&target, &link).unwrap();
+
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true);
+        assert_eq!(
+            open_existing_private_file(&link, &opts).map(|_| ()),
+            Err(PrivateFsError::Symlink(link.clone()))
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"ghp_secrettoken");
+    }
+
+    #[test]
+    fn open_existing_checks_kind_and_mode_and_never_creates() {
+        let dir = private_tempdir();
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+
+        let missing = dir.path().join("missing");
+        assert!(matches!(
+            open_existing_private_file(&missing, &opts),
+            Err(PrivateFsError::Io { .. })
+        ));
+        assert!(!missing.exists());
+
+        let open = dir.path().join("open");
+        fs::write(&open, b"").unwrap();
+        chmod(&open, 0o640);
+        assert_eq!(
+            open_existing_private_file(&open, &opts).map(|_| ()),
+            Err(PrivateFsError::Insecure {
+                path: open.clone(),
+                mode: 0o640
+            })
+        );
+
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        chmod(&sub, 0o700);
+        assert_eq!(
+            open_existing_private_file(&sub, &opts).map(|_| ()),
+            Err(PrivateFsError::WrongType(sub.clone()))
+        );
+
+        let private = dir.path().join("private");
+        fs::write(&private, b"ok").unwrap();
+        chmod(&private, 0o600);
+        assert!(open_existing_private_file(&private, &opts).is_ok());
     }
 
     #[test]
