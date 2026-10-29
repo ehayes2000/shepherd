@@ -127,7 +127,7 @@ acceptance:
 scope: crates/adapters, crates/core (docs only)
 
 ### F09: Event log files and dirs are private
-status: todo (before T11 merges)
+status: in-progress
 depends: T04
 touches: adapters::event_log
 goal: Logs that hold prompts and tool output can't be read by other users (decision 0010).
@@ -387,7 +387,7 @@ the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
 status: todo
-depends: T04, T06, T08, T09, T10, F06
+depends: T04, T06, T08, T09, T10, F06, F09
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
