@@ -32,8 +32,9 @@ Assert on returned `Command`s and on public state accessors. Never call adapters
 let app = AppBuilder::new().with_sessions([running("fix-login"), idle("docs")]).build();
 insta::assert_snapshot!(render_to_string(&app, 40, 12));
 ```
-Name snapshots after the state they show. Check the new `.snap` by eye before accepting it with
-`cargo insta review`. Never accept a snapshot diff you can't explain.
+Name snapshots after the state they show. `cargo insta review` is interactive, so agents instead run
+`cargo insta pending-snapshots`, read each `.snap.new` file in full, and accept one at a time with
+`cargo insta accept --snapshot <path>` once it's right. Never accept a snapshot diff you can't explain.
 
 **Contract.** How a port behaves. Add cases to `shepherd-testkit::contracts::<port>::suite` so the fake and
 the real adapter both run them. If the real adapter can't satisfy a case, the trait or the fake is wrong.

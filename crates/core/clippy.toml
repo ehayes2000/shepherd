@@ -1,0 +1,40 @@
+# shepherd-core is pure: no IO, threads, env, or clocks. See docs/architecture.md.
+# Clippy does not merge config files, so the root settings are repeated here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "core is pure: time arrives as an event field" },
+  { path = "std::time::SystemTime::now", reason = "core is pure: time arrives as an event field" },
+  { path = "std::thread::spawn", reason = "core is pure: concurrency lives in the runtime" },
+  { path = "std::thread::sleep", reason = "core is pure" },
+  { path = "std::env::var", reason = "core is pure: config arrives via the Config port" },
+  { path = "std::env::vars", reason = "core is pure: config arrives via the Config port" },
+  { path = "std::env::var_os", reason = "core is pure: config arrives via the Config port" },
+  { path = "std::env::current_dir", reason = "core is pure" },
+  { path = "std::env::set_var", reason = "core is pure" },
+  { path = "std::process::exit", reason = "core is pure" },
+  { path = "std::fs::read", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::read_to_string", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::write", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::read_dir", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::create_dir_all", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::remove_file", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::remove_dir_all", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::metadata", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::copy", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::rename", reason = "core is pure: IO goes through a port" },
+]
+
+disallowed-types = [
+  { path = "std::fs::File", reason = "core is pure: IO goes through a port" },
+  { path = "std::fs::OpenOptions", reason = "core is pure: IO goes through a port" },
+  { path = "std::process::Command", reason = "core is pure: processes go through a port" },
+  { path = "std::process::Child", reason = "core is pure: processes go through a port" },
+  { path = "std::net::TcpStream", reason = "core is pure: network goes through a port" },
+  { path = "std::net::TcpListener", reason = "core is pure: network goes through a port" },
+  { path = "std::net::UdpSocket", reason = "core is pure: network goes through a port" },
+  { path = "std::os::unix::net::UnixStream", reason = "core is pure: network goes through a port" },
+  { path = "std::os::unix::net::UnixListener", reason = "core is pure: network goes through a port" },
+]

@@ -1,0 +1,20 @@
+[package]
+name = "shepherd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shepherd-core.workspace = true
+shepherd-tui.workspace = true
+shepherd-adapters.workspace = true
+
+[dev-dependencies]
+shepherd-testkit.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "shepherd"
+path = "src/main.rs"

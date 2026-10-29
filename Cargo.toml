@@ -1,20 +1,27 @@
-[package]
-name = "shepherd"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
-[dependencies]
-crossterm = "0.29.0"
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-portable-pty = "0.9"
-dirs = "6.0"
-tattoy-wezterm-term = "0.1.0-fork.5"
-nix = { version = "0.30", features = ["term", "signal", "process", "fs", "poll", "aio"] }
-signal-hook = "0.4.1"
-vt100 = "0.16.2"
-arc-swap = "1.7"
-ratatui = "0.30.0"
-chrono = "0.4"
-crossbeam-channel = "0.5"
+[workspace.dependencies]
+shepherd-core = { path = "crates/core" }
+shepherd-tui = { path = "crates/tui" }
+shepherd-adapters = { path = "crates/adapters" }
+shepherd-testkit = { path = "crates/testkit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ratatui = "0.30"
+insta = "1"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

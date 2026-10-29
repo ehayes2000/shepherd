@@ -35,8 +35,8 @@ scripts/check.sh                     # on the merged result, every time
 ```
 - If the gate is red after merging, run `git reset --hard ORIG_HEAD` and send it back to the builder. Branches
   green on their own can still conflict in behavior. The second merge is the one that rebases.
-- If the gate is green, open the PR per CLAUDE.md conventions or merge directly, whichever the user has
-  authorized. Mark the task `done` and record the commit hash in plan.md.
+- If the gate is green, the merge stays on local `main`. Don't push. The user pushes or asks for a PR.
+  Mark the task `done` and record the merge commit hash in plan.md.
 - Delete the merged task branch and its worktree.
 
 ## 5. Learn

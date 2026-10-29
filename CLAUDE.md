@@ -57,8 +57,8 @@ The full version, with reasons, is in `docs/architecture.md`.
    accept a snapshot. Changing an existing assertion must be justified in the commit message and the report.
 7. **Deterministic.** No sleeps, no wall clock, and no network in core or tui tests. Real-adapter tests use
    tempdirs and clean up after themselves.
-8. **UI is snapshot-tested** with `insta` and ratatui's `TestBackend`. Review every snapshot diff with
-   `cargo insta review`.
+8. **UI is snapshot-tested** with `insta` and ratatui's `TestBackend`. Read every new or changed `.snap.new`
+   before accepting it. Never bulk-accept.
 
 ## Commits
 

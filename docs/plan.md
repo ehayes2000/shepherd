@@ -44,7 +44,7 @@ None of these are planned yet, but the log was designed so each one is additive:
 ## M0 Foundation
 
 ### T00: Wipe v1 and scaffold the workspace
-status: todo
+status: done
 owner: PM (not dispatched, because builders assume this structure exists)
 depends: none
 touches: everything
