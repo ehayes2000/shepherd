@@ -7,14 +7,16 @@ on:
     branches: [main]
 
 jobs:
-  clippy:
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run clippy with warnings as errors
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Gate
+        run: scripts/check.sh
