@@ -44,6 +44,27 @@ fn every_fixture_segment_round_trips() {
 }
 
 #[test]
+fn a_copy_taken_anywhere_in_a_fixture_follows_the_rest_of_it() {
+    for agent in AGENTS {
+        let first = &segments(agent)[0];
+        // An odd stride, so the cuts land inside escape sequences and UTF-8 chars as well as between them.
+        for cut in (0..first.bytes.len()).step_by(97) {
+            let mut screen = Screen::new(first.cols, first.rows);
+            screen.feed(&first.bytes[..cut]);
+            let mut copy = copy_of(&screen);
+            screen.feed(&first.bytes[cut..]);
+            copy.feed(&first.bytes[cut..]);
+            assert_eq!(
+                observe(&copy),
+                observe(&screen),
+                "{} cut at byte {cut}",
+                first.name
+            );
+        }
+    }
+}
+
+#[test]
 fn snapshot_of_a_blank_screen_round_trips() {
     assert_round_trips(&Screen::new(10, 3), "blank");
 }
@@ -396,4 +417,107 @@ fn a_broken_wide_half_with_nothing_whole_before_it_comes_out_blank() {
     let copy = copy_of(&screen);
     let widths: Vec<_> = copy.row(0).map(|c| (c.ch, c.width)).collect();
     assert_eq!(widths, [('日', Width::Wide), (' ', Width::Single)]);
+}
+
+/// Feeds `chunks` one call each, snapshots, then feeds `rest` to both the original and the copy. They must match
+/// right after, and again once any held sync update is expired on both.
+fn assert_continues(cols: u16, rows: u16, chunks: &[&[u8]], rest: &[u8]) {
+    let mut screen = Screen::new(cols, rows);
+    for chunk in chunks {
+        screen.feed(chunk);
+    }
+    let mut copy = copy_of(&screen);
+    screen.feed(rest);
+    copy.feed(rest);
+    assert_eq!(
+        observe(&copy),
+        observe(&screen),
+        "after {chunks:?} + {rest:?}"
+    );
+    for s in [&mut screen, &mut copy] {
+        if let Some(hold) = s.sync_hold() {
+            s.expire_sync(hold.id);
+        }
+    }
+    assert_eq!(
+        observe(&copy),
+        observe(&screen),
+        "after {chunks:?} + {rest:?} and expiring"
+    );
+}
+
+#[test]
+fn a_snapshot_mid_escape_sequence_carries_the_unfinished_sequence() {
+    // Splits a sync begin marker, so the copy must start holding at the same byte as the original.
+    assert_continues(10, 3, &[b"x\x1b[?20"], b"26hab");
+    assert_continues(10, 3, &[b"ab\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"ab\x1b"], b"[2Dc");
+    assert_continues(10, 3, &[b"ab\x1b]0;tit"], b"le\x07c");
+    assert_continues(10, 3, &[b"ab\x1b]0;title\x1b"], b"\\c");
+    assert_continues(10, 3, &[b"ab\x1bP1$"], b"qm\x1b\\c");
+}
+
+#[test]
+fn controls_inside_an_unfinished_sequence_are_not_run_twice() {
+    assert_continues(10, 3, &[b"ab\x1b[3\t\x08"], b"Dc");
+    assert_continues(10, 3, &[b"ab\x1b\r\n"], b"7c\x1b8d");
+}
+
+#[test]
+fn a_snapshot_mid_utf8_char_carries_the_unfinished_char() {
+    assert_continues(10, 3, &["a日".as_bytes(), b"\xe6\x97"], b"\xa5b");
+    assert_continues(10, 3, &[b"a\xf0"], b"\x9f\x90\x91b");
+    assert_continues(10, 3, &[b"a\xf0\x9f"], b"\x1b[31mb");
+}
+
+#[test]
+fn finished_sequences_before_an_unfinished_one_are_not_replayed() {
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@\x1b[1"], b"Cx");
+    assert_continues(10, 3, &[b"abc\x1b[H\x1b[2@", b"\x1b[1"], b"Cx");
+}
+
+#[test]
+fn an_unfinished_sequence_inside_a_sync_update_is_carried_over() {
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"\x1b[?2026h", b"ab\xe6\x97"], b"\xa5");
+    // The end marker itself split across feeds.
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[?20"], b"26lc");
+}
+
+#[test]
+fn an_unfinished_sequence_left_when_a_sync_update_ends_is_carried_over() {
+    assert_continues(10, 3, &[b"\x1b[?2026hab\x1b[?2026l\x1b[3"], b"1mc");
+    assert_continues(10, 3, &[b"\x1b[?2026hab", b"\x1b[?2026lc\xe6"], b"\x97\xa5");
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[?2026hab\x1b[3");
+    let id = screen.sync_hold().unwrap().id;
+    screen.expire_sync(id);
+    let mut copy = copy_of(&screen);
+    screen.feed(b"1mc");
+    copy.feed(b"1mc");
+    assert_eq!(observe(&copy), observe(&screen));
+}
+
+#[test]
+fn an_unfinished_sequence_before_a_new_sync_begin_is_carried_over() {
+    // The end marker makes the parser run up to the new begin marker, leaving it inside the sequence.
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026l\x1b]0;ti\x1b[?2026hzz"],
+        b"\x1b[?2026l",
+    );
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026lb\x1b[3\x1b[?2026hzz"],
+        b"y",
+    );
+    assert_continues(
+        10,
+        3,
+        &[b"\x1b[?2026ha", b"\x1b[?2026lb\xe6\x1b[?2026hzz"],
+        b"y",
+    );
 }

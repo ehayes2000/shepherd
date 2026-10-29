@@ -1,4 +1,5 @@
-//! Random output, resizes and sync timeouts never panic, and `snapshot_ansi` always reproduces what a viewer sees.
+//! Random output, resizes and sync timeouts never panic, `snapshot_ansi` always reproduces what a viewer sees, and the
+//! copy then follows further output the same way, even when the snapshot was taken mid-sequence.
 //!
 //! Run longer with `PROPTEST_CASES=40000 cargo test -p shepherd-term --test fuzz`.
 
@@ -6,7 +7,7 @@ mod support;
 
 use proptest::prelude::*;
 use shepherd_term::{Screen, Width};
-use support::observe;
+use support::{Observed, observe};
 
 /// Text and escape sequences, weighted toward the ones that stress wide chars, screens, sync and input modes.
 #[rustfmt::skip]
@@ -35,6 +36,26 @@ const TOKENS: &[&str] = &[
     // Title and colour setting.
     "\x1b]0;title\x07", "\x1b]11;rgb:12/34/56\x07",
 ];
+
+/// Tokens touching state `snapshot_ansi` documents it doesn't carry over: scroll region, tab stops, charset, REP's
+/// last character, kitty stack entries below the top, the primary screen, and the saved cursor's pending wrap. Left
+/// out of the output fed after the snapshot, and the copy is only expected to keep following the original when none
+/// of them came before it either.
+#[rustfmt::skip]
+const GAPS: &[&str] = &[
+    "\x1b[2;4r", "\x1b[r", "\x1b[3g", "\x1bH", "\x1b(0", "\x1b(B", "\x0e", "\x0f", "\x1b[3b", "\x1b[<u", "\x1b[?1049l",
+    "\x1b8",
+];
+
+/// Tokens that may follow a snapshot.
+fn continuation() -> impl Strategy<Value = &'static str> {
+    let tokens: Vec<&str> = TOKENS
+        .iter()
+        .copied()
+        .filter(|t| !GAPS.contains(t))
+        .collect();
+    prop::sample::select(tokens)
+}
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -92,18 +113,47 @@ fn describe(ops: &[Op]) -> String {
 
 /// The one case `snapshot_ansi` documents it can't rebuild: a broken wide-char half in the last column with only
 /// broken halves before it (so there's nothing whole to shift it into place from).
-fn has_unrebuildable_row(screen: &Screen) -> bool {
+fn unrebuildable_rows(screen: &Screen) -> Vec<usize> {
     let (_, rows) = screen.size();
-    (0..rows).any(|row| {
-        let cells: Vec<Width> = screen.row(row).map(|cell| cell.width).collect();
-        let broken = |i: usize| match cells[i] {
-            Width::Single => false,
-            Width::Wide => cells.get(i + 1) != Some(&Width::Spacer),
-            Width::Spacer => i == 0 || cells[i - 1] != Width::Wide,
-        };
-        let last = cells.len() - 1;
-        broken(last) && (0..last).all(broken)
+    (0..rows)
+        .filter(|&row| {
+            let cells: Vec<Width> = screen.row(row).map(|cell| cell.width).collect();
+            let broken = |i: usize| match cells[i] {
+                Width::Single => false,
+                Width::Wide => cells.get(i + 1) != Some(&Width::Spacer),
+                Width::Spacer => i == 0 || cells[i - 1] != Width::Wide,
+            };
+            let last = cells.len() - 1;
+            broken(last) && (0..last).all(broken)
+        })
+        .map(usize::from)
+        .collect()
+}
+
+/// What a viewer sees, with `skip` rows left out.
+fn observe_except<'a>(screen: &'a Screen, skip: &[usize]) -> Observed<'a> {
+    let mut seen = observe(screen);
+    for &row in skip {
+        seen.cells[row].clear();
+    }
+    seen
+}
+
+/// Whether `ops` may leave state the copy doesn't get. Besides the gap tokens, a resize can leave the cursor's wrap
+/// flag away from the last column, and rows whose blank cells alacritty no longer resets with a new background.
+fn leaves_hidden_state(ops: &[Op]) -> bool {
+    ops.iter().any(|op| match op {
+        Op::Tokens(tokens) => tokens.iter().any(|&t| GAPS.contains(&TOKENS[t])),
+        Op::Resize(..) => true,
+        Op::Bytes(_) | Op::ExpireSync => false,
     })
+}
+
+fn expire(screen: &mut Screen) {
+    if let Some(hold) = screen.sync_hold() {
+        screen.expire_sync(hold.id);
+    }
+    screen.take_replies();
 }
 
 proptest! {
@@ -114,19 +164,44 @@ proptest! {
         cols in 0u16..14,
         rows in 0u16..8,
         ops in prop::collection::vec(op(), 0..40),
+        resizes in any::<bool>(),
+        (cut, at) in (continuation(), any::<prop::sample::Index>()),
+        more in prop::collection::vec(continuation(), 0..12),
     ) {
-        let log = format!("new {cols}x{rows} | {}", describe(&ops));
+        // Half the runs have no resizes, so the continuation below is checked often.
+        let ops: Vec<Op> = ops.into_iter().filter(|op| resizes || !matches!(op, Op::Resize(..))).collect();
+        // The snapshot is taken after the first `at` bytes of `cut`, which may split a sequence or a UTF-8 char.
+        let at = at.index(cut.len() + 1);
+        let log = format!(
+            "new {cols}x{rows} | {} | {:?} / {:?} | {more:?}",
+            describe(&ops),
+            &cut.as_bytes()[..at],
+            &cut.as_bytes()[at..],
+        );
         let mut screen = Screen::new(cols, rows);
         for op in &ops {
             apply(&mut screen, op);
         }
+        screen.feed(&cut.as_bytes()[..at]);
+        screen.take_replies();
         let (cols, rows) = screen.size();
         let mut copy = Screen::new(cols, rows);
         copy.feed(&screen.snapshot_ansi());
+        copy.take_replies();
 
         prop_assert_eq!(copy.sync_hold().is_some(), screen.sync_hold().is_some(), "after {}", log);
-        if !has_unrebuildable_row(&screen) {
-            prop_assert_eq!(observe(&copy), observe(&screen), "after {}", log);
+        let skip = unrebuildable_rows(&screen);
+        prop_assert_eq!(observe_except(&copy, &skip), observe_except(&screen, &skip), "after {}", log);
+        // A row the copy couldn't rebuild, or state it didn't get, would make later output diverge too.
+        if skip.is_empty() && !leaves_hidden_state(&ops) {
+            for s in [&mut screen, &mut copy] {
+                s.feed(&cut.as_bytes()[at..]);
+                for t in &more {
+                    s.feed(t.as_bytes());
+                }
+                expire(s);
+            }
+            prop_assert_eq!(observe(&copy), observe(&screen), "continuing after {}", log);
         }
     }
 }
