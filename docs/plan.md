@@ -64,7 +64,7 @@ acceptance:
 scope: crates/core
 
 ### F04: Replace hand-rolled base64 with the base64 crate
-status: in-progress
+status: done (214833e)
 depends: T06
 touches: core::wire, core::acpp::envelope (docs and tests only)
 goal: Remove reinvented code (decision 0008). The Timestamp half was folded into T06's review fixes.
