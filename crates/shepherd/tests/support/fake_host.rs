@@ -1,0 +1,147 @@
+//! A scripted host on a [`FakeNetwork`], standing in for the host runtime (T11) in client scenarios. Its state is
+//! a real `core::host` driven through [`HostDriver`]; its "PTYs" echo what they are sent.
+//!
+//! It handles events only when pumped, from the test's thread, so a scenario is deterministic.
+
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+
+use shepherd_core::host::HostCommand;
+use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::{ConnId, Link, LinkEvent};
+use shepherd_core::wire::{
+    ClientMessage, ClientNotification, ClientRequest, HostNotification, HostResponse, HostResult,
+    LogEntry, PtyOutput, Request, decode_client_message, encode_host_notification, encode_response,
+    negotiate,
+};
+use shepherd_testkit::builders::HostDriver;
+use shepherd_testkit::contracts::link::ChannelSink;
+use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
+
+pub struct FakeHost {
+    link: FakeLink,
+    events: Receiver<LinkEvent>,
+    driver: HostDriver,
+    subscribers: Vec<ConnId>,
+    sessions: u64,
+    /// Every input the host was sent, in order.
+    inputs: Vec<(SessionId, Vec<u8>)>,
+}
+
+impl FakeHost {
+    /// Starts listening on `net`. Panics if a host already is.
+    pub fn start(net: &FakeNetwork) -> Self {
+        let (tx, events) = std::sync::mpsc::channel();
+        let link = net
+            .listen(Arc::new(ChannelSink(tx)))
+            .unwrap_or_else(|e| panic!("FakeHost: {e}"));
+        Self {
+            link,
+            events,
+            driver: HostDriver::new(),
+            subscribers: Vec::new(),
+            sessions: 0,
+            inputs: Vec::new(),
+        }
+    }
+
+    pub fn inputs(&self) -> &[(SessionId, Vec<u8>)] {
+        &self.inputs
+    }
+
+    /// Handles every event queued so far. Returns how many there were.
+    pub fn pump(&mut self) -> usize {
+        let mut handled = 0;
+        while let Ok(event) = self.events.try_recv() {
+            handled += 1;
+            match event {
+                LinkEvent::Connected { .. } => {}
+                LinkEvent::Line { conn, line } => self.line(conn, &line),
+                LinkEvent::Disconnected { conn, .. } => self.subscribers.retain(|c| *c != conn),
+            }
+        }
+        handled
+    }
+
+    fn line(&mut self, conn: ConnId, line: &[u8]) {
+        match decode_client_message(line) {
+            Ok(ClientMessage::Request(request)) => self.request(conn, request),
+            Ok(ClientMessage::Notification(ClientNotification::SessionInput(input))) => {
+                let echo = PtyOutput {
+                    session: input.session.clone(),
+                    bytes: input.data.clone(),
+                };
+                self.inputs.push((input.session, input.data));
+                self.broadcast(&HostNotification::PtyOutput(echo));
+            }
+            Ok(ClientMessage::Notification(ClientNotification::SessionResize(_))) => {}
+            Err(e) => {
+                if let Some(response) = e.into_response() {
+                    self.send(conn, &encode_response(&response));
+                }
+            }
+        }
+    }
+
+    fn request(&mut self, conn: ConnId, Request { id, body }: Request) {
+        let before = self.driver.log().len();
+        let result = match body {
+            ClientRequest::Hello(hello) => {
+                negotiate(&hello, &MachineId::new("m_test")).map(HostResult::Hello)
+            }
+            ClientRequest::Subscribe(sub) => {
+                for env in self.driver.log().to_vec() {
+                    let from = match env.session() {
+                        None => sub.from.host,
+                        Some(s) => sub.from.sessions.get(s).copied(),
+                    };
+                    if from.is_none_or(|from| env.seq() > from) {
+                        let entry =
+                            HostNotification::LogEntry(Box::new(LogEntry { envelope: env }));
+                        self.send(conn, &encode_host_notification(&entry));
+                    }
+                }
+                self.subscribers.push(conn);
+                Ok(HostResult::Ack)
+            }
+            ClientRequest::SessionNew(_) => {
+                self.sessions += 1;
+                let id = format!("s{}", self.sessions);
+                reply_of(self.driver.new_session(&id))
+            }
+            ClientRequest::SessionRename(r) => {
+                reply_of(self.driver.rename(r.session.as_str(), &r.name))
+            }
+            ClientRequest::SessionClose(c) => reply_of(self.driver.close(c.session.as_str())),
+            ClientRequest::HookFrame(_) => Ok(HostResult::Ack),
+        };
+        let fresh = self.driver.log()[before..].to_vec();
+        for env in fresh {
+            let entry = HostNotification::LogEntry(Box::new(LogEntry { envelope: env }));
+            self.broadcast(&entry);
+        }
+        self.send(conn, &encode_response(&HostResponse { id, result }));
+    }
+
+    fn broadcast(&mut self, note: &HostNotification) {
+        let line = encode_host_notification(note);
+        for conn in self.subscribers.clone() {
+            self.send(conn, &line);
+        }
+    }
+
+    fn send(&mut self, conn: ConnId, line: &[u8]) {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let _ = self.link.send(conn, line);
+    }
+}
+
+fn reply_of(commands: Vec<HostCommand>) -> Result<HostResult, shepherd_core::wire::WireError> {
+    commands
+        .into_iter()
+        .find_map(|c| match c {
+            HostCommand::Reply { result, .. } => Some(result),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("FakeHost: the host didn't reply"))
+}

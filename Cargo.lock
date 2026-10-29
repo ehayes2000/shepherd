@@ -1895,8 +1895,11 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 name = "shepherd"
 version = "0.1.0"
 dependencies = [
+ "jiff",
+ "serde_json",
  "shepherd-adapters",
  "shepherd-core",
+ "shepherd-term",
  "shepherd-testkit",
  "shepherd-tui",
 ]

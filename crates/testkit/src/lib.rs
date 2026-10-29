@@ -10,13 +10,18 @@ pub mod builders {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use shepherd_core::acpp::{
         Dir, EntryId, Envelope, Frame, FrameDraft, Seq, Source, SourceKind, Stamp, Timestamp,
     };
+    use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
     use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
     use shepherd_core::ids::{MachineId, SessionId};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
+    use shepherd_core::wire::{
+        ClientMessage, ClientNotification, HostMessage, HostNotification, LogEntry,
+        PROTOCOL_VERSION, RawResponse, Request, WireError,
+    };
 
     /// Seals frames into envelopes for one session log, as the host's append path would: `seq` starts at 1 and
     /// increments with every envelope built.
@@ -157,19 +162,33 @@ pub mod builders {
             let commands = self.host.handle(event);
             for command in &commands {
                 if let HostCommand::Append(draft) = command {
-                    let stamp = Stamp {
-                        id: EntryId::new(format!("e{}", self.log.len() + 1)),
-                        ts: self.now(),
-                        machine: MachineId::new("m_test"),
-                    };
-                    let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
-                    *seq += 1;
-                    let env = (**draft).clone().seal(Seq::new(*seq), stamp);
-                    self.host.apply(&env);
-                    self.log.push(env);
+                    self.seal((**draft).clone());
                 }
             }
             commands
+        }
+
+        /// Seals and applies a frame from outside the host (a hook, an agent) at its log's next seq, as the host's
+        /// append path would. Panics on a malformed frame.
+        pub fn append(&mut self, session: Option<&str>, source: Source, frame: Value) -> Envelope {
+            let frame = Frame::from_value(frame)
+                .unwrap_or_else(|e| panic!("HostDriver: malformed frame: {e}"));
+            let draft = FrameDraft::new(frame, source, Dir::Internal, session.map(SessionId::new));
+            self.seal(draft)
+        }
+
+        fn seal(&mut self, draft: FrameDraft) -> Envelope {
+            let stamp = Stamp {
+                id: EntryId::new(format!("e{}", self.log.len() + 1)),
+                ts: self.now(),
+                machine: MachineId::new("m_test"),
+            };
+            let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
+            *seq += 1;
+            let env = draft.seal(Seq::new(*seq), stamp);
+            self.host.apply(&env);
+            self.log.push(env.clone());
+            env
         }
 
         /// A `NewSession` for `id`, with no name and [`shell_spawn`].
@@ -211,6 +230,137 @@ pub mod builders {
         }
     }
 
+    /// Drives a [`Client`] against a [`HostDriver`]: sessions are made on the host, and [`ClientDriver::sync`] delivers
+    /// the host's new log entries to the client as `_shepherd/log/entry` notifications.
+    ///
+    /// ```text
+    /// let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    /// c.user(Intent::NextSession);
+    /// assert_eq!(c.client().selected(), Some(&SessionId::new("s1")));
+    /// ```
+    #[derive(Debug, Clone)]
+    pub struct ClientDriver {
+        client: Client,
+        host: HostDriver,
+        /// How many of the host's log entries the client has been sent.
+        delivered: usize,
+    }
+
+    impl Default for ClientDriver {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl ClientDriver {
+        /// A client for machine `m_client` that hasn't started connecting.
+        pub fn new() -> Self {
+            Self {
+                client: Client::new(MachineId::new("m_client")),
+                host: HostDriver::new(),
+                delivered: 0,
+            }
+        }
+
+        /// A connected client that has been sent sessions `ids`, created in that order (so the last is newest).
+        pub fn with_sessions(ids: &[&str]) -> Self {
+            let mut driver = Self::new();
+            driver.connect();
+            for id in ids {
+                driver.host.new_session(id);
+            }
+            driver.sync();
+            driver
+        }
+
+        pub fn client(&self) -> &Client {
+            &self.client
+        }
+
+        pub fn host(&mut self) -> &mut HostDriver {
+            &mut self.host
+        }
+
+        pub fn handle(&mut self, event: ClientEvent) -> Vec<ClientCommand> {
+            self.client.handle(event)
+        }
+
+        pub fn user(&mut self, intent: Intent) -> Vec<ClientCommand> {
+            self.client.handle(ClientEvent::User(intent))
+        }
+
+        /// Starts the client, connects it, and answers its hello. Returns the commands the answer produced (the
+        /// subscribe). Panics if the client doesn't follow that script.
+        pub fn connect(&mut self) -> Vec<ClientCommand> {
+            let started = self.handle(ClientEvent::Start);
+            assert_eq!(started, vec![ClientCommand::Connect], "ClientDriver: start");
+            let hello = self.handle(ClientEvent::Connected);
+            let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test" });
+            self.answer(&hello, Ok(answer))
+        }
+
+        /// Sends the client every host-log entry it hasn't been sent yet, in append order.
+        pub fn sync(&mut self) -> Vec<ClientCommand> {
+            let fresh: Vec<Envelope> = self.host.log()[self.delivered..].to_vec();
+            self.delivered = self.host.log().len();
+            let mut commands = Vec::new();
+            for env in fresh {
+                commands.extend(self.client.handle(log_entry(env)));
+            }
+            commands
+        }
+
+        /// Answers the one request in `commands` with `result`. Panics unless there is exactly one.
+        pub fn answer(
+            &mut self,
+            commands: &[ClientCommand],
+            result: Result<Value, WireError>,
+        ) -> Vec<ClientCommand> {
+            let [request] = requests(commands)[..] else {
+                panic!("ClientDriver: expected one request in {commands:?}");
+            };
+            let id = request.id.clone();
+            self.handle(ClientEvent::Host(HostMessage::Response(RawResponse {
+                id,
+                result,
+            })))
+        }
+    }
+
+    /// `envelope` as the host pushes it to a subscribed client.
+    pub fn log_entry(envelope: Envelope) -> ClientEvent {
+        ClientEvent::Host(HostMessage::Notification(HostNotification::LogEntry(
+            Box::new(LogEntry { envelope }),
+        )))
+    }
+
+    /// The requests among `commands`.
+    pub fn requests(commands: &[ClientCommand]) -> Vec<&Request> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                ClientCommand::Send(ClientMessage::Request(r)) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The notifications among `commands`.
+    pub fn notifications(commands: &[ClientCommand]) -> Vec<&ClientNotification> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                ClientCommand::Send(ClientMessage::Notification(n)) => Some(n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Parses `ts`. Panics on a malformed timestamp.
+    pub fn ts(ts: &str) -> Timestamp {
+        Timestamp::parse(ts).unwrap_or_else(|e| panic!("{e}"))
+    }
+
     /// What the M1 runtime spawns for a plain session: a shell in `/home/test`, 80x24.
     pub fn shell_spawn() -> SpawnSpec {
         SpawnSpec {
@@ -239,6 +389,7 @@ pub mod builders {
 pub mod contracts {
     pub mod config;
     pub mod event_log;
+    pub mod launcher;
     pub mod link;
     pub mod pty;
     pub mod worktrees;
@@ -248,6 +399,7 @@ pub mod contracts {
 pub mod fakes {
     pub mod config;
     pub mod event_log;
+    pub mod launcher;
     pub mod link;
     pub mod pty;
     pub mod worktrees;
