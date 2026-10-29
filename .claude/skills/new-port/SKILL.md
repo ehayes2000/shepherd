@@ -47,6 +47,8 @@ where adapters break.
 - **Run the adapter's contract under parallel load** before you ship, e.g.
   `for i in $(seq 48); do target/debug/deps/<test-bin> & done; wait`, repeated a few times, and report the pass rate.
   T08's adapter passed 40 out of 40 runs one at a time and failed 4% of runs under load, losing output.
+  Run the **whole** adapter test binary, not just your port's tests. Ports interact inside one process (PTY children
+  inherit file descriptors and locks across `fork`), and T04's lock bug only showed up next to the PTY tests.
 - If a case passes on the fake but fails on the real adapter, fix the fake *and* note it in your report. It means
   core tests were testing a world that doesn't exist.
 
