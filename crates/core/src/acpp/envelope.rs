@@ -138,6 +138,9 @@ impl Envelope {
 pub struct Seq(u64);
 
 impl Seq {
+    /// Before the first entry. Reading a log from here returns all of it.
+    pub const ZERO: Seq = Seq(0);
+
     pub fn new(n: u64) -> Self {
         Self(n)
     }
