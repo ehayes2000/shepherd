@@ -1,5 +1,7 @@
 //! Newline-delimited framing: one JSON message per line.
 
+use std::collections::VecDeque;
+
 /// The longest line a [`Decoder`] accepts by default, not counting the line ending.
 pub const MAX_LINE: usize = 16 * 1024 * 1024;
 
@@ -13,13 +15,20 @@ pub struct LineTooLong {
 /// Splits a byte stream into lines. Feed it chunks as they arrive with [`Decoder::push`], then drain whole
 /// lines with [`Decoder::next_line`]. Lines end in `\n` or `\r\n`, the ending is stripped, and empty lines are
 /// skipped.
+///
+/// Memory stays bounded even if the caller never drains: an unfinished line is dropped as soon as it passes
+/// the limit, and reported as [`LineTooLong`] in its place in the stream.
 #[derive(Debug, Clone)]
 pub struct Decoder {
     buf: Vec<u8>,
     max: usize,
-    /// How much of `buf` is known to hold no `\n`.
-    scanned: usize,
-    /// Dropping the rest of a line that went over the limit.
+    /// Where the next line starts. `buf[..start]` was already returned and is dropped on the next push.
+    start: usize,
+    /// Where the unfinished last line starts. Everything before it ends in `\n`.
+    partial: usize,
+    /// Offsets in `buf` where a dropped long line belongs, in order. Reported when reading reaches them.
+    dropped: VecDeque<usize>,
+    /// Skipping the rest of a long line until its `\n`.
     discarding: bool,
 }
 
@@ -38,12 +47,15 @@ impl Decoder {
         Self {
             buf: Vec::new(),
             max,
-            scanned: 0,
+            start: 0,
+            partial: 0,
+            dropped: VecDeque::new(),
             discarding: false,
         }
     }
 
     pub fn push(&mut self, mut chunk: &[u8]) {
+        self.compact();
         if self.discarding {
             let Some(i) = chunk.iter().position(|&b| b == b'\n') else {
                 return;
@@ -51,40 +63,65 @@ impl Decoder {
             self.discarding = false;
             chunk = &chunk[i + 1..];
         }
+        if let Some(i) = chunk.iter().rposition(|&b| b == b'\n') {
+            self.partial = self.buf.len() + i + 1;
+        }
         self.buf.extend_from_slice(chunk);
+
+        let pending = &self.buf[self.partial..];
+        // One extra byte may be the `\r` of a line that is exactly at the limit.
+        let allowed = self.max.saturating_add(1);
+        let over =
+            pending.len() > allowed || (pending.len() == allowed && pending.last() != Some(&b'\r'));
+        if over {
+            self.buf.truncate(self.partial);
+            self.dropped.push_back(self.partial);
+            self.discarding = true;
+        }
+    }
+
+    /// Bytes held but not yet returned as lines.
+    pub fn buffered(&self) -> usize {
+        self.buf.len() - self.start
     }
 
     /// The next whole line, or `None` until more bytes arrive. A line over the limit is reported once as an
-    /// error, as soon as the buffer passes the limit, and the rest of it is dropped.
+    /// error, and the rest of it is dropped.
     pub fn next_line(&mut self) -> Option<Result<Vec<u8>, LineTooLong>> {
         let too_long = Err(LineTooLong { max: self.max });
         loop {
-            let Some(i) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') else {
-                self.scanned = self.buf.len();
-                // One extra byte may be the `\r` of a line that is exactly at the limit.
-                let over = self.buf.len() > self.max + 1
-                    || (self.buf.len() == self.max + 1 && self.buf.last() != Some(&b'\r'));
-                if over {
-                    self.buf.clear();
-                    self.scanned = 0;
-                    self.discarding = true;
-                    return Some(too_long);
-                }
-                return None;
-            };
-            let mut line: Vec<u8> = self.buf.drain(..=self.scanned + i).collect();
-            self.scanned = 0;
-            line.pop();
+            if self.dropped.front() == Some(&self.start) {
+                self.dropped.pop_front();
+                return Some(too_long);
+            }
+            let i = self.buf[self.start..self.partial]
+                .iter()
+                .position(|&b| b == b'\n')?;
+            let mut line = &self.buf[self.start..self.start + i];
+            self.start += i + 1;
             if line.last() == Some(&b'\r') {
-                line.pop();
+                line = &line[..line.len() - 1];
             }
             if line.len() > self.max {
                 return Some(too_long);
             }
             if !line.is_empty() {
-                return Some(Ok(line));
+                return Some(Ok(line.to_vec()));
             }
         }
+    }
+
+    /// Drops the lines already returned.
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        self.buf.drain(..self.start);
+        self.partial -= self.start;
+        for at in &mut self.dropped {
+            *at -= self.start;
+        }
+        self.start = 0;
     }
 }
 
@@ -172,7 +209,7 @@ mod tests {
         assert_eq!(drain(&mut d), [Err(LineTooLong { max: 4 })]);
         d.push(b"6789");
         assert!(drain(&mut d).is_empty(), "rest of the long line is dropped");
-        assert!(d.buf.len() <= 4, "decoder must not grow past its limit");
+        assert!(d.buffered() <= 4, "decoder must not grow past its limit");
     }
 
     #[test]
@@ -194,5 +231,60 @@ mod tests {
             d.push(std::slice::from_ref(b));
             assert!(!drain(&mut d).iter().any(Result::is_err));
         }
+    }
+
+    #[test]
+    fn unlimited_max_line_does_not_overflow() {
+        let mut d = Decoder::with_max_line(usize::MAX);
+        d.push(b"abc");
+        assert!(drain(&mut d).is_empty());
+        d.push(b"\r\n");
+        assert_eq!(lines(&mut d), ["abc"]);
+    }
+
+    #[test]
+    fn pushing_without_draining_stays_bounded_and_reports_the_long_line() {
+        let mut d = Decoder::with_max_line(16);
+        d.push(b"first\n");
+        for _ in 0..1000 {
+            d.push(b"xxxxxxxx");
+            assert!(d.buffered() <= 6 + 17, "buffered {} bytes", d.buffered());
+        }
+        d.push(b"xx\nlast\n");
+        assert_eq!(
+            drain(&mut d),
+            [
+                Ok(b"first".to_vec()),
+                Err(LineTooLong { max: 16 }),
+                Ok(b"last".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn each_long_line_pushed_without_draining_is_reported_in_order() {
+        let mut d = Decoder::with_max_line(4);
+        d.push(b"123456");
+        d.push(b"7\nok\n");
+        d.push(b"abcdef");
+        d.push(b"\n");
+        assert_eq!(
+            drain(&mut d),
+            [
+                Err(LineTooLong { max: 4 }),
+                Ok(b"ok".to_vec()),
+                Err(LineTooLong { max: 4 })
+            ]
+        );
+    }
+
+    #[test]
+    fn many_short_lines_pushed_without_draining_are_all_kept() {
+        let mut d = Decoder::with_max_line(4);
+        for _ in 0..100 {
+            d.push(b"ab\n");
+        }
+        assert_eq!(lines(&mut d).len(), 100);
+        assert_eq!(d.buffered(), 0);
     }
 }
