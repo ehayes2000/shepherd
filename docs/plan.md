@@ -76,6 +76,17 @@ acceptance:
   bracketed annotations), and a test pins that fractions longer than 9 digits are rejected.
 scope: crates/core, workspace Cargo.toml
 
+### F05: Validate SessionId at construction
+status: todo
+depends: T04
+touches: core::ids, every SessionId::new call site
+goal: An invalid session id can't exist, so the log can't reject one at runtime.
+acceptance:
+- `SessionId` construction validates `[a-z0-9_-]{1,64}` (`TryFrom<String>`/`parse`, a typed error, and serde deserialize
+  validates too). `LogId::validate` relies on it or is removed.
+- Ids coming from outside (hook env, wire requests, logs) fail cleanly at the boundary with a typed error.
+scope: crates/core, crates/testkit, crates/adapters
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
@@ -171,7 +182,7 @@ notes: Keep the raw `serde_json::Value` next to the typed parse (see "Lossless" 
 variants in §5. `agent-client-protocol-schema` is allowed **only** as a core dev-dependency.
 
 ### T04: `EventLog` port
-status: in-progress
+status: done (8900d15)
 depends: T03
 touches: ports::event_log, testkit, adapters::event_log
 goal: Persist and read ACP++ logs per session and for the host.
@@ -334,6 +345,7 @@ acceptance:
 - Executes `Append` (stamping it with id, ts, and machine), `SpawnPty`, `WritePty`, `ResizePty`, `KillPty`, and `Reply`.
 - Keeps a `shepherd_term::Screen` per PTY. PTY output is fed into it, and `take_replies()` is written back to the PTY, so
   agents get their terminal-query answers with no client attached (decision 0007).
+- Session ids are generated as `s_<lowercase ulid>` (they must match `[a-z0-9_-]{1,64}`). Timestamps are stamped as RFC 3339 UTC with ms.
 - Live log fan-out uses the `Envelope` returned by `append`. `EventLog::read(log, from)` is only for catching up a client
   on subscribe and for startup replay.
 - Attach: subscribing to a session's output first sends `snapshot_ansi()`, then live bytes. A scenario test shows a

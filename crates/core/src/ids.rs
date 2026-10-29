@@ -5,7 +5,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// A shepherd session. Format is opaque to core (the runtime uses `s_<ulid>`).
+/// A shepherd session. Must match `[a-z0-9_-]{1,64}` to be stored (see `ports::event_log::LogId::validate`);
+/// the runtime generates `s_<lowercase ulid>`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(String);

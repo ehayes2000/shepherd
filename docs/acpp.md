@@ -23,7 +23,7 @@ and worktree. This gives us:
   "id": "01JBX7Q5W2M9K3...",
   "ts": "2026-10-29T12:00:00.123Z",
   "machine": "m_7f3a9c",
-  "session": "s_01JBX7P...",
+  "session": "s_01jbx7p...",
   "source": { "kind": "hook", "agent": "claude-code" },
   "dir": "from_agent",
   "frame": { "jsonrpc": "2.0", "method": "session/update", "params": { ... } }
@@ -37,7 +37,7 @@ and worktree. This gives us:
 | `id`      | ULID, globally unique. Used to dedupe when logs are relayed between machines. |
 | `ts`      | Host wall-clock time at append. Writers emit RFC 3339 UTC with ms; readers accept any ISO 8601 instant jiff parses and keep the original text. Ordering within a log comes from `seq`; across logs, by instant. |
 | `machine` | ID of the machine whose host appended the entry. |
-| `session` | Shepherd session ID, or `null` for host-level entries (workspace and machine events). |
+| `session` | Shepherd session ID (`[a-z0-9_-]{1,64}`, lowercase only so case-insensitive filesystems can't alias; the runtime uses `s_<lowercase ulid>`), or `null` for host-level entries. |
 | `source`  | Who produced the frame. `kind` ∈ `acp` (a real ACP wire), `hook` (translated from agent hooks), `shepherd` (the host itself), `ext` (third-party producer). Optional `agent` names the agent. |
 | `dir`     | `to_agent`, `from_agent`, or `internal`. Gives ACP direction for wire frames. |
 | `frame`   | Exactly one JSON-RPC 2.0 message: request, response, or notification. |
