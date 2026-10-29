@@ -133,6 +133,12 @@ struct Entry {
 /// On start, the runtime replays the logs through `apply`. Logs may be replayed in any interleaving; entries within
 /// one log must be applied in seq order. Every such interleaving folds to the same state: nothing in it depends on
 /// the order in which entries from different logs arrive.
+///
+/// When something fails in the runtime:
+/// - If [`HostCommand::SpawnPty`] fails, the runtime feeds `HostEvent::PtyExited { session, code: None }`, so the
+///   session shows as exited and closing it won't send [`HostCommand::KillPty`].
+/// - If an [`HostCommand::Append`] fails, the runtime skips the rest of that `handle` call's commands. If they
+///   include a [`HostCommand::Reply`], it sends that reply as `Err(WireError::Internal)` instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Host {
     /// Every session ever created, closed ones included, so a closed id stays unknown to requests and still counts
@@ -145,13 +151,10 @@ impl Host {
         Self::default()
     }
 
-    /// Open sessions, newest first: by the `ts` of their `session/created` entry, then by session id. Timestamps
-    /// compare as strings, which is chronological because the host stamps every entry in UTC at a fixed precision.
+    /// Open sessions, newest first: by the instant of their `session/created` entry's `ts`, then by session id.
     pub fn sessions(&self) -> Vec<HostSession> {
         let mut open: Vec<_> = self.sessions.iter().filter(|(_, e)| !e.closed).collect();
-        open.sort_by(|(a_id, a), (b_id, b)| {
-            (b.created.as_str(), *b_id).cmp(&(a.created.as_str(), *a_id))
-        });
+        open.sort_by(|(a_id, a), (b_id, b)| (&b.created, *b_id).cmp(&(&a.created, *a_id)));
         open.into_iter()
             .map(|(id, e)| HostSession {
                 id: id.clone(),
@@ -298,6 +301,7 @@ impl Host {
 
 /// An `Append` of a frame the host produces about session `id`.
 fn append(id: &SessionId, frame: ShepherdFrame) -> HostCommand {
+    // F03: replace this hand-built JSON with acpp's typed frame builders (`ShepherdFrame::to_frame()`).
     let params = match &frame {
         ShepherdFrame::SessionCreated(p) => params(p),
         ShepherdFrame::SessionRenamed(p) => params(p),

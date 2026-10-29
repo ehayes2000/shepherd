@@ -1,9 +1,11 @@
 //! The ACP++ envelope and the draft producers create before the host appends it.
 
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::Frame;
@@ -274,11 +276,17 @@ impl fmt::Display for EntryId {
     }
 }
 
-/// An RFC 3339 timestamp, kept as the exact string it was written as. Validated on construction, so a
-/// `Timestamp` is always well-formed. Core never reads the clock: the runtime formats the time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct Timestamp(String);
+/// An RFC 3339 timestamp. Parsed by `jiff` on construction, so a `Timestamp` is always a valid instant. Core never
+/// reads the clock: the runtime formats the time.
+///
+/// It keeps the exact string it was parsed from: [`Timestamp::as_str`], `Display` and serialization all give back
+/// that original text, so an envelope round-trips unchanged. Equality, ordering and hashing are by **instant**:
+/// `12:30:00+01:00` and `11:30:00.000Z` are equal, though their strings differ.
+#[derive(Debug, Clone)]
+pub struct Timestamp {
+    raw: String,
+    instant: jiff::Timestamp,
+}
 
 /// The string is not an RFC 3339 date-time.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -287,16 +295,47 @@ pub struct TimestampError(String);
 
 impl Timestamp {
     pub fn parse(s: impl Into<String>) -> Result<Self, TimestampError> {
-        let s = s.into();
-        if is_rfc3339(s.as_bytes()) {
-            Ok(Self(s))
-        } else {
-            Err(TimestampError(s))
+        let raw = s.into();
+        match raw.parse::<jiff::Timestamp>() {
+            Ok(instant) => Ok(Self { raw, instant }),
+            Err(_) => Err(TimestampError(raw)),
         }
     }
 
+    /// The original text, exactly as parsed.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.raw
+    }
+
+    /// The instant it names.
+    pub fn instant(&self) -> jiff::Timestamp {
+        self.instant
+    }
+}
+
+impl PartialEq for Timestamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.instant == other.instant
+    }
+}
+
+impl Eq for Timestamp {}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.instant.cmp(&other.instant)
+    }
+}
+
+impl Hash for Timestamp {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.instant.hash(state);
     }
 }
 
@@ -310,7 +349,13 @@ impl FromStr for Timestamp {
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.raw)
+    }
+}
+
+impl Serialize for Timestamp {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.raw)
     }
 }
 
@@ -318,58 +363,4 @@ impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
-}
-
-/// RFC 3339 `date-time`: `YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)`, with `T` and `Z` in either case.
-fn is_rfc3339(b: &[u8]) -> bool {
-    fn num(b: &[u8], at: usize, len: usize) -> Option<u32> {
-        let digits = b.get(at..at + len)?;
-        digits.iter().try_fold(0u32, |acc, d| {
-            d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0'))
-        })
-    }
-    let sep = |at: usize, c: u8| b.get(at) == Some(&c);
-    let parsed = (|| {
-        let (year, month, day) = (num(b, 0, 4)?, num(b, 5, 2)?, num(b, 8, 2)?);
-        let (hour, minute, second) = (num(b, 11, 2)?, num(b, 14, 2)?, num(b, 17, 2)?);
-        let shape = sep(4, b'-')
-            && sep(7, b'-')
-            && matches!(b.get(10), Some(b'T' | b't'))
-            && sep(13, b':')
-            && sep(16, b':');
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let days = match month {
-            2 if leap => 29,
-            2 => 28,
-            4 | 6 | 9 | 11 => 30,
-            _ => 31,
-        };
-        let in_range = (1..=12).contains(&month)
-            && (1..=days).contains(&day)
-            && hour <= 23
-            && minute <= 59
-            && second <= 60;
-
-        let mut at = 19;
-        if sep(at, b'.') {
-            let digits = b[at + 1..]
-                .iter()
-                .take_while(|d| d.is_ascii_digit())
-                .count();
-            if digits == 0 {
-                return None;
-            }
-            at += 1 + digits;
-        }
-        let offset = match b.get(at)? {
-            b'Z' | b'z' => at + 1 == b.len(),
-            b'+' | b'-' => {
-                let (oh, om) = (num(b, at + 1, 2)?, num(b, at + 4, 2)?);
-                sep(at + 3, b':') && oh <= 23 && om <= 59 && at + 6 == b.len()
-            }
-            _ => false,
-        };
-        Some(shape && in_range && offset)
-    })();
-    parsed.unwrap_or(false)
 }

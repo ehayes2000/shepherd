@@ -584,7 +584,76 @@ fn sessions_created_at_the_same_ts_are_ordered_by_id() {
     assert_eq!(ids, [sid("c"), sid("b"), sid("a")]);
 }
 
+#[test]
+fn sessions_are_ordered_by_instant_across_offsets_and_precisions() {
+    // As strings these sort in exactly the reverse order.
+    let mut host = HostDriver::new();
+    host.pin_ts("2026-10-29T12:00:00Z");
+    host.new_session("a");
+    host.pin_ts("2026-10-29T12:00:00.500Z");
+    host.new_session("b");
+    host.pin_ts("2026-10-29T12:30:00+01:00");
+    host.new_session("c");
+    let ids: Vec<_> = host.host().sessions().into_iter().map(|s| s.id).collect();
+    assert_eq!(ids, [sid("b"), sid("a"), sid("c")]);
+}
+
+/// A valid RFC 3339 string for `secs.nanos` since the epoch, written at `offset_mins` from UTC with `digits`
+/// fraction digits (the fraction is truncated, `0` writes none).
+fn rfc3339(secs: i64, nanos: u32, digits: u32, offset_mins: i32) -> String {
+    let instant = jiff::Timestamp::new(secs, 0).unwrap_or_else(|e| panic!("{e}"));
+    let offset = jiff::tz::Offset::from_seconds(offset_mins * 60).unwrap_or_else(|e| panic!("{e}"));
+    let dt = offset.to_datetime(instant);
+    let fraction = match digits {
+        0 => String::new(),
+        d => format!(".{:0width$}", nanos / 10u32.pow(9 - d), width = d as usize),
+    };
+    let sign = if offset_mins < 0 { '-' } else { '+' };
+    let abs = offset_mins.unsigned_abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}{sign}{:02}:{:02}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        abs / 60,
+        abs % 60,
+    )
+}
+
+fn created_ts() -> impl Strategy<Value = String> {
+    // Within a few seconds of each other, so different offsets and precisions interleave.
+    (
+        1_793_000_000i64..1_793_000_004,
+        0u32..1_000_000_000,
+        0u32..=9,
+        -720i32..=840,
+    )
+        .prop_map(|(secs, nanos, digits, offset)| rfc3339(secs, nanos, digits, offset))
+}
+
 proptest! {
+    #[test]
+    fn sessions_are_ordered_by_created_instant_then_id(stamps in proptest::collection::vec(created_ts(), 1..12)) {
+        let mut host = HostDriver::new();
+        for (i, ts) in stamps.iter().enumerate() {
+            host.pin_ts(ts);
+            host.new_session(&format!("s{i:02}"));
+        }
+        let mut expected: Vec<(jiff::Timestamp, String)> = stamps
+            .iter()
+            .enumerate()
+            .map(|(i, ts)| (ts.parse::<jiff::Timestamp>().unwrap_or_else(|e| panic!("{e}")), format!("s{i:02}")))
+            .collect();
+        expected.sort();
+        expected.reverse();
+        let expected: Vec<String> = expected.into_iter().map(|(_, id)| id).collect();
+        let actual: Vec<String> = host.host().sessions().into_iter().map(|s| s.id.to_string()).collect();
+        prop_assert_eq!(actual, expected);
+    }
+
     #[test]
     fn replay_in_any_interleaving_of_the_logs_equals_live_state(
         ops in proptest::collection::vec(op(), 0..60),
