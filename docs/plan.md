@@ -63,7 +63,7 @@ acceptance:
 notes: v1 code stays in git history and can be consulted, but is never copied wholesale.
 
 ### T01: Spike: ACP schema types in core
-status: todo
+status: in-progress
 depends: T00
 touches: docs only
 goal: Decide how core gets ACP types without breaking purity.
@@ -74,10 +74,11 @@ acceptance:
   `core::acpp::acp`, covering only the methods we fold, with everything else kept raw.
 - List the ACP methods and `session/update` variants we need for M1–M2, and the pinned ACP version.
 out of scope: writing production code.
-notes: The output is a decision entry the PM adds to architecture.md and a note in T03.
+notes: Commit the report as `docs/spikes/T01-acp-types.md` on the task branch. The PM turns it into a decision entry
+in architecture.md and a note in T03.
 
 ### T02: Spike: terminal emulator
-status: todo
+status: in-progress
 depends: T00
 touches: docs only
 goal: Pick the VT emulator for rendering PTY output in the TUI. v1's emulation bugs were a main failure.
@@ -89,6 +90,8 @@ acceptance:
   the comparison. Note how to re-record it.
 - Give a recommendation and the `TUI_ALLOWED` change it implies.
 out of scope: integrating it.
+notes: Commit the report as `docs/spikes/T02-terminal-emulator.md` plus the fixtures on the task branch. Throwaway
+comparison code goes in a scratch dir outside the repo, not in the workspace.
 
 ---
 
@@ -179,7 +182,7 @@ acceptance:
 scope: crates/core
 
 ### T08: `Pty` port
-status: todo
+status: in-progress
 depends: T00
 touches: ports::pty, testkit, adapters::pty
 goal: Spawn processes in PTYs, write input, resize them, stream output, and observe exit.
@@ -189,8 +192,24 @@ acceptance:
 - Fake passes the contract. In fake mode it uses scripted programs: a test registers a handler for a command name.
 - portable-pty adapter passes the contract.
 scope: core::ports, testkit, adapters
-notes: The trait is async and streaming. Output and exit arrive as a stream of `PtyEvent { session, Output(bytes) | Exited(code) }`.
-The PM confirms the exact trait in the spec before dispatch.
+notes: The trait is synchronous, and output is pushed to a sink, so core needs no async dependency (portable-pty is blocking
+anyway, and the adapter uses a reader thread per PTY). Put it in `crates/core/src/ports/pty.rs` and re-export it from `ports`:
+```rust
+pub struct SpawnSpec { pub command: String, pub args: Vec<String>, pub cwd: PathBuf, pub env: Vec<(String, String)>, pub size: PtySize }
+pub struct PtySize { pub cols: u16, pub rows: u16 }
+pub enum PtyEvent { Output { session: SessionId, bytes: Vec<u8> }, Exited { session: SessionId, code: Option<i32> } }
+pub trait PtyEventSink: Send + Sync + 'static { fn send(&self, event: PtyEvent); }
+pub trait Pty {
+    fn spawn(&mut self, session: SessionId, spec: SpawnSpec) -> Result<(), PtyError>;
+    fn write(&mut self, session: &SessionId, bytes: &[u8]) -> Result<(), PtyError>;
+    fn resize(&mut self, session: &SessionId, size: PtySize) -> Result<(), PtyError>;
+    fn kill(&mut self, session: &SessionId) -> Result<(), PtyError>;
+}
+// PtyError (thiserror): UnknownSession, AlreadyExists, SpawnFailed(String), Io(String)
+```
+Adapters are constructed with an `Arc<dyn PtyEventSink>`. The contract harness wraps the port plus a channel-backed sink
+with `wait_for(predicate, timeout)` (std mpsc `recv_timeout`; no sleeps). Exactly one `Exited` per session, and it comes after all
+its `Output`. Use `SessionId` from `shepherd_core::ids`. New deps allowed: `portable-pty` (adapters).
 
 ### T09: Terminal screen model
 status: todo
