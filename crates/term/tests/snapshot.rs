@@ -3,8 +3,6 @@
 
 mod support;
 
-use std::time::{Duration, Instant};
-
 use shepherd_term::{Screen, Width};
 use support::{AGENTS, observe, replay, segments};
 
@@ -536,69 +534,71 @@ fn an_unfinished_sequence_before_a_new_sync_begin_is_carried_over() {
     );
 }
 
-/// Feeds `intro` and then `len` bytes of `body` in 4 KiB chunks. Returns the time the chunks took and the snapshot.
-fn feed_open_sequence(intro: &[u8], body: u8, len: usize) -> (Duration, Vec<u8>) {
-    let mut screen = Screen::new(80, 24);
+/// Feeds `intro` and then `len` bytes of `body`, `chunk` bytes at a time.
+fn open_sequence(intro: &[u8], body: u8, len: usize, chunk: usize) -> Screen {
+    let mut screen = Screen::new(10, 3);
     screen.feed(intro);
-    let chunk = vec![body; 4096];
-    let start = Instant::now();
-    for _ in 0..len / chunk.len() {
-        screen.feed(&chunk);
+    let piece = vec![body; chunk];
+    for _ in 0..len / chunk {
+        screen.feed(&piece);
     }
-    (start.elapsed(), screen.snapshot_ansi())
+    screen
 }
 
 #[test]
-fn a_sequence_that_never_ends_costs_linear_time_and_a_bounded_snapshot() {
-    let cases: [(&str, &[u8], u8); 5] = [
+fn a_sequence_that_never_ends_costs_linear_work_and_a_bounded_snapshot() {
+    let cases: [(&str, &[u8], u8); 6] = [
         ("OSC", b"\x1b]0;", b'x'),
         ("DCS", b"\x1bPq", b'x'),
         ("APC", b"\x1b_", b'x'),
         ("CSI params", b"\x1b[", b'1'),
+        ("CSI ignored", b"\x1b[<", b'<'),
         ("ESC intermediates", b"\x1b", b' '),
     ];
     for (label, intro, body) in cases {
-        let (small, snapshot) = feed_open_sequence(intro, body, 1 << 20);
-        assert!(
-            snapshot.len() < 80 * 1024,
-            "{label}: snapshot is {} bytes",
-            snapshot.len()
-        );
-        let (large, snapshot) = feed_open_sequence(intro, body, 8 << 20);
-        assert!(
-            snapshot.len() < 80 * 1024,
-            "{label}: snapshot is {} bytes",
-            snapshot.len()
-        );
-        // Eight times the bytes; quadratic work would take about 64 times as long. The floor keeps a fast small
-        // run from making the ratio noisy.
-        assert!(
-            large < small.max(Duration::from_millis(20)) * 24,
-            "{label}: 1 MiB took {small:?}, 8 MiB took {large:?}"
-        );
+        for (len, chunk) in [(8 << 20, 4096), (256 << 10, 1)] {
+            let screen = open_sequence(intro, body, len, chunk);
+            let fed = (intro.len() + len) as u64;
+            // Probing the start of the sequence, then one tracking parser reading every byte once.
+            assert!(
+                screen.tracking_work() <= 3 * fed,
+                "{label} in {chunk}-byte feeds: {} bytes of work for {fed} fed",
+                screen.tracking_work()
+            );
+            let snapshot = screen.snapshot_ansi();
+            assert!(
+                snapshot.len() < 80 * 1024,
+                "{label}: snapshot is {} bytes",
+                snapshot.len()
+            );
+        }
     }
 }
 
-#[test]
-fn a_copy_taken_inside_an_over_long_sequence_still_swallows_the_rest() {
-    let cases: [(&[u8], u8, &[u8]); 4] = [
-        (b"\x1b]0;", b'x', b"\x07ab"),
-        (b"\x1bPq", b'x', b"\x1b\\ab"),
-        (b"\x1b[", b'1', b"mab"),
-        (b"\x1b", b' ', b"Bab"),
-    ];
-    for (intro, body, end) in cases {
-        let mut screen = Screen::new(10, 3);
-        screen.feed(intro);
-        for _ in 0..64 {
-            screen.feed(&[body; 4096]);
-        }
-        let mut copy = copy_of(&screen);
-        for s in [&mut screen, &mut copy] {
-            s.feed(&[body; 100]);
-            s.feed(end);
-        }
-        assert_eq!(observe(&copy), observe(&screen), "{intro:?}");
-        assert_eq!(support::text(&screen)[0], "ab");
+/// Opens a sequence with `intro` and 70 000 bytes of `body` (past the carried cap), feeds `mid`, then snapshots and
+/// feeds more `body` and `end` to both. The copy must match and the first row read `text`.
+fn assert_over_long_ends_alike(intro: &[u8], body: u8, mid: &[u8], end: &[u8], text: &str) {
+    let mut screen = open_sequence(intro, body, 70_000, 4096);
+    screen.feed(mid);
+    let mut copy = copy_of(&screen);
+    for s in [&mut screen, &mut copy] {
+        s.feed(&[body; 100]);
+        s.feed(end);
     }
+    let label = format!("{intro:?} {mid:?} {end:?}");
+    assert_eq!(observe(&copy), observe(&screen), "{label}");
+    assert_eq!(support::text(&screen)[0], text, "{label}");
+}
+
+#[test]
+fn a_copy_taken_inside_an_over_long_sequence_ends_it_on_the_same_byte() {
+    assert_over_long_ends_alike(b"\x1b]0;", b'x', b"", b"\x07ab", "ab");
+    assert_over_long_ends_alike(b"\x1bPq", b'x', b"", b"\x1b\\ab", "ab");
+    assert_over_long_ends_alike(b"\x1b[", b'1', b"", b"mab", "ab");
+    assert_over_long_ends_alike(b"\x1b", b' ', b"", b"Bab", "ab");
+    // A byte past the cap that sends the DCS header to its ignore state, so the 8-bit ST doesn't end it.
+    assert_over_long_ends_alike(b"\x1bP", b'1', b"<q", b"data\x9cvisible", "");
+    // A byte past the cap that makes the CSI ignored, so it doesn't turn bracketed paste on.
+    assert_over_long_ends_alike(b"\x1b[?2004;", b'0', b"<", b"hX", "X");
+    assert_over_long_ends_alike(b"\x1b[", b'0', b" ", b"5mX", "X");
 }

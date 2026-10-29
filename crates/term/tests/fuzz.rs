@@ -140,13 +140,15 @@ fn observe_except<'a>(screen: &'a Screen, skip: &[usize]) -> Observed<'a> {
     seen
 }
 
-/// Whether `ops` may leave state the copy doesn't get. Besides the gap tokens, a resize can leave the cursor's wrap
-/// flag away from the last column, and rows whose blank cells alacritty no longer resets with a new background.
+/// Whether `ops` may leave state the copy doesn't get. Besides the gap tokens, random bytes with an ESC can form
+/// one (`ESC H` sets a tab stop), and a resize can leave the cursor's wrap flag away from the last column, and rows
+/// whose blank cells alacritty no longer resets with a new background.
 fn leaves_hidden_state(ops: &[Op]) -> bool {
     ops.iter().any(|op| match op {
         Op::Tokens(tokens) => tokens.iter().any(|&t| GAPS.contains(&TOKENS[t])),
+        Op::Bytes(bytes) => bytes.contains(&0x1b),
         Op::Resize(..) => true,
-        Op::Bytes(_) | Op::ExpireSync => false,
+        Op::ExpireSync => false,
     })
 }
 

@@ -181,7 +181,8 @@ impl Screen {
     ///
     /// Output held by an open synchronized update is appended after a begin marker, so the copy is left holding
     /// the same bytes. An escape sequence or UTF-8 char the parser is in the middle of is carried too, so the copy
-    /// reads the rest of it the same way; of a sequence longer than 64 KiB only the start is carried.
+    /// reads the rest of it the same way. Past 64 KiB only the bytes that change where a sequence ends are carried,
+    /// so its parameters or payload may be cut short.
     ///
     /// Not carried over: the primary screen while the alt screen is active, scrollback, the scroll region, tab
     /// stops, hyperlinks, the title, the charset state, colours set with OSC 4 / 10 / 11 (so colour queries can get
@@ -208,6 +209,13 @@ impl Screen {
             out.extend_from_slice(self.unfinished.bytes());
         }
         out
+    }
+
+    /// Bytes fed to the extra parsers that follow unfinished sequences for [`Screen::snapshot_ansi`]. Only for tests
+    /// that check this work stays linear in the output.
+    #[doc(hidden)]
+    pub fn tracking_work(&self) -> u64 {
+        self.unfinished.work()
     }
 
     /// Splits what was not yet parsed before this feed (`held`, then `bytes`) into what the parser has now read
