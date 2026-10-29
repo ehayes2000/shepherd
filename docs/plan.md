@@ -115,6 +115,17 @@ acceptance:
 - Kitty flags set with `CSI = flags;1u` on an empty stack round-trip, so `CSI ? u` answers the same on both screens.
 scope: crates/term
 
+### F08: Clean up after a timed-out worktree create
+status: todo
+depends: T20
+touches: adapters::worktrees, ports::worktrees (docs)
+goal: A `create` that times out (e.g. a slow post-checkout hook) leaves no half-made branch or worktree behind.
+acceptance:
+- On `Timeout` during `worktree add`, the adapter removes any registered worktree and the new branch, and a retry with
+  the same name succeeds. There's an adapter test with a slow `post-checkout` hook, asserting nothing is left and the retry works.
+- If cleanup itself fails, the error says so, and `Worktrees::create` docs describe it.
+scope: crates/adapters, crates/core (docs only)
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
@@ -539,7 +550,7 @@ scope: crates/core, crates/shepherd, crates/tui
 ## M3 Workspaces & worktrees
 
 ### T20: `Worktrees` port
-status: in-progress
+status: done (9a7d007)
 depends: T00
 touches: ports::worktrees, testkit, adapters::worktrees
 goal: Managed git worktrees, expressed in domain terms.
