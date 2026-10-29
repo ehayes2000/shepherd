@@ -11,6 +11,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 agent-client-protocol-schema = { version = "=1.13.0", default-features = false }
+proptest = "1"
+shepherd-testkit.workspace = true
 
 
 [lints]
