@@ -54,7 +54,7 @@ acceptance:
 scope: crates/testkit
 
 ### F03: Typed frame builders in acpp
-status: in-progress
+status: done (a912f30)
 depends: T06
 touches: core::acpp
 goal: Producers (host, hook translators) build frames from typed values instead of hand-written JSON.

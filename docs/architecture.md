@@ -208,3 +208,12 @@ Deadlines (the sync-update timeout, connect retries, polling) are computed from 
 with no sleeps. No tokio for M1. Revisit at M4 if iroh needs it, by putting iroh behind the `Link` port on its own runtime thread.
 Consequences: simple, deterministic ordering (a subscribe and its catch-up read happen in one loop iteration, so there's no
 gap and no duplicate). Supersedes 0005 for M1.
+
+### 0012: serde_json `preserve_order` is on in every build (2026-10-29)
+Context: F03 found `preserve_order` was enabled only in test builds, through feature unification from a dev-dependency (the ACP
+schema crate). Tests and production serialized JSON objects differently: insertion order against sorted keys. Golden-string
+tests passed for a reason that doesn't hold in the shipped binary.
+Decision: the workspace `serde_json` dependency enables `preserve_order` for every build. Logs keep each frame's original key
+order, which fits the lossless rule better.
+Consequences: a dev-dependency can never again change production serialization this way. In general, a feature a
+dev-dependency switches on that changes behavior must be enabled in normal builds or not at all.
