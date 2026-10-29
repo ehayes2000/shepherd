@@ -353,7 +353,7 @@ notes: The T02 report's alacritty section is binding on API gotchas. The `check-
 exist.
 
 ### T10: Link ports (transport)
-status: in-progress
+status: done (e9835a9)
 depends: T07
 touches: ports::link, testkit, adapters::link
 goal: Move wire messages between client and host, independent of transport.
