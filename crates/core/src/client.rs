@@ -23,14 +23,16 @@ use crate::wire::{
 pub const MAX_CONNECT_ATTEMPTS: u32 = 50;
 /// How long after a failed connect the next attempt is made.
 pub const RETRY_INTERVAL: SignedDuration = SignedDuration::from_millis(100);
+/// How long a connected host has to answer the hello before the attempt counts as failed.
+pub const HELLO_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
 
 /// Something that happened, for the client to decide on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     /// The runtime is up: start connecting.
     Start,
-    /// A [`ClientCommand::Connect`] succeeded.
-    Connected,
+    /// A [`ClientCommand::Connect`] succeeded at `at`.
+    Connected { at: Timestamp },
     /// A [`ClientCommand::Connect`] failed at `at`.
     ConnectFailed { at: Timestamp, error: String },
     /// The link to the host is gone.
@@ -115,8 +117,12 @@ pub enum Connection {
         attempt: u32,
         until: jiff::Timestamp,
     },
-    /// Connected; waiting for the hello answer.
-    Handshaking,
+    /// Connect attempt `attempt` reached the host at `since`; waiting for the hello answer. The attempt fails if
+    /// the link drops, or no answer comes by [`HELLO_TIMEOUT`] after `since`.
+    Handshaking {
+        attempt: u32,
+        since: jiff::Timestamp,
+    },
     Ready,
     /// The client gave up. The message says why, for the user.
     Failed(String),
@@ -141,7 +147,7 @@ pub struct ClientSession {
 pub struct Client {
     machine: MachineId,
     connection: Connection,
-    /// The host was launched during the current outage.
+    /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
     next_request: u64,
     pending: HashMap<RequestId, Method>,
@@ -234,7 +240,7 @@ impl Client {
         }
         match event {
             ClientEvent::Start => self.connect(1),
-            ClientEvent::Connected => self.connected(),
+            ClientEvent::Connected { at } => self.connected(&at),
             ClientEvent::ConnectFailed { at, error } => self.connect_failed(&at, &error),
             ClientEvent::Disconnected => self.disconnected(),
             ClientEvent::LaunchFailed { error } => {
@@ -243,6 +249,11 @@ impl Client {
             ClientEvent::Tick { at } => match self.connection {
                 Connection::Waiting { attempt, until } if at.instant() >= until => {
                     self.connect(attempt + 1)
+                }
+                Connection::Handshaking { attempt, since }
+                    if at.instant() >= since.checked_add(HELLO_TIMEOUT).unwrap_or(since) =>
+                {
+                    self.attempt_failed(attempt, at.instant(), "the host didn't answer hello")
                 }
                 _ => Vec::new(),
             },
@@ -265,12 +276,14 @@ impl Client {
         vec![ClientCommand::Connect]
     }
 
-    fn connected(&mut self) -> Vec<ClientCommand> {
-        if !matches!(self.connection, Connection::Connecting { .. }) {
+    fn connected(&mut self, at: &Timestamp) -> Vec<ClientCommand> {
+        let Connection::Connecting { attempt } = self.connection else {
             return Vec::new();
-        }
-        self.connection = Connection::Handshaking;
-        self.launched = false;
+        };
+        self.connection = Connection::Handshaking {
+            attempt,
+            since: at.instant(),
+        };
         let hello = Hello {
             version: PROTOCOL_VERSION,
             machine: self.machine.clone(),
@@ -282,6 +295,18 @@ impl Client {
         let Connection::Connecting { attempt } = self.connection else {
             return Vec::new();
         };
+        self.attempt_failed(attempt, at.instant(), error)
+    }
+
+    /// Attempt `attempt` failed at `at`: launch the host if this outage hasn't yet, and retry after
+    /// [`RETRY_INTERVAL`], or give up after the last attempt.
+    fn attempt_failed(
+        &mut self,
+        attempt: u32,
+        at: jiff::Timestamp,
+        error: &str,
+    ) -> Vec<ClientCommand> {
+        self.pending.clear();
         if attempt >= MAX_CONNECT_ATTEMPTS {
             return self.fail(format!(
                 "could not connect to the shepherd host after {attempt} attempts: {error}. \
@@ -294,20 +319,25 @@ impl Client {
             commands.push(ClientCommand::LaunchHost);
         }
         // An instant this close to jiff's maximum can't come from a real clock: retry at once.
-        let until = at
-            .instant()
-            .checked_add(RETRY_INTERVAL)
-            .unwrap_or(at.instant());
+        let until = at.checked_add(RETRY_INTERVAL).unwrap_or(at);
         self.connection = Connection::Waiting { attempt, until };
         commands
     }
 
     fn disconnected(&mut self) -> Vec<ClientCommand> {
-        if !matches!(self.connection, Connection::Handshaking | Connection::Ready) {
-            return Vec::new();
+        match self.connection {
+            // A host that accepts and then drops before answering hello is a failed attempt. Retried from
+            // when it connected, so the next tick reconnects.
+            Connection::Handshaking { attempt, since } => {
+                self.attempt_failed(attempt, since, "the host closed the connection")
+            }
+            // A new outage.
+            Connection::Ready => {
+                self.pending.clear();
+                self.connect(1)
+            }
+            _ => Vec::new(),
         }
-        self.pending.clear();
-        self.connect(1)
     }
 
     fn fail(&mut self, why: String) -> Vec<ClientCommand> {
@@ -339,6 +369,7 @@ impl Client {
         match (method, result) {
             (Method::Hello, Ok(_)) => {
                 self.connection = Connection::Ready;
+                self.launched = false;
                 let subscribe = Subscribe {
                     from: self.subscribe_from(),
                 };

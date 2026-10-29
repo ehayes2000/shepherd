@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use shepherd::client::{ClientError, ClientRuntime, Connector};
 use shepherd_core::acpp::Timestamp;
-use shepherd_core::client::{Intent, MAX_CONNECT_ATTEMPTS, RETRY_INTERVAL};
+use shepherd_core::client::{
+    Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, RETRY_INTERVAL,
+};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_term::Screen;
@@ -26,6 +28,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// A client runtime on a fake network whose launcher starts a [`FakeHost`], with a clock the test moves.
 struct Harness {
+    net: FakeNetwork,
     host: HostSlot,
     launcher: FakeHostLauncher,
     now: Arc<Mutex<jiff::Timestamp>>,
@@ -45,6 +48,7 @@ impl Harness {
         let net = FakeNetwork::new();
         let host: HostSlot = Arc::default();
         let launcher = make(net.clone(), host.clone());
+        let connect_net = net.clone();
         let now = Arc::new(Mutex::new(
             "2026-10-29T12:00:00Z"
                 .parse::<jiff::Timestamp>()
@@ -55,10 +59,11 @@ impl Harness {
             move || Timestamp::parse(lock(&now).to_string()).unwrap_or_else(|e| panic!("{e}"))
         };
         let connect: Connector<FakeLink> =
-            Box::new(move |sink| net.connect(sink).map_err(|e| e.to_string()));
+            Box::new(move |sink| connect_net.connect(sink).map_err(|e| e.to_string()));
         let runtime =
             ClientRuntime::new(MachineId::new("m_client"), connect, launcher.clone(), clock);
         Self {
+            net,
             host,
             launcher,
             now,
@@ -78,14 +83,14 @@ impl Harness {
 
     /// Moves the clock past the retry interval and ticks.
     fn wait_retry(&mut self) {
-        {
-            let mut now = lock(&self.now);
-            *now = now
-                .checked_add(RETRY_INTERVAL)
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
+        self.advance(RETRY_INTERVAL);
         self.runtime.tick();
         self.settle();
+    }
+
+    fn advance(&mut self, by: jiff::SignedDuration) {
+        let mut now = lock(&self.now);
+        *now = now.checked_add(by).unwrap_or_else(|e| panic!("{e}"));
     }
 
     fn user(&mut self, intent: Intent) {
@@ -134,10 +139,7 @@ fn two_sessions_switching_between_them_routes_input_to_the_selected_one() {
     h.settle();
     assert_eq!(h.launcher.launches(), 1);
     h.wait_retry();
-    assert_eq!(
-        h.runtime.client().connection(),
-        &shepherd_core::client::Connection::Ready
-    );
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
 
     h.user(Intent::NewSession);
     h.user(Intent::NewSession);
@@ -193,4 +195,28 @@ fn a_host_that_never_listens_is_given_up_on_after_the_last_attempt() {
         why.contains("could not connect to the shepherd host"),
         "{why}"
     );
+}
+
+#[test]
+fn a_host_slow_to_answer_hello_is_retried_and_the_old_links_events_are_ignored() {
+    let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
+    *lock(&h.host) = Some(FakeHost::start(&h.net));
+    // Connect, but the host doesn't get to answer the hello before it times out.
+    h.runtime.start();
+    h.runtime.pump();
+    h.advance(HELLO_TIMEOUT);
+    h.runtime.tick();
+    assert!(matches!(
+        h.runtime.client().connection(),
+        Connection::Waiting { .. }
+    ));
+    // The retry replaces the first link. Dropping it queues that link's `Disconnected` behind the new
+    // connection, where it must not be taken for the new link going away.
+    h.advance(RETRY_INTERVAL);
+    h.runtime.tick();
+    h.settle();
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+    h.user(Intent::NewSession);
+    h.user(Intent::Input(b"hi".to_vec()));
+    assert_eq!(h.inputs(), [("s1".into(), "hi".into())]);
 }

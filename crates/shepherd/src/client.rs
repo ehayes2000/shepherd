@@ -288,7 +288,7 @@ where
                 match (self.connect)(sink) {
                     Ok(link) => {
                         self.link = Some(link);
-                        Some(ClientEvent::Connected)
+                        Some(ClientEvent::Connected { at: (self.clock)() })
                     }
                     Err(error) => Some(ClientEvent::ConnectFailed {
                         at: (self.clock)(),

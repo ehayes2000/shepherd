@@ -5,7 +5,9 @@
 //! once, and `launch` reaps it, so the host is reparented to init straight away and the client never has a zombie
 //! to collect, whenever either of them exits. The host calls `setsid`, so it has no controlling terminal: closing
 //! the client's terminal doesn't hang it up, and nothing it runs can prompt on that terminal. Its stdio is
-//! `/dev/null` (the client's terminal belongs to the TUI) and its working directory is `/`.
+//! `/dev/null` (the client's terminal belongs to the TUI) and its working directory is `/`. It inherits no
+//! descriptor the client leaked without close-on-exec, and starts with common signals (`RESET_SIGNALS`) at their
+//! default action even if the client ignored them.
 //!
 //! Errors still reach `launch`: std reports a failed `exec` through a close-on-exec pipe that the host inherits,
 //! and that pipe only closes once the host has called `exec` or reported why it couldn't.
@@ -52,14 +54,28 @@ impl HostLauncher for ProcessHostLauncher {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // SAFETY: `fork`, `setsid` and `_exit` are async-signal-safe, and the closure touches nothing else.
+        let max_fd = fd_limit();
+        // SAFETY: `fork`, `setsid`, `fcntl`, `close`, `signal` and `_exit` are async-signal-safe, and the closure
+        // touches nothing else (`max_fd` is computed before the fork).
         unsafe {
-            command.pre_exec(|| match libc::fork() {
+            command.pre_exec(move || match libc::fork() {
                 -1 => Err(io::Error::last_os_error()),
                 // The host: a new session, with no controlling terminal.
                 0 => {
                     if libc::setsid() == -1 {
                         return Err(io::Error::last_os_error());
+                    }
+                    // Descriptors the client leaked without close-on-exec. The close-on-exec ones are left to
+                    // `exec`, std's error pipe among them, so `closefrom` would be wrong here.
+                    for fd in 3..max_fd {
+                        let flags = libc::fcntl(fd, libc::F_GETFD);
+                        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                            libc::close(fd);
+                        }
+                    }
+                    // Dispositions survive `exec`: a client started with these ignored mustn't pass that on.
+                    for signal in RESET_SIGNALS {
+                        libc::signal(signal, libc::SIG_DFL);
                     }
                     Ok(())
                 }
@@ -77,6 +93,24 @@ impl HostLauncher for ProcessHostLauncher {
         }
         Ok(())
     }
+}
+
+/// Signals the host starts with at their default action, whatever the client had.
+const RESET_SIGNALS: [libc::c_int; 6] = [
+    libc::SIGTERM,
+    libc::SIGHUP,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGPIPE,
+    libc::SIGCHLD,
+];
+
+/// One past the highest descriptor to check for leaks: the open-file limit, capped so an unlimited limit doesn't
+/// mean billions of `fcntl` calls.
+fn fd_limit() -> libc::c_int {
+    // SAFETY: plain libc call.
+    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    libc::c_int::try_from(limit.clamp(256, 65_536)).unwrap_or(65_536)
 }
 
 #[cfg(test)]
@@ -99,6 +133,17 @@ mod tests {
     const FIFO_VAR: &str = "SHEPHERD_LAUNCHER_TEST_FIFO";
     /// A fifo the re-run waits on before it exits, passed to the re-run.
     const GO_VAR: &str = "SHEPHERD_LAUNCHER_TEST_GO";
+    /// Set in the re-run of [`launched_host_inherits_no_leaked_fd_or_ignored_signal`].
+    const HYGIENE_VAR: &str = "SHEPHERD_LAUNCHER_TEST_HYGIENE";
+
+    /// Reports `hygiene <open|closed> <ignored|default>` to the fifo in `$1`: whether descriptor `$2` is open, and
+    /// whether `SIGTERM` is ignored (a child shell that sends itself `SIGTERM` survives to say so). Then exits.
+    const HYGIENE: &str = r#"
+if { true >&"$2"; } 2>/dev/null; then f=open; else f=closed; fi
+t=$(sh -c 'kill -TERM $$; echo ignored')
+[ -n "$t" ] || t=default
+echo "hygiene $f $t" > "$1"
+"#;
     /// Generous: under parallel load a shell and `ps` can take seconds to start.
     const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -120,6 +165,7 @@ wait
     enum Report {
         Started { pid: i32, tty: bool },
         Alive { pid: i32, ppid: i32 },
+        Hygiene { fd_open: bool, term_ignored: bool },
     }
 
     fn parse(line: &str) -> Report {
@@ -132,6 +178,10 @@ wait
             ["alive", pid, ppid] => Report::Alive {
                 pid: pid.parse().unwrap(),
                 ppid: ppid.parse().unwrap(),
+            },
+            ["hygiene", fd, term] => Report::Hygiene {
+                fd_open: fd == "open",
+                term_ignored: term == "ignored",
             },
             _ => panic!("bad report {line:?}"),
         }
@@ -292,6 +342,54 @@ wait
             ppid as u32,
             std::process::id(),
             "the host would be our zombie"
+        );
+    }
+
+    /// Re-runs itself with `SIGTERM` ignored and a file open without close-on-exec, as a careless parent of the
+    /// client might leave them, and launches from there. Neither may reach the host.
+    #[test]
+    fn launched_host_inherits_no_leaked_fd_or_ignored_signal() {
+        if std::env::var_os(HYGIENE_VAR).is_some() {
+            let fifo = PathBuf::from(std::env::var_os(FIFO_VAR).unwrap());
+            let leaked = File::open("/dev/null").unwrap();
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&leaked);
+            // SAFETY: plain syscalls on a descriptor this test owns, and a valid disposition.
+            unsafe {
+                assert_eq!(libc::fcntl(fd, libc::F_SETFD, 0), 0);
+                assert_ne!(libc::signal(libc::SIGTERM, libc::SIG_IGN), libc::SIG_ERR);
+            }
+            let fifo = fifo.to_str().unwrap().to_owned();
+            launch(ProcessHostLauncher::new(
+                "/bin/sh",
+                ["-c", HYGIENE, "hygiene", &fifo, &fd.to_string()],
+            ));
+            return;
+        }
+        let mut f = StandInFixture::new();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launcher::tests::launched_host_inherits_no_leaked_fd_or_ignored_signal",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(HYGIENE_VAR, "1")
+            .env(FIFO_VAR, f.fifo())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        assert_eq!(
+            f.next(),
+            Report::Hygiene {
+                fd_open: false,
+                term_ignored: false
+            }
         );
     }
 

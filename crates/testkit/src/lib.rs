@@ -294,7 +294,9 @@ pub mod builders {
         pub fn connect(&mut self) -> Vec<ClientCommand> {
             let started = self.handle(ClientEvent::Start);
             assert_eq!(started, vec![ClientCommand::Connect], "ClientDriver: start");
-            let hello = self.handle(ClientEvent::Connected);
+            let hello = self.handle(ClientEvent::Connected {
+                at: ts("2026-10-29T12:00:00.000Z"),
+            });
             let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test" });
             self.answer(&hello, Ok(answer))
         }

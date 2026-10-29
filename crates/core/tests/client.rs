@@ -3,16 +3,43 @@
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind, Timestamp};
 use shepherd_core::client::{
-    ClientCommand, ClientEvent, Connection, Focus, Intent, MAX_CONNECT_ATTEMPTS, Popup,
+    ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS,
+    Popup,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
     ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput, SessionRename,
-    SessionResize, WireError,
+    SessionResize, Subscribe, WireError,
 };
-use shepherd_testkit::builders::{ClientDriver, notifications, requests, ts};
+use shepherd_testkit::builders::{ClientDriver, log_entry, notifications, requests, ts};
+
+fn connected() -> ClientEvent {
+    connected_at(0)
+}
+
+fn connected_at(ms: i64) -> ClientEvent {
+    ClientEvent::Connected { at: at(ms) }
+}
+
+fn hello_ok() -> serde_json::Value {
+    json!({ "version": PROTOCOL_VERSION, "machine": "m_test" })
+}
+
+/// Drops the link, reconnects, answers the hello, and returns the subscribe the client sends.
+fn reconnect(c: &mut ClientDriver) -> Subscribe {
+    assert_eq!(
+        c.handle(ClientEvent::Disconnected),
+        [ClientCommand::Connect]
+    );
+    let hello = c.handle(connected());
+    let sent = c.answer(&hello, Ok(hello_ok()));
+    match &bodies(&sent)[..] {
+        [ClientRequest::Subscribe(sub)] => sub.clone(),
+        _ => panic!("expected a subscribe in {sent:?}"),
+    }
+}
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id)
@@ -88,14 +115,34 @@ fn an_exited_session_stays_listed_as_exited() {
 }
 
 #[test]
-fn entries_sent_twice_are_folded_once() {
+fn a_replayed_older_entry_does_not_move_the_resume_point_back() {
     let mut c = ClientDriver::with_sessions(&["s1"]);
     c.host().rename("s1", "api");
     c.sync();
+    // A resubscribe that overlaps what the client already has sends `created` (seq 1) again.
     let created = c.host().log()[0].clone();
-    // A resubscribe that overlaps what the client already has: the stale `created` must not undo the rename.
-    c.handle(shepherd_testkit::builders::log_entry(created));
-    assert_eq!(c.client().sessions()[0].name, "api");
+    c.handle(log_entry(created));
+    let from = reconnect(&mut c).from;
+    assert_eq!(from.sessions.get(&sid("s1")).map(|s| s.get()), Some(2));
+}
+
+#[test]
+fn a_replayed_older_entry_is_not_folded_again() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    let prompt = json!({ "jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+        "params": { "sessionId": "a1", "prompt": [{ "type": "text", "text": "hi" }] } });
+    let prompt = c.host().append(Some("s1"), hook.clone(), prompt);
+    c.host().append(
+        Some("s1"),
+        hook,
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} }),
+    );
+    c.sync();
+    assert_eq!(c.client().sessions()[0].activity, Activity::Idle);
+    // Folding the old prompt again would start a turn that never ends.
+    c.handle(log_entry(prompt));
+    assert_eq!(c.client().sessions()[0].activity, Activity::Idle);
 }
 
 #[test]
@@ -225,10 +272,13 @@ fn a_session_the_user_created_is_selected_once_the_host_answers() {
 
 #[test]
 fn a_created_session_answered_before_its_log_entry_is_selected_when_it_arrives() {
-    let mut c = ClientDriver::with_sessions(&["s1"]);
+    let mut c = ClientDriver::with_sessions(&["s1", "s0"]);
+    // The user's pick, so the selection no longer follows the top of the list.
+    c.user(Intent::PrevSession);
+    assert_eq!(selected(&c).as_deref(), Some("s1"));
     let sent = c.user(Intent::NewSession);
     c.answer(&sent, Ok(json!({ "session": "s2" })));
-    c.host().new_session("s0");
+    c.host().new_session("s3");
     c.host().new_session("s2");
     c.sync();
     assert_eq!(selected(&c).as_deref(), Some("s2"));
@@ -412,7 +462,7 @@ fn starting_connects() {
 fn connecting_says_hello_with_this_version_and_machine() {
     let mut c = ClientDriver::new();
     c.handle(ClientEvent::Start);
-    let sent = c.handle(ClientEvent::Connected);
+    let sent = c.handle(connected());
     assert_eq!(
         bodies(&sent),
         [ClientRequest::Hello(shepherd_core::wire::Hello {
@@ -437,7 +487,7 @@ fn a_hello_answer_subscribes_to_everything_and_is_ready() {
 fn a_version_mismatch_is_fatal() {
     let mut c = ClientDriver::new();
     c.handle(ClientEvent::Start);
-    let hello = c.handle(ClientEvent::Connected);
+    let hello = c.handle(connected());
     let cmds = c.answer(
         &hello,
         Err(WireError::VersionMismatch { host: 2, client: 1 }),
@@ -577,7 +627,7 @@ fn losing_the_host_reconnects_and_resumes_each_log_where_it_left_off() {
         c.handle(ClientEvent::Disconnected),
         [ClientCommand::Connect]
     );
-    let hello = c.handle(ClientEvent::Connected);
+    let hello = c.handle(connected());
     let sent = c.answer(
         &hello,
         Ok(json!({ "version": PROTOCOL_VERSION, "machine": "m_test" })),
@@ -593,13 +643,89 @@ fn losing_the_host_reconnects_and_resumes_each_log_where_it_left_off() {
 
 #[test]
 fn a_reconnect_that_is_refused_launches_the_host_again() {
-    let mut c = ClientDriver::with_sessions(&["s1"]);
-    c.handle(ClientEvent::Disconnected);
-    let cmds = c.handle(ClientEvent::ConnectFailed {
-        at: ts("2026-10-29T12:00:00.000Z"),
-        error: "refused".into(),
-    });
-    assert_eq!(cmds, [ClientCommand::LaunchHost]);
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    assert_eq!(refused(&mut c, 0), [ClientCommand::LaunchHost]);
+    c.handle(ClientEvent::Tick { at: at(100) });
+    let hello = c.handle(connected_at(100));
+    c.answer(&hello, Ok(hello_ok()));
+    assert_eq!(c.client().connection(), &Connection::Ready);
+    // The launched host dies later: a new outage.
+    assert_eq!(
+        c.handle(ClientEvent::Disconnected),
+        [ClientCommand::Connect]
+    );
+    assert_eq!(refused(&mut c, 5000), [ClientCommand::LaunchHost]);
+}
+
+#[test]
+fn a_host_that_drops_before_answering_hello_is_a_failed_attempt() {
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    c.handle(connected_at(0));
+    assert_eq!(
+        c.handle(ClientEvent::Disconnected),
+        [ClientCommand::LaunchHost]
+    );
+    assert!(matches!(
+        c.client().connection(),
+        Connection::Waiting { attempt: 1, .. }
+    ));
+    assert_eq!(
+        c.handle(ClientEvent::Tick { at: at(100) }),
+        [ClientCommand::Connect]
+    );
+    assert_eq!(
+        c.client().connection(),
+        &Connection::Connecting { attempt: 2 }
+    );
+}
+
+#[test]
+fn a_host_that_keeps_dropping_the_handshake_is_launched_once_then_given_up_on() {
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    let (mut launches, mut last) = (0, Vec::new());
+    for i in 0..i64::from(MAX_CONNECT_ATTEMPTS) {
+        c.handle(connected_at(i * 1000));
+        last = c.handle(ClientEvent::Disconnected);
+        launches += last
+            .iter()
+            .filter(|c| **c == ClientCommand::LaunchHost)
+            .count();
+        c.handle(ClientEvent::Tick {
+            at: at(i * 1000 + 500),
+        });
+    }
+    assert_eq!(launches, 1);
+    assert_eq!(last, [ClientCommand::Quit]);
+    let fatal = c.client().fatal().unwrap_or_default().to_owned();
+    assert!(fatal.contains("closed the connection"), "{fatal}");
+}
+
+#[test]
+fn a_host_that_never_answers_hello_times_out_as_a_failed_attempt() {
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    let hello = c.handle(connected_at(0));
+    let timeout_ms = HELLO_TIMEOUT.as_millis() as i64;
+    assert_eq!(
+        c.handle(ClientEvent::Tick {
+            at: at(timeout_ms - 1)
+        }),
+        []
+    );
+    assert_eq!(
+        c.handle(ClientEvent::Tick { at: at(timeout_ms) }),
+        [ClientCommand::LaunchHost]
+    );
+    assert!(matches!(
+        c.client().connection(),
+        Connection::Waiting { attempt: 1, .. }
+    ));
+    // A hello answer that arrives too late is ignored.
+    assert_eq!(c.answer(&hello, Ok(hello_ok())), []);
+    assert_ne!(c.client().connection(), &Connection::Ready);
 }
 
 #[test]
@@ -607,7 +733,7 @@ fn answers_pending_when_the_link_dropped_are_forgotten() {
     let mut c = ClientDriver::with_sessions(&["s1"]);
     let sent = c.user(Intent::NewSession);
     c.handle(ClientEvent::Disconnected);
-    c.handle(ClientEvent::Connected);
+    c.handle(connected());
     assert_eq!(c.answer(&sent, Err(WireError::Internal("x".into()))), []);
     assert_eq!(c.client().notice(), None);
 }
