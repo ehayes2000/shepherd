@@ -629,27 +629,18 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    /// Runs `f` with the process umask set to `mask`. The umask is process-wide, so tests running in parallel
-    /// create files under it too; that only loosens their permissions for a moment, and no other test checks them.
-    fn with_umask<T>(mask: libc::mode_t, f: impl FnOnce() -> T) -> T {
-        // SAFETY: umask only swaps the process's file mode creation mask.
-        let old = unsafe { libc::umask(mask) };
-        let result = f();
-        // SAFETY: as above.
-        unsafe { libc::umask(old) };
-        result
-    }
-
+    /// Exact modes, so a missing chmod or `DirBuilder::mode` shows up under the ordinary umask too (the socket
+    /// would be 0755 or so, the dir 0755).
     #[test]
-    fn socket_and_created_dir_are_private_under_a_permissive_umask() {
+    fn socket_is_0600_and_created_dir_is_0700() {
         let dir = short_tempdir();
         let parent = dir.path().join("shepherd");
         let path = parent.join("host.sock");
 
-        let (_host, _events) = with_umask(0, || bind(&path)).unwrap();
+        let (_host, _events) = bind(&path).unwrap();
 
-        assert_eq!(mode(&parent) & 0o077, 0, "dir mode {:o}", mode(&parent));
-        assert_eq!(mode(&path) & 0o077, 0, "socket mode {:o}", mode(&path));
+        assert_eq!(mode(&parent), 0o700, "dir mode {:o}", mode(&parent));
+        assert_eq!(mode(&path), 0o600, "socket mode {:o}", mode(&path));
     }
 
     #[test]

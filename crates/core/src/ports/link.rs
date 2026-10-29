@@ -69,6 +69,11 @@ pub enum DisconnectReason {
     Protocol(String),
 }
 
+/// Where a link pushes its events, from its own threads.
+///
+/// `send` must never block waiting on the link's owner (the code calling [`Link`] methods): an adapter may hold
+/// a per-conn lock while it sends a `Line`, and [`Link::close`] takes that lock, so an owner that is blocked in
+/// `close` while the sink waits for it would deadlock. Forward into an unbounded channel.
 pub trait LinkEventSink: Send + Sync + 'static {
     fn send(&self, event: LinkEvent);
 }
