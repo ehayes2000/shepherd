@@ -57,7 +57,8 @@ the multi-machine work doesn't change core's shape.
 | crate               | may depend on (internal)        | external deps                                    |
 |---------------------|---------------------------------|--------------------------------------------------|
 | `shepherd-core`     | none                            | allowlist only: see `CORE_ALLOWED` in the script |
-| `shepherd-tui`      | `shepherd-core`                 | ratatui, crossterm (types), plus allowlist       |
+| `shepherd-term`     | none                            | alacritty_terminal                               |
+| `shepherd-tui`      | `shepherd-core`, `shepherd-term`| ratatui, crossterm (types), plus allowlist       |
 | `shepherd-adapters` | `shepherd-core`                 | anything needed for IO                           |
 | `shepherd-testkit`  | `shepherd-core`                 | test helpers                                     |
 | `shepherd`          | all of the above                | anything                                         |
@@ -149,3 +150,18 @@ request `id`. Pinned to ACP protocol v1 / schema 1.13.0. The schema crate may be
 for conformance tests only.
 Consequences: we maintain about 300 lines of types. We get losslessness and a fold that never panics, and core
 keeps its tiny dependency set.
+
+### 0007: `alacritty_terminal` emulator in a `shepherd-term` crate, run by both host and client (2026-10-29)
+Context: T02 (`docs/spikes/T02-terminal-emulator.md`). All candidates draw real Claude and Codex output the same way.
+alacritty_terminal wins on the edge cases: query replies, synchronized output, reflow, visible input modes, and 33
+crates against about 200. Agents query the terminal at startup and block until it answers, so something next to the PTY
+must answer even when no client is attached. A client attaching to a running session also needs the current screen.
+Decision: a new crate, `shepherd-term`, wraps `alacritty_terminal` (`default-features = false`). It exposes a
+`Screen` with `feed`, `resize`, `take_replies`, `modes` (keyboard, mouse, paste, focus), `snapshot_ansi`
+(a redraw sequence), and read-only cell access. It holds no policy. The host keeps one `Screen` per PTY, writes its
+replies back to the PTY, and sends `snapshot_ansi` to a client on attach, followed by live bytes. The client keeps
+its own `Screen` per session for rendering and input encoding. `shepherd-tui` renders a `Screen` into a ratatui `Buffer`.
+The sync-update timeout comes from the runtime clock, not from a clock read inside the crate.
+Consequences: PTY bytes are parsed twice (host and client), which is cheap. Agents behave correctly with no client
+attached, and reattaching shows the right screen immediately. Known gaps we accept: `❤️`-style emoji are 1 cell
+wide, multi-person emoji are split across cells, and XTVERSION gets no answer.

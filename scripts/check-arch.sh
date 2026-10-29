@@ -8,13 +8,16 @@ cd "$(dirname "$0")/.."
 CORE_ALLOWED="serde serde_json thiserror"
 # External crates shepherd-tui may use beyond core's allowlist.
 TUI_ALLOWED="ratatui crossterm unicode-width"
+# External crates shepherd-term may use.
+TERM_ALLOWED="alacritty_terminal"
 
 # Internal crates each crate may depend on (normal + build deps). Unknown crates are not checked.
 internal_allowed() {
   case "$1" in
-    shepherd-core) echo "" ;;
-    shepherd-tui | shepherd-adapters | shepherd-testkit) echo "shepherd-core" ;;
-    shepherd) echo "shepherd-core shepherd-tui shepherd-adapters" ;;
+    shepherd-core | shepherd-term) echo "" ;;
+    shepherd-tui) echo "shepherd-core shepherd-term" ;;
+    shepherd-adapters | shepherd-testkit) echo "shepherd-core" ;;
+    shepherd) echo "shepherd-core shepherd-term shepherd-tui shepherd-adapters" ;;
     *) return 1 ;;
   esac
 }
@@ -45,6 +48,8 @@ while IFS=$'\t' read -r pkg dep kind; do
       in_list "$dep" "$CORE_ALLOWED" || err "shepherd-core: external dep '$dep' not in CORE_ALLOWED" ;;
     shepherd-tui)
       in_list "$dep" "$CORE_ALLOWED $TUI_ALLOWED" || err "shepherd-tui: external dep '$dep' not in TUI_ALLOWED" ;;
+    shepherd-term)
+      in_list "$dep" "$TERM_ALLOWED" || err "shepherd-term: external dep '$dep' not in TERM_ALLOWED" ;;
   esac
 done < <(jq -r '.packages[] | .name as $p | .dependencies[] | [$p, .name, (.kind // "normal")] | @tsv' <<<"$meta")
 
