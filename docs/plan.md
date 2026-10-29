@@ -617,6 +617,22 @@ acceptance:
 - Snapshot of the sidebar with attention markers.
 scope: crates/core, crates/tui
 
+### T18b: Quiet-output idle fallback
+status: todo
+depends: T11, T15
+touches: core::session (or core::agents), core::host, shepherd::host
+goal: A session interrupted with Esc (no `Stop` hook fires) stops showing Working within seconds, not minutes.
+acceptance:
+- Pure policy in core. When a session's Activity is Working and its PTY has produced no output for a quiet period (config
+  `[agents.<name>] idle_after_quiet_ms`, default about 3000; agent TUIs animate a spinner while working, so silence means
+  waiting), the host appends `_shepherd/agent/idle { inferred: "quiet" }`. Time comes from runtime events: PTY output
+  carries `at`, plus a `Tick { at }` deadline the runtime schedules. No clocks in core.
+- Output after the inferred idle doesn't flip back to Working by itself. Only real turn signals (a prompt or a tool call) do,
+  per T05's rules.
+- Tests: core table tests (quiet then idle, output resets the timer, already Idle means no duplicate, NeedsPermission is not
+  overridden by quiet, because waiting for permission is legitimately quiet) and a scenario with the fake PTY.
+scope: crates/core, crates/shepherd
+
 ### T19: Codex integration
 status: todo
 depends: T14, T16, T17
