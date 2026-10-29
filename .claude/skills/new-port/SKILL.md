@@ -38,12 +38,12 @@ where adapters break.
 - Stateful and in-memory. It behaves like the real thing, it doesn't just return canned answers.
 - It can inject failures, e.g. `fake.fail_next(WorktreeError::BranchExists)`.
 - It records calls only if tests need them, and prefers exposing resulting state.
-- Its test is one line: `#[test] fn fake_satisfies_contract() { contracts::worktrees::suite(FakeWorktrees::harness) }`.
+- Its test is one line: `worktrees_contract!(FakeWorktrees::harness);` (expands to one `#[test]` per case).
 
 ## 4. Real adapter (`crates/adapters/src/<name>.rs`)
 - Thin. Translate the domain call to IO and the IO result back to domain types. No policy.
 - Its test runs the **same** suite against real resources in a tempdir:
-  `#[test] fn git_worktrees_satisfy_contract() { contracts::worktrees::suite(GitWorktrees::temp_harness) }`.
+  `worktrees_contract!(GitWorktrees::temp_harness);`.
 - **Run the adapter's contract under parallel load** before you ship, e.g.
   `for i in $(seq 48); do target/debug/deps/<test-bin> & done; wait`, repeated a few times, and report the pass rate.
   T08's adapter passed 40 out of 40 runs one at a time and failed 4% of runs under load, losing output.
