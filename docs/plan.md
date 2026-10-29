@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-1 findings | `task/T11-host-runtime` @ bd1ce34 | 1 | Fix: paced catch-up per decision 0013 (new `Link::queued_bytes`, test with more than `MAX_QUEUED` of history); service deadlines every iteration (`yes` starvation); startup errors also to host.log; startup messages name paths. PM-accepted: ack after catch-up completes; the rest of round 0 stands |
-| T12 client core + runtime | builder fixing round-1 findings | `task/T12-client` @ ca6a254 | 1 | Fix: dup-filter test (Subscribe.from must not go backwards); select-when-listed test; connect bound reset only on hello OK, plus a hello timeout; launcher closes fds above 2 and resets signals; generation-tag test; launched-reset test. PM-accepted: request-id counter in Client; `Start` and `ConnectFailed` events; double-fork launcher |
+| T12 client core + runtime | re-review (round 2) | `task/T12-client` @ 07ebee7 | 1 | Round-1 fixes in (mutation-verified). PM-accepted: request-id counter in Client; `Start`/`ConnectFailed` events; double-fork launcher; fd sweep capped at 65,536; post-hello drop reconnects immediately (F13) |
 
 Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
 
@@ -217,6 +217,16 @@ goal: `SessionState::turns()` counts prompts the user actually sent.
 acceptance:
 - Prompts marked `_meta.shepherd.continuation: true` (T15's continuations of a blocked Stop) open a turn for activity purposes,
   but don't increment `turns()` or change `last_prompt()`. There's a table test.
+scope: crates/core
+
+### F13: Client reconnect backoff
+status: todo
+depends: T12
+touches: core::client
+goal: A host that accepts, completes hello, then drops right away can't make the client reconnect in a tight loop.
+acceptance:
+- Consecutive outages that each end within a short window back off exponentially (capped). A stable connection resets the
+  backoff. Driven by `Tick`, no clocks. Core table tests.
 scope: crates/core
 
 ## Out of scope for the initial feature set
