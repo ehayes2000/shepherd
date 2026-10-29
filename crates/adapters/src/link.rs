@@ -1,0 +1,765 @@
+//! `Link` over a unix socket. The host binds with [`UnixListenLink::bind`] (normally `~/.shepherd/host.sock`), and
+//! clients connect with [`UnixConnectLink::connect`].
+//!
+//! Each conn has a reader thread and a writer thread. The writer drains an unbounded channel, while `send`
+//! counts the bytes waiting in it and disconnects the conn as a slow consumer once that passes `MAX_QUEUED`, so
+//! `send` never blocks. The reader splits the stream with `wire::Decoder` and is the only thread that emits the
+//! conn's `Line`s and its `Disconnected`, so `Disconnected` is sent once, after every `Line`. Whoever decides a
+//! conn is over (close, slow consumer, bad line, write error) records the reason, first one wins, and shuts the
+//! socket down, which ends the reader.
+//!
+//! Anyone who can connect to the socket can drive the user's agents, so it is private: its directory must not be
+//! accessible to group or others (it is created `0700` if missing, and an existing one that is open to others is
+//! refused with [`UnixLinkError::InsecureDir`], never chmodded), and the socket itself is set to `0600` right after
+//! it is bound.
+
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Write};
+use std::net::Shutdown;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use shepherd_core::ports::{
+    ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
+};
+use shepherd_core::wire::Decoder;
+
+/// The longest socket path the OS accepts, in bytes (`sizeof(sun_path)` minus the trailing NUL).
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+pub const MAX_SOCKET_PATH: usize = 103;
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+pub const MAX_SOCKET_PATH: usize = 107;
+
+/// How long a blocked write waits before checking whether its conn was closed.
+const WRITE_TICK: Duration = Duration::from_millis(50);
+/// How long `close` keeps trying to deliver queued lines to a peer that isn't reading.
+const CLOSE_FLUSH: Duration = Duration::from_secs(2);
+/// The writer batches queued lines into writes of about this size.
+const WRITE_BATCH: usize = 64 * 1024;
+const READ_BUF: usize = 64 * 1024;
+/// How long the accept thread waits before retrying after `accept` fails (e.g. out of fds), so it doesn't spin.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Binding or connecting failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UnixLinkError {
+    /// A live host is already listening on the path.
+    #[error("a host is already listening on {0}")]
+    AddrInUse(PathBuf),
+    #[error("socket path is {len} bytes, the limit is {max}: {path}")]
+    PathTooLong {
+        path: PathBuf,
+        len: usize,
+        max: usize,
+    },
+    /// The socket's directory exists and group or others have some access to it, so they could reach the socket.
+    /// The directory is left as it is: fix its permissions (`chmod 700`) or pick another path.
+    #[error(
+        "{dir} has mode {mode:o}; the socket directory must not be accessible to group or others"
+    )]
+    InsecureDir { dir: PathBuf, mode: u32 },
+    /// The path exists and is not a socket. It is never removed.
+    #[error("{0} exists and is not a socket")]
+    NotASocket(PathBuf),
+    #[error("{0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for UnixLinkError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e.to_string())
+    }
+}
+
+/// The host end: accepts clients and emits `Connected` for each.
+pub struct UnixListenLink {
+    conns: Conns,
+    path: PathBuf,
+    /// The socket file's `(dev, ino)`, so `Drop` removes only the file this link created.
+    file_id: (u64, u64),
+    /// Shut down by `Drop` to wake the accept thread.
+    wake: UnixStream,
+    accept: Option<JoinHandle<()>>,
+}
+
+impl UnixListenLink {
+    /// Listens on `path`, creating its directory (`0700`) if missing. A socket file nobody is listening on (left by
+    /// a host that died) is replaced. A live one is [`UnixLinkError::AddrInUse`] and is left alone. An existing
+    /// directory that group or others can access is [`UnixLinkError::InsecureDir`].
+    pub fn bind(
+        path: impl AsRef<Path>,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> Result<Self, UnixLinkError> {
+        let path = path.as_ref().to_path_buf();
+        check_len(&path)?;
+        ensure_private_dir(&path)?;
+        let listener = match UnixListener::bind(&path) {
+            Err(e) if e.kind() == ErrorKind::AddrInUse => {
+                replace_stale(&path)?;
+                UnixListener::bind(&path)?
+            }
+            other => other?,
+        };
+        let file_id = match make_private(&path, &listener) {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(e.into());
+            }
+        };
+
+        let conns = Conns::default();
+        let (wake, wake_rx) = UnixStream::pair()?;
+        let accept_conns = conns.clone();
+        let accept = thread::Builder::new()
+            .name("link-accept".into())
+            .spawn(move || accept(listener, wake_rx, accept_conns, sink))?;
+        Ok(Self {
+            conns,
+            path,
+            file_id,
+            wake,
+            accept: Some(accept),
+        })
+    }
+}
+
+/// Makes sure the socket's directory is private, creating it `0700` if it doesn't exist.
+fn ensure_private_dir(path: &Path) -> Result<(), UnixLinkError> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    match std::fs::metadata(dir) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(UnixLinkError::InsecureDir {
+                    dir: dir.to_path_buf(),
+                    mode,
+                });
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Sets the freshly bound socket to `0600` and makes the listener non-blocking for the accept loop. Returns the
+/// socket file's identity.
+fn make_private(path: &Path, listener: &UnixListener) -> std::io::Result<(u64, u64)> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+impl Link for UnixListenLink {
+    fn send(&mut self, conn: ConnId, line: &[u8]) -> Result<(), LinkError> {
+        self.conns.send(conn, line)
+    }
+
+    fn close(&mut self, conn: ConnId) -> Result<(), LinkError> {
+        self.conns.close(conn)
+    }
+}
+
+impl Drop for UnixListenLink {
+    fn drop(&mut self) {
+        let _ = self.wake.shutdown(Shutdown::Both);
+        // Once joined, the listener is closed and no conn can be added behind `drop_all`.
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        let ours = std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.file_id);
+        if ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
+        self.conns.drop_all();
+    }
+}
+
+/// The client end: one conn to a host.
+pub struct UnixConnectLink {
+    conns: Conns,
+}
+
+impl UnixConnectLink {
+    pub fn connect(
+        path: impl AsRef<Path>,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> Result<(Self, ConnId), UnixLinkError> {
+        let path = path.as_ref();
+        check_len(path)?;
+        let stream = UnixStream::connect(path)?;
+        let conns = Conns::default();
+        let conn = conns.open(stream, sink, false)?;
+        Ok((Self { conns }, conn))
+    }
+}
+
+impl Link for UnixConnectLink {
+    fn send(&mut self, conn: ConnId, line: &[u8]) -> Result<(), LinkError> {
+        self.conns.send(conn, line)
+    }
+
+    fn close(&mut self, conn: ConnId) -> Result<(), LinkError> {
+        self.conns.close(conn)
+    }
+}
+
+impl Drop for UnixConnectLink {
+    fn drop(&mut self) {
+        self.conns.drop_all();
+    }
+}
+
+fn check_len(path: &Path) -> Result<(), UnixLinkError> {
+    let len = path.as_os_str().len();
+    if len > MAX_SOCKET_PATH {
+        return Err(UnixLinkError::PathTooLong {
+            path: path.to_path_buf(),
+            len,
+            max: MAX_SOCKET_PATH,
+        });
+    }
+    Ok(())
+}
+
+/// Removes the socket at `path` if nothing is listening on it.
+fn replace_stale(path: &Path) -> Result<(), UnixLinkError> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_socket() {
+        return Err(UnixLinkError::NotASocket(path.to_path_buf()));
+    }
+    match UnixStream::connect(path) {
+        Ok(_) => Err(UnixLinkError::AddrInUse(path.to_path_buf())),
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path)?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Accepts clients until `wake` becomes readable (the link was dropped). `listener` is non-blocking.
+fn accept(listener: UnixListener, wake: UnixStream, conns: Conns, sink: Arc<dyn LinkEventSink>) {
+    let mut backoff = false;
+    loop {
+        let woken = if backoff {
+            // After a failed accept, wait for the link to drop or the backoff to pass, not for the listener:
+            // it would still be readable and the loop would spin.
+            poll_readable(&[wake.as_raw_fd()], Some(ACCEPT_BACKOFF))[0]
+        } else {
+            poll_readable(&[wake.as_raw_fd(), listener.as_raw_fd()], None)[0]
+        };
+        if woken {
+            return;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                backoff = false;
+                // Accepted sockets may inherit the listener's non-blocking mode.
+                if stream.set_nonblocking(false).is_ok() {
+                    let _ = conns.open(stream, sink.clone(), true);
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::Interrupted | ErrorKind::ConnectionAborted
+                ) => {}
+            // E.g. out of fds. Only that client is lost; try again after the backoff.
+            Err(_) => backoff = true,
+        }
+    }
+}
+
+/// Waits until one of `fds` is readable (or hung up), or `timeout` passes (`None`: forever). Returns which are.
+fn poll_readable(fds: &[RawFd], timeout: Option<Duration>) -> Vec<bool> {
+    let mut pfds: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let ms = timeout.map_or(-1, |t| {
+        libc::c_int::try_from(t.as_millis()).unwrap_or(libc::c_int::MAX)
+    });
+    let nfds = libc::nfds_t::try_from(pfds.len()).unwrap_or(libc::nfds_t::MAX);
+    // SAFETY: `pfds` is a valid, exclusively borrowed array of `nfds` pollfds for the duration of the call.
+    let ready = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, ms) };
+    if ready <= 0 {
+        // Timed out or interrupted: nothing is ready.
+        return vec![false; fds.len()];
+    }
+    pfds.iter().map(|p| p.revents != 0).collect()
+}
+
+/// Unique across every link in the process, so unique per link too.
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+/// State shared by a conn's caller-facing handle and its two threads.
+struct Shared {
+    /// A clone of the conn's socket, for shutting it down.
+    stream: UnixStream,
+    /// Bytes sent but not yet taken by the writer.
+    queued: AtomicUsize,
+    /// Why the conn ended. Set once, by whoever ended it first.
+    reason: OnceLock<DisconnectReason>,
+    /// When `close` was called. The reader holds this lock while it emits a `Line`, so once `close` has set it
+    /// and returned, no more `Line`s are emitted.
+    closed_at: Mutex<Option<Instant>>,
+}
+
+impl Shared {
+    fn closed_at(&self) -> MutexGuard<'_, Option<Instant>> {
+        self.closed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn end(&self, reason: DisconnectReason) {
+        let _ = self.reason.set(reason);
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+struct Handle {
+    shared: Arc<Shared>,
+    /// Dropping it lets the writer finish what is queued and exit.
+    queue: Sender<Vec<u8>>,
+}
+
+/// The live conns of one link. A conn is removed when it is closed, dropped as a slow consumer, or right before
+/// its `Disconnected` is sent.
+#[derive(Clone, Default)]
+struct Conns(Arc<Mutex<HashMap<ConnId, Handle>>>);
+
+impl Conns {
+    fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Handle>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers `stream` as a new conn and starts its threads. With `announce` (host side), the sink gets
+    /// `Connected` first; a client learns its conn from `connect` instead.
+    fn open(
+        &self,
+        stream: UnixStream,
+        sink: Arc<dyn LinkEventSink>,
+        announce: bool,
+    ) -> std::io::Result<ConnId> {
+        let conn = ConnId::new(NEXT_CONN.fetch_add(1, Ordering::Relaxed));
+        let shared = Arc::new(Shared {
+            stream: stream.try_clone()?,
+            queued: AtomicUsize::new(0),
+            reason: OnceLock::new(),
+            closed_at: Mutex::new(None),
+        });
+        let writer_stream = stream.try_clone()?;
+        // Fails (EINVAL on macOS) only when the peer has already gone. The conn is still registered and announced,
+        // and its reader reports the disconnect right away.
+        let _ = writer_stream.set_write_timeout(Some(WRITE_TICK));
+        let (queue, rx) = mpsc::channel();
+
+        self.lock().insert(
+            conn,
+            Handle {
+                shared: shared.clone(),
+                queue,
+            },
+        );
+        // Sent before the reader starts, so it comes before the conn's first `Line`.
+        if announce {
+            sink.send(LinkEvent::Connected { conn });
+        }
+
+        let writer_shared = shared.clone();
+        let (reader_conns, reader_sink) = (self.clone(), sink.clone());
+        let spawned = thread::Builder::new()
+            .name(format!("link-write-{}", conn.get()))
+            .spawn(move || write_loop(writer_stream, rx, writer_shared))
+            .and_then(|_| {
+                thread::Builder::new()
+                    .name(format!("link-read-{}", conn.get()))
+                    .spawn(move || read_loop(stream, conn, shared, reader_conns, reader_sink))
+            });
+        if let Err(e) = spawned {
+            // No reader to send the `Disconnected` that must follow `Connected`, so send it here. A writer that
+            // did start exits once the handle (and with it the queue) is dropped.
+            if let Some(handle) = self.lock().remove(&conn) {
+                handle.shared.end(DisconnectReason::PeerGone);
+            }
+            if announce {
+                sink.send(LinkEvent::Disconnected {
+                    conn,
+                    reason: DisconnectReason::PeerGone,
+                });
+            }
+            return Err(e);
+        }
+        Ok(conn)
+    }
+
+    fn send(&self, conn: ConnId, line: &[u8]) -> Result<(), LinkError> {
+        let mut conns = self.lock();
+        let handle = conns.get(&conn).ok_or(LinkError::UnknownConn)?;
+        if line.contains(&b'\n') {
+            return Err(LinkError::InvalidLine);
+        }
+        let queued = handle.shared.queued.load(Ordering::SeqCst);
+        if queued > 0 && queued + line.len() > MAX_QUEUED {
+            if let Some(handle) = conns.remove(&conn) {
+                handle.shared.end(DisconnectReason::SlowConsumer);
+            }
+            return Ok(());
+        }
+        let mut framed = Vec::with_capacity(line.len() + 1);
+        framed.extend_from_slice(line);
+        framed.push(b'\n');
+        handle
+            .shared
+            .queued
+            .fetch_add(framed.len(), Ordering::SeqCst);
+        // Fails only once the writer is gone, and then the reader is about to report the disconnect.
+        let _ = handle.queue.send(framed);
+        Ok(())
+    }
+
+    fn close(&self, conn: ConnId) -> Result<(), LinkError> {
+        let handle = self.lock().remove(&conn).ok_or(LinkError::UnknownConn)?;
+        let _ = handle.shared.reason.set(DisconnectReason::Closed);
+        // Waits for a `Line` being emitted right now; none follow.
+        *handle.shared.closed_at() = Some(Instant::now());
+        // Dropping the handle drops the queue's sender: the writer flushes, then shuts the socket down.
+        Ok(())
+    }
+
+    fn drop_all(&self) {
+        for (_, handle) in self.lock().drain() {
+            handle.shared.end(DisconnectReason::Closed);
+        }
+    }
+}
+
+fn read_loop(
+    mut stream: UnixStream,
+    conn: ConnId,
+    shared: Arc<Shared>,
+    conns: Conns,
+    sink: Arc<dyn LinkEventSink>,
+) {
+    let mut decoder = Decoder::new();
+    let mut buf = vec![0; READ_BUF];
+    'read: loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        decoder.push(&buf[..n]);
+        while let Some(line) = decoder.next_line() {
+            match line {
+                Ok(line) => {
+                    let closed = shared.closed_at();
+                    if closed.is_none() {
+                        sink.send(LinkEvent::Line { conn, line });
+                    }
+                }
+                Err(too_long) => {
+                    shared.end(DisconnectReason::Protocol(too_long.to_string()));
+                    break 'read;
+                }
+            }
+        }
+    }
+    conns.lock().remove(&conn);
+    let reason = shared
+        .reason
+        .get()
+        .cloned()
+        .unwrap_or(DisconnectReason::PeerGone);
+    sink.send(LinkEvent::Disconnected { conn, reason });
+}
+
+fn write_loop(mut stream: UnixStream, queue: Receiver<Vec<u8>>, shared: Arc<Shared>) {
+    let mut batch = Vec::with_capacity(WRITE_BATCH);
+    while let Ok(first) = queue.recv() {
+        take(&shared, &first);
+        batch.clear();
+        batch.extend_from_slice(&first);
+        while batch.len() < WRITE_BATCH {
+            match queue.try_recv() {
+                Ok(next) => {
+                    take(&shared, &next);
+                    batch.extend_from_slice(&next);
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        if write_all(&mut stream, &batch, &shared).is_err() {
+            shared.end(DisconnectReason::PeerGone);
+            return;
+        }
+    }
+    // The handle was dropped: closed, slow consumer, or the link went away.
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+fn take(shared: &Shared, line: &[u8]) {
+    shared.queued.fetch_sub(line.len(), Ordering::SeqCst);
+}
+
+/// Like `Write::write_all`, but gives up once a close has waited `CLOSE_FLUSH` for a peer that isn't reading.
+fn write_all(stream: &mut UnixStream, mut bytes: &[u8], shared: &Shared) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                if shared
+                    .closed_at()
+                    .is_some_and(|at| at.elapsed() > CLOSE_FLUSH)
+                {
+                    return Err(e);
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shepherd_testkit::contracts::link::{Events, LinkFixture};
+    use tempfile::TempDir;
+
+    /// A private (`0700`) tempdir under `/tmp`, so socket paths stay well under the `sun_path` limit (macOS's
+    /// `$TMPDIR` is long).
+    fn short_tempdir() -> TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new()
+            .prefix("shl")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    struct UnixFixture {
+        dir: TempDir,
+    }
+
+    impl UnixFixture {
+        fn new() -> Self {
+            Self {
+                dir: short_tempdir(),
+            }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.dir.path().join("host.sock")
+        }
+    }
+
+    impl LinkFixture for UnixFixture {
+        type Host = UnixListenLink;
+        type Client = UnixConnectLink;
+        /// A raw socket: never read, and dropping it closes the fd with no shutdown.
+        type Stalled = UnixStream;
+
+        fn listen(&mut self, sink: Arc<dyn LinkEventSink>) -> UnixListenLink {
+            UnixListenLink::bind(self.path(), sink).unwrap()
+        }
+
+        fn connect(&mut self, sink: Arc<dyn LinkEventSink>) -> (UnixConnectLink, ConnId) {
+            UnixConnectLink::connect(self.path(), sink).unwrap()
+        }
+
+        fn stalled_peer(&mut self) -> UnixStream {
+            UnixStream::connect(self.path()).unwrap()
+        }
+    }
+
+    mod contract {
+        use super::UnixFixture;
+
+        shepherd_testkit::link_contract!(UnixFixture::new());
+    }
+
+    fn bind(path: &Path) -> Result<(UnixListenLink, Events), UnixLinkError> {
+        let (sink, events) = Events::channel();
+        UnixListenLink::bind(path, sink).map(|link| (link, events))
+    }
+
+    /// Waits until nothing holds the listener at `path` open. macOS has no `SOCK_CLOEXEC`, so a PTY forked by a
+    /// test running in parallel can briefly hold a copy of a dropped listener's fd, and connects still succeed.
+    fn wait_until_refused(path: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match UnixStream::connect(path) {
+                Err(e) if e.kind() == ErrorKind::ConnectionRefused => return,
+                _ if std::time::Instant::now() > deadline => {
+                    panic!("{} still accepts connections", path.display())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Exact modes, so a missing chmod or `DirBuilder::mode` shows up under the ordinary umask too (the socket
+    /// would be 0755 or so, the dir 0755).
+    #[test]
+    fn socket_is_0600_and_created_dir_is_0700() {
+        let dir = short_tempdir();
+        let parent = dir.path().join("shepherd");
+        let path = parent.join("host.sock");
+
+        let (_host, _events) = bind(&path).unwrap();
+
+        assert_eq!(mode(&parent), 0o700, "dir mode {:o}", mode(&parent));
+        assert_eq!(mode(&path), 0o600, "socket mode {:o}", mode(&path));
+    }
+
+    #[test]
+    fn existing_dir_open_to_others_is_insecure_dir_and_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = short_tempdir();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("host.sock");
+
+        assert_eq!(
+            bind(&path).err(),
+            Some(UnixLinkError::InsecureDir {
+                dir: dir.path().to_path_buf(),
+                mode: 0o755
+            })
+        );
+        assert_eq!(mode(dir.path()), 0o755, "the user's dir is not chmodded");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn dropping_the_host_stops_listening_even_if_its_socket_file_was_deleted() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let alias = dir.path().join("alias.sock");
+        let (host, _events) = bind(&path).unwrap();
+        // The alias reaches the same listener after the original name is gone.
+        std::fs::hard_link(&path, &alias).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        drop(host);
+        // Not a single connect: a PTY forked by a parallel test may hold a copy of the fd for a moment.
+        wait_until_refused(&alias);
+    }
+
+    #[test]
+    fn stale_socket_file_is_replaced() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        // A listener that goes away without removing its file, like a host that crashed.
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        wait_until_refused(&path);
+
+        let (_host, events) = bind(&path).unwrap();
+        let (sink, _client_events) = Events::channel();
+        let _client = UnixConnectLink::connect(&path, sink).unwrap();
+        events.wait_for(
+            |e| matches!(e, LinkEvent::Connected { .. }),
+            Duration::from_secs(10),
+        );
+    }
+
+    #[test]
+    fn live_socket_is_addr_in_use_and_left_alone() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let (_first, first_events) = bind(&path).unwrap();
+
+        assert_eq!(
+            bind(&path).err(),
+            Some(UnixLinkError::AddrInUse(path.clone()))
+        );
+        // The first host still gets its clients.
+        let (sink, _client_events) = Events::channel();
+        let _client = UnixConnectLink::connect(&path, sink).unwrap();
+        first_events.wait_for(
+            |e| matches!(e, LinkEvent::Connected { .. }),
+            Duration::from_secs(10),
+        );
+    }
+
+    #[test]
+    fn existing_file_that_is_not_a_socket_is_never_removed() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        std::fs::write(&path, "precious").unwrap();
+
+        assert_eq!(
+            bind(&path).err(),
+            Some(UnixLinkError::NotASocket(path.clone()))
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "precious");
+    }
+
+    #[test]
+    fn socket_path_over_the_os_limit_is_path_too_long() {
+        let dir = short_tempdir();
+        let path = dir.path().join("x".repeat(MAX_SOCKET_PATH));
+        assert!(matches!(
+            bind(&path).err(),
+            Some(UnixLinkError::PathTooLong {
+                max: MAX_SOCKET_PATH,
+                ..
+            })
+        ));
+        let (sink, _events) = Events::channel();
+        assert!(matches!(
+            UnixConnectLink::connect(&path, sink).err(),
+            Some(UnixLinkError::PathTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn dropping_the_host_removes_its_socket_file() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let (host, _events) = bind(&path).unwrap();
+        drop(host);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn connecting_with_no_host_is_an_error() {
+        let dir = short_tempdir();
+        let (sink, _events) = Events::channel();
+        assert!(matches!(
+            UnixConnectLink::connect(dir.path().join("host.sock"), sink).err(),
+            Some(UnixLinkError::Io(_))
+        ));
+    }
+}

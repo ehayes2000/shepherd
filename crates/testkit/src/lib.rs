@@ -239,6 +239,7 @@ pub mod builders {
 pub mod contracts {
     pub mod config;
     pub mod event_log;
+    pub mod link;
     pub mod pty;
     pub mod worktrees;
 }
@@ -247,6 +248,7 @@ pub mod contracts {
 pub mod fakes {
     pub mod config;
     pub mod event_log;
+    pub mod link;
     pub mod pty;
     pub mod worktrees;
 }
