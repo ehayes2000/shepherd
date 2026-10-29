@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-1 findings | `task/T11-host-runtime` @ bd1ce34 | 1 | Fix: paced catch-up per decision 0013 (new `Link::queued_bytes`, test with more than `MAX_QUEUED` of history); service deadlines every iteration (`yes` starvation); startup errors also to host.log; startup messages name paths. PM-accepted: ack after catch-up completes; the rest of round 0 stands |
-| T12 client core + runtime | re-review (round 2) | `task/T12-client` @ 07ebee7 | 1 | Round-1 fixes in (mutation-verified). PM-accepted: request-id counter in Client; `Start`/`ConnectFailed` events; double-fork launcher; fd sweep capped at 65,536; post-hello drop reconnects immediately (F13) |
+| T12 client core + runtime | builder fixing round-2 findings | `task/T12-client` @ 07ebee7 | 2 | Fix: flaky `ask_alive` test helper (ESRCH after a report); monotonic `at` in the client runtime. PM-accepted: request-id counter; `Start`/`ConnectFailed`; double-fork launcher; fd sweep cap 65,536; F13 for post-hello reconnect backoff |
 
 Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
 
