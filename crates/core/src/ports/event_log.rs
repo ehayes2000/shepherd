@@ -9,6 +9,7 @@
 //! what such a loss leaves at the end of a log when they open it.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::acpp::{Envelope, FrameDraft, Seq, Stamp};
 use crate::ids::SessionId;
@@ -99,6 +100,10 @@ pub enum LogError {
         expected: u64,
         found: u64,
     },
+    /// A store directory or file is accessible to group or others (decision 0010). It is never chmodded: the
+    /// user fixes it.
+    #[error("{path} has mode {mode:o}; the log store must not be accessible to group or others")]
+    InsecurePermissions { path: PathBuf, mode: u32 },
     #[error("log io: {0}")]
     Io(String),
 }
