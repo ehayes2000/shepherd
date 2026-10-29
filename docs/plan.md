@@ -86,7 +86,7 @@ acceptance:
 - Compare `alacritty_terminal`, `vt100`, and `wezterm-term` (or its maintained fork) on: correctness with Claude
   Code and Codex TUIs (alt screen, 24-bit color, wide chars, cursor styles, bracketed paste, mouse modes),
   resize behavior, API fit for drawing into a ratatui `Buffer`, maintenance, and dependency weight.
-- Include a recorded byte fixture of a real `claude` session (stored under `crates/tui/tests/fixtures/`) to use for
+- Include a recorded byte fixture of a real `claude` session (stored under `crates/term/tests/fixtures/`) to use for
   the comparison. Note how to re-record it.
 - Give a recommendation and the `TUI_ALLOWED` change it implies.
 out of scope: integrating it.

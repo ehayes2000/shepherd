@@ -37,7 +37,7 @@ and shape, alt screen, bracketed paste, mouse mode, and title. It ran four check
 The harness also drew every snapshot into a ratatui `Buffer` and read it back. That gave 0 mismatched rows on
 both fixtures for every candidate, including the CJK and emoji lines.
 
-## Fixtures (`crates/tui/tests/fixtures/`)
+## Fixtures (`crates/term/tests/fixtures/`)
 
 | file | size | what's in it |
 |---|---|---|
@@ -66,12 +66,12 @@ order, so start at the size of segment 0.
 
 ### How to re-record
 
-The recorder is `crates/tui/tests/fixtures/record/record.py`, a small Python pty driver. Its scripts are
+The recorder is `crates/term/tests/fixtures/record/record.py`, a small Python pty driver. Its scripts are
 `claude.json` and `codex.json` in the same directory.
 
 ```
 mkdir -p /tmp/shepherd-demo                     # neutral cwd; the path appears in the output
-cd crates/tui/tests/fixtures/record
+cd crates/term/tests/fixtures/record
 python3 record.py claude.json                   # writes ./claude.<n>.bin per segment, plus ./claude.log
 python3 record.py codex.json
 ```
