@@ -380,7 +380,7 @@ notes: The status glyph shapes and colors are decided in this task and recorded 
 ## M2 Agents
 
 ### T14: `Config` port and agent profiles
-status: in-progress
+status: done (d8173f4)
 depends: T00
 touches: ports::config, core::config, testkit, adapters::config
 goal: One config file with global defaults and per-agent profiles.
