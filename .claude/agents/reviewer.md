@@ -32,7 +32,9 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
    building JSON with `format!`). This is blocking even if the spec seemed to require it. Flag it so the PM fixes the spec.
 7. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
    abstractions.
-8. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
+8. **Claims match tests.** Every guarantee in docs, comments or the commit message ("never", "always", "refuses") is
+   proven by a test. An untested guarantee is a finding. Try to break it.
+9. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
    For real adapters, run their contract tests under parallel load (about 24 copies of the whole test binary at once;
    macOS caps ptys at 511) and
    hunt for races, lost output, leaked threads, fds and processes, and signals that don't actually kill.

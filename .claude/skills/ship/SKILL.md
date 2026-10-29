@@ -12,6 +12,8 @@ description: Finish a shepherd builder task - run the gate, self-review the diff
    - no stray debug output, `dbg!`, commented-out code, or TODOs without a plan.md follow-up
    - no files outside the task's scope
    - any changed existing test or snapshot is justified
+   - every guarantee your docs or report claim ("never follows symlinks", "no Line after close") has a test that would fail
+     without it. If you can't test a claim, don't make it.
 4. Commit on `task/<id>-<slug>`. Use a conventional, one-line message (`feat:`, `fix:`, `test:`, `refactor:`,
    `chore:`). If you changed an existing test's assertion or a snapshot, add a body line saying why. Prefer one
    commit per task. Use several only if they're each meaningful on their own.
