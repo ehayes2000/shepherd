@@ -509,7 +509,7 @@ scope: crates/core, crates/shepherd, crates/tui
 ## M3 Workspaces & worktrees
 
 ### T20: `Worktrees` port
-status: todo
+status: in-progress
 depends: T00
 touches: ports::worktrees, testkit, adapters::worktrees
 goal: Managed git worktrees, expressed in domain terms.
@@ -522,6 +522,14 @@ acceptance:
 - If fetch fails while offline, it falls back to the local `<default>` and the result reports that.
 - Fake plus git CLI adapter. Adapter contract tests use a tempdir bare "origin" and a clone.
 scope: core::ports, testkit, adapters
+notes: Use the `git` CLI, not a git library. Worktree support in gix and git2 is incomplete, and `git` is the reference
+implementation the user's hooks expect. Run it with an explicit `-C <dir>` and parse only `--porcelain` or plumbing
+output (`worktree list --porcelain`, `status --porcelain=v2 --branch`, `rev-parse`, `for-each-ref`). Never parse
+human-readable output. Tests must never read or write the user's git config: set `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM=1` and a temp `HOME`, plus a fixed author/committer identity. The managed root (`~/.shepherd/worktrees`)
+is a constructor parameter, and tests use a tempdir. The trait is sync, and git calls are bounded by a timeout (fetch
+especially), returning a typed error. Path safety: `remove` refuses any path outside the managed root, tested with
+`..` escapes and symlinks.
 
 ### T21: Workspaces
 status: todo
