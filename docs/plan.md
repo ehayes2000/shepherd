@@ -127,7 +127,7 @@ acceptance:
 scope: crates/adapters, crates/core (docs only)
 
 ### F09: Event log files and dirs are private
-status: in-progress
+status: done (a15dc56)
 depends: T04
 touches: adapters::event_log
 goal: Logs that hold prompts and tool output can't be read by other users (decision 0010).
@@ -136,6 +136,25 @@ acceptance:
   It returns a typed error if an existing root is accessible to group or others (never chmods it). Mirror
   `UnixLinkError::InsecureDir`.
 - Adapter tests under a permissive umask. The test tempdir helpers chmod their dirs to 0700.
+scope: crates/adapters
+
+### F10: One shared private-filesystem helper for adapters
+status: in-progress
+depends: F09, T10
+touches: adapters::private_fs (new), adapters::event_log, adapters::link
+goal: Every adapter under `~/.shepherd` follows the same race-free private-permission rules (decision 0010). T11 uses it to
+create `~/.shepherd`.
+acceptance:
+- A new `crates/adapters/src/private_fs.rs` provides `ensure_private_dir(path)` and `create_or_open_private_file(path)` (or
+  similar), used by both `event_log` and `link`. The duplicated helpers are deleted.
+- No time-of-check/time-of-use gap in directory creation. Missing parents are created recursively, and the final part with a
+  plain `create_dir`. `AlreadyExists` means re-check it. The exact mode is applied only to a directory this call created, through
+  an fd opened with `O_DIRECTORY|O_NOFOLLOW` (or after a `symlink_metadata` check that refuses symlinks). An existing
+  directory that is a symlink, or is open to group or others, is a typed error and is never chmodded.
+- Link's existing behavior is preserved (`InsecureDir`, socket 0600). A directory created by link is now chmodded exactly 0700,
+  the same as event_log.
+- Tests: a symlink planted at the final part of the path is refused, not followed or chmodded, and the existing
+  permission tests for both adapters still pass unchanged. Also document the "parents created under umask 277 are 0500" note.
 scope: crates/adapters
 
 ## Out of scope for the initial feature set
@@ -387,11 +406,11 @@ the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
 status: todo
-depends: T04, T06, T08, T09, T10, F06, F09
+depends: T04, T06, T08, T09, T10, F06, F09, F10
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
-- Startup creates or validates `~/.shepherd` as 0700 (decision 0010) before anything else, with a typed, user-facing error
+- Startup creates or validates `~/.shepherd` as 0700 (decision 0010) with `adapters::private_fs`, before anything else, with a typed, user-facing error
   if its permissions are too open.
 - Startup order: open the `EventLog` first, which takes its exclusive root lock, and only then bind the host socket. The lock
   makes "a second host" fail cleanly before it can treat the live socket as stale and replace it.
