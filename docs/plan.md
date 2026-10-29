@@ -126,6 +126,18 @@ acceptance:
 - If cleanup itself fails, the error says so, and `Worktrees::create` docs describe it.
 scope: crates/adapters, crates/core (docs only)
 
+### F09: Event log files and dirs are private
+status: todo (before T11 merges)
+depends: T04
+touches: adapters::event_log
+goal: Logs that hold prompts and tool output can't be read by other users (decision 0010).
+acceptance:
+- `JsonlEventLog::open` creates its root and `sessions/` as 0700, and log files and the lock file as 0600, regardless of umask.
+  It returns a typed error if an existing root is accessible to group or others (never chmods it). Mirror
+  `UnixLinkError::InsecureDir`.
+- Adapter tests under a permissive umask. The test tempdir helpers chmod their dirs to 0700.
+scope: crates/adapters
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
@@ -379,6 +391,8 @@ depends: T04, T06, T08, T09, T10, F06
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
+- Startup creates or validates `~/.shepherd` as 0700 (decision 0010) before anything else, with a typed, user-facing error
+  if its permissions are too open.
 - Startup order: open the `EventLog` first, which takes its exclusive root lock, and only then bind the host socket. The lock
   makes "a second host" fail cleanly before it can treat the live socket as stale and replace it.
 - On start, it folds every log from `EventLog` to rebuild state. Sessions whose PTY no longer exists become Exited

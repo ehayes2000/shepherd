@@ -190,3 +190,11 @@ newlines. Any complete line that doesn't parse is `Corrupt` and is never silentl
 enforced with an exclusive file lock.
 Consequences: a power cut may lose the newest events and need recovery, but it never silently rewrites history.
 Revisit this (fsync per batch) if acks to remote peers start depending on durability (M4).
+
+### 0010: `~/.shepherd` is private (0700) (2026-10-29)
+Context: T10 review. The host socket lets anyone who can connect drive your agents, and the ACP++ logs hold prompts, tool
+inputs and outputs.
+Decision: the host runtime creates `~/.shepherd` with mode 0700 before opening anything, and refuses to start if it exists
+with group or other permissions (it reports the fix, and never chmods it silently). Adapters that create directories under
+it use 0700, and files use 0600. The socket adapter enforces this for its own dir (`InsecureDir`).
+Consequences: one clear startup error for a misconfigured home dir. No other user on the machine can read the logs or reach the socket.
