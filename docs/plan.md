@@ -54,7 +54,7 @@ acceptance:
 scope: crates/testkit
 
 ### F03: Typed frame builders in acpp
-status: todo
+status: in-progress
 depends: T06
 touches: core::acpp
 goal: Producers (host, hook translators) build frames from typed values instead of hand-written JSON.
@@ -176,7 +176,7 @@ acceptance:
 scope: crates/adapters
 
 ### F12: Continuation prompts don't count as user turns
-status: todo
+status: in-progress
 depends: T15
 touches: core::session
 goal: `SessionState::turns()` counts prompts the user actually sent.
