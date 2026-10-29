@@ -30,6 +30,8 @@ and no edits to `~/.claude*`, `~/.codex`, shell rc files or global git config. I
 (e.g. to record fixtures), isolate it with a temp `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, turn off auto-update,
 and never send keystrokes to update or trust dialogs. If you can't avoid a side effect, stop and ask the PM first.
 Report any side effect that happened anyway.
+Never kill processes by pattern (`pkill -f`, `killall`): test binaries have the same name in every worktree, so a
+pattern kills other agents' work. Kill only pids you started and recorded.
 
 ## Stop and report instead of improvising if
 - the task seems to need breaking an architecture rule or editing `scripts/check-arch.sh` allowlists

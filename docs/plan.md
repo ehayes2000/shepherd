@@ -24,6 +24,7 @@ dependencies are done.
 | `Pty` | host | T08 | portable-pty |
 | `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
+| `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid) |
 | `Worktrees` | host | T20 | git CLI |
 | `Commands` (run hook scripts) | host | T23 | tokio::process |
 | `Forge` | host | T27 | `gh` CLI |
