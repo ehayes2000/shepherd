@@ -422,7 +422,7 @@ a stale socket file, and a live socket that is already bound (`AddrInUse`, never
 the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
-status: todo
+status: in-progress
 depends: T04, T06, T08, T09, T10, F06, F09, F10
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
@@ -449,6 +449,36 @@ acceptance:
   restarts and the client sees the same session list.
 - Replay equality: after the scenario, a fresh host built from the fake log has the same state as the live one.
 scope: crates/shepherd
+notes (PM design, binding):
+- Decision 0011: one runtime thread looping over an unbounded channel of `RuntimeEvent`s (Pty events, Link events, deadline
+  expiry, shutdown signal). For each event: decode, call `Host::handle` (and `Host::apply` after each `Append`), then execute
+  the commands in order. Follow the runtime contract documented on `Host` exactly (seal-append-apply, spawn failure becomes
+  `PtyExited{code:None}`, a failed Append aborts the batch and replies Internal).
+- Ids and time: a small `Env` trait in the shepherd crate (not a core port; core never calls it) with `now() -> Timestamp`,
+  `new_session_id() -> SessionId` (`s_<lowercase ulid>`), and `new_entry_id() -> EntryId`. The real impl uses `jiff` and `ulid`
+  (both allowed in the shepherd crate). The scenario impl is deterministic. `MachineId` is a constant `local` until T29.
+- Wire: decode each client line with `core::wire`. Map `ClientRequest`s to `HostEvent`s with a `ReplyTo` token that maps back to
+  `(ConnId, RequestId)`. Notifications (input, resize) carry no reply. `hello` is answered by `wire::negotiate`. Malformed
+  lines follow `RequestError::into_response` (answer or stay silent).
+- Subscriptions are per connection: a host-log `from` seq plus a session-log `from` per session. Handle a subscribe in one loop
+  iteration: `EventLog::read(log, from)` catch-up, then register for live fan-out (no gap, no duplicate, by construction).
+  Output subscription for a session sends `snapshot_ansi()` first, then live bytes.
+- Screens: one `shepherd_term::Screen` per live PTY, fed every Output event. After each feed, write `take_replies()` back to the
+  PTY. Service the sync-update timeout as a deadline (`sync_hold()` → `expire_sync(id)`), with no sleeps. Resize the Screen
+  on ResizePty.
+- New sessions: the command comes from `Config::resolve(raw, login_shell)` (the `shell` profile, with `$SHELL` read by the runtime),
+  cwd is `$HOME`, and the initial size is 80x24 until the client sends a resize.
+- Startup: PTYs never survive a host restart, so every session that is open and not exited after replay gets
+  `PtyExited{code: None}` fed through `Host::handle` (which appends `agent/exited`).
+- Shutdown on SIGTERM/SIGINT (`signal-hook` is allowed): kill PTYs, let their exits append, close links, drop the EventLog
+  (releasing the lock). There's a scenario test using a fake shutdown event.
+- Logging: no printing (clippy denies it). Add `tracing` plus a file writer to `~/.shepherd/host.log` (0600 via `private_fs`).
+  Errors that aren't sent to a client go there.
+- `main.rs`: `shepherd host` runs the host runtime. Keep the edit minimal (one match arm), because T12 is adding the client
+  arm concurrently.
+- Scenario tests in `crates/shepherd/tests/` use FakePty, FakeEventLog, FakeNetwork, FakeConfigSource and a deterministic `Env`.
+  Put the reusable harness (build a host runtime on fakes, drive a fake client conn, step the loop until idle) in
+  `crates/shepherd/tests/support/` or testkit, so T12, T13 and M2 reuse it.
 
 ### T12: Client core + runtime
 status: in-progress

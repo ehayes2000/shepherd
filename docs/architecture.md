@@ -198,3 +198,13 @@ Decision: the host runtime creates `~/.shepherd` with mode 0700 before opening a
 with group or other permissions (it reports the fix, and never chmods it silently). Adapters that create directories under
 it use 0700, and files use 0600. The socket adapter enforces this for its own dir (`InsecureDir`).
 Consequences: one clear startup error for a misconfigured home dir. No other user on the machine can read the logs or reach the socket.
+
+### 0011: Runtimes are a single-threaded event loop over channels, not tokio (2026-10-29)
+Context: decision 0005 assumed async. In practice every port (Pty, EventLog, Link, Worktrees, Config, HostLauncher) came out
+synchronous, with background threads pushing events into a sink.
+Decision: each runtime (host, client) is one thread looping over a single unbounded channel of runtime events (port
+events, timer deadlines, signals). It calls the pure core and executes the resulting commands through the ports, in order.
+Deadlines (the sync-update timeout, connect retries, polling) are computed from state and serviced with `recv_timeout`,
+with no sleeps. No tokio for M1. Revisit at M4 if iroh needs it, by putting iroh behind the `Link` port on its own runtime thread.
+Consequences: simple, deterministic ordering (a subscribe and its catch-up read happen in one loop iteration, so there's no
+gap and no duplicate). Supersedes 0005 for M1.
