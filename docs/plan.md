@@ -559,7 +559,7 @@ acceptance:
 scope: core, testkit, adapters
 
 ### T15: Claude Code hook translation
-status: in-progress
+status: done (7eb7375)
 depends: T03, T05
 touches: core::agents::claude
 goal: Pure translation of Claude Code hook payloads into ACP++ FrameDrafts.
@@ -597,6 +597,8 @@ acceptance:
   payload to the host over the socket. It exits 0 quickly (target < 50ms) and never blocks the agent. If the host
   is unreachable it exits 0 silently.
 - The host translates the payload with the agent's translator (T15 or T19), keeping per-session translation state, and appends.
+  `ClaudeTranslation::new(session, id_seed)` must get a seed unique within that session's log (e.g. the log's current last
+  seq plus the host start's entry id), or restore persisted state. A test shows ids don't collide across a host restart.
 - Scenario: a fake agent process in a PTY invokes the hook path, and the session's Activity changes.
 scope: crates/shepherd, crates/core
 
