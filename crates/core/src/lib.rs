@@ -2,5 +2,6 @@
 //!
 //! Everything here is pure. See `docs/architecture.md`.
 
+pub mod acpp;
 pub mod ids;
 pub mod ports;
