@@ -16,7 +16,7 @@
 //! - A peer that sends a line over [`MAX_LINE`](crate::wire::MAX_LINE) is disconnected with
 //!   [`DisconnectReason::Protocol`].
 //! - `close` delivers the lines already queued, then disconnects: the closing end sees `Closed`, the other end
-//!   `PeerGone`. No `Line`s are emitted for a conn after `close` is called on it.
+//!   `PeerGone`. Once `close` returns, no more `Line`s are emitted for that conn.
 //! - Dropping a link disconnects all its conns without flushing; their peers see `PeerGone`.
 
 use std::fmt;

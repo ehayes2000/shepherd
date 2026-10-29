@@ -32,6 +32,7 @@ macro_rules! link_contract {
             peer_that_dies_abruptly_is_peer_gone,
             peer_that_dies_right_after_connecting_is_announced_then_gone,
             peer_that_never_reads_is_disconnected_as_slow_consumer,
+            no_lines_arrive_after_close_returns,
             line_over_the_limit_is_a_protocol_error,
             other_conns_survive_a_disconnect,
         );
@@ -46,9 +47,11 @@ macro_rules! link_contract {
     };
 }
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
@@ -59,12 +62,11 @@ use shepherd_core::wire::MAX_LINE;
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to watch for stray events after a disconnect. Only used to assert that nothing else arrives.
 const QUIET: Duration = Duration::from_millis(300);
-/// The slowest a single `send` may be. Generous, so the case holds on a loaded machine.
-const FAST: Duration = Duration::from_millis(250);
 
 /// Builds the ends of a link. Each test gets a fresh fixture.
 pub trait LinkFixture {
-    type Host: Link;
+    /// `Send`, so a case can drive it from another thread and notice if it blocks.
+    type Host: Link + Send + 'static;
     type Client: Link;
     /// A connection to the host that never reads what it is sent, and goes away abruptly when dropped (for a
     /// socket: its file descriptor is closed with no shutdown).
@@ -226,22 +228,66 @@ impl<C: Link> Client<C> {
     }
 }
 
+/// The host's sink. Besides forwarding, it counts `Line`s for conns [`LinkHarness::close`] has already returned
+/// for, which the port promises never happen.
+struct HostSink {
+    inner: ChannelSink,
+    closed: Mutex<HashSet<ConnId>>,
+    late_lines: AtomicUsize,
+}
+
+impl LinkEventSink for HostSink {
+    fn send(&self, event: LinkEvent) {
+        if let LinkEvent::Line { conn, .. } = &event {
+            let closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
+            if closed.contains(conn) {
+                self.late_lines.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        self.inner.send(event);
+    }
+}
+
 /// A listening host end plus its events, and the fixture to connect clients with.
 pub struct LinkHarness<F: LinkFixture> {
     fixture: F,
     pub host: F::Host,
     pub host_events: Events,
+    host_sink: Arc<HostSink>,
 }
 
 impl<F: LinkFixture> LinkHarness<F> {
     pub fn new(mut fixture: F) -> Self {
-        let (sink, host_events) = Events::channel();
-        let host = fixture.listen(sink);
+        let (tx, rx) = mpsc::channel();
+        let host_sink = Arc::new(HostSink {
+            inner: ChannelSink(tx),
+            closed: Mutex::default(),
+            late_lines: AtomicUsize::new(0),
+        });
+        let host = fixture.listen(host_sink.clone());
         Self {
             fixture,
             host,
-            host_events,
+            host_events: Events(rx),
+            host_sink,
         }
+    }
+
+    /// Closes `conn` on the host and records that `close` returned, so later `Line`s for it are counted.
+    pub fn close(&mut self, conn: ConnId) -> Result<(), LinkError> {
+        self.host.close(conn)?;
+        let mut closed = self
+            .host_sink
+            .closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        closed.insert(conn);
+        Ok(())
+    }
+
+    /// How many `Line`s the host got for a conn after [`close`](Self::close) returned for it.
+    pub fn late_lines(&self) -> usize {
+        self.host_sink.late_lines.load(Ordering::SeqCst)
     }
 
     /// Connects a client and waits for the host to see it. Connect clients before sending traffic: panics if
@@ -483,35 +529,61 @@ pub fn peer_that_dies_right_after_connecting_is_announced_then_gone<F: LinkFixtu
     }
 }
 
+/// `send` must not block on a peer that never reads. The sends run on another thread: if one blocked, the
+/// case fails on the liveness timeout instead of hanging. The work is counted, not timed: the conn must be dropped
+/// well before the bytes sent reach a few times the queue bound.
 pub fn peer_that_never_reads_is_disconnected_as_slow_consumer<F: LinkFixture>(
     mut h: LinkHarness<F>,
 ) {
     let c = h.connect();
     let (_peer, conn) = h.stalled_peer();
-    let chunk = vec![b'x'; 64 * 1024];
-    let mut slowest = Duration::ZERO;
-    let mut sent = 0;
-    // Well past the queue bound plus any transport buffering.
-    while sent < 4 * MAX_QUEUED {
-        let start = Instant::now();
-        let result = h.host.send(conn, &chunk);
-        slowest = slowest.max(start.elapsed());
-        match result {
-            Ok(()) => sent += chunk.len(),
-            Err(LinkError::UnknownConn) => break,
-            Err(e) => panic!("send failed: {e}"),
+    let limit = 4 * MAX_QUEUED;
+    let mut host = h.host;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut sent = 0;
+        let mut dropped = false;
+        while sent < limit {
+            match host.send(conn, &chunk) {
+                Ok(()) => sent += chunk.len(),
+                Err(LinkError::UnknownConn) => {
+                    dropped = true;
+                    break;
+                }
+                Err(e) => panic!("send failed: {e}"),
+            }
         }
-    }
-    assert!(slowest < FAST, "a send took {slowest:?}");
+        let _ = tx.send((host, sent, dropped));
+    });
+    let (mut host, sent, dropped) = rx
+        .recv_timeout(TIMEOUT)
+        .unwrap_or_else(|_| panic!("send blocked on a peer that never reads"));
+    assert!(dropped, "still connected after {sent} bytes queued");
     assert_eq!(
         h.host_events.disconnect_of(conn).1,
         DisconnectReason::SlowConsumer
     );
-    assert_eq!(h.host.send(conn, b"x"), Err(LinkError::UnknownConn));
+    assert_eq!(host.send(conn, b"x"), Err(LinkError::UnknownConn));
 
     // Other conns are unaffected.
-    h.send(c.host_conn, "still here");
+    host.send(c.host_conn, b"still here").unwrap();
     assert_eq!(c.events.lines_of(c.conn, 1), [b"still here".to_vec()]);
+}
+
+/// Closing a conn while its peer is still streaming: once `close` returns, no more of its `Line`s are emitted.
+pub fn no_lines_arrive_after_close_returns<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let mut c = h.connect();
+    for l in lines("client", 5000) {
+        c.send(l);
+    }
+    h.host_events.lines_of(c.host_conn, 1);
+    h.close(c.host_conn).unwrap();
+    assert_eq!(
+        h.host_events.disconnect_of(c.host_conn).1,
+        DisconnectReason::Closed
+    );
+    assert_eq!(h.late_lines(), 0, "lines emitted after close returned");
 }
 
 pub fn line_over_the_limit_is_a_protocol_error<F: LinkFixture>(mut h: LinkHarness<F>) {
