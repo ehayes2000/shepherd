@@ -3,6 +3,36 @@
 The source of truth for work in progress. Only the PM edits statuses. Task format is described in the
 `write-task` skill. Background reading: `manifesto.md`, `docs/architecture.md`, `docs/acpp.md`.
 
+## In flight
+
+Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it against git first.
+
+| Task | Stage | Branch @ commit | Round | Open items / PM decisions |
+|---|---|---|---|---|
+| T11 host runtime | review (round 1) | `task/T11-host-runtime` @ bd1ce34 | 0 | PM-accepted: one subscribe covers all logs and live output; ack after catch-up; `session/new` profile/cwd ignored in M1; hook/frame gets MethodNotFound until T16; 5s shutdown grace; harness in `crates/shepherd/tests/support/`. Will conflict with T12 in main.rs, lib.rs, Cargo.toml and tests/support |
+| T12 client core + runtime | builder fixing round-1 findings | `task/T12-client` @ ca6a254 | 1 | Fix: dup-filter test (Subscribe.from must not go backwards); select-when-listed test; connect bound reset only on hello OK, plus a hello timeout; launcher closes fds above 2 and resets signals; generation-tag test; launched-reset test. PM-accepted: request-id counter in Client; `Start` and `ConnectFailed` events; double-fork launcher |
+
+Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
+
+## Completed task log
+
+| Task | Review rounds | Notable findings |
+|---|---|---|
+| T03 | 2 | public sealing for adapters |
+| T04 | 2 | silent data loss on recovery, durability claim, two hosts |
+| T05 | 2 | phantom tool |
+| T06 | 3 | replay order, string timestamps |
+| T07 | 1 | notifications for input and resize |
+| T08 | 2 | lost output under load, kill didn't kill |
+| T09 | 2 | 1-column crash or hang |
+| T10 | 2 | world-connectable socket |
+| T14 | 1 | – |
+| T15 | 2 | Stop blocked by another hook |
+| T20 | 3 | data loss under user git config, ssh prompts |
+| F06 | 3 | quadratic stall |
+| F09 | 1 | – |
+| F10 | 2 | symlinked log truncated an outside file |
+
 ## Milestones
 
 | milestone | outcome | tasks |

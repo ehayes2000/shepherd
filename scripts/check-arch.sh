@@ -59,7 +59,7 @@ if grep -rn --include='*.rs' '#\[ignore' crates src 2>/dev/null; then
 fi
 
 # Project docs agents depend on must never be empty or missing.
-for doc in CLAUDE.md docs/architecture.md docs/acpp.md docs/plan.md; do
+for doc in CLAUDE.md docs/architecture.md docs/acpp.md docs/plan.md docs/pm.md; do
   [[ -s "$doc" ]] || err "$doc is missing or empty"
 done
 

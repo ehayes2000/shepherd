@@ -5,7 +5,8 @@ description: (PM) Run ready shepherd tasks from docs/plan.md through builder sub
 
 # Dispatching work
 
-You are the PM. You don't write feature code here. You schedule, review and merge.
+You are the PM. You don't write feature code here. You schedule, review and merge. `docs/pm.md` is the full manual.
+**Update the In flight table in `docs/plan.md` on every transition.** It's the only state that survives a context reset.
 
 ## 1. Pick a batch
 - Read `docs/plan.md`. Candidates are tasks with `status: ready`.

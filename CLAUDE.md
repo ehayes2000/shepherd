@@ -3,7 +3,8 @@
 A terminal agent manager: a sidebar of coding-agent sessions (Claude Code, Codex), each running in a
 shepherd-managed git worktree, across multiple machines. `manifesto.md` is the product intent.
 
-Before writing code, read `docs/architecture.md`. Current work lives in `docs/plan.md`.
+Before writing code, read `docs/architecture.md`. Current work lives in `docs/plan.md`. The PM's operating manual,
+including how to take over in-flight work, is `docs/pm.md`.
 
 ## How this project is built
 
