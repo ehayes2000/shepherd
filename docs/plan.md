@@ -87,6 +87,23 @@ acceptance:
 - Ids coming from outside (hook env, wire requests, logs) fail cleanly at the boundary with a typed error.
 scope: crates/core, crates/testkit, crates/adapters
 
+### F06: Snapshots preserve partial parser input
+status: todo (required before T11's attach feature)
+depends: T09
+touches: term
+goal: A snapshot taken in the middle of an escape sequence or UTF-8 char doesn't corrupt the reattached client's screen.
+acceptance:
+- `snapshot_ansi` carries any incomplete trailing escape sequence or UTF-8 bytes, so continuing both screens with the rest
+  of the sequence gives identical screens. Repro: feed `x\x1b[?20`, snapshot, then feed `26hab` to both; they must match.
+  Claude doesn't use sync output, so without this an attach during heavy output can show garbage text.
+- The fuzz test gains a continuation phase: after the round trip, feed more tokens to both screens and expire any held
+  sync on both, then compare again. Documented-gap tokens are excluded from that phase (scroll region, tab stops,
+  charset, REP, kitty pops, `?1049l`).
+- Fix the incorrect "has no effect there" comment about a wrap flag left set away from the last column, and add that
+  case, REP's last character, and the saved cursor's pending wrap to the "Not carried over" docs.
+- `has_unrebuildable_row` skips only the affected rows, not the whole comparison.
+scope: crates/term
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
@@ -280,7 +297,7 @@ with `wait_for(predicate, timeout)` (std mpsc `recv_timeout`; no sleeps). Exactl
 its `Output`. Use `SessionId` from `shepherd_core::ids`. New deps allowed: `portable-pty` (adapters).
 
 ### T09: `shepherd-term` screen + TUI rendering
-status: in-progress (review fixes)
+status: done (435d44b)
 depends: T02
 touches: term (new crate), tui::screen
 goal: Turn PTY bytes into a screen, answer terminal queries, snapshot for attach, and render into ratatui (decision 0007).
@@ -336,7 +353,7 @@ the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
 status: todo
-depends: T04, T06, T08, T09, T10
+depends: T04, T06, T08, T09, T10, F06
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
