@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | review (round 1) | `task/T11-host-runtime` @ bd1ce34 | 0 | PM-accepted: one subscribe covers all logs and live output; ack after catch-up; `session/new` profile/cwd ignored in M1; hook/frame gets MethodNotFound until T16; 5s shutdown grace; harness in `crates/shepherd/tests/support/`. Will conflict with T12 in main.rs, lib.rs, Cargo.toml and tests/support |
+| T11 host runtime | builder fixing round-1 findings | `task/T11-host-runtime` @ bd1ce34 | 1 | Fix: paced catch-up per decision 0013 (new `Link::queued_bytes`, test with more than `MAX_QUEUED` of history); service deadlines every iteration (`yes` starvation); startup errors also to host.log; startup messages name paths. PM-accepted: ack after catch-up completes; the rest of round 0 stands |
 | T12 client core + runtime | builder fixing round-1 findings | `task/T12-client` @ ca6a254 | 1 | Fix: dup-filter test (Subscribe.from must not go backwards); select-when-listed test; connect bound reset only on hello OK, plus a hello timeout; launcher closes fds above 2 and resets signals; generation-tag test; launched-reset test. PM-accepted: request-id counter in Client; `Start` and `ConnectFailed` events; double-fork launcher |
 
 Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
