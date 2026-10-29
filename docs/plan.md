@@ -104,6 +104,17 @@ acceptance:
 - `has_unrebuildable_row` skips only the affected rows, not the whole comparison.
 scope: crates/term
 
+### F07: Carry palette colours and the empty-stack kitty flags in snapshots
+status: todo
+depends: F06
+touches: term
+goal: A reattached client draws colours set by programs, and answers kitty queries, the same as the host.
+acceptance:
+- Colours set with OSC 4/10/11 are carried by `snapshot_ansi`, so the copy renders and reports them identically. Remove them from
+  the fuzz `GAPS` list and the "Not carried over" docs.
+- Kitty flags set with `CSI = flags;1u` on an empty stack round-trip, so `CSI ? u` answers the same on both screens.
+scope: crates/term
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
