@@ -2,8 +2,8 @@
 //!
 //! An [`Envelope`] wraps exactly one JSON-RPC 2.0 [`Frame`]. Frames are lossless: each one keeps the raw JSON it
 //! was parsed from and always serializes back to it. The typed parse is a read-only view next to the raw value.
-//! Producers create a [`FrameDraft`]. Only the host seals a draft into an envelope, because only it knows
-//! `seq`, `id`, `ts` and `machine`.
+//! Producers create a [`FrameDraft`]. Only the host process's append path seals a draft into an envelope,
+//! because only it knows `seq`, `id`, `ts` and `machine`.
 
 /// A string enum that never fails to parse. Known wire values get a variant, anything else lands in
 /// `Other(String)` and serializes back unchanged.
@@ -67,8 +67,8 @@ mod frame;
 mod shepherd;
 
 pub use envelope::{
-    Dir, ENVELOPE_VERSION, EntryId, Envelope, FrameDraft, Source, SourceKind, Timestamp,
-    TimestampError,
+    Dir, ENVELOPE_VERSION, EntryId, Envelope, EnvelopeError, FrameDraft, Seq, Source, SourceKind,
+    Stamp, Timestamp, TimestampError,
 };
 pub use frame::{Correlated, Frame, FrameError, Message, PendingRequests, RequestId, Response};
 pub use shepherd::{

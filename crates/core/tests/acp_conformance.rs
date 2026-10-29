@@ -8,7 +8,9 @@ use agent_client_protocol_schema::v1 as schema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use shepherd_core::acpp::acp::{AcpFrame, PromptOutcome, SessionUpdate, StopReason};
+use shepherd_core::acpp::acp::{
+    AcpFrame, CompactionStatus, PromptOutcome, SessionUpdate, StopReason, ToolCallStatus, ToolKind,
+};
 use shepherd_core::acpp::{Correlated, Dir, Frame, PendingRequests};
 
 /// Asserts the schema type accepts `v` and re-serializes it unchanged.
@@ -181,5 +183,92 @@ fn prompt_responses_conform() {
             panic!("{wire} did not complete the prompt")
         };
         assert_eq!(p.stop_reason, ours_reason);
+    }
+}
+
+/// Parses a conforming `session/update` and returns its typed update.
+fn typed_update(u: Value) -> SessionUpdate {
+    let params = update(u);
+    schema_accepts::<schema::SessionNotification>(&params);
+    match ours(&notification("session/update", params)) {
+        Frame::Acp(m) => match m.body() {
+            AcpFrame::Update(n) => n.update.clone(),
+            other => panic!("expected session/update, got {other:?}"),
+        },
+        other => panic!("expected an ACP frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_v1_tool_kind_parses_to_its_named_variant() {
+    for (wire, expected) in [
+        ("read", ToolKind::Read),
+        ("edit", ToolKind::Edit),
+        ("delete", ToolKind::Delete),
+        ("move", ToolKind::Move),
+        ("search", ToolKind::Search),
+        ("execute", ToolKind::Execute),
+        ("think", ToolKind::Think),
+        ("fetch", ToolKind::Fetch),
+        ("switch_mode", ToolKind::SwitchMode),
+    ] {
+        // tool_call_update, because the schema omits a default `kind` when re-serializing a tool_call.
+        let u = typed_update(
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t", "kind": wire }),
+        );
+        let SessionUpdate::ToolCallUpdate(u) = u else {
+            panic!("{wire}: expected tool_call_update")
+        };
+        assert_eq!(u.kind, Some(expected), "{wire}");
+    }
+}
+
+#[test]
+fn v1_tool_kind_other_is_the_default_kind() {
+    // ACP's own "other" shares its name with the catch-all, so it is spelled `ToolKind::Other("other")`, the
+    // same value as an absent kind.
+    let u = typed_update(
+        json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t", "kind": "other" }),
+    );
+    let SessionUpdate::ToolCallUpdate(u) = u else {
+        panic!("expected tool_call_update")
+    };
+    assert_eq!(u.kind, Some(ToolKind::default()));
+    assert_eq!(ToolKind::default(), ToolKind::Other("other".into()));
+}
+
+#[test]
+fn every_v1_tool_call_status_parses_to_its_named_variant() {
+    for (wire, expected) in [
+        ("pending", ToolCallStatus::Pending),
+        ("in_progress", ToolCallStatus::InProgress),
+        ("completed", ToolCallStatus::Completed),
+        ("failed", ToolCallStatus::Failed),
+    ] {
+        let u = typed_update(
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t", "status": wire }),
+        );
+        let SessionUpdate::ToolCallUpdate(u) = u else {
+            panic!("{wire}: expected tool_call_update")
+        };
+        assert_eq!(u.status, Some(expected), "{wire}");
+    }
+}
+
+#[test]
+fn every_v1_compaction_status_parses_to_its_named_variant() {
+    for (wire, expected) in [
+        ("in_progress", CompactionStatus::InProgress),
+        ("completed", CompactionStatus::Completed),
+        ("failed", CompactionStatus::Failed),
+        ("cancelled", CompactionStatus::Cancelled),
+    ] {
+        let u = typed_update(
+            json!({ "sessionUpdate": "compaction_update", "compactionId": "c", "status": wire }),
+        );
+        let SessionUpdate::CompactionUpdate(c) = u else {
+            panic!("{wire}: expected compaction_update")
+        };
+        assert_eq!(c.status, expected, "{wire}");
     }
 }

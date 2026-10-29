@@ -317,6 +317,11 @@ pub enum Correlated {
 ///
 /// Ids are scoped by direction: each JSON-RPC peer numbers its own requests, so a `to_agent` prompt and a
 /// `from_agent` permission request may share an id. A response travels the opposite way to its request.
+///
+/// Rule for producers: a synthesized request and its synthesized response must use opposite `dir`s. A
+/// synthesized `session/prompt` is `to_agent` and its response is `from_agent`; a synthesized
+/// `session/request_permission` is `from_agent` and its response is `to_agent`. A response with the same `dir`
+/// as its request never correlates. `internal` requests correlate with `internal` responses.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PendingRequests {
     pending: BTreeMap<(String, RequestId), String>,

@@ -9,18 +9,19 @@ use serde_json::{Map, Value};
 use super::Frame;
 use crate::ids::{MachineId, SessionId};
 
-/// The envelope version this code writes. It only bumps for breaking envelope changes.
+/// The envelope version this code reads and writes. It only bumps for breaking envelope changes, so an envelope
+/// with any other version is rejected.
 pub const ENVELOPE_VERSION: u32 = 1;
 
-/// One log entry: a frame plus what the host knew when it appended it. Unknown envelope fields are kept and
+/// One log entry: a frame plus what the log knew when it appended it. Unknown envelope fields are kept and
 /// serialized back.
 ///
-/// Envelopes come from the log (deserialization) or from the host sealing a [`FrameDraft`]. Nothing else builds
-/// one.
+/// Envelopes come from reading a log, or from [`FrameDraft::seal`] on the append path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "EnvelopeRepr")]
 pub struct Envelope {
     acpp: u32,
-    seq: u64,
+    seq: Seq,
     id: EntryId,
     ts: Timestamp,
     machine: MachineId,
@@ -32,13 +33,67 @@ pub struct Envelope {
     extra: Map<String, Value>,
 }
 
+/// The wire shape of an envelope, before its version is checked.
+#[derive(Deserialize)]
+struct EnvelopeRepr {
+    acpp: u64,
+    seq: Seq,
+    id: EntryId,
+    ts: Timestamp,
+    machine: MachineId,
+    session: Option<SessionId>,
+    source: Source,
+    dir: Dir,
+    frame: Frame,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+impl TryFrom<EnvelopeRepr> for Envelope {
+    type Error = EnvelopeError;
+
+    fn try_from(r: EnvelopeRepr) -> Result<Self, Self::Error> {
+        if r.acpp != u64::from(ENVELOPE_VERSION) {
+            return Err(EnvelopeError::UnsupportedVersion(r.acpp));
+        }
+        Ok(Self {
+            acpp: ENVELOPE_VERSION,
+            seq: r.seq,
+            id: r.id,
+            ts: r.ts,
+            machine: r.machine,
+            session: r.session,
+            source: r.source,
+            dir: r.dir,
+            frame: r.frame,
+            extra: r.extra,
+        })
+    }
+}
+
+/// Why a JSON value is not an envelope this version can read.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EnvelopeError {
+    #[error("unsupported envelope version {0}, expected {ENVELOPE_VERSION}")]
+    UnsupportedVersion(u64),
+    /// A missing or ill-typed field, a bad timestamp, or a malformed frame.
+    #[error("malformed envelope: {0}")]
+    Malformed(String),
+}
+
 impl Envelope {
+    /// Parses an envelope, reporting why it can't be read.
+    pub fn from_value(raw: Value) -> Result<Self, EnvelopeError> {
+        let repr: EnvelopeRepr =
+            serde_json::from_value(raw).map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+        Self::try_from(repr)
+    }
+
     pub fn acpp(&self) -> u32 {
         self.acpp
     }
 
-    /// Position in its log: starts at 1, gapless.
-    pub fn seq(&self) -> u64 {
+    pub fn seq(&self) -> Seq {
         self.seq
     }
 
@@ -77,8 +132,38 @@ impl Envelope {
     }
 }
 
-/// What a producer creates: a frame and what it knows about it. The host turns it into an [`Envelope`].
-#[derive(Debug, Clone, PartialEq)]
+/// An entry's position in its log: starts at 1, gapless. Assigned by the log at append time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Seq(u64);
+
+impl Seq {
+    pub fn new(n: u64) -> Self {
+        Self(n)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Seq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The fields the host assigns to every entry it appends, apart from `seq`, which the log assigns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamp {
+    pub id: EntryId,
+    pub ts: Timestamp,
+    pub machine: MachineId,
+}
+
+/// What a producer creates: a frame and what it knows about it. The host's append path seals it into an
+/// [`Envelope`]. Serializable, because producers like `shepherd hook` send drafts to the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrameDraft {
     pub frame: Frame,
     pub source: Source,
@@ -96,18 +181,14 @@ impl FrameDraft {
         }
     }
 
-    /// Seals the draft with the fields only the host assigns at append time.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by core::host once it exists")
-    )]
-    pub(crate) fn seal(self, seq: u64, id: EntryId, ts: Timestamp, machine: MachineId) -> Envelope {
+    /// Seals the draft with the fields assigned at append time.
+    pub fn seal(self, seq: Seq, stamp: Stamp) -> Envelope {
         Envelope {
             acpp: ENVELOPE_VERSION,
             seq,
-            id,
-            ts,
-            machine,
+            id: stamp.id,
+            ts: stamp.ts,
+            machine: stamp.machine,
             session: self.session,
             source: self.source,
             dir: self.dir,
@@ -291,39 +372,4 @@ fn is_rfc3339(b: &[u8]) -> bool {
         Some(shape && in_range && offset)
     })();
     parsed.unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn host_seals_a_draft_into_an_envelope() {
-        let frame =
-            Frame::from_value(json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle" }))
-                .expect("frame");
-        let draft = FrameDraft::new(
-            frame.clone(),
-            Source::new(SourceKind::Hook, Some("claude-code".into())),
-            Dir::FromAgent,
-            Some(SessionId::new("s_1")),
-        );
-        let env = draft.seal(
-            7,
-            EntryId::new("01J"),
-            Timestamp::parse("2026-10-29T12:00:00.000Z").expect("ts"),
-            MachineId::new("m_1"),
-        );
-        assert_eq!(
-            serde_json::to_value(&env).expect("serialize"),
-            json!({
-                "acpp": 1, "seq": 7, "id": "01J", "ts": "2026-10-29T12:00:00.000Z", "machine": "m_1",
-                "session": "s_1", "source": { "kind": "hook", "agent": "claude-code" }, "dir": "from_agent",
-                "frame": { "jsonrpc": "2.0", "method": "_shepherd/agent/idle" }
-            })
-        );
-        assert_eq!(env.frame(), &frame);
-    }
 }

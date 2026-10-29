@@ -6,10 +6,11 @@ use shepherd_core::acpp::acp::{
     ToolCallStatus, ToolKind,
 };
 use shepherd_core::acpp::{
-    Correlated, Dir, Envelope, Frame, FrameDraft, FrameError, PendingRequests, RequestId,
-    ShepherdFrame, Source, SourceKind, Timestamp,
+    Correlated, Dir, ENVELOPE_VERSION, EntryId, Envelope, EnvelopeError, Frame, FrameDraft,
+    FrameError, PendingRequests, RequestId, Seq, ShepherdFrame, Source, SourceKind, Stamp,
+    Timestamp,
 };
-use shepherd_core::ids::SessionId;
+use shepherd_core::ids::{MachineId, SessionId};
 
 fn frame(v: Value) -> Frame {
     Frame::from_value(v).unwrap_or_else(|e| panic!("expected a well-formed frame: {e}"))
@@ -61,7 +62,7 @@ fn envelope_round_trips_every_field() {
     let raw = full_envelope();
     let env: Envelope = serde_json::from_value(raw.clone()).unwrap();
     assert_eq!(env.acpp(), 1);
-    assert_eq!(env.seq(), 1042);
+    assert_eq!(env.seq(), Seq::new(1042));
     assert_eq!(env.id().as_str(), "01JBX7Q5W2M9K3ABCDEFGHJKMN");
     assert_eq!(env.ts().as_str(), "2026-10-29T12:00:00.123Z");
     assert_eq!(env.machine().as_str(), "m_7f3a9c");
@@ -149,18 +150,78 @@ fn envelope_with_invalid_timestamp_is_rejected() {
 }
 
 #[test]
-fn frame_draft_carries_what_producers_know() {
-    let f = frame(json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} }));
-    let draft = FrameDraft::new(
-        f.clone(),
-        Source::new(SourceKind::Hook, Some("codex".into())),
+fn unsupported_envelope_version_is_a_typed_error() {
+    let mut raw = full_envelope();
+    raw["acpp"] = json!(2);
+    assert_eq!(
+        Envelope::from_value(raw.clone()),
+        Err(EnvelopeError::UnsupportedVersion(2))
+    );
+    assert!(serde_json::from_value::<Envelope>(raw).is_err());
+}
+
+#[test]
+fn malformed_envelope_is_a_typed_error() {
+    let mut raw = full_envelope();
+    raw.as_object_mut().unwrap().remove("seq");
+    assert!(matches!(
+        Envelope::from_value(raw),
+        Err(EnvelopeError::Malformed(_))
+    ));
+}
+
+fn idle_draft() -> FrameDraft {
+    FrameDraft::new(
+        frame(json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle" })),
+        Source::new(SourceKind::Hook, Some("claude-code".into())),
         Dir::FromAgent,
         Some(SessionId::new("s_1")),
+    )
+}
+
+#[test]
+fn sealing_a_draft_assigns_the_append_time_fields() {
+    let draft = idle_draft();
+    let frame = draft.frame.clone();
+    let stamp = Stamp {
+        id: EntryId::new("01J"),
+        ts: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap(),
+        machine: MachineId::new("m_1"),
+    };
+    let env = draft.seal(Seq::new(7), stamp);
+    assert_eq!(env.acpp(), ENVELOPE_VERSION);
+    assert_eq!(env.seq(), Seq::new(7));
+    assert_eq!(env.frame(), &frame);
+    assert_eq!(
+        serde_json::to_value(&env).unwrap(),
+        json!({
+            "acpp": 1, "seq": 7, "id": "01J", "ts": "2026-10-29T12:00:00.000Z", "machine": "m_1",
+            "session": "s_1", "source": { "kind": "hook", "agent": "claude-code" }, "dir": "from_agent",
+            "frame": { "jsonrpc": "2.0", "method": "_shepherd/agent/idle" }
+        })
     );
-    assert_eq!(draft.frame, f);
-    assert_eq!(draft.source.agent.as_deref(), Some("codex"));
-    assert_eq!(draft.dir, Dir::FromAgent);
-    assert_eq!(draft.session, Some(SessionId::new("s_1")));
+}
+
+#[test]
+fn frame_draft_round_trips_through_json() {
+    let draft = idle_draft();
+    let wire = serde_json::to_value(&draft).unwrap();
+    assert_eq!(
+        wire,
+        json!({ "frame": { "jsonrpc": "2.0", "method": "_shepherd/agent/idle" },
+                "source": { "kind": "hook", "agent": "claude-code" },
+                "dir": "from_agent", "session": "s_1" })
+    );
+    assert_eq!(serde_json::from_value::<FrameDraft>(wire).unwrap(), draft);
+}
+
+#[test]
+fn host_level_frame_draft_round_trips_with_null_session() {
+    let mut draft = idle_draft();
+    draft.session = None;
+    let wire = serde_json::to_value(&draft).unwrap();
+    assert_eq!(wire["session"], Value::Null);
+    assert_eq!(serde_json::from_value::<FrameDraft>(wire).unwrap(), draft);
 }
 
 // ---------- ACP frames ----------
