@@ -141,7 +141,7 @@ acceptance:
 scope: crates/adapters
 
 ### F10: One shared private-filesystem helper for adapters
-status: in-progress
+status: done (3278967)
 depends: F09, T10
 touches: adapters::private_fs (new), adapters::event_log, adapters::link
 goal: Every adapter under `~/.shepherd` follows the same race-free private-permission rules (decision 0010). T11 uses it to
@@ -157,6 +157,21 @@ acceptance:
   the same as event_log.
 - Tests: a symlink planted at the final part of the path is refused, not followed or chmodded, and the existing
   permission tests for both adapters still pass unchanged. Also document the "parents created under umask 277 are 0500" note.
+scope: crates/adapters
+
+### F11: private_fs hardening and untested guarantees
+status: todo
+depends: F10
+touches: adapters::private_fs, adapters::event_log
+goal: Close the last F10 review gaps. Every documented guarantee is proven by a test (CLAUDE.md, reviewer rule).
+acceptance:
+- `open_existing_private_file` can't hang on a FIFO or other special file. Open with `O_NONBLOCK`, fstat-check for a regular
+  file, then clear `O_NONBLOCK`. There's a test with a 0600 FIFO at a log path, where append and read return a typed error promptly
+  (enforced by a liveness bound, not a timing assertion).
+- The directory `AlreadyExists` path is tested directly: pre-create a 0755 dir and a symlink at the final part, and assert
+  `Insecure`/`Symlink` with the mode and target unchanged. Factor the step into a private fn if needed.
+- The event_log "durable against a crash of this process once `append` returns" claim is tested: a child process appends and then
+  `abort()`s, and the parent reopens and sees the entry.
 scope: crates/adapters
 
 ## Out of scope for the initial feature set
