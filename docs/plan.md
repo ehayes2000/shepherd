@@ -98,7 +98,7 @@ comparison code goes in a scratch dir outside the repo, not in the workspace.
 ## M1 Log + host/client skeleton
 
 ### T03: ACP++ envelope and frame types
-status: in-progress
+status: done (3540e22)
 depends: T00, T01
 touches: core::acpp
 goal: Typed, lossless parsing and serialization of ACP++ entries per docs/acpp.md.
@@ -143,7 +143,7 @@ stays pure. The log assigns `seq` and seals with `FrameDraft::seal(seq, stamp)`.
 with `LogId = Host | Session(SessionId)`.
 
 ### T05: Session activity fold
-status: todo
+status: in-progress
 depends: T03
 touches: core::session
 goal: Derive agent status from a session's frames. This is the heart of the sidebar.
@@ -177,7 +177,7 @@ acceptance:
 scope: crates/core
 
 ### T07: Wire protocol
-status: todo
+status: in-progress
 depends: T03
 touches: core::wire
 goal: Client↔host messages as JSON-RPC, with encode and decode as pure functions.
