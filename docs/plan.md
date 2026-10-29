@@ -245,7 +245,7 @@ with `wait_for(predicate, timeout)` (std mpsc `recv_timeout`; no sleeps). Exactl
 its `Output`. Use `SessionId` from `shepherd_core::ids`. New deps allowed: `portable-pty` (adapters).
 
 ### T09: `shepherd-term` screen + TUI rendering
-status: review
+status: in-progress (review fixes)
 depends: T02
 touches: term (new crate), tui::screen
 goal: Turn PTY bytes into a screen, answer terminal queries, snapshot for attach, and render into ratatui (decision 0007).
@@ -277,6 +277,27 @@ acceptance:
 - An in-memory fake pair passes the contract.
 - The unix socket adapter (`~/.shepherd/host.sock`) passes the contract. A stale socket file is detected and replaced.
 scope: core::ports, testkit, adapters
+notes: The trait moves **lines** (one encoded wire message each, with no `\n`). Framing uses `core::wire::Decoder` inside the
+adapter. Same sync-plus-sink shape as the Pty port, in `crates/core/src/ports/link.rs`:
+```rust
+pub struct ConnId(u64);   // assigned by the adapter, unique per adapter instance
+pub enum LinkEvent { Connected { conn: ConnId }, Line { conn: ConnId, line: Vec<u8> }, Disconnected { conn: ConnId, reason: DisconnectReason } }
+pub enum DisconnectReason { Closed, PeerGone, SlowConsumer, Protocol(String) }   // Protocol: e.g. LineTooLong
+pub trait LinkEventSink: Send + Sync + 'static { fn send(&self, event: LinkEvent); }
+pub trait Link {
+    fn send(&mut self, conn: ConnId, line: &[u8]) -> Result<(), LinkError>;   // never blocks on a slow peer
+    fn close(&mut self, conn: ConnId) -> Result<(), LinkError>;
+}
+// LinkError (thiserror): UnknownConn, InvalidLine (contains '\n'), Io(String)
+```
+The host side is built with `UnixListenLink::bind(path, sink)` and emits `Connected` for each client. The client side is
+built with `UnixConnectLink::connect(path, sink) -> (Self, ConnId)`. Both implement `Link`. Each connection has a bounded
+outbound queue and a writer thread, so `send` never blocks. A peer that doesn't drain its queue past the bound (e.g. 8 MiB)
+is disconnected with `SlowConsumer`. A line over the decoder limit disconnects with `Protocol`. Exactly one `Disconnected`
+per conn, after all its `Line`s. Contract cases include: ordering both ways, several clients at once, 10k lines,
+a peer that never reads (it must get disconnected while `send` stays fast), abrupt peer death, close from either end,
+a stale socket file, and a live socket that is already bound (`AddrInUse`, never replaced). Fake: an in-memory pair with
+the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
 status: todo
