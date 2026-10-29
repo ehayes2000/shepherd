@@ -45,7 +45,9 @@ where adapters break.
 - Its test runs the **same** suite against real resources in a tempdir:
   `worktrees_contract!(GitWorktrees::temp_harness);`.
 - **Run the adapter's contract under parallel load** before you ship, e.g.
-  `for i in $(seq 48); do target/debug/deps/<test-bin> & done; wait`, repeated a few times, and report the pass rate.
+  `for i in $(seq 24); do target/debug/deps/<test-bin> & done; wait`, repeated a few times, and report the pass rate.
+  Use 24 copies, not more: macOS caps ptys at 511 system-wide, and the Pty contract opens 20 at once, so 48 copies fail for
+  reasons unrelated to your change.
   T08's adapter passed 40 out of 40 runs one at a time and failed 4% of runs under load, losing output.
   Run the **whole** adapter test binary, not just your port's tests. Ports interact inside one process (PTY children
   inherit file descriptors and locks across `fork`), and T04's lock bug only showed up next to the PTY tests.

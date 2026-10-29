@@ -31,7 +31,8 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
 6. **Scope.** Changes outside the spec's scope, new dependencies not allowed by the spec, speculative
    abstractions.
 7. **Correctness.** Error paths, edge cases from the spec, panics (`unwrap`/`expect`/indexing in non-test code).
-   For real adapters, run their contract tests under parallel load (many copies of the test binary at once) and
+   For real adapters, run their contract tests under parallel load (about 24 copies of the whole test binary at once;
+   macOS caps ptys at 511) and
    hunt for races, lost output, leaked threads, fds and processes, and signals that don't actually kill.
 
 Only report what you'd defend. Leave style nits to clippy and fmt.
