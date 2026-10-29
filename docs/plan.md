@@ -111,7 +111,6 @@ acceptance:
 - Malformed JSON-RPC (missing `jsonrpc`, or both `result` and `error`) is a typed error.
 - `FrameDraft` (frame + source + dir + session) is what producers create. Only the host turns it into an `Envelope`.
 - Synthesized frames are marked with `_meta.shepherd.synthesized`, and a helper reports whether a frame is synthesized.
-scope: crates/core
 - `StopReason`, `ToolCallStatus`, `ToolKind`, `SessionUpdate`, and `ContentBlock` are open enums with an
   `Other`/raw catch-all. An unknown `sessionUpdate` or `stopReason` parses successfully.
 - JSON-RPC responses parse as a generic `Response { id, result | error }`. Typed interpretation of a response
@@ -119,6 +118,7 @@ scope: crates/core
   folds can use (`PendingRequests` mapping `id → method`).
 - A dev-dependency conformance test checks that sample frames accepted by `agent-client-protocol-schema =1.13.0`
   round-trip identically through our types.
+scope: crates/core
 notes: Keep the raw `serde_json::Value` next to the typed parse (see "Lossless" in acpp.md). Decision 0006 and
 `docs/spikes/T01-acp-types.md` §3–§5 are binding: types live in `core::acpp::acp` and cover exactly the methods and
 variants in §5. `agent-client-protocol-schema` is allowed **only** as a core dev-dependency.
