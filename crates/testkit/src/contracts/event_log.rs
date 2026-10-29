@@ -288,6 +288,7 @@ pub fn append_to_the_wrong_log_is_wrong_log<L: EventLog>(mut h: EventLogHarness<
 }
 
 pub fn unsafe_session_ids_are_invalid<L: EventLog>(mut h: EventLogHarness<L>) {
+    let too_long = "a".repeat(65);
     for bad in [
         "",
         ".",
@@ -298,6 +299,12 @@ pub fn unsafe_session_ids_are_invalid<L: EventLog>(mut h: EventLogHarness<L>) {
         "a\\b",
         ".hidden",
         "nul\0",
+        // Uppercase would alias lowercase on a case-insensitive filesystem.
+        "S1",
+        "a.b",
+        "s 1",
+        "é",
+        &too_long,
     ] {
         let log = session(bad);
         let err = LogError::InvalidSessionId(SessionId::new(bad));
@@ -309,7 +316,9 @@ pub fn unsafe_session_ids_are_invalid<L: EventLog>(mut h: EventLogHarness<L>) {
         assert_eq!(h.read(log.clone(), Seq::ZERO), Err(err), "read {bad:?}");
     }
     assert_eq!(h.logs().unwrap(), vec![]);
-    // Dots and dashes inside an id are fine.
-    let ok = session("s_01.a-b..c");
-    assert_eq!(h.push(&ok, 1).seq(), Seq::new(1));
+    // Lowercase letters, digits, `_` and `-`, up to 64 of them.
+    let longest = "a".repeat(64);
+    for ok in ["s_01hx-9z", "0", &longest] {
+        assert_eq!(h.push(&session(ok), 1).seq(), Seq::new(1), "{ok:?}");
+    }
 }

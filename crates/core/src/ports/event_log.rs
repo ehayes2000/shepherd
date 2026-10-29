@@ -1,8 +1,12 @@
 //! The ACP++ logs: one for the host, one per session (see `docs/acpp.md`). The log assigns each entry its
 //! `seq` and seals the draft; everything else in the envelope comes from the caller's [`Stamp`].
 //!
-//! The trait is synchronous because an append is one buffered write. It takes `&mut self` for appends, so a
-//! log has a single writer: if several tasks need to append, the caller serializes them (the host owns the log).
+//! The trait is synchronous because an append is a single write. It takes `&mut self` for appends, so a log has
+//! a single writer: if several tasks need to append, the caller serializes them (the host owns the log).
+//!
+//! Durability (decision 0009): once `append` returns `Ok`, the entry survives a crash of this process. It may
+//! not survive power loss or a kernel panic, because there is no fsync per append. Implementations clean up
+//! what such a loss leaves at the end of a log when they open it.
 
 use std::fmt;
 
@@ -33,19 +37,19 @@ impl LogId {
         }
     }
 
-    /// Rejects session ids that can't safely name a log on disk: empty, starting with `.` (so `.` and `..`),
-    /// or containing a path separator or NUL.
+    /// Rejects session ids that can't name a log file. An id must be 1 to 64 characters of `[a-z0-9_-]`.
+    /// Lowercase only, so two ids can't alias on a case-insensitive filesystem. The runtime generates lowercase
+    /// `s_<ulid>` ids.
     pub fn validate(&self) -> Result<(), LogError> {
         match self {
             Self::Host => Ok(()),
             Self::Session(id) => {
                 let s = id.as_str();
-                let unsafe_name =
-                    s.is_empty() || s.starts_with('.') || s.contains(['/', '\\', '\0']);
-                if unsafe_name {
-                    Err(LogError::InvalidSessionId(id.clone()))
-                } else {
+                let allowed = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-');
+                if (1..=64).contains(&s.len()) && s.chars().all(allowed) {
                     Ok(())
+                } else {
+                    Err(LogError::InvalidSessionId(id.clone()))
                 }
             }
         }
@@ -72,12 +76,28 @@ pub enum LogError {
     /// The session id can't name a log (see [`LogId::validate`]).
     #[error("session id {0:?} is not a valid log name")]
     InvalidSessionId(SessionId),
-    /// A stored entry before the last one is unreadable, or the seqs aren't gapless. `line` counts from 1.
+    /// A complete stored entry is unreadable, the seqs aren't gapless, or an entry belongs to another log.
+    /// `line` counts from 1.
     #[error("{log} is corrupt at line {line}: {reason}")]
     Corrupt {
         log: LogId,
         line: u64,
         reason: String,
+    },
+    /// Another process has the log store open. A store has a single writer.
+    #[error("the log store is locked by another process")]
+    Locked,
+    /// A failed append couldn't be undone, so where the log ends is unknown. Appends to it fail until the
+    /// store is reopened, which recovers it.
+    #[error("{log} is poisoned by a failed append; reopen to recover")]
+    Poisoned { log: LogId },
+    /// The stored log isn't the length this store left it at, so something else changed it. Nothing was
+    /// written.
+    #[error("{log} changed on disk: expected {expected} bytes, found {found}")]
+    ChangedOnDisk {
+        log: LogId,
+        expected: u64,
+        found: u64,
     },
     #[error("log io: {0}")]
     Io(String),
