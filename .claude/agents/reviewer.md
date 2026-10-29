@@ -13,7 +13,9 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
 ## Check, in order
 1. **Gate.** Check out the branch in a scratch worktree (`git worktree add <tmp> <branch>`), run
    `scripts/check.sh`, then remove the worktree. Red means CHANGES, and you're done.
-2. **Spec coverage.** For each acceptance criterion, find the test that proves it. A criterion with no test
+2. **Spec coverage.** For each acceptance criterion, find the test that proves it. **Prove it with mutations.** For
+   each key line (a guard, a filter, a reset, a state transition), break it in a scratch copy and confirm a named test
+   fails. A line no test notices is an untested behavior and a finding. A criterion with no test
    means CHANGES. Read the test. Would it actually fail if the behavior broke? A test that asserts nothing
    meaningful, or only mirrors the implementation, doesn't count.
 3. **Flakiness.** Tests that assert on wall-clock time, depend on scheduling or sleeps, or are tuned tightly against
