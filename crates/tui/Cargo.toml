@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 shepherd-core.workspace = true
+shepherd-term.workspace = true
 ratatui.workspace = true
 
 [dev-dependencies]
