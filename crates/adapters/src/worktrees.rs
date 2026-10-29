@@ -137,31 +137,64 @@ impl GitWorktrees {
     }
 
     fn repo_name(&self, dir: &Path) -> Result<String, WorktreeError> {
-        let common = self.common_dir(dir)?;
-        repo_name_from_common_dir(&common).ok_or_else(|| {
-            WorktreeError::Other(format!("can't name the repo at {}", common.display()))
-        })
+        name_of(&self.common_dir(dir)?)
     }
 
-    /// `origin/HEAD`'s target, which must exist. Assumes `dir` is in a repo.
+    /// The branch `origin/HEAD` points at (the ref itself may be missing). If there is no `origin/HEAD`, asks origin
+    /// for it once with `git remote set-head origin --auto`. Assumes `dir` is in a repo.
     fn default_of(&self, dir: &Path) -> Result<String, WorktreeError> {
-        let none = || WorktreeError::NoDefaultBranch(dir.to_owned());
+        if let Some(branch) = self.origin_head(dir)? {
+            return Ok(branch);
+        }
+        // Best effort: if origin can't be reached, the retry below reports it.
+        let _ = self.git_within(
+            dir,
+            &["remote", "set-head", "origin", "--auto"],
+            self.fetch_timeout,
+        );
+        self.origin_head(dir)?
+            .ok_or_else(|| WorktreeError::NoDefaultBranch(dir.to_owned()))
+    }
+
+    fn origin_head(&self, dir: &Path) -> Result<Option<String>, WorktreeError> {
         let target = match self.git(
             dir,
             &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
         ) {
             Ok(out) => out,
-            Err(Failure::Exit { .. }) => return Err(none()),
+            Err(Failure::Exit { .. }) => return Ok(None),
             Err(f) => return Err(f.into_error("symbolic-ref")),
         };
-        let target = target.trim_end_matches('\n');
-        let branch = target
+        Ok(target
+            .trim_end_matches('\n')
             .strip_prefix("refs/remotes/origin/")
-            .ok_or_else(none)?;
-        if branch.is_empty() || !self.ref_exists(dir, target)? {
-            return Err(none());
-        }
-        Ok(branch.to_owned())
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned))
+    }
+
+    /// Whether `repo_dir` (`<root>/<repo-name>`) holds a worktree whose common git dir is not `common`.
+    fn taken_by_another_repo(&self, repo_dir: &Path, common: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(repo_dir) else {
+            return false;
+        };
+        let ours = std::fs::canonicalize(common).ok();
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            let args = [
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-common-dir",
+            ];
+            let Ok(out) = self.git(&path, &args) else {
+                return false;
+            };
+            let mut lines = out.lines().map(std::fs::canonicalize);
+            let (Some(Ok(top)), Some(Ok(theirs))) = (lines.next(), lines.next()) else {
+                return false;
+            };
+            std::fs::canonicalize(&path).is_ok_and(|p| p == top) && Some(theirs) != ours
+        })
     }
 
     fn ref_exists(&self, dir: &Path, full_ref: &str) -> Result<bool, WorktreeError> {
@@ -231,15 +264,19 @@ impl Worktrees for GitWorktrees {
     ) -> Result<Created, WorktreeError> {
         let BaseSpec::OriginDefault = base;
         let dir = repo.as_path();
-        let repo_name = self.repo_name(dir)?;
-        let default = self.default_of(dir)?;
+        let common = self.common_dir(dir)?;
+        let repo_dir = self.root.join(name_of(&common)?);
         let branch = name.branch();
-        let path = self.root.join(&repo_name).join(name.as_str());
+        let path = repo_dir.join(name.as_str());
 
         let _guard = self
             .create_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if self.taken_by_another_repo(&repo_dir, &common) {
+            return Err(WorktreeError::RepoNameTaken { path: repo_dir });
+        }
+        let default = self.default_of(dir)?;
         if self.ref_exists(dir, &format!("refs/heads/{branch}"))? {
             return Err(WorktreeError::BranchExists(branch));
         }
@@ -263,17 +300,24 @@ impl Worktrees for GitWorktrees {
             ),
             Err(failure) => {
                 let fetch_error = failure.describe(self.fetch_timeout);
+                let branch = BranchName::new(&default);
+                let stale = format!("refs/remotes/origin/{default}");
                 let local = format!("refs/heads/{default}");
-                if !self.ref_exists(dir, &local)? {
+                if self.ref_exists(dir, &stale)? {
+                    let base = BaseUsed::Stale {
+                        branch,
+                        fetch_error,
+                    };
+                    (stale, base)
+                } else if self.ref_exists(dir, &local)? {
+                    let base = BaseUsed::Local {
+                        branch,
+                        fetch_error,
+                    };
+                    (local, base)
+                } else {
                     return Err(WorktreeError::FetchFailed(fetch_error));
                 }
-                (
-                    local,
-                    BaseUsed::LocalFallback {
-                        branch: BranchName::new(&default),
-                        fetch_error,
-                    },
-                )
             }
         };
         if let Some(parent) = path.parent() {
@@ -338,8 +382,12 @@ impl Worktrees for GitWorktrees {
         let dir = path.as_path();
         self.common_dir(dir)?;
         let default = self.default_of(dir)?;
+        let origin_default = format!("refs/remotes/origin/{default}");
+        if !self.ref_exists(dir, &origin_default)? {
+            return Err(WorktreeError::NoDefaultBranch(dir.to_owned()));
+        }
         let porcelain = self.porcelain_status(dir)?;
-        let range = format!("refs/remotes/origin/{default}..HEAD");
+        let range = format!("{origin_default}..HEAD");
         let ahead = self
             .git(dir, &["rev-list", "--count", &range])
             .map_err(|f| f.into_error("rev-list"))?;
@@ -380,6 +428,11 @@ impl Worktrees for GitWorktrees {
             .map_err(|f| f.into_error("worktree remove"))?;
         Ok(())
     }
+}
+
+fn name_of(common: &Path) -> Result<String, WorktreeError> {
+    repo_name_from_common_dir(common)
+        .ok_or_else(|| WorktreeError::Other(format!("can't name the repo at {}", common.display())))
 }
 
 /// How a git call went wrong.
@@ -645,6 +698,30 @@ mod tests {
             let app = self.app();
             self.git(&app, &["checkout", "--quiet", "--detach"]);
             self.git(&app, &["branch", "--quiet", "-D", DEFAULT]);
+        }
+
+        fn fetch(&self) {
+            self.git(&self.app(), &["fetch", "--quiet", "origin"]);
+        }
+
+        fn delete_remote_tracking_default(&self) {
+            let tracking = format!("refs/remotes/origin/{DEFAULT}");
+            self.git(&self.app(), &["update-ref", "-d", &tracking]);
+        }
+
+        fn forget_origin_head(&self) {
+            self.git(&self.app(), &["remote", "set-head", "origin", "--delete"]);
+        }
+
+        fn same_named_repo(&self) -> RepoRef {
+            let tmp = self.tmp();
+            std::fs::create_dir(tmp.join("other")).unwrap();
+            let origin = tmp.join("origin.git");
+            self.git(
+                &tmp.join("other"),
+                &["clone", "--quiet", origin.to_str().unwrap(), REPO_NAME],
+            );
+            RepoRef::new(tmp.join("other").join(REPO_NAME))
         }
     }
 

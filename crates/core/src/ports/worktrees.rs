@@ -9,8 +9,10 @@
 //!
 //! # Terms
 //!
-//! - **default branch**: the branch `origin/HEAD` points at, e.g. `main`. Not guessed: a repo without
-//!   `origin/HEAD` is [`WorktreeError::NoDefaultBranch`] (`git remote set-head origin --auto` fixes it).
+//! - **default branch**: the branch `origin/HEAD` points at, e.g. `main`. Not guessed. If the repo has no
+//!   `origin/HEAD` (e.g. it was made with `git init` + `git remote add` rather than cloned), the port asks origin for
+//!   its HEAD once (`git remote set-head origin --auto`, which needs the network) and writes that one ref, as
+//!   `git clone` would have. Only if that fails is it [`WorktreeError::NoDefaultBranch`].
 //! - **origin default**: the remote-tracking ref `origin/<default>` as of the last fetch. [`Worktrees::status`] never
 //!   fetches.
 
@@ -110,8 +112,9 @@ impl fmt::Display for WorktreeName {
 /// Where a new worktree's branch starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseSpec {
-    /// Fetch origin, then start from `origin/<default>`. If the fetch fails (offline, timeout), start from the local
-    /// `<default>` branch instead and say so in [`Created::base`].
+    /// Fetch origin, then start from `origin/<default>`. If the fetch fails (offline, timeout), start from
+    /// `origin/<default>` as last fetched, or if there is none from the local `<default>`, and say so in
+    /// [`Created::base`].
     OriginDefault,
 }
 
@@ -120,8 +123,13 @@ pub enum BaseSpec {
 pub enum BaseUsed {
     /// `origin/<branch>`, freshly fetched.
     Origin { branch: BranchName },
-    /// The fetch failed, so the local `<branch>` was used. It may be behind origin.
-    LocalFallback {
+    /// The fetch failed, so `origin/<branch>` as last fetched was used. It may be behind origin.
+    Stale {
+        branch: BranchName,
+        fetch_error: String,
+    },
+    /// The fetch failed and there is no `origin/<branch>` at all, so the local `<branch>` was used.
+    Local {
         branch: BranchName,
         fetch_error: String,
     },
@@ -159,11 +167,12 @@ pub struct WorktreeStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorktreeError {
-    /// The path is not inside a git checkout (or does not exist).
+    /// The path is not inside a git checkout, or does not exist.
     #[error("{0} is not a git repository")]
     NotARepo(PathBuf),
-    /// The repo has no `origin/HEAD`, so its default branch is unknown.
-    #[error("{0} has no origin default branch (try `git remote set-head origin --auto`)")]
+    /// The repo has no `origin/HEAD` and origin could not be asked for it, or `origin/<default>` doesn't exist where
+    /// it is needed (status).
+    #[error("{0} has no origin default branch")]
     NoDefaultBranch(PathBuf),
     /// A local branch with this name already exists. Removing a worktree keeps its branch, so a name stays taken.
     #[error("branch {0} already exists")]
@@ -171,9 +180,12 @@ pub enum WorktreeError {
     /// The worktree has uncommitted changes and removal was not forced.
     #[error("{0} has uncommitted changes")]
     Dirty(WorktreePath),
-    /// The fetch failed and there was no local default branch to fall back to.
+    /// The fetch failed and there was neither `origin/<default>` nor a local default branch to fall back to.
     #[error("fetching origin failed: {0}")]
     FetchFailed(String),
+    /// `<root>/<repo-name>/` already holds worktrees of a different repo with the same directory name.
+    #[error("{path} already holds worktrees of another repo with the same name")]
+    RepoNameTaken { path: PathBuf },
     /// Not a valid [`WorktreeName`].
     #[error("{0:?} is not a valid worktree name")]
     InvalidName(String),
@@ -189,11 +201,12 @@ pub enum WorktreeError {
 }
 
 pub trait Worktrees {
-    /// The repo's default branch (see the module docs).
+    /// The repo's default branch (see the module docs). May write `origin/HEAD` if it is missing.
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError>;
 
     /// Creates `<root>/<repo-name>/<name>` on a new branch `<name>` started from `base`. The new branch has no upstream
-    /// until it is pushed.
+    /// until it is pushed. [`WorktreeError::RepoNameTaken`] if another repo with the same name already has worktrees
+    /// under the root.
     fn create(
         &self,
         repo: &RepoRef,
@@ -205,12 +218,14 @@ pub trait Worktrees {
     /// checkout and worktrees elsewhere are not listed.
     fn list_managed(&self, repo: &RepoRef) -> Result<Vec<Worktree>, WorktreeError>;
 
-    /// See [`WorktreeStatus`]. Works on any checkout, managed or not.
+    /// See [`WorktreeStatus`]. Works on any checkout, managed or not. A path that doesn't exist is
+    /// [`WorktreeError::NotARepo`].
     fn status(&self, path: &WorktreePath) -> Result<WorktreeStatus, WorktreeError>;
 
-    /// Removes a managed worktree's directory and git's record of it. Its branch is kept. A dirty worktree is
-    /// [`WorktreeError::Dirty`] unless `force`. Anything not directly under `<root>/<repo-name>/` is
-    /// [`WorktreeError::OutsideManagedRoot`], whatever `force` says.
+    /// Removes a managed worktree's directory and git's record of it. Its branch is kept, with any commits on it:
+    /// deleting branches is the caller's decision. A dirty worktree is [`WorktreeError::Dirty`] unless `force`.
+    /// Anything not directly under `<root>/<repo-name>/` is [`WorktreeError::OutsideManagedRoot`], whatever `force`
+    /// says. A managed-looking path that doesn't exist is [`WorktreeError::NotARepo`].
     fn remove(&self, path: &WorktreePath, force: bool) -> Result<(), WorktreeError>;
 }
 

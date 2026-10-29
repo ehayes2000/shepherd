@@ -47,6 +47,9 @@ struct Repo {
     checkouts: BTreeMap<PathBuf, Checkout>,
     main: PathBuf,
     offline: Option<String>,
+    /// Whether the clone has `origin/HEAD`. Origin always knows its HEAD; a missing one is repaired on demand when
+    /// online.
+    head_known: bool,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +105,7 @@ impl FakeWorktrees {
             )]),
             main: path.clone(),
             offline: None,
+            head_known: true,
         });
         RepoRef::new(path)
     }
@@ -207,6 +211,24 @@ impl FakeWorktrees {
         s.repos[r].offline = error.map(str::to_owned);
     }
 
+    /// Deletes the clone's `origin/HEAD`.
+    pub fn forget_origin_head(&self, repo: &RepoRef) {
+        let mut s = self.lock();
+        let r = s
+            .repo_of(repo.as_path())
+            .unwrap_or_else(|| panic!("no repo at {repo}"));
+        s.repos[r].head_known = false;
+    }
+
+    /// Deletes the clone's remote-tracking `origin/<branch>`.
+    pub fn delete_tracking(&self, repo: &RepoRef, branch: &str) {
+        let mut s = self.lock();
+        let r = s
+            .repo_of(repo.as_path())
+            .unwrap_or_else(|| panic!("no repo at {repo}"));
+        s.repos[r].tracking.remove(branch);
+    }
+
     /// Deletes a local branch. The main checkout is detached first if it is on it.
     pub fn delete_branch(&self, repo: &RepoRef, branch: &str) {
         let mut s = self.lock();
@@ -301,6 +323,17 @@ impl State {
 }
 
 impl Repo {
+    /// The default branch, asking origin for its HEAD if the clone has lost it.
+    fn default_branch(&mut self) -> Result<String, WorktreeError> {
+        if !self.head_known {
+            if self.offline.is_some() {
+                return Err(WorktreeError::NoDefaultBranch(self.main.clone()));
+            }
+            self.head_known = true;
+        }
+        Ok(self.default.clone())
+    }
+
     fn resolve(&self, head: &Head) -> Option<Commit> {
         match head {
             Head::Branch(b) => self.local.get(b).copied(),
@@ -311,11 +344,11 @@ impl Repo {
 
 impl Worktrees for FakeWorktrees {
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError> {
-        let s = self.take_failure()?;
+        let mut s = self.take_failure()?;
         let r = s
             .repo_of(repo.as_path())
             .ok_or_else(|| State::not_a_repo(repo.as_path()))?;
-        Ok(BranchName::new(&s.repos[r].default))
+        s.repos[r].default_branch().map(BranchName::new)
     }
 
     fn create(
@@ -329,19 +362,30 @@ impl Worktrees for FakeWorktrees {
         let r = s
             .repo_of(repo.as_path())
             .ok_or_else(|| State::not_a_repo(repo.as_path()))?;
+        let repo_dir = self.root.join(&s.repos[r].name);
+        let taken = s.repos.iter().enumerate().any(|(i, other)| {
+            i != r
+                && other
+                    .checkouts
+                    .keys()
+                    .any(|p| p.parent() == Some(repo_dir.as_path()))
+        });
+        if taken {
+            return Err(WorktreeError::RepoNameTaken { path: repo_dir });
+        }
         let rp = &mut s.repos[r];
+        let default = BranchName::new(rp.default_branch()?);
         let branch = name.branch();
         if rp.local.contains_key(branch.as_str()) {
             return Err(WorktreeError::BranchExists(branch));
         }
-        let path = self.root.join(&rp.name).join(name.as_str());
+        let path = repo_dir.join(name.as_str());
         if rp.checkouts.contains_key(&path) {
             return Err(WorktreeError::Other(format!(
                 "{} already exists",
                 path.display()
             )));
         }
-        let default = BranchName::new(&rp.default);
         let (start, base) = match rp.offline.clone() {
             None => {
                 rp.tracking = rp.origin.clone();
@@ -349,16 +393,21 @@ impl Worktrees for FakeWorktrees {
                 (start, BaseUsed::Origin { branch: default })
             }
             Some(fetch_error) => {
-                let Some(&start) = rp.local.get(default.as_str()) else {
-                    return Err(WorktreeError::FetchFailed(fetch_error));
-                };
-                (
-                    start,
-                    BaseUsed::LocalFallback {
+                if let Some(&start) = rp.tracking.get(default.as_str()) {
+                    let base = BaseUsed::Stale {
                         branch: default,
                         fetch_error,
-                    },
-                )
+                    };
+                    (start, base)
+                } else if let Some(&start) = rp.local.get(default.as_str()) {
+                    let base = BaseUsed::Local {
+                        branch: default,
+                        fetch_error,
+                    };
+                    (start, base)
+                } else {
+                    return Err(WorktreeError::FetchFailed(fetch_error));
+                }
             }
         };
         rp.local.insert(branch.as_str().to_owned(), start);
@@ -399,9 +448,10 @@ impl Worktrees for FakeWorktrees {
     }
 
     fn status(&self, path: &WorktreePath) -> Result<WorktreeStatus, WorktreeError> {
-        let s = self.take_failure()?;
+        let mut s = self.take_failure()?;
         let path = path.as_path();
         let (r, head) = s.checkout(path).ok_or_else(|| State::not_a_repo(path))?;
+        s.repos[r].default_branch()?;
         let rp = &s.repos[r];
         let tip = rp
             .resolve(&head)
@@ -532,6 +582,23 @@ mod tests {
 
         fn delete_local_default(&self) {
             self.fake.delete_branch(&self.repo, DEFAULT);
+        }
+
+        fn fetch(&self) {
+            self.fake.fetch(&self.repo);
+        }
+
+        fn delete_remote_tracking_default(&self) {
+            self.fake.delete_tracking(&self.repo, DEFAULT);
+        }
+
+        fn forget_origin_head(&self) {
+            self.fake.forget_origin_head(&self.repo);
+        }
+
+        fn same_named_repo(&self) -> RepoRef {
+            self.fake
+                .add_repo(Path::new("/fake/other").join(REPO_NAME), DEFAULT)
         }
     }
 

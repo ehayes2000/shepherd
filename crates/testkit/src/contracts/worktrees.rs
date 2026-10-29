@@ -35,6 +35,8 @@ macro_rules! worktrees_contract {
         $crate::worktrees_contract!(@cases $fixture;
             default_branch_is_what_origin_head_points_at,
             default_branch_of_a_non_repo_is_not_a_repo,
+            default_branch_repairs_a_missing_origin_head,
+            default_branch_without_origin_head_offline_is_no_default_branch,
             create_places_the_worktree_under_root_repo_name_and_name,
             create_branches_from_freshly_fetched_origin_default,
             create_branch_has_no_upstream,
@@ -42,8 +44,10 @@ macro_rules! worktrees_contract {
             create_with_a_taken_name_is_branch_exists,
             create_after_remove_is_still_branch_exists,
             create_in_a_non_repo_is_not_a_repo,
-            create_offline_falls_back_to_local_default_and_says_so,
-            create_offline_without_local_default_is_fetch_failed,
+            create_in_a_same_named_repo_is_repo_name_taken,
+            create_offline_falls_back_to_last_fetched_origin_default,
+            create_offline_without_remote_tracking_ref_falls_back_to_local_default,
+            create_offline_with_nothing_to_fall_back_to_is_fetch_failed,
             create_when_fetch_hangs_times_out_and_falls_back,
             concurrent_creates_all_succeed,
             list_managed_lists_created_worktrees_only,
@@ -116,11 +120,19 @@ pub trait WorktreesFixture {
     fn land_on_origin_default(&self, path: &WorktreePath);
     /// Makes origin unreachable: every fetch from now on fails quickly.
     fn go_offline(&self);
-    /// Makes every fetch from now on hang for at least 10 minutes, and returns a port for the same repo and root whose fetch timeout is
-    /// `timeout`.
+    /// Makes every fetch from now on hang for at least 10 minutes, and returns a port for the same repo and root whose
+    /// fetch timeout is `timeout`.
     fn hang_origin(&self, timeout: Duration) -> Self::Port;
     /// Deletes the clone's local default branch (the main checkout is detached first).
     fn delete_local_default(&self);
+    /// The clone fetches origin. Local branches don't move.
+    fn fetch(&self);
+    /// Deletes the clone's `origin/<default>` ref, leaving `origin/HEAD` pointing at it.
+    fn delete_remote_tracking_default(&self);
+    /// Deletes the clone's `origin/HEAD`, as if it had been made with `git init` + `git remote add` + `git fetch`.
+    fn forget_origin_head(&self);
+    /// Another clone whose directory is also named [`REPO_NAME`], somewhere else.
+    fn same_named_repo(&self) -> RepoRef;
 }
 
 /// A fixture backed by a real filesystem.
@@ -177,6 +189,26 @@ pub fn default_branch_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
     let result = f.port().default_branch(&f.not_a_repo());
     assert!(
         matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
+}
+
+pub fn default_branch_repairs_a_missing_origin_head<F: WorktreesFixture>(f: &F) {
+    f.forget_origin_head();
+    assert_eq!(f.port().default_branch(&f.repo()), Ok(default()));
+    let created = f
+        .port()
+        .create(&f.repo(), &name("repaired"), BaseSpec::OriginDefault)
+        .unwrap();
+    assert_eq!(created.base, BaseUsed::Origin { branch: default() });
+}
+
+pub fn default_branch_without_origin_head_offline_is_no_default_branch<F: WorktreesFixture>(f: &F) {
+    f.forget_origin_head();
+    f.go_offline();
+    let result = f.port().default_branch(&f.repo());
+    assert!(
+        matches!(result, Err(WorktreeError::NoDefaultBranch(_))),
         "{result:?}"
     );
 }
@@ -257,6 +289,34 @@ pub fn create_after_remove_is_still_branch_exists<F: WorktreesFixture>(f: &F) {
     );
 }
 
+/// Two repos in directories with the same name map to the same `<root>/<name>/`; the second can't use it while the
+/// first has worktrees there.
+pub fn create_in_a_same_named_repo_is_repo_name_taken<F: WorktreesFixture>(f: &F) {
+    let first = create(f, "first");
+    let other = f.same_named_repo();
+    let result = f
+        .port()
+        .create(&other, &name("second"), BaseSpec::OriginDefault);
+    assert_eq!(
+        result,
+        Err(WorktreeError::RepoNameTaken {
+            path: f.root().join(REPO_NAME)
+        })
+    );
+    assert_eq!(listed_paths(f), vec![first.clone()]);
+
+    f.port().remove(&first, false).unwrap();
+    let created = f
+        .port()
+        .create(&other, &name("second"), BaseSpec::OriginDefault)
+        .unwrap();
+    assert_eq!(
+        created.path,
+        WorktreePath::new(f.root().join(REPO_NAME).join("second"))
+    );
+    assert!(listed_paths(f).is_empty(), "not the first repo's worktree");
+}
+
 pub fn create_in_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
     let result = f
         .port()
@@ -267,27 +327,59 @@ pub fn create_in_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
     );
 }
 
-pub fn create_offline_falls_back_to_local_default_and_says_so<F: WorktreesFixture>(f: &F) {
+/// Asserts `base` is the given fallback kind for the default branch, with the fetch error kept.
+fn assert_fallback(base: &BaseUsed, stale: bool) {
+    let (BaseUsed::Stale {
+        branch,
+        fetch_error,
+    }
+    | BaseUsed::Local {
+        branch,
+        fetch_error,
+    }) = base
+    else {
+        panic!("expected a fallback, got {base:?}");
+    };
+    assert_eq!(matches!(base, BaseUsed::Stale { .. }), stale, "{base:?}");
+    assert_eq!(branch, &default());
+    assert!(!fetch_error.is_empty(), "the fetch error should be kept");
+}
+
+/// The last-fetched `origin/<default>` is usually newer than the local default.
+pub fn create_offline_falls_back_to_last_fetched_origin_default<F: WorktreesFixture>(f: &F) {
+    f.advance_origin();
+    f.fetch();
+    let last_fetched = f.origin_tip();
     f.advance_origin();
     f.go_offline();
     let created = f
         .port()
         .create(&f.repo(), &name("offline"), BaseSpec::OriginDefault)
         .unwrap();
-    match &created.base {
-        BaseUsed::LocalFallback {
-            branch,
-            fetch_error,
-        } => {
-            assert_eq!(branch, &default());
-            assert!(!fetch_error.is_empty(), "the fetch error should be kept");
-        }
-        other => panic!("expected a local fallback, got {other:?}"),
-    }
+    assert_fallback(&created.base, true);
+    let head = f.head(created.path.as_path());
+    assert_eq!(head, last_fetched);
+    assert_ne!(head, f.local_default_tip());
+    assert_ne!(head, f.origin_tip());
+}
+
+pub fn create_offline_without_remote_tracking_ref_falls_back_to_local_default<
+    F: WorktreesFixture,
+>(
+    f: &F,
+) {
+    f.delete_remote_tracking_default();
+    f.go_offline();
+    let created = f
+        .port()
+        .create(&f.repo(), &name("offline"), BaseSpec::OriginDefault)
+        .unwrap();
+    assert_fallback(&created.base, false);
     assert_eq!(f.head(created.path.as_path()), f.local_default_tip());
 }
 
-pub fn create_offline_without_local_default_is_fetch_failed<F: WorktreesFixture>(f: &F) {
+pub fn create_offline_with_nothing_to_fall_back_to_is_fetch_failed<F: WorktreesFixture>(f: &F) {
+    f.delete_remote_tracking_default();
     f.delete_local_default();
     f.go_offline();
     let result = f
@@ -313,11 +405,7 @@ pub fn create_when_fetch_hangs_times_out_and_falls_back<F: WorktreesFixture>(f: 
         "took {:?}",
         started.elapsed()
     );
-    assert!(
-        matches!(created.base, BaseUsed::LocalFallback { .. }),
-        "{:?}",
-        created.base
-    );
+    assert_fallback(&created.base, true);
 }
 
 pub fn concurrent_creates_all_succeed<F: WorktreesFixture>(f: &F) {
