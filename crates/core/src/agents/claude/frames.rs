@@ -8,13 +8,23 @@ use serde_json::{Map, Value, json};
 
 use crate::acpp::{Frame, RequestId};
 
-/// A `session/prompt` request carrying the prompt text, if any.
-pub(super) fn prompt(id: &RequestId, agent_session: &str, text: Option<&str>) -> Option<Frame> {
+/// A `session/prompt` request carrying the prompt text, if any. A `continuation` (work a Stop hook kept going, not
+/// a user prompt) is marked `_meta.shepherd.continuation: true`.
+pub(super) fn prompt(
+    id: &RequestId,
+    agent_session: &str,
+    text: Option<&str>,
+    continuation: bool,
+) -> Option<Frame> {
     let prompt: Vec<Value> = text.map(text_block).into_iter().collect();
-    synthesized(json!({
-        "jsonrpc": "2.0", "id": id, "method": "session/prompt",
-        "params": { "sessionId": agent_session, "prompt": prompt },
-    }))
+    let mut params = json!({ "sessionId": agent_session, "prompt": prompt });
+    if let (true, Some(obj)) = (continuation, params.as_object_mut()) {
+        obj.insert(
+            "_meta".to_owned(),
+            json!({ "shepherd": { "continuation": true } }),
+        );
+    }
+    synthesized(json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": params }))
 }
 
 /// The `session/prompt` response that ends a turn normally.

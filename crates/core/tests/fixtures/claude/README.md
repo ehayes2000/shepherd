@@ -27,6 +27,8 @@ value or one the reference lists. Inferred means a value we picked that fits the
 | `PreCompact` | `trigger`, `custom_instructions` (`null` when none given) | |
 | `PostCompact` | `trigger`, `compact_summary` | |
 | `SessionEnd.{other,clear}` | `reason` | |
+| `Stop.continued` | `stop_hook_active: true` (Claude is continuing because a Stop hook blocked the previous `Stop`) | |
+| `PreToolUse.Grep.subagent`, `PermissionRequest.Grep.subagent` | `agent_id`, `agent_type` (present when the hook fires inside a subagent), Grep `pattern` | `agent-7f3a`, `Explore`, `path`, `toolu_03GHI789` |
 | `CwdChanged` | `old_cwd`, `new_cwd` (stands in for any hook without a mapping) | |
 
 ## Facts from the reference the translator relies on
@@ -40,3 +42,6 @@ value or one the reference lists. Inferred means a value we picked that fits the
 - `SessionStart` fires with `source: compact` after compaction, inside the same process. `/clear` fires `SessionEnd`
   (`reason: clear`) and then `SessionStart` (`source: clear`) with a new `session_id`.
 - API errors end the turn with `StopFailure` instead of `Stop`.
+- A Stop hook can block `Stop` (or `/goal` can), and Claude then keeps working and fires `Stop` again with
+  `stop_hook_active: true`, up to 8 consecutive continuations.
+- A hook can block `PreCompact`, and then no `PostCompact` follows.

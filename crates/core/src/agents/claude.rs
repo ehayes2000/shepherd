@@ -6,21 +6,25 @@
 //! | hook | frames |
 //! |---|---|
 //! | `UserPromptSubmit` | `session/prompt` request (`to_agent`) + `user_message_chunk` |
-//! | `PreToolUse` | `tool_call` `in_progress`, `toolCallId` = `tool_use_id` |
+//! | `PreToolUse` | `tool_call` `in_progress`, `toolCallId` = `tool_use_id`; after a continuation prompt if needed |
 //! | `PostToolUse` | `tool_call_update` `completed` |
 //! | `PostToolUseFailure`, `PermissionDenied` | `tool_call_update` `failed` |
-//! | `PermissionRequest` | `session/request_permission` (`from_agent`) |
+//! | `PermissionRequest` | `session/request_permission` (`from_agent`); after a continuation prompt if needed |
 //! | `Notification` `permission_prompt` | `session/request_permission`, unless one is already open |
 //! | `Notification` `idle_prompt` | `_shepherd/agent/idle` |
 //! | `Stop` | the open prompt's response with `end_turn` (`from_agent`), or `_shepherd/agent/idle` if none is open |
 //! | `StopFailure` | `_claude-code/StopFailure` + `_shepherd/agent/idle` |
 //! | `SessionStart` | `_shepherd/agent/started { agent_session_id }`, except after compaction (`source: compact`) |
 //! | `SessionEnd` | `_shepherd/agent/exited`, except for `/clear` and `/resume`, which start a new session in the same process |
-//! | `PreCompact` / `PostCompact` | `compaction_update` `in_progress` / `completed`, same `compactionId` |
+//! | `PreCompact` / `PostCompact` | `compaction_update` `in_progress` / `completed`, same `compactionId`; a new `PreCompact` first cancels one left open |
 //! | anything else | `_claude-code/<hook_name>` with the raw payload (`_claude-code/unknown` without a usable name) |
 //!
 //! Synthesized ACP frames carry `_meta.shepherd.synthesized`. A known hook missing a field its frames need becomes
 //! its vendor frame instead.
+//!
+//! Continuations: when a main-agent `PreToolUse` or `PermissionRequest` (no `agent_id`) arrives with no prompt
+//! open, a `Stop` hook kept the turn going after `Stop` fired. The translator opens an empty `session/prompt`
+//! marked `_meta.shepherd.continuation: true`, which the next `Stop` answers.
 //!
 //! Interrupts: Claude Code fires no hook when the user presses Esc (`Stop` "does not run if the stoppage occurred
 //! due to a user interrupt"). The turn ends at the next `UserPromptSubmit` (a new prompt replaces the old turn in
@@ -29,6 +33,7 @@
 
 mod frames;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::acpp::{Dir, Frame, FrameDraft, RequestId, Source, SourceKind};
@@ -38,16 +43,19 @@ use crate::ids::SessionId;
 pub const AGENT: &str = "claude-code";
 
 /// What the translator remembers between hooks of one shepherd session. The host keeps one per session and passes
-/// it to every [`translate`] call, so a prompt and its `Stop` pair up by id.
-#[derive(Debug, Clone, PartialEq)]
+/// it to every [`translate`] call, so a prompt and its `Stop` pair up by id. It serializes, so the host can persist
+/// it across restarts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeTranslation {
     session: SessionId,
+    /// Unique per translator lifetime within the session's log; prefixes every id this translator creates.
+    id_seed: String,
     /// Claude Code's own session id, from the latest `SessionStart`.
     agent_session_id: Option<String>,
-    /// Numbers every request and compaction this translator creates, so ids never repeat in a log.
+    /// Numbers the requests and compactions this translator creates.
     next_id: u64,
-    /// The open `session/prompt` request.
-    prompt: Option<RequestId>,
+    /// The id of the open `session/prompt` request.
+    prompt: Option<String>,
     /// A permission prompt was sent and no tool activity or turn end has followed.
     permission_open: bool,
     /// Tools that started (`PreToolUse`) and haven't finished in this turn, oldest first.
@@ -56,7 +64,7 @@ pub struct ClaudeTranslation {
     compaction: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct OpenTool {
     id: String,
     name: String,
@@ -65,9 +73,15 @@ struct OpenTool {
 
 impl ClaudeTranslation {
     /// A fresh translator for shepherd session `session`.
-    pub fn new(session: SessionId) -> Self {
+    ///
+    /// `id_seed` must be unique among the translators that ever write to this session's log, for example the
+    /// session log's last seq or the newest envelope id when the translator is created. Request and compaction
+    /// ids are `claude-<id_seed>-<kind>-<n>`, so a new translator for an existing session (after a host restart
+    /// that didn't restore the old state) never reuses an id that is still in the log.
+    pub fn new(session: SessionId, id_seed: impl Into<String>) -> Self {
         Self {
             session,
+            id_seed: id_seed.into(),
             agent_session_id: None,
             next_id: 1,
             prompt: None,
@@ -82,7 +96,7 @@ impl ClaudeTranslation {
     }
 
     fn new_id(&mut self, kind: &str) -> String {
-        let id = format!("claude-{kind}-{}", self.next_id);
+        let id = format!("claude-{}-{kind}-{}", self.id_seed, self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         id
     }
@@ -180,21 +194,53 @@ fn agent_session(state: &ClaudeTranslation, hook: &Hook) -> String {
 fn user_prompt_submit(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let agent_session = agent_session(state, hook);
     let text = hook.str("prompt");
-    let id = RequestId::from(state.new_id("prompt"));
-    let mut out = vec![(Dir::ToAgent, frames::prompt(&id, &agent_session, text)?)];
+    let mut out = vec![open_prompt(state, &agent_session, text, false)?];
     if let Some(text) = text {
         out.push((
             Dir::FromAgent,
             frames::user_message_chunk(&agent_session, text)?,
         ));
     }
+    Some(out)
+}
+
+/// Starts a turn with a new `session/prompt` request, which the next `Stop` answers.
+fn open_prompt(
+    state: &mut ClaudeTranslation,
+    agent_session: &str,
+    text: Option<&str>,
+    continuation: bool,
+) -> Option<(Dir, Frame)> {
+    let id = state.new_id("prompt");
+    let frame = frames::prompt(
+        &RequestId::from(id.clone()),
+        agent_session,
+        text,
+        continuation,
+    )?;
     state.end_turn();
     state.prompt = Some(id);
-    Some(out)
+    Some((Dir::ToAgent, frame))
+}
+
+/// The continuation prompt a main-agent tool hook needs when no prompt is open, else nothing.
+///
+/// A `Stop` hook (another one, or `/goal`) can block `Stop`, and Claude then keeps working after the `Stop` this
+/// translator already answered, firing `Stop` again (`stop_hook_active: true`) when it is done. The fold ignores
+/// tool activity while idle, so the continued work gets a prompt of its own: empty, marked
+/// `_meta.shepherd.continuation`, answered by the next `Stop`. Subagent hooks (with `agent_id`) belong to the main
+/// agent's turn and never open one.
+fn continuation(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
+    if state.prompt.is_some() || hook.field("agent_id").is_some() {
+        return Some(Vec::new());
+    }
+    let agent_session = agent_session(state, hook);
+    Some(vec![open_prompt(state, &agent_session, None, true)?])
 }
 
 fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let id = hook.str("tool_use_id")?;
+    let mut out = continuation(state, hook)?;
     let name = hook.str("tool_name").unwrap_or("Tool");
     let input = hook.field("tool_input");
     let frame = frames::tool_call(
@@ -211,7 +257,8 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         input: input.cloned(),
     });
     state.permission_open = false;
-    Some(vec![(Dir::FromAgent, frame)])
+    out.push((Dir::FromAgent, frame));
+    Some(out)
 }
 
 fn tool_done(
@@ -237,7 +284,9 @@ fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         .rev()
         .find(|t| t.name == name && t.input.as_ref() == input)
         .map(|t| t.id.clone());
-    permission(state, hook, tool, &tool_title(name, input))
+    let mut out = continuation(state, hook)?;
+    out.extend(permission(state, hook, tool, &tool_title(name, input))?);
+    Some(out)
 }
 
 fn notification(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
@@ -282,7 +331,10 @@ fn permission(
 
 fn stop(state: &mut ClaudeTranslation, _hook: &Hook) -> Frames {
     let frame = match &state.prompt {
-        Some(id) => (Dir::FromAgent, frames::prompt_end_turn(id)?),
+        Some(id) => (
+            Dir::FromAgent,
+            frames::prompt_end_turn(&RequestId::from(id.as_str()))?,
+        ),
         None => (Dir::Internal, frames::agent_idle()?),
     };
     state.end_turn();
@@ -326,11 +378,24 @@ fn session_end(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     Some(vec![(Dir::Internal, frame)])
 }
 
+/// A hook can block `PreCompact`, and then no `PostCompact` follows. A compaction still open when the next one
+/// starts was blocked, so it is cancelled first.
 fn pre_compact(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
+    let agent_session = agent_session(state, hook);
+    let mut out = Vec::new();
+    if let Some(old) = &state.compaction {
+        out.push((
+            Dir::FromAgent,
+            frames::compaction(&agent_session, old, "cancelled", None)?,
+        ));
+    }
     let id = state.new_id("compaction");
-    let frame = frames::compaction(&agent_session(state, hook), &id, "in_progress", None)?;
+    out.push((
+        Dir::FromAgent,
+        frames::compaction(&agent_session, &id, "in_progress", None)?,
+    ));
     state.compaction = Some(id);
-    Some(vec![(Dir::FromAgent, frame)])
+    Some(out)
 }
 
 fn post_compact(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {

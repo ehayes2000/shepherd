@@ -42,13 +42,26 @@ fn all_fixtures() -> Vec<Value> {
         fx!("SessionEnd.other"),
         fx!("SessionEnd.clear"),
         fx!("CwdChanged"),
+        fx!("Stop.continued"),
+        fx!("PreToolUse.Grep.subagent"),
+        fx!("PermissionRequest.Grep.subagent"),
     ]
 }
 
 // ---------- helpers ----------
 
 fn state() -> ClaudeTranslation {
-    ClaudeTranslation::new(SessionId::new("s_test"))
+    seeded("1")
+}
+
+fn seeded(seed: &str) -> ClaudeTranslation {
+    ClaudeTranslation::new(SessionId::new("s_test"), seed)
+}
+
+/// Whether a draft is a synthesized continuation of a turn a Stop hook kept going.
+fn is_continuation(d: &FrameDraft) -> bool {
+    d.frame.method() == Some("session/prompt")
+        && d.frame.raw()["params"]["_meta"]["shepherd"]["continuation"] == json!(true)
 }
 
 /// Translates `payloads` in order with one translation state, returning all drafts.
@@ -244,6 +257,59 @@ fn translation_state_survives_a_round_trip_between_calls() {
     );
 }
 
+#[test]
+fn translation_state_persists_through_serde() {
+    let mut st = state();
+    run(
+        &mut st,
+        &[
+            fx!("UserPromptSubmit"),
+            fx!("PreToolUse.Bash"),
+            fx!("PreCompact"),
+        ],
+    );
+    let json = serde_json::to_value(&st).unwrap();
+    let mut restored: ClaudeTranslation = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, st);
+    let next = [
+        fx!("PermissionRequest.Bash"),
+        fx!("PostCompact"),
+        fx!("Stop"),
+    ];
+    assert_eq!(run(&mut restored, &next), run(&mut st, &next));
+}
+
+#[test]
+fn translators_with_different_seeds_never_share_an_id() {
+    // A new translator for an existing session (e.g. after a host restart) must not reuse the old one's ids.
+    let session = [
+        fx!("UserPromptSubmit"),
+        fx!("PermissionRequest.Bash"),
+        fx!("PreCompact"),
+        fx!("PreCompact"),
+        fx!("Stop"),
+        fx!("PreToolUse.Bash"),
+    ];
+    let ids = |seed: &str| -> Vec<String> {
+        run(&mut seeded(seed), &session)
+            .iter()
+            .filter_map(|d| {
+                let raw = d.frame.raw();
+                let compaction = raw["params"]["update"]["compactionId"].as_str();
+                match (d.frame.method(), d.frame.id()) {
+                    (Some(_), Some(id)) => Some(id.to_string()),
+                    _ => compaction.map(str::to_owned),
+                }
+            })
+            .collect()
+    };
+    let (a, b) = (ids("e01"), ids("e02"));
+    assert_eq!(a.len(), 6);
+    for id in &a {
+        assert!(!b.contains(id), "{id} repeats across translators");
+    }
+}
+
 // ---------- tools ----------
 
 #[test]
@@ -263,7 +329,7 @@ fn pre_tool_use_becomes_an_in_progress_tool_call_keyed_by_tool_use_id() {
 
 #[test]
 fn tool_titles_and_kinds_follow_the_tool() {
-    let drafts = one(&[fx!("PreToolUse.Read")]);
+    let drafts = last(&[fx!("UserPromptSubmit"), fx!("PreToolUse.Read")]);
     let SessionUpdate::ToolCall(call) = update(&drafts[0]) else {
         panic!("expected a tool_call");
     };
@@ -322,7 +388,7 @@ fn permission_request_becomes_request_permission_naming_the_pending_tool() {
 
 #[test]
 fn permission_request_for_an_unseen_tool_gets_its_own_tool_call_id() {
-    let drafts = one(&[fx!("PermissionRequest.Bash")]);
+    let drafts = last(&[fx!("UserPromptSubmit"), fx!("PermissionRequest.Bash")]);
     let AcpFrame::RequestPermission(r) = acp(&drafts[0]) else {
         panic!("expected request_permission");
     };
@@ -470,6 +536,39 @@ fn post_compact_completes_the_same_compaction_with_its_summary() {
 }
 
 #[test]
+fn a_new_pre_compact_cancels_a_compaction_that_never_completed() {
+    // A hook can block PreCompact, and then no PostCompact follows.
+    let mut st = state();
+    let first = translate(&mut st, &fx!("PreCompact"));
+    let second = translate(&mut st, &fx!("PreCompact"));
+    let SessionUpdate::CompactionUpdate(blocked) = update(&first[0]) else {
+        panic!("expected compaction_update");
+    };
+    let updates: Vec<_> = second
+        .iter()
+        .map(|d| match update(d) {
+            SessionUpdate::CompactionUpdate(c) => {
+                (c.compaction_id.clone(), c.status.as_str().to_owned())
+            }
+            other => panic!("expected compaction_update, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(
+        updates[0],
+        (blocked.compaction_id.clone(), "cancelled".to_owned())
+    );
+    assert_ne!(updates[1].0, blocked.compaction_id);
+    assert_eq!(updates[1].1, "in_progress");
+
+    let done = translate(&mut st, &fx!("PostCompact"));
+    let SessionUpdate::CompactionUpdate(c) = update(&done[0]) else {
+        panic!("expected compaction_update");
+    };
+    assert_eq!(c.compaction_id, updates[1].0);
+}
+
+#[test]
 fn post_compact_without_a_pre_compact_is_a_vendor_frame() {
     let drafts = one(&[fx!("PostCompact")]);
     assert_eq!(methods(&drafts), vec![Some("_claude-code/PostCompact")]);
@@ -567,6 +666,119 @@ fn a_full_turn_folds_to_the_expected_activity_sequence() {
             Activity::Idle,
             Activity::Exited { code: None },
         ]
+    );
+}
+
+// ---------- turns a Stop hook continues ----------
+
+#[test]
+fn a_turn_continued_after_stop_works_again_until_the_next_stop() {
+    // Another Stop hook (or /goal) blocked the first Stop, so Claude keeps going and fires Stop again.
+    let seen = activities(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PreToolUse.Bash"),
+        fx!("PostToolUse.Bash"),
+        fx!("Stop.continued"),
+    ]);
+    assert_eq!(
+        seen,
+        vec![
+            working(),
+            Activity::Idle,
+            working_on_bash(),
+            working(),
+            Activity::Idle,
+        ]
+    );
+}
+
+#[test]
+fn a_main_agent_tool_with_no_open_prompt_opens_a_marked_continuation() {
+    let drafts = last(&[fx!("UserPromptSubmit"), fx!("Stop"), fx!("PreToolUse.Bash")]);
+    assert_eq!(
+        methods(&drafts),
+        vec![Some("session/prompt"), Some("session/update")]
+    );
+    let d = &drafts[0];
+    assert!(is_continuation(d));
+    assert!(d.frame.is_synthesized());
+    assert_eq!(d.dir, Dir::ToAgent);
+    let AcpFrame::Prompt(p) = acp(d) else {
+        panic!("expected a prompt request");
+    };
+    assert!(p.prompt.is_empty());
+}
+
+#[test]
+fn the_continued_stop_answers_the_continuation() {
+    let drafts = one(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PreToolUse.Bash"),
+        fx!("Stop.continued"),
+    ]);
+    let continuation = drafts.iter().find(|d| is_continuation(d)).unwrap();
+    let response = drafts.last().unwrap();
+    assert!(matches!(response.frame, Frame::Response(_)));
+    assert_eq!(response.frame.id(), continuation.frame.id());
+    assert_eq!(response.dir, Dir::FromAgent);
+}
+
+#[test]
+fn a_permission_request_with_no_open_prompt_opens_a_continuation() {
+    let drafts = last(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PermissionRequest.Bash"),
+    ]);
+    assert_eq!(
+        methods(&drafts),
+        vec![Some("session/prompt"), Some("session/request_permission")]
+    );
+    assert!(is_continuation(&drafts[0]));
+}
+
+#[test]
+fn tools_inside_an_open_prompt_open_no_continuation() {
+    let drafts = one(&[
+        fx!("UserPromptSubmit"),
+        fx!("PreToolUse.Bash"),
+        fx!("PermissionRequest.Bash"),
+        fx!("PostToolUse.Bash"),
+        fx!("PreToolUse.Read"),
+    ]);
+    assert!(!drafts.iter().any(is_continuation));
+}
+
+#[test]
+fn subagent_tool_hooks_open_no_continuation() {
+    let drafts = last(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PreToolUse.Grep.subagent"),
+    ]);
+    assert!(!drafts.iter().any(is_continuation));
+    let drafts = last(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PermissionRequest.Grep.subagent"),
+    ]);
+    assert!(!drafts.iter().any(is_continuation));
+
+    let seen = activities(&[
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PreToolUse.Grep.subagent"),
+    ]);
+    assert_eq!(seen.last(), Some(&Activity::Idle));
+}
+
+#[test]
+fn subagent_tools_during_the_main_turn_are_tracked_as_usual() {
+    let seen = activities(&[fx!("UserPromptSubmit"), fx!("PreToolUse.Grep.subagent")]);
+    assert!(
+        matches!(seen.last(), Some(Activity::Working { tool: Some(t) }) if t.id == "toolu_03GHI789")
     );
 }
 
