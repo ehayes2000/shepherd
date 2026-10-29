@@ -73,4 +73,4 @@ one-line description of what you did.
 If a PR is more than a single commit, the body should contain the commit message of each commit.
 Otherwise the body should be left blank.
 
-ALWAYS RUN `scripts/check.sh` BEFORE A COMMIT OR PR (it runs `cargo fmt --check` and `cargo clippy -- -D warnings`).
+ALWAYS RUN `scripts/check.sh` BEFORE A COMMIT OR PR (it runs `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`).
