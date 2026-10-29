@@ -120,5 +120,6 @@ This is enforced by test: in the scenario harness, folding the persisted logs fr
   sessions/<session-id>.jsonl    # one log per session
 ```
 
-JSONL, one envelope per line. Append, then flush. On open, a torn final line is truncated with a warning.
-Corruption anywhere else is an error. Snapshots and compaction are deferred until replay is measurably slow.
+JSONL, one envelope per line, one exclusive writer per root (lock file). An append survives a process crash, not power
+loss (decision 0009). On open, bytes after the last newline, or a trailing run of only NUL bytes and newlines, are
+truncated and reported. Any complete line that doesn't parse is `Corrupt`. Snapshots and compaction are deferred until replay is measurably slow.

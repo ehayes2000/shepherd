@@ -179,3 +179,14 @@ Decision: core may use pure, widely used crates through `CORE_ALLOWED`. Added no
 clock-reading functions are in core's clippy `disallowed-methods`. Hand-rolling something a standard crate does is
 a review finding. Builders ask the PM to add the crate rather than reimplementing it.
 Consequences: a slightly bigger dependency tree. Timestamps get real ordering and arithmetic. F04 replaces the hand-rolled code.
+
+### 0009: Log durability is process-crash safe, not power-loss safe (2026-10-29)
+Context: T04 review. fsync on every append (F_FULLFSYNC on macOS) costs milliseconds per hook event. Losing the last
+few events on power loss is acceptable for an agent manager, but losing or corrupting acknowledged history after an
+ordinary crash is not.
+Decision: appends write a complete line with no fsync. They survive a process crash, not power loss or a kernel panic.
+Recovery truncates only (a) bytes after the last newline, and (b) a trailing region made up only of NUL bytes and
+newlines. Any complete line that doesn't parse is `Corrupt` and is never silently dropped. Each root has one writer,
+enforced with an exclusive file lock.
+Consequences: a power cut may lose the newest events and need recovery, but it never silently rewrites history.
+Revisit this (fsync per batch) if acks to remote peers start depending on durability (M4).

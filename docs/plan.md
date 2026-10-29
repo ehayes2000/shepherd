@@ -331,6 +331,8 @@ acceptance:
 - Executes `Append` (stamping it with id, ts, and machine), `SpawnPty`, `WritePty`, `ResizePty`, `KillPty`, and `Reply`.
 - Keeps a `shepherd_term::Screen` per PTY. PTY output is fed into it, and `take_replies()` is written back to the PTY, so
   agents get their terminal-query answers with no client attached (decision 0007).
+- Live log fan-out uses the `Envelope` returned by `append`. `EventLog::read(log, from)` is only for catching up a client
+  on subscribe and for startup replay.
 - Attach: subscribing to a session's output first sends `snapshot_ansi()`, then live bytes. A scenario test shows a
   client attaching mid-session and seeing the current screen.
 - Fans new envelopes and PTY output out to subscribed clients. A subscribe with `from` replays history first, then goes live
