@@ -1,0 +1,9 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-app/abc123.jsonl",
+  "cwd": "/Users/dev/app",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Bash",
+  "title": "Permission needed",
+  "notification_type": "permission_prompt"
+}

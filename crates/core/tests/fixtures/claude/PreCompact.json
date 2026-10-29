@@ -1,0 +1,8 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-app/abc123.jsonl",
+  "cwd": "/Users/dev/app",
+  "hook_event_name": "PreCompact",
+  "trigger": "manual",
+  "custom_instructions": null
+}

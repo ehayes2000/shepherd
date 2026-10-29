@@ -1,0 +1,9 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-app/abc123.jsonl",
+  "cwd": "/Users/dev/app",
+  "prompt_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Actually, make it iterative"
+}
