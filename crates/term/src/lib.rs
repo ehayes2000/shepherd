@@ -181,14 +181,17 @@ impl Screen {
     ///
     /// Output held by an open synchronized update is appended after a begin marker, so the copy is left holding
     /// the same bytes. An escape sequence or UTF-8 char the parser is in the middle of is carried too, so the copy
-    /// reads the rest of it the same way.
+    /// reads the rest of it the same way; of a sequence longer than 64 KiB only the start is carried.
     ///
     /// Not carried over: the primary screen while the alt screen is active, scrollback, the scroll region, tab
-    /// stops, hyperlinks, the title, the charset state, the last printed character that REP repeats, and whether
-    /// the saved cursor (DECSC) was waiting to wrap. Only the top of the active screen's kitty keyboard stack is
-    /// re-pushed; deeper entries and the inactive screen's stack are lost. A widening resize can leave the cursor
+    /// stops, hyperlinks, the title, the charset state, colours set with OSC 4 / 10 / 11 (so colour queries can get
+    /// different answers), the last printed character that REP repeats, and whether the saved cursor (DECSC) was
+    /// waiting to wrap. Only the top of the active screen's kitty keyboard stack is re-pushed; deeper entries and the
+    /// inactive screen's stack are lost, and flags set with `CSI = u` on an empty stack are pushed, so the copy
+    /// reports them to `CSI ? u` where the original reports 0. A widening resize can leave the cursor
     /// waiting to wrap away from the last column, so the next character or tab starts a new line; the copy's cursor
-    /// doesn't wait.
+    /// doesn't wait. After a widening resize alacritty can also stop resetting the blank cells of a row erased with
+    /// a background colour, so a later erase, insert or reset leaves that colour in the original but not the copy.
     ///
     /// Wide characters with a half erased (by ECH, EL, ICH or DCH) are rebuilt with the same edits, with two gaps:
     /// a broken half in the last column with only broken halves before it comes out as a blank, and when the

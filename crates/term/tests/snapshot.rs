@@ -3,6 +3,8 @@
 
 mod support;
 
+use std::time::{Duration, Instant};
+
 use shepherd_term::{Screen, Width};
 use support::{AGENTS, observe, replay, segments};
 
@@ -464,6 +466,18 @@ fn controls_inside_an_unfinished_sequence_are_not_run_twice() {
 }
 
 #[test]
+fn sequences_ending_in_a_later_feed_are_followed() {
+    // An ignored CSI ends without a callback.
+    assert_continues(10, 3, &[b"ab\x1b[<", b"<5", b"mc\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b", b"[<<mc\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b[<", b"<5", b"m\n"], b"c");
+    assert_continues(10, 3, &[b"ab\x1b]0;t", b"itle", b"\x07c\xe6"], b"\x97\xa5");
+    assert_continues(10, 3, &[b"ab\x1b]0;t", b"it\x18c"], b"d");
+    assert_continues(10, 3, &[b"ab\x1bP1$", b"q", b"m\x9cc"], b"d");
+    assert_continues(10, 3, &[b"ab\x1b[3", b"1", b"mc\x1b[1"], b"Cd");
+}
+
+#[test]
 fn a_snapshot_mid_utf8_char_carries_the_unfinished_char() {
     assert_continues(10, 3, &["a日".as_bytes(), b"\xe6\x97"], b"\xa5b");
     assert_continues(10, 3, &[b"a\xf0"], b"\x9f\x90\x91b");
@@ -520,4 +534,71 @@ fn an_unfinished_sequence_before_a_new_sync_begin_is_carried_over() {
         &[b"\x1b[?2026ha", b"\x1b[?2026lb\xe6\x1b[?2026hzz"],
         b"y",
     );
+}
+
+/// Feeds `intro` and then `len` bytes of `body` in 4 KiB chunks. Returns the time the chunks took and the snapshot.
+fn feed_open_sequence(intro: &[u8], body: u8, len: usize) -> (Duration, Vec<u8>) {
+    let mut screen = Screen::new(80, 24);
+    screen.feed(intro);
+    let chunk = vec![body; 4096];
+    let start = Instant::now();
+    for _ in 0..len / chunk.len() {
+        screen.feed(&chunk);
+    }
+    (start.elapsed(), screen.snapshot_ansi())
+}
+
+#[test]
+fn a_sequence_that_never_ends_costs_linear_time_and_a_bounded_snapshot() {
+    let cases: [(&str, &[u8], u8); 5] = [
+        ("OSC", b"\x1b]0;", b'x'),
+        ("DCS", b"\x1bPq", b'x'),
+        ("APC", b"\x1b_", b'x'),
+        ("CSI params", b"\x1b[", b'1'),
+        ("ESC intermediates", b"\x1b", b' '),
+    ];
+    for (label, intro, body) in cases {
+        let (small, snapshot) = feed_open_sequence(intro, body, 1 << 20);
+        assert!(
+            snapshot.len() < 80 * 1024,
+            "{label}: snapshot is {} bytes",
+            snapshot.len()
+        );
+        let (large, snapshot) = feed_open_sequence(intro, body, 8 << 20);
+        assert!(
+            snapshot.len() < 80 * 1024,
+            "{label}: snapshot is {} bytes",
+            snapshot.len()
+        );
+        // Eight times the bytes; quadratic work would take about 64 times as long. The floor keeps a fast small
+        // run from making the ratio noisy.
+        assert!(
+            large < small.max(Duration::from_millis(20)) * 24,
+            "{label}: 1 MiB took {small:?}, 8 MiB took {large:?}"
+        );
+    }
+}
+
+#[test]
+fn a_copy_taken_inside_an_over_long_sequence_still_swallows_the_rest() {
+    let cases: [(&[u8], u8, &[u8]); 4] = [
+        (b"\x1b]0;", b'x', b"\x07ab"),
+        (b"\x1bPq", b'x', b"\x1b\\ab"),
+        (b"\x1b[", b'1', b"mab"),
+        (b"\x1b", b' ', b"Bab"),
+    ];
+    for (intro, body, end) in cases {
+        let mut screen = Screen::new(10, 3);
+        screen.feed(intro);
+        for _ in 0..64 {
+            screen.feed(&[body; 4096]);
+        }
+        let mut copy = copy_of(&screen);
+        for s in [&mut screen, &mut copy] {
+            s.feed(&[body; 100]);
+            s.feed(end);
+        }
+        assert_eq!(observe(&copy), observe(&screen), "{intro:?}");
+        assert_eq!(support::text(&screen)[0], "ab");
+    }
 }

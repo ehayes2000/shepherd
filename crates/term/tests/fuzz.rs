@@ -37,14 +37,15 @@ const TOKENS: &[&str] = &[
     "\x1b]0;title\x07", "\x1b]11;rgb:12/34/56\x07",
 ];
 
-/// Tokens touching state `snapshot_ansi` documents it doesn't carry over: scroll region, tab stops, charset, REP's
-/// last character, kitty stack entries below the top, the primary screen, and the saved cursor's pending wrap. Left
-/// out of the output fed after the snapshot, and the copy is only expected to keep following the original when none
-/// of them came before it either.
+/// Tokens touching state `snapshot_ansi` doesn't carry over: scroll region, tab stops, charset, REP's last
+/// character, the kitty stack (flags set with an empty stack are reported as 0, but the copy re-pushes them), the
+/// primary screen, the saved cursor's pending wrap, and colours set with OSC (which change replies). Left out of the
+/// output fed after the snapshot, and the copy is only expected to keep following the original when none of them
+/// came before it either.
 #[rustfmt::skip]
 const GAPS: &[&str] = &[
     "\x1b[2;4r", "\x1b[r", "\x1b[3g", "\x1bH", "\x1b(0", "\x1b(B", "\x0e", "\x0f", "\x1b[3b", "\x1b[<u", "\x1b[?1049l",
-    "\x1b8",
+    "\x1b8", "\x1b]11;rgb:12/34/56\x07", "\x1b[=3;1u",
 ];
 
 /// Tokens that may follow a snapshot.
@@ -149,11 +150,11 @@ fn leaves_hidden_state(ops: &[Op]) -> bool {
     })
 }
 
-fn expire(screen: &mut Screen) {
+fn expire(screen: &mut Screen, replies: &mut Vec<u8>) {
     if let Some(hold) = screen.sync_hold() {
         screen.expire_sync(hold.id);
     }
-    screen.take_replies();
+    replies.extend(screen.take_replies());
 }
 
 proptest! {
@@ -165,11 +166,21 @@ proptest! {
         rows in 0u16..8,
         ops in prop::collection::vec(op(), 0..40),
         resizes in any::<bool>(),
+        gaps in any::<bool>(),
         (cut, at) in (continuation(), any::<prop::sample::Index>()),
         more in prop::collection::vec(continuation(), 0..12),
     ) {
-        // Half the runs have no resizes, so the continuation below is checked often.
-        let ops: Vec<Op> = ops.into_iter().filter(|op| resizes || !matches!(op, Op::Resize(..))).collect();
+        // Some runs have no resizes or gap tokens, so the continuation below is checked often and on long runs.
+        let ops: Vec<Op> = ops
+            .into_iter()
+            .filter(|op| resizes || !matches!(op, Op::Resize(..)))
+            .map(|op| match op {
+                Op::Tokens(tokens) if !gaps => {
+                    Op::Tokens(tokens.into_iter().filter(|&t| !GAPS.contains(&TOKENS[t])).collect())
+                }
+                op => op,
+            })
+            .collect();
         // The snapshot is taken after the first `at` bytes of `cut`, which may split a sequence or a UTF-8 char.
         let at = at.index(cut.len() + 1);
         let log = format!(
@@ -194,14 +205,25 @@ proptest! {
         prop_assert_eq!(observe_except(&copy, &skip), observe_except(&screen, &skip), "after {}", log);
         // A row the copy couldn't rebuild, or state it didn't get, would make later output diverge too.
         if skip.is_empty() && !leaves_hidden_state(&ops) {
+            let mut replies = Vec::new();
             for s in [&mut screen, &mut copy] {
+                let mut answered = Vec::new();
                 s.feed(&cut.as_bytes()[at..]);
+                answered.extend(s.take_replies());
                 for t in &more {
                     s.feed(t.as_bytes());
+                    answered.extend(s.take_replies());
                 }
-                expire(s);
+                expire(s, &mut answered);
+                replies.push(answered);
             }
             prop_assert_eq!(observe(&copy), observe(&screen), "continuing after {}", log);
+            prop_assert_eq!(
+                String::from_utf8_lossy(&replies[1]),
+                String::from_utf8_lossy(&replies[0]),
+                "replies continuing after {}",
+                log
+            );
         }
     }
 }
