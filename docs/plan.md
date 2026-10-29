@@ -176,7 +176,7 @@ acceptance:
 scope: crates/adapters
 
 ### F12: Continuation prompts don't count as user turns
-status: in-progress
+status: done (5d09c6d)
 depends: T15
 touches: core::session
 goal: `SessionState::turns()` counts prompts the user actually sent.
