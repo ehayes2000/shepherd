@@ -143,7 +143,7 @@ stays pure. The log assigns `seq` and seals with `FrameDraft::seal(seq, stamp)`.
 with `LogId = Host | Session(SessionId)`.
 
 ### T05: Session activity fold
-status: in-progress
+status: done (6919323)
 depends: T03
 touches: core::session
 goal: Derive agent status from a session's frames. This is the heart of the sidebar.
@@ -348,6 +348,12 @@ acceptance:
 - The prompt request `id` is derived deterministically from state carried between calls (pass in the session's
   translation state and get it back) so that request and response pair up.
 - Folding the translated fixtures through T05 produces the expected Activity sequence.
+- Interrupts: Claude Code does not fire `Stop` when the user interrupts with Esc. Find the signal that does exist
+  (an idle notification, the next `UserPromptSubmit`, or something else in the current docs) and make sure a
+  hook-fed session doesn't stay Working forever after an interrupt. Write a fixture-based test for it. If no hook signal
+  exists, report it so the PM can decide on a non-hook fallback (e.g. PTY output going quiet).
+- A permission notification arriving while Idle moves the fold into NeedsPermission (by T05's design). Only emit
+  `session/request_permission` for real permission prompts, not for generic notifications.
 scope: crates/core
 out of scope: launching claude (T17).
 
