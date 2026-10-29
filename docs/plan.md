@@ -630,8 +630,14 @@ acceptance:
   carries `at`, plus a `Tick { at }` deadline the runtime schedules. No clocks in core.
 - Output after the inferred idle doesn't flip back to Working by itself. Only real turn signals (a prompt or a tool call) do,
   per T05's rules.
-- Tests: core table tests (quiet then idle, output resets the timer, already Idle means no duplicate, NeedsPermission is not
-  overridden by quiet, because waiting for permission is legitimately quiet) and a scenario with the fake PTY.
+- NeedsPermission: an untouched dialog is legitimately quiet, so quiet alone never clears it. But choosing "No" in Claude's
+  permission dialog fires **no hook** (`PermissionDenied` is auto-mode only). So: in NeedsPermission, if PTY output happens
+  *after* the permission request (the dialog was answered and redrawn) and then a quiet period follows, append
+  `_shepherd/agent/idle { inferred: "quiet-after-permission" }`.
+- The same fallback covers the other no-signal cases from the T15 review: a prompt blocked by another `UserPromptSubmit` hook,
+  and Esc during a hook.
+- Tests: core table tests (quiet then idle, output resets the timer, already Idle means no duplicate, an untouched NeedsPermission
+  stays put, NeedsPermission plus output plus quiet goes idle) and a scenario with the fake PTY.
 scope: crates/core, crates/shepherd
 
 ### T19: Codex integration
