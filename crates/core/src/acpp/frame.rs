@@ -260,6 +260,19 @@ impl Frame {
             == Some(&Value::Bool(true))
     }
 
+    /// Whether this is a `session/prompt` a producer opened to continue work the user didn't ask for (e.g. a
+    /// Claude Code turn a Stop hook kept going), marked `_meta.shepherd.continuation: true` in its `params`.
+    pub fn is_continuation(&self) -> bool {
+        let raw = self.raw();
+        raw.get("method").and_then(Value::as_str) == Some("session/prompt")
+            && raw
+                .get("params")
+                .and_then(|p| p.get("_meta"))
+                .and_then(|m| m.get("shepherd"))
+                .and_then(|s| s.get("continuation"))
+                == Some(&Value::Bool(true))
+    }
+
     /// The JSON this frame was parsed from.
     pub fn raw(&self) -> &Value {
         match self {

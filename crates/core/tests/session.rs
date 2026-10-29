@@ -573,6 +573,113 @@ fn last_prompt_joins_text_blocks_and_skips_others() {
     assert_eq!(state.last_prompt(), Some("look at\nthis"));
 }
 
+fn continuation(id: i64, text: Option<&str>) -> (Dir, Value) {
+    let prompt: Vec<Value> = text
+        .map(|t| json!({ "type": "text", "text": t }))
+        .into_iter()
+        .collect();
+    (
+        Dir::ToAgent,
+        json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+                "params": { "sessionId": "a1", "prompt": prompt,
+                            "_meta": { "shepherd": { "continuation": true, "synthesized": true } } } }),
+    )
+}
+
+/// (name, steps, activity, turns, last_prompt)
+type TurnCase = (&'static str, Vec<Step>, Activity, u32, Option<&'static str>);
+
+#[test]
+fn continuations_open_a_turn_but_are_not_user_turns() {
+    let cases: Vec<TurnCase> = vec![
+        (
+            "a lone continuation works without counting",
+            vec![continuation(1, None)],
+            working(),
+            0,
+            None,
+        ),
+        (
+            "a continuation after a user turn keeps the count and text",
+            vec![
+                prompt(1, "fix the login"),
+                prompt_done(1),
+                idle(),
+                continuation(2, None),
+            ],
+            working(),
+            1,
+            Some("fix the login"),
+        ),
+        (
+            "a continuation's own text is not a user prompt",
+            vec![
+                prompt(1, "fix the login"),
+                prompt_done(1),
+                continuation(2, Some("keep going")),
+            ],
+            working(),
+            1,
+            Some("fix the login"),
+        ),
+        (
+            "tools run inside a continuation",
+            vec![
+                prompt(1, "fix the login"),
+                prompt_done(1),
+                continuation(2, None),
+                tool_call("t1", "Bash"),
+            ],
+            working_on("t1", "Bash"),
+            1,
+            Some("fix the login"),
+        ),
+        (
+            "a continuation ends like any turn",
+            vec![
+                prompt(1, "fix the login"),
+                prompt_done(1),
+                continuation(2, None),
+                prompt_done(2),
+            ],
+            Activity::Idle,
+            1,
+            Some("fix the login"),
+        ),
+        (
+            "the next user prompt counts again",
+            vec![
+                prompt(1, "fix the login"),
+                prompt_done(1),
+                continuation(2, None),
+                prompt_done(2),
+                prompt(3, "now add tests"),
+            ],
+            working(),
+            2,
+            Some("now add tests"),
+        ),
+        (
+            "a continuation marked false is a user prompt",
+            vec![(
+                Dir::ToAgent,
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+                        "params": { "sessionId": "a1", "prompt": [{ "type": "text", "text": "hi" }],
+                                    "_meta": { "shepherd": { "continuation": false } } } }),
+            )],
+            working(),
+            1,
+            Some("hi"),
+        ),
+    ];
+    for (name, steps, activity, turns, last_prompt) in cases {
+        let state = fold(&steps);
+        assert_eq!(state.activity(), &activity, "{name}: activity");
+        assert_eq!(state.turns(), turns, "{name}: turns");
+        assert_eq!(state.last_prompt(), last_prompt, "{name}: last_prompt");
+    }
+}
+
 // ---------- property ----------
 
 fn arb_json() -> impl Strategy<Value = Value> {

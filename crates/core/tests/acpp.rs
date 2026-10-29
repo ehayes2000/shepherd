@@ -703,6 +703,25 @@ fn real_frames_are_not_synthesized() {
     assert!(!f.is_synthesized());
 }
 
+#[test]
+fn continuation_prompts_are_recognized_by_their_mark() {
+    let marked = |meta: Value| {
+        frame(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+                      "params": { "sessionId": "a1", "prompt": [], "_meta": meta } }),
+        )
+    };
+    assert!(marked(json!({ "shepherd": { "continuation": true } })).is_continuation());
+    assert!(!marked(json!({ "shepherd": { "continuation": false } })).is_continuation());
+    assert!(!marked(json!({ "shepherd": {} })).is_continuation());
+    assert!(!marked(json!({ "continuation": true })).is_continuation());
+    let unmarked = frame(
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+                                 "params": { "sessionId": "a1", "prompt": [] } }),
+    );
+    assert!(!unmarked.is_continuation());
+}
+
 // ---------- correlating responses ----------
 
 fn prompt_request(id: Value) -> Frame {
