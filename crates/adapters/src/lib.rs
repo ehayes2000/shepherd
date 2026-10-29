@@ -5,7 +5,9 @@
 pub mod config;
 pub mod event_log;
 pub mod pty;
+pub mod worktrees;
 
 pub use config::TomlConfigSource;
 pub use event_log::{JsonlEventLog, TornTail};
 pub use pty::PortablePty;
+pub use worktrees::GitWorktrees;

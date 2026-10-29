@@ -240,6 +240,7 @@ pub mod contracts {
     pub mod config;
     pub mod event_log;
     pub mod pty;
+    pub mod worktrees;
 }
 
 /// One stateful in-memory fake per port. Each must pass its port's contract suite.
@@ -247,4 +248,5 @@ pub mod fakes {
     pub mod config;
     pub mod event_log;
     pub mod pty;
+    pub mod worktrees;
 }
