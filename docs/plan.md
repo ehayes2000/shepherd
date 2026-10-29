@@ -548,7 +548,7 @@ acceptance:
 scope: core, testkit, adapters
 
 ### T15: Claude Code hook translation
-status: todo
+status: in-progress
 depends: T03, T05
 touches: core::agents::claude
 goal: Pure translation of Claude Code hook payloads into ACP++ FrameDrafts.
