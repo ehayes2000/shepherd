@@ -415,7 +415,7 @@ acceptance:
 scope: crates/shepherd
 
 ### T12: Client core + runtime
-status: todo
+status: in-progress
 depends: T07, T10
 touches: core::client, shepherd::client
 goal: The TUI's brain: connect, subscribe, keep view state, and turn user intents into wire requests.
@@ -429,6 +429,20 @@ acceptance:
   number of attempts. On final failure it shows a clear error.
 - Scenario: two sessions, switching between them, input routed to the right one.
 scope: crates/core, crates/shepherd
+notes: `Client::handle(ClientEvent) -> Vec<ClientCommand>` in `core::client` is pure: no IO, no clock, and request ids and
+timestamps come in events. Events come from the link (decoded `HostMessage`s), from the user (abstract intents like
+`NextSession`, `Input(bytes)` and `Resize`; the TUI's key mapping is T13), and from the runtime (`Connected`, `Disconnected`,
+`LaunchFailed`). Commands are `Send(ClientMessage)`, `LaunchHost`, `Connect` and `Quit`. The client tracks pending request ids
+to type responses (`RawResponse::typed`) and keeps the session list by folding `_shepherd/log/entry` envelopes. Reuse
+`core::session` for activity and `core::host`'s session fold where it fits; don't fork them.
+Starting the host is a side effect behind a new small port `HostLauncher { fn launch(&self) -> Result<(), LaunchError> }`
+(`core::ports::launcher`). The real adapter spawns `<current exe> host` detached (`setsid`, stdio to null or a log file
+under `~/.shepherd`). The fake records launches and can be wired to start a fake host on the fake link. The contract covers
+launch success and failure, and that a launched process outlives the client (adapter test). Connect retries are client
+policy in core: up to N attempts, with the next attempt triggered by a runtime `Tick { at }` event, with no sleeps.
+The client runtime in `crates/shepherd/src/client.rs` is generic over `Link` and `HostLauncher`. It feeds PTY output bytes to a
+`shepherd_term::Screen` per session (no rendering in this task). Scenario tests use the fake link plus a fake host driven by
+`core::host` (or a scripted fake host).
 
 ### T13: TUI layout, sidebar, and keys
 status: todo
