@@ -117,9 +117,8 @@ pub struct HostSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
-    /// 1 for the first session this host ever created, and so on. Orders [`Host::sessions`].
-    ordinal: u64,
     name: String,
+    /// With the session id, orders [`Host::sessions`].
     created: Timestamp,
     exited: bool,
     closed: bool,
@@ -129,14 +128,16 @@ struct Entry {
 ///
 /// Contract with the runtime: for each [`HostEvent`], call [`Host::handle`] and execute the commands in order. Each
 /// [`HostCommand::Append`] goes through the event log, and the sealed envelope it returns is passed to
-/// [`Host::apply`] before the next event is handled, so a `NewSession` followed by a `Rename` of it works. On start,
-/// the runtime replays the logs through `apply` in the order their entries were appended.
+/// [`Host::apply`] before the next event is handled, so a `NewSession` followed by a `Rename` of it works.
+///
+/// On start, the runtime replays the logs through `apply`. Logs may be replayed in any interleaving; entries within
+/// one log must be applied in seq order. Every such interleaving folds to the same state: nothing in it depends on
+/// the order in which entries from different logs arrive.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Host {
-    /// Every session ever created, closed ones included, so a closed id stays unknown to requests.
+    /// Every session ever created, closed ones included, so a closed id stays unknown to requests and still counts
+    /// towards placeholder names.
     sessions: BTreeMap<SessionId, Entry>,
-    /// How many sessions this host has created.
-    created: u64,
 }
 
 impl Host {
@@ -144,10 +145,13 @@ impl Host {
         Self::default()
     }
 
-    /// Open sessions, newest first.
+    /// Open sessions, newest first: by the `ts` of their `session/created` entry, then by session id. Timestamps
+    /// compare as strings, which is chronological because the host stamps every entry in UTC at a fixed precision.
     pub fn sessions(&self) -> Vec<HostSession> {
         let mut open: Vec<_> = self.sessions.iter().filter(|(_, e)| !e.closed).collect();
-        open.sort_by_key(|(_, e)| std::cmp::Reverse(e.ordinal));
+        open.sort_by(|(a_id, a), (b_id, b)| {
+            (b.created.as_str(), *b_id).cmp(&(a.created.as_str(), *a_id))
+        });
         open.into_iter()
             .map(|(id, e)| HostSession {
                 id: id.clone(),
@@ -171,9 +175,10 @@ impl Host {
                     let error = WireError::Internal(format!("session {id} already exists"));
                     return vec![reply_err(reply, error)];
                 }
+                // The placeholder is picked here and written into the frame. The fold only reads it back.
                 let name = spec
                     .name
-                    .unwrap_or_else(|| format!("shell-{}", self.created + 1));
+                    .unwrap_or_else(|| format!("shell-{}", self.sessions.len() + 1));
                 let created = ShepherdFrame::SessionCreated(SessionCreated {
                     name,
                     workspace: None,
@@ -253,9 +258,7 @@ impl Host {
                 if self.sessions.contains_key(id) {
                     return;
                 }
-                self.created += 1;
                 let entry = Entry {
-                    ordinal: self.created,
                     name: created.name.clone(),
                     created: env.ts().clone(),
                     exited: false,

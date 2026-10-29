@@ -1,8 +1,10 @@
 //! The host session registry, through the public `shepherd_core::host` API.
 
+use std::collections::{BTreeMap, VecDeque};
+
 use proptest::prelude::*;
 use serde_json::{Value, json};
-use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind, Timestamp};
+use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
 use shepherd_core::host::{Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -495,23 +497,110 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-proptest! {
-    #[test]
-    fn replay_equals_live_state_for_any_sequence(ops in proptest::collection::vec(op(), 0..60)) {
-        let mut host = HostDriver::new();
-        for op in ops {
-            let id = |i: u8| format!("s{i}");
-            match op {
-                Op::New(i) => { host.new_session(&id(i)); }
-                Op::Rename(i, n) => { host.rename(&id(i), &format!("name-{n}")); }
-                Op::Close(i) => { host.close(&id(i)); }
-                Op::Exit(i, code) => { host.pty_exited(&id(i), code); }
-                Op::Input(i) => { host.handle(HostEvent::Input { session: sid(&id(i)), bytes: vec![b'x'] }); }
-                Op::Resize(i) => {
-                    host.handle(HostEvent::Resize { session: sid(&id(i)), size: PtySize { cols: 10, rows: 5 } });
-                }
+fn run(ops: Vec<Op>) -> HostDriver {
+    let mut host = HostDriver::new();
+    let id = |i: u8| format!("s{i}");
+    for op in ops {
+        match op {
+            Op::New(i) => {
+                host.new_session(&id(i));
+            }
+            Op::Rename(i, n) => {
+                host.rename(&id(i), &format!("name-{n}"));
+            }
+            Op::Close(i) => {
+                host.close(&id(i));
+            }
+            Op::Exit(i, code) => {
+                host.pty_exited(&id(i), code);
+            }
+            Op::Input(i) => {
+                host.handle(HostEvent::Input {
+                    session: sid(&id(i)),
+                    bytes: vec![b'x'],
+                });
+            }
+            Op::Resize(i) => {
+                host.handle(HostEvent::Resize {
+                    session: sid(&id(i)),
+                    size: PtySize { cols: 10, rows: 5 },
+                });
             }
         }
+    }
+    host
+}
+
+/// The appended envelopes split into their logs (the host log and one per session), each in seq order.
+fn logs(driver: &HostDriver) -> Vec<VecDeque<Envelope>> {
+    let mut logs: BTreeMap<Option<SessionId>, VecDeque<Envelope>> = BTreeMap::new();
+    for env in driver.log() {
+        logs.entry(env.session().cloned())
+            .or_default()
+            .push_back(env.clone());
+    }
+    logs.into_values().collect()
+}
+
+/// Folds `logs` into a fresh host, taking each next entry from the log `picks` chooses, so every log keeps its own
+/// order while the interleaving between logs follows `picks`.
+fn replay_interleaved(mut logs: Vec<VecDeque<Envelope>>, picks: &[u16]) -> Host {
+    let mut host = Host::new();
+    let mut picks = picks.iter().cycle();
+    loop {
+        logs.retain(|log| !log.is_empty());
+        if logs.is_empty() {
+            return host;
+        }
+        let pick = usize::from(picks.next().copied().unwrap_or(0)) % logs.len();
+        if let Some(env) = logs[pick].pop_front() {
+            host.apply(&env);
+        }
+    }
+}
+
+#[test]
+fn sessions_are_ordered_by_created_ts_whatever_order_their_logs_are_replayed_in() {
+    let mut driver = HostDriver::new();
+    driver.new_session("s1");
+    driver.new_session("s2");
+    let mut logs = logs(&driver);
+    logs.reverse();
+    let mut host = Host::new();
+    for env in logs.into_iter().flatten() {
+        host.apply(&env);
+    }
+    assert_eq!(names(&host), ["shell-2", "shell-1"]);
+}
+
+#[test]
+fn sessions_created_at_the_same_ts_are_ordered_by_id() {
+    let mut host = HostDriver::new();
+    host.pin_ts("2026-10-29T12:00:00.000Z");
+    host.new_session("b");
+    host.new_session("a");
+    host.new_session("c");
+    let ids: Vec<_> = host.host().sessions().into_iter().map(|s| s.id).collect();
+    assert_eq!(ids, [sid("c"), sid("b"), sid("a")]);
+}
+
+proptest! {
+    #[test]
+    fn replay_in_any_interleaving_of_the_logs_equals_live_state(
+        ops in proptest::collection::vec(op(), 0..60),
+        interleavings in proptest::collection::vec(proptest::collection::vec(any::<u16>(), 1..40), 1..6),
+    ) {
+        let host = run(ops);
+        for picks in &interleavings {
+            let replayed = replay_interleaved(logs(&host), picks);
+            prop_assert_eq!(replayed.sessions(), host.host().sessions());
+            prop_assert_eq!(&replayed, host.host());
+        }
+    }
+
+    #[test]
+    fn replay_equals_live_state_for_any_sequence(ops in proptest::collection::vec(op(), 0..60)) {
+        let host = run(ops);
         prop_assert_eq!(replay(&host), host.host().clone());
         let closed = host.log().iter().filter(|e| e.frame().method() == Some("_shepherd/session/closed"));
         for env in closed {

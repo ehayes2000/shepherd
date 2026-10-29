@@ -94,7 +94,8 @@ pub mod builders {
     }
 
     /// Runs a [`Host`] the way the runtime does: each [`HostCommand::Append`] that `handle` returns is sealed at its
-    /// log's next seq and passed to `apply` before the next event. Every other command is only returned.
+    /// log's next seq and passed to `apply` before the next event. Every other command is only returned. Each entry's
+    /// `ts` is 1 ms after the previous one's, unless pinned with [`HostDriver::pin_ts`].
     ///
     /// ```text
     /// let mut host = HostDriver::new();
@@ -109,6 +110,7 @@ pub mod builders {
         /// The last seq of each log: the host log (`None`) and one per session.
         seqs: BTreeMap<Option<SessionId>, u64>,
         next_reply: u64,
+        pinned_ts: Option<Timestamp>,
     }
 
     impl HostDriver {
@@ -125,6 +127,25 @@ pub mod builders {
             &self.log
         }
 
+        /// Stamps every later entry with `ts` instead of the advancing clock, until [`HostDriver::unpin_ts`].
+        /// Panics on a malformed timestamp.
+        pub fn pin_ts(&mut self, ts: &str) {
+            let ts = Timestamp::parse(ts).unwrap_or_else(|e| panic!("HostDriver: {e}"));
+            self.pinned_ts = Some(ts);
+        }
+
+        pub fn unpin_ts(&mut self) {
+            self.pinned_ts = None;
+        }
+
+        /// The `ts` the next entry gets: the pinned one, else `2026-10-29T12:00:00.000Z` plus 1 ms per entry
+        /// appended so far.
+        pub fn now(&self) -> Timestamp {
+            self.pinned_ts
+                .clone()
+                .unwrap_or_else(|| ts_at(self.log.len()))
+        }
+
         /// A fresh token for a request event.
         pub fn reply_to(&mut self) -> ReplyTo {
             self.next_reply += 1;
@@ -136,13 +157,13 @@ pub mod builders {
             let commands = self.host.handle(event);
             for command in &commands {
                 if let HostCommand::Append(draft) = command {
-                    let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
-                    *seq += 1;
                     let stamp = Stamp {
                         id: EntryId::new(format!("e{}", self.log.len() + 1)),
-                        ts: ts(),
+                        ts: self.now(),
                         machine: MachineId::new("m_test"),
                     };
+                    let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
+                    *seq += 1;
                     let env = (**draft).clone().seal(Seq::new(*seq), stamp);
                     self.host.apply(&env);
                     self.log.push(env);
@@ -157,7 +178,7 @@ pub mod builders {
             self.handle(HostEvent::NewSession {
                 reply,
                 id: SessionId::new(id),
-                at: ts(),
+                at: self.now(),
                 spec: NewSessionSpec {
                     name: None,
                     spawn: shell_spawn(),
@@ -201,9 +222,15 @@ pub mod builders {
         }
     }
 
-    fn ts() -> Timestamp {
-        Timestamp::parse("2026-10-29T12:00:00.000Z")
-            .unwrap_or_else(|e| panic!("HostDriver: bad timestamp: {e}"))
+    /// `2026-10-29T12:00:00.000Z` plus `ms` milliseconds. Panics past the end of that day.
+    fn ts_at(ms: usize) -> Timestamp {
+        let (secs, ms) = (ms / 1000, ms % 1000);
+        let (mins, secs) = (secs / 60, secs % 60);
+        let (hours, mins) = (12 + mins / 60, mins % 60);
+        Timestamp::parse(format!(
+            "2026-10-29T{hours:02}:{mins:02}:{secs:02}.{ms:03}Z"
+        ))
+        .unwrap_or_else(|e| panic!("HostDriver: ran out of timestamps: {e}"))
     }
 }
 
