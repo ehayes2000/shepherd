@@ -1,7 +1,20 @@
 //! The typed client↔host messages and their encode/decode functions.
 //!
-//! The client sends [`Request`]s. The host answers each with a [`HostResponse`] carrying the same id, and pushes
-//! [`HostNotification`]s. Every encoded message is one JSON line, ready for the [`Decoder`](super::Decoder).
+//! The client sends [`Request`]s and [`ClientNotification`]s. The host answers each request with a
+//! [`HostResponse`] carrying the same id, and pushes [`HostNotification`]s. Every encoded message is one JSON
+//! line, ready for the [`Decoder`](super::Decoder).
+//!
+//! Answering rules, following JSON-RPC 2.0:
+//! - Every request gets exactly one response, an error included.
+//! - A notification (no `id`) is never answered. Errors on one, such as invalid params, an unknown method or
+//!   an unknown session, are dropped by the host.
+//! - `_shepherd/session/input` and `_shepherd/session/resize` are notifications only, because they are high
+//!   volume and fire-and-forget. Sent as a request (with an `id`), either is answered with
+//!   [`WireError::InvalidRequest`].
+//! - A line too malformed to tell a request from a notification is answered with a `null` id.
+//!
+//! [`decode_client_message`] encodes these rules in [`RequestError::into_response`], which returns `None`
+//! when the host must stay silent.
 //!
 //! These are not log frames: the log's `_shepherd/*` extension methods live in `acpp`, and none of these
 //! messages is ever appended to a log.
@@ -21,27 +34,23 @@ use crate::ids::{MachineId, SessionId};
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// A client request, as `_shepherd/*` method names.
+/// A client request method. Responses are typed by it, see [`RawResponse::typed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
     Hello,
     SessionNew,
     SessionRename,
     SessionClose,
-    SessionInput,
-    SessionResize,
     Subscribe,
     HookFrame,
 }
 
 impl Method {
-    pub const ALL: [Method; 8] = [
+    pub const ALL: [Method; 6] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
         Self::SessionClose,
-        Self::SessionInput,
-        Self::SessionResize,
         Self::Subscribe,
         Self::HookFrame,
     ];
@@ -52,8 +61,6 @@ impl Method {
             Self::SessionNew => "_shepherd/session/new",
             Self::SessionRename => "_shepherd/session/rename",
             Self::SessionClose => "_shepherd/session/close",
-            Self::SessionInput => "_shepherd/session/input",
-            Self::SessionResize => "_shepherd/session/resize",
             Self::Subscribe => "_shepherd/subscribe",
             Self::HookFrame => "_shepherd/hook/frame",
         }
@@ -77,10 +84,59 @@ pub enum ClientRequest {
     SessionNew(SessionNew),
     SessionRename(SessionRename),
     SessionClose(SessionClose),
-    SessionInput(SessionInput),
-    SessionResize(SessionResize),
     Subscribe(Subscribe),
     HookFrame(Box<HookFrame>),
+}
+
+/// A fire-and-forget message from a client. Never answered, see the module docs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientNotification {
+    /// `_shepherd/session/input`
+    SessionInput(SessionInput),
+    /// `_shepherd/session/resize`
+    SessionResize(SessionResize),
+}
+
+/// What a host reads from a client.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientMessage {
+    Request(Request),
+    Notification(ClientNotification),
+}
+
+const SESSION_INPUT: &str = "_shepherd/session/input";
+const SESSION_RESIZE: &str = "_shepherd/session/resize";
+
+impl ClientNotification {
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::SessionInput(_) => SESSION_INPUT,
+            Self::SessionResize(_) => SESSION_RESIZE,
+        }
+    }
+
+    fn params(&self) -> Value {
+        match self {
+            Self::SessionInput(p) => json(p),
+            Self::SessionResize(p) => json(p),
+        }
+    }
+
+    fn is_method(method: &str) -> bool {
+        matches!(method, SESSION_INPUT | SESSION_RESIZE)
+    }
+
+    fn parse(method: &str, params: Value) -> Result<Self, WireError> {
+        match method {
+            SESSION_INPUT => invalid_params(params).map(Self::SessionInput),
+            SESSION_RESIZE => invalid_params(params).map(Self::SessionResize),
+            other => Err(WireError::MethodNotFound(other.to_owned())),
+        }
+    }
+}
+
+fn invalid_params<T: DeserializeOwned>(params: Value) -> Result<T, WireError> {
+    serde_json::from_value(params).map_err(|e| WireError::InvalidParams(e.to_string()))
 }
 
 /// The first request on a connection. Answered with [`HelloOk`], or [`WireError::VersionMismatch`].
@@ -125,18 +181,21 @@ pub struct SessionResize {
     pub rows: u16,
 }
 
-/// Stream log entries, resuming each log at the given seq (see `from: seq` in `docs/acpp.md`).
+/// Stream log entries as `_shepherd/log/entry` notifications, resuming each log where the client left off.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscribe {
     pub from: SubscribeFrom,
 }
 
+/// Where to resume each log (`from: seq` in `docs/acpp.md`). Every seq is the **last entry the client already
+/// has**: the host sends that log's entries with `seq > from`. A log missing here (`host: None`, or a session not
+/// in `sessions`) is sent from its first entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeFrom {
-    /// Where to resume the host log. `None` when the client has none of it.
+    /// The last host-log entry the client has. `None`: send the whole host log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<Seq>,
-    /// Where to resume each session log the client already has.
+    /// The last entry the client has of each session log. A session not listed is sent in full.
     #[serde(default)]
     pub sessions: BTreeMap<SessionId, Seq>,
 }
@@ -154,8 +213,6 @@ impl ClientRequest {
             Self::SessionNew(_) => Method::SessionNew,
             Self::SessionRename(_) => Method::SessionRename,
             Self::SessionClose(_) => Method::SessionClose,
-            Self::SessionInput(_) => Method::SessionInput,
-            Self::SessionResize(_) => Method::SessionResize,
             Self::Subscribe(_) => Method::Subscribe,
             Self::HookFrame(_) => Method::HookFrame,
         }
@@ -167,28 +224,21 @@ impl ClientRequest {
             Self::SessionNew(p) => json(p),
             Self::SessionRename(p) => json(p),
             Self::SessionClose(p) => json(p),
-            Self::SessionInput(p) => json(p),
-            Self::SessionResize(p) => json(p),
             Self::Subscribe(p) => json(p),
             Self::HookFrame(p) => json(p),
         }
     }
 
     fn parse(method: &str, params: Value) -> Result<Self, WireError> {
-        fn p<T: DeserializeOwned>(params: Value) -> Result<T, WireError> {
-            serde_json::from_value(params).map_err(|e| WireError::InvalidParams(e.to_string()))
-        }
         let method =
             Method::parse(method).ok_or_else(|| WireError::MethodNotFound(method.to_owned()))?;
         Ok(match method {
-            Method::Hello => Self::Hello(p(params)?),
-            Method::SessionNew => Self::SessionNew(p(params)?),
-            Method::SessionRename => Self::SessionRename(p(params)?),
-            Method::SessionClose => Self::SessionClose(p(params)?),
-            Method::SessionInput => Self::SessionInput(p(params)?),
-            Method::SessionResize => Self::SessionResize(p(params)?),
-            Method::Subscribe => Self::Subscribe(p(params)?),
-            Method::HookFrame => Self::HookFrame(p(params)?),
+            Method::Hello => Self::Hello(invalid_params(params)?),
+            Method::SessionNew => Self::SessionNew(invalid_params(params)?),
+            Method::SessionRename => Self::SessionRename(invalid_params(params)?),
+            Method::SessionClose => Self::SessionClose(invalid_params(params)?),
+            Method::Subscribe => Self::Subscribe(invalid_params(params)?),
+            Method::HookFrame => Self::HookFrame(invalid_params(params)?),
         })
     }
 }
@@ -307,22 +357,26 @@ pub enum HostMessage {
     Notification(HostNotification),
 }
 
-/// The host could not read a client's request. Answer it with [`RequestError::into_response`].
+/// The host could not read or accept a client's message. See [`RequestError::into_response`] for whether to
+/// answer it.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("{error}")]
 pub struct RequestError {
     /// The request's id, when it got far enough to have one.
     pub id: Option<RequestId>,
     pub error: WireError,
+    /// The message was a well-formed notification, so it must not be answered.
+    pub notification: bool,
 }
 
 impl RequestError {
-    /// The error response. Its id is `null` when the request's id couldn't be read, as JSON-RPC 2.0 requires.
-    pub fn into_response(self) -> HostResponse {
-        HostResponse {
+    /// The error response, or `None` for a notification, which is never answered. The id is `null` when the
+    /// message's id couldn't be read, as JSON-RPC 2.0 requires.
+    pub fn into_response(self) -> Option<HostResponse> {
+        (!self.notification).then(|| HostResponse {
             id: self.id.unwrap_or(RequestId::Null),
             result: Err(self.error),
-        }
+        })
     }
 }
 
@@ -364,14 +418,25 @@ pub fn encode_request(req: &Request) -> Vec<u8> {
     line(obj)
 }
 
-/// Reads one request line. On failure the error carries the request's id when it could be read, so the host
-/// can answer it.
-pub fn decode_request(line: &[u8]) -> Result<Request, RequestError> {
-    let fail = |id: Option<RequestId>, error| RequestError { id, error };
+pub fn encode_client_notification(note: &ClientNotification) -> Vec<u8> {
+    let mut obj = jsonrpc_object();
+    obj.insert("method".to_owned(), note.method().into());
+    obj.insert("params".to_owned(), note.params());
+    line(obj)
+}
+
+/// Reads one line from a client: a request or a notification. On failure, [`RequestError::into_response`] says
+/// how the host answers, following the rules in the module docs.
+pub fn decode_client_message(line: &[u8]) -> Result<ClientMessage, RequestError> {
+    let answered = |id: Option<RequestId>, error| RequestError {
+        id,
+        error,
+        notification: false,
+    };
     let invalid =
-        |id: Option<RequestId>, why: &str| fail(id, WireError::InvalidRequest(why.to_owned()));
-    let v: Value =
-        serde_json::from_slice(line).map_err(|e| fail(None, WireError::Parse(e.to_string())))?;
+        |id: Option<RequestId>, why: &str| answered(id, WireError::InvalidRequest(why.to_owned()));
+    let v: Value = serde_json::from_slice(line)
+        .map_err(|e| answered(None, WireError::Parse(e.to_string())))?;
     let obj = v
         .as_object()
         .ok_or_else(|| invalid(None, "not an object"))?;
@@ -389,9 +454,32 @@ pub fn decode_request(line: &[u8]) -> Result<Request, RequestError> {
         .get("method")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid(id.clone(), "\"method\" must be a string"))?;
-    let id = id.ok_or_else(|| invalid(None, "client messages must be requests with an \"id\""))?;
-    let body = ClientRequest::parse(method, params(obj)).map_err(|e| fail(Some(id.clone()), e))?;
-    Ok(Request { id, body })
+
+    let Some(id) = id else {
+        // A well-formed notification: from here on, errors are dropped, never answered.
+        let silent = |error| RequestError {
+            id: None,
+            error,
+            notification: true,
+        };
+        if Method::parse(method).is_some() {
+            return Err(silent(WireError::InvalidRequest(format!(
+                "{method} is a request and needs an \"id\""
+            ))));
+        }
+        return ClientNotification::parse(method, params(obj))
+            .map(ClientMessage::Notification)
+            .map_err(silent);
+    };
+    if ClientNotification::is_method(method) {
+        return Err(invalid(
+            Some(id),
+            &format!("{method} is a notification and must not have an \"id\""),
+        ));
+    }
+    let body =
+        ClientRequest::parse(method, params(obj)).map_err(|e| answered(Some(id.clone()), e))?;
+    Ok(ClientMessage::Request(Request { id, body }))
 }
 
 pub fn encode_response(resp: &HostResponse) -> Vec<u8> {
@@ -404,7 +492,7 @@ pub fn encode_response(resp: &HostResponse) -> Vec<u8> {
     line(obj)
 }
 
-pub fn encode_notification(note: &HostNotification) -> Vec<u8> {
+pub fn encode_host_notification(note: &HostNotification) -> Vec<u8> {
     let params = match note {
         HostNotification::LogEntry(p) => json(p),
         HostNotification::PtyOutput(p) => json(p),

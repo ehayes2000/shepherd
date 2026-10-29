@@ -8,11 +8,12 @@ use shepherd_core::acpp::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
-    ClientRequest, DecodeError, Decoder, Hello, HelloOk, HookFrame, HostMessage, HostNotification,
-    HostResponse, HostResult, LogEntry, Method, PROTOCOL_VERSION, PtyOutput, Request, SessionClose,
-    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom,
-    WireError, code, decode_host_message, decode_request, encode_notification, encode_request,
-    encode_response, negotiate,
+    ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
+    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method,
+    PROTOCOL_VERSION, PtyOutput, Request, RequestError, SessionClose, SessionInput, SessionNew,
+    SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError, code,
+    decode_client_message, decode_host_message, encode_client_notification,
+    encode_host_notification, encode_request, encode_response, negotiate,
 };
 
 fn sid(s: &str) -> SessionId {
@@ -50,15 +51,6 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         ClientRequest::SessionClose(SessionClose {
             session: sid("s_1"),
         }),
-        ClientRequest::SessionInput(SessionInput {
-            session: sid("s_1"),
-            data: vec![0x1b, b'[', b'A', 0xff, 0x00],
-        }),
-        ClientRequest::SessionResize(SessionResize {
-            session: sid("s_1"),
-            cols: 120,
-            rows: 40,
-        }),
         ClientRequest::Subscribe(Subscribe {
             from: SubscribeFrom {
                 host: Some(Seq::new(3)),
@@ -67,6 +59,20 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::Subscribe(Subscribe::default()),
         ClientRequest::HookFrame(Box::new(HookFrame { draft: draft() })),
+    ]
+}
+
+fn one_of_each_notification() -> Vec<ClientNotification> {
+    vec![
+        ClientNotification::SessionInput(SessionInput {
+            session: sid("s_1"),
+            data: vec![0x1b, b'[', b'A', 0xff, 0x00],
+        }),
+        ClientNotification::SessionResize(SessionResize {
+            session: sid("s_1"),
+            cols: 120,
+            rows: 40,
+        }),
     ]
 }
 
@@ -91,11 +97,43 @@ fn request_line(method: &str, params: Value) -> Vec<u8> {
         .into_bytes()
 }
 
-fn rejected(line: &[u8]) -> (Option<RequestId>, WireError) {
-    let Err(err) = decode_request(line) else {
-        panic!("expected the request to be rejected");
+fn notification_line(method: &str, params: Value) -> Vec<u8> {
+    json!({ "jsonrpc": "2.0", "method": method, "params": params })
+        .to_string()
+        .into_bytes()
+}
+
+fn request(line: &[u8]) -> Request {
+    match decode_client_message(line).unwrap_or_else(|e| panic!("{e}")) {
+        ClientMessage::Request(r) => r,
+        other => panic!("expected a request, got {other:?}"),
+    }
+}
+
+fn client_notification(line: &[u8]) -> ClientNotification {
+    match decode_client_message(line).unwrap_or_else(|e| panic!("{e}")) {
+        ClientMessage::Notification(n) => n,
+        other => panic!("expected a notification, got {other:?}"),
+    }
+}
+
+fn rejection(line: &[u8]) -> RequestError {
+    let Err(err) = decode_client_message(line) else {
+        panic!("expected the message to be rejected");
     };
+    err
+}
+
+fn rejected(line: &[u8]) -> (Option<RequestId>, WireError) {
+    let err = rejection(line);
     (err.id, err.error)
+}
+
+/// The JSON the host would answer a rejected message with, or `None` if it stays silent.
+fn answer(line: &[u8]) -> Option<Value> {
+    rejection(line)
+        .into_response()
+        .map(|r| wire_json(&encode_response(&r)))
 }
 
 fn response(line: &[u8], method: Method) -> HostResponse {
@@ -121,7 +159,7 @@ fn every_client_request_round_trips_through_encode_and_decode() {
             id: RequestId::from(i as i64),
             body,
         };
-        assert_eq!(decode_request(&encode_request(&req)).unwrap(), req);
+        assert_eq!(request(&encode_request(&req)), req);
     }
 }
 
@@ -133,8 +171,6 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/session/new",
         "_shepherd/session/rename",
         "_shepherd/session/close",
-        "_shepherd/session/input",
-        "_shepherd/session/resize",
         "_shepherd/subscribe",
         "_shepherd/subscribe",
         "_shepherd/hook/frame",
@@ -167,55 +203,13 @@ fn hello_params_are_version_and_machine() {
 }
 
 #[test]
-fn input_bytes_are_base64_on_the_wire() {
-    let line = encode_request(&Request {
-        id: 1.into(),
-        body: ClientRequest::SessionInput(SessionInput {
-            session: sid("s_1"),
-            data: b"foobar".to_vec(),
-        }),
-    });
-    assert_eq!(
-        wire_json(&line)["params"],
-        json!({ "session": "s_1", "data": "Zm9vYmFy" })
-    );
-}
-
-#[test]
-fn input_with_invalid_base64_is_rejected_as_invalid_params() {
-    let line = request_line(
-        "_shepherd/session/input",
-        json!({ "session": "s_1", "data": "Zm9v!" }),
-    );
-    let (id, error) = rejected(&line);
-    assert_eq!(id, Some(9.into()));
-    assert!(matches!(error, WireError::InvalidParams(_)), "{error:?}");
-}
-
-#[test]
-fn resize_params_are_cols_and_rows() {
-    let line = request_line(
-        "_shepherd/session/resize",
-        json!({ "session": "s_1", "cols": 80, "rows": 24 }),
-    );
-    assert_eq!(
-        decode_request(&line).unwrap().body,
-        ClientRequest::SessionResize(SessionResize {
-            session: sid("s_1"),
-            cols: 80,
-            rows: 24
-        })
-    );
-}
-
-#[test]
 fn subscribe_from_maps_host_and_sessions_to_seqs() {
     let line = request_line(
         "_shepherd/subscribe",
         json!({ "from": { "host": 12, "sessions": { "s_1": 4 } } }),
     );
     assert_eq!(
-        decode_request(&line).unwrap().body,
+        request(&line).body,
         ClientRequest::Subscribe(Subscribe {
             from: SubscribeFrom {
                 host: Some(Seq::new(12)),
@@ -229,8 +223,16 @@ fn subscribe_from_maps_host_and_sessions_to_seqs() {
 fn subscribe_from_nothing_omits_host_and_sessions() {
     let line = request_line("_shepherd/subscribe", json!({ "from": {} }));
     assert_eq!(
-        decode_request(&line).unwrap().body,
+        request(&line).body,
         ClientRequest::Subscribe(Subscribe::default())
+    );
+    let encoded = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::Subscribe(Subscribe::default()),
+    });
+    assert_eq!(
+        wire_json(&encoded)["params"],
+        json!({ "from": { "sessions": {} } })
     );
 }
 
@@ -238,7 +240,7 @@ fn subscribe_from_nothing_omits_host_and_sessions() {
 fn session_new_without_params_uses_defaults() {
     let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "_shepherd/session/new" }).to_string();
     assert_eq!(
-        decode_request(line.as_bytes()).unwrap().body,
+        request(line.as_bytes()).body,
         ClientRequest::SessionNew(SessionNew::default())
     );
 }
@@ -264,7 +266,7 @@ fn unknown_request_fields_are_ignored() {
         json!({ "session": "s_1", "force": true }),
     );
     assert_eq!(
-        decode_request(&line).unwrap().body,
+        request(&line).body,
         ClientRequest::SessionClose(SessionClose {
             session: sid("s_1")
         })
@@ -281,6 +283,7 @@ fn unknown_method_is_method_not_found_with_the_request_id() {
             WireError::MethodNotFound("_shepherd/teleport".into())
         )
     );
+    assert_eq!(answer(&line).map(|v| v["id"].clone()), Some(json!(9)));
 }
 
 #[test]
@@ -289,22 +292,26 @@ fn malformed_json_is_a_parse_error_answered_with_a_null_id() {
     assert_eq!(id, None);
     assert!(matches!(error, WireError::Parse(_)), "{error:?}");
 
-    let resp = decode_request(b"{\"jsonrpc\":")
-        .unwrap_err()
-        .into_response();
-    let v = wire_json(&encode_response(&resp));
+    let v = answer(b"{\"jsonrpc\":").unwrap_or_else(|| panic!("a parse error is answered"));
     assert_eq!(v["id"], Value::Null);
     assert_eq!(v["error"]["code"], code::PARSE_ERROR);
 }
 
 #[test]
-fn request_without_an_id_is_invalid() {
-    let line = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/close",
-                       "params": { "session": "s_1" } })
-    .to_string();
-    let (id, error) = rejected(line.as_bytes());
+fn malformed_message_without_an_id_is_still_answered_with_a_null_id() {
+    let line = json!({ "jsonrpc": "2.0", "method": 1 }).to_string();
+    let v = answer(line.as_bytes()).unwrap_or_else(|| panic!("an invalid request is answered"));
+    assert_eq!(v["id"], Value::Null);
+    assert_eq!(v["error"]["code"], code::INVALID_REQUEST);
+}
+
+#[test]
+fn request_method_sent_as_a_notification_is_dropped_unanswered() {
+    let line = notification_line("_shepherd/session/close", json!({ "session": "s_1" }));
+    let (id, error) = rejected(&line);
     assert_eq!(id, None);
     assert!(matches!(error, WireError::InvalidRequest(_)), "{error:?}");
+    assert_eq!(answer(&line), None);
 }
 
 #[test]
@@ -317,13 +324,111 @@ fn request_with_wrong_jsonrpc_version_is_invalid() {
 
 #[test]
 fn request_with_params_of_the_wrong_shape_is_invalid_params() {
-    let line = request_line(
-        "_shepherd/session/resize",
-        json!({ "session": "s_1", "cols": -1 }),
-    );
+    let line = request_line("_shepherd/session/rename", json!({ "session": "s_1" }));
     let (id, error) = rejected(&line);
     assert_eq!(id, Some(9.into()));
     assert!(matches!(error, WireError::InvalidParams(_)), "{error:?}");
+}
+
+// ---------- client notifications ----------
+
+#[test]
+fn every_client_notification_round_trips_through_encode_and_decode() {
+    for note in one_of_each_notification() {
+        assert_eq!(
+            client_notification(&encode_client_notification(&note)),
+            note
+        );
+    }
+}
+
+#[test]
+fn input_and_resize_are_notifications_without_an_id() {
+    let expected = ["_shepherd/session/input", "_shepherd/session/resize"];
+    for (note, method) in one_of_each_notification().into_iter().zip(expected) {
+        assert_eq!(note.method(), method);
+        let v = wire_json(&encode_client_notification(&note));
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], method);
+        assert!(v.get("id").is_none(), "notifications have no id");
+    }
+}
+
+#[test]
+fn input_bytes_are_base64_on_the_wire() {
+    let line = encode_client_notification(&ClientNotification::SessionInput(SessionInput {
+        session: sid("s_1"),
+        data: b"foobar".to_vec(),
+    }));
+    assert_eq!(
+        wire_json(&line)["params"],
+        json!({ "session": "s_1", "data": "Zm9vYmFy" })
+    );
+}
+
+#[test]
+fn resize_params_are_cols_and_rows() {
+    let line = notification_line(
+        "_shepherd/session/resize",
+        json!({ "session": "s_1", "cols": 80, "rows": 24 }),
+    );
+    assert_eq!(
+        client_notification(&line),
+        ClientNotification::SessionResize(SessionResize {
+            session: sid("s_1"),
+            cols: 80,
+            rows: 24
+        })
+    );
+}
+
+#[test]
+fn input_or_resize_sent_as_a_request_is_answered_invalid_request() {
+    for (method, params) in [
+        (
+            "_shepherd/session/input",
+            json!({ "session": "s_1", "data": "" }),
+        ),
+        (
+            "_shepherd/session/resize",
+            json!({ "session": "s_1", "cols": 80, "rows": 24 }),
+        ),
+    ] {
+        let line = request_line(method, params);
+        let (id, error) = rejected(&line);
+        assert_eq!(id, Some(9.into()), "{method}");
+        assert!(matches!(error, WireError::InvalidRequest(_)), "{error:?}");
+        let v = answer(&line).unwrap_or_else(|| panic!("a request is always answered"));
+        assert_eq!(v["id"], 9);
+        assert_eq!(v["error"]["code"], code::INVALID_REQUEST);
+    }
+}
+
+#[test]
+fn notification_with_invalid_params_is_dropped_unanswered() {
+    let bad = [
+        notification_line(
+            "_shepherd/session/input",
+            json!({ "session": "s_1", "data": "Zm9v!" }),
+        ),
+        notification_line(
+            "_shepherd/session/resize",
+            json!({ "session": "s_1", "cols": -1 }),
+        ),
+    ];
+    for line in bad {
+        let (id, error) = rejected(&line);
+        assert_eq!(id, None);
+        assert!(matches!(error, WireError::InvalidParams(_)), "{error:?}");
+        assert_eq!(answer(&line), None);
+    }
+}
+
+#[test]
+fn unknown_client_notification_is_dropped_unanswered() {
+    let line = notification_line("_shepherd/teleport", json!({}));
+    assert!(matches!(rejected(&line).1, WireError::MethodNotFound(_)));
+    assert_eq!(answer(&line), None);
 }
 
 // ---------- hello ----------
@@ -520,7 +625,7 @@ fn log_entry_notification_carries_the_envelope() {
     let note = HostNotification::LogEntry(Box::new(LogEntry {
         envelope: envelope(),
     }));
-    let line = encode_notification(&note);
+    let line = encode_host_notification(&note);
     let v = wire_json(&line);
     assert_eq!(v["method"], "_shepherd/log/entry");
     assert!(v.get("id").is_none(), "notifications have no id");
@@ -534,7 +639,7 @@ fn pty_output_notification_carries_base64_bytes() {
         session: sid("s_1"),
         bytes: vec![0xe2, 0x9c, 0x93, 0xff, b'\n'],
     });
-    let line = encode_notification(&note);
+    let line = encode_host_notification(&note);
     let v = wire_json(&line);
     assert_eq!(v["method"], "_shepherd/pty/output");
     assert_eq!(
@@ -567,26 +672,39 @@ fn pty_output_with_invalid_base64_is_invalid_params() {
 // ---------- framing ----------
 
 #[test]
-fn encoded_requests_split_at_every_byte_boundary_decode_unchanged() {
-    let reqs: Vec<Request> = one_of_each_request()
+fn client_stream_split_at_every_byte_boundary_decodes_unchanged() {
+    let mut msgs: Vec<ClientMessage> = one_of_each_request()
         .into_iter()
         .enumerate()
-        .map(|(i, body)| Request {
-            id: RequestId::from(i as i64),
-            body,
+        .map(|(i, body)| {
+            ClientMessage::Request(Request {
+                id: RequestId::from(i as i64),
+                body,
+            })
         })
         .collect();
-    let stream: Vec<u8> = reqs.iter().flat_map(encode_request).collect();
+    msgs.extend(
+        one_of_each_notification()
+            .into_iter()
+            .map(ClientMessage::Notification),
+    );
+    let stream: Vec<u8> = msgs
+        .iter()
+        .flat_map(|m| match m {
+            ClientMessage::Request(r) => encode_request(r),
+            ClientMessage::Notification(n) => encode_client_notification(n),
+        })
+        .collect();
     for split in 0..=stream.len() {
         let mut d = Decoder::new();
         let mut got = Vec::new();
         for part in [&stream[..split], &stream[split..]] {
             d.push(part);
             while let Some(line) = d.next_line() {
-                got.push(decode_request(&line.unwrap()).unwrap());
+                got.push(decode_client_message(&line.unwrap()).unwrap());
             }
         }
-        assert_eq!(got, reqs, "split at {split}");
+        assert_eq!(got, msgs, "split at {split}");
     }
 }
 
@@ -600,7 +718,7 @@ fn host_stream_split_at_every_byte_boundary_decodes_unchanged() {
         id: 1.into(),
         result: Ok(HostResult::Ack),
     };
-    let stream = [encode_notification(&note), encode_response(&resp)].concat();
+    let stream = [encode_host_notification(&note), encode_response(&resp)].concat();
     for split in 0..=stream.len() {
         let mut d = Decoder::new();
         let mut got = Vec::new();

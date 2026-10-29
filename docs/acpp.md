@@ -33,7 +33,7 @@ and worktree. This gives us:
 | field     | meaning |
 |-----------|---------|
 | `acpp`    | Envelope version. It only bumps for breaking *envelope* changes, never for new frame types. |
-| `seq`     | Monotonic per log, starting at 1, gapless. Assigned by the host at append time. Readers resume with `from: seq`. |
+| `seq`     | Monotonic per log, starting at 1, gapless. Assigned by the host at append time. Readers resume with `from: seq`, the last seq they already have, and receive the entries after it. |
 | `id`      | ULID, globally unique. Used to dedupe when logs are relayed between machines. |
 | `ts`      | Host wall-clock time at append (RFC 3339, UTC, ms). Informational. Ordering comes from `seq`. |
 | `machine` | ID of the machine whose host appended the entry. |
