@@ -185,7 +185,6 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::contracts;
     use crate::contracts::pty::{ChannelSink, spec};
 
     /// Scripted stand-ins for the commands the contract runs, doing just what the contract asks of them.
@@ -198,25 +197,28 @@ mod tests {
                     p.exit(0);
                 }
             })
-            .with_program("cat", |input, p| {
-                if let ProgramInput::Stdin(bytes) = input {
-                    match bytes.iter().position(|&b| b == 0x04) {
-                        Some(eof) => {
-                            p.print(&bytes[..eof]);
+            .with_program("cat", cat)
+            .with_program("sh", |input, p| {
+                let script = p.spec().args.get(1).cloned().unwrap_or_default();
+                match script.as_str() {
+                    "read _; stty size" => {
+                        if let ProgramInput::Stdin(bytes) = input
+                            && bytes.contains(&b'\n')
+                        {
+                            let size = p.size();
+                            p.print(format!("{} {}\r\n", size.rows, size.cols));
                             p.exit(0);
                         }
-                        None => p.print(bytes),
                     }
-                }
-            })
-            // `sh -c 'read _; stty size'`
-            .with_program("sh", |input, p| {
-                if let ProgramInput::Stdin(bytes) = input
-                    && bytes.contains(&b'\n')
-                {
-                    let size = p.size();
-                    p.print(format!("{} {}\r\n", size.rows, size.cols));
-                    p.exit(0);
+                    // There is no echo or SIGHUP here, so both reduce to "say ready, then cat".
+                    "stty -echo; echo ready; cat" | "trap '' HUP; echo ready; cat" => {
+                        if input == ProgramInput::Start {
+                            p.print("ready\r\n");
+                        } else {
+                            cat(input, p);
+                        }
+                    }
+                    _ => p.exit(127),
                 }
             })
             .with_program("printenv", |input, p| {
@@ -246,9 +248,23 @@ mod tests {
             })
     }
 
-    #[test]
-    fn fake_satisfies_contract() {
-        contracts::pty::suite(contract_fake);
+    /// Echoes stdin until ^D, then exits 0.
+    fn cat(input: ProgramInput<'_>, p: &mut ScriptedProcess<'_>) {
+        if let ProgramInput::Stdin(bytes) = input {
+            match bytes.iter().position(|&b| b == 0x04) {
+                Some(eof) => {
+                    p.print(&bytes[..eof]);
+                    p.exit(0);
+                }
+                None => p.print(bytes),
+            }
+        }
+    }
+
+    mod contract {
+        use super::contract_fake;
+
+        crate::pty_contract!(contract_fake);
     }
 
     #[test]

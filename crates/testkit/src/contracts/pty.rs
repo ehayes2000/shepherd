@@ -1,8 +1,41 @@
-//! The `Pty` contract. Commands used here (`printf`, `cat`, `sh`, `stty`, `printenv`, `pwd`) run for real
-//! on the adapter; the fake gets scripted versions of them (see `fakes::pty`).
+//! The `Pty` contract. Commands used here (`printf`, `cat`, `sh`, `printenv`, `pwd`) run for real on the
+//! adapter; the fake gets scripted versions of them (see `fakes::pty`).
+//!
+//! Run it with [`pty_contract!`](crate::pty_contract), which expands to one `#[test]` per case.
 
 // Contract cases are tests that live outside `#[cfg(test)]` so other crates can run them.
 #![allow(clippy::unwrap_used)]
+
+/// Expands to one `#[test]` per `Pty` contract case. `$make` builds the port under test from an
+/// `Arc<dyn PtyEventSink>`, e.g. `shepherd_testkit::pty_contract!(PortablePty::new);`.
+#[macro_export]
+macro_rules! pty_contract {
+    ($make:expr) => {
+        $crate::pty_contract!(@cases $make;
+            output_then_exit_code,
+            exit_is_sent_once_and_last,
+            short_lived_sessions_deliver_all_output,
+            writes_reach_the_child,
+            resize_is_visible_to_the_child,
+            kill_ends_the_process,
+            kill_ends_a_process_that_ignores_hangup,
+            env_is_honored,
+            cwd_is_honored,
+            exited_session_is_unknown,
+            unknown_session_is_an_error,
+            spawning_a_live_id_again_is_already_exists,
+            spawning_a_missing_command_is_spawn_failed,
+        );
+    };
+    (@cases $make:expr; $($case:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $case() {
+                $crate::contracts::pty::$case($crate::contracts::pty::PtyHarness::new($make));
+            }
+        )*
+    };
+}
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,21 +48,6 @@ use shepherd_core::ports::{Pty, PtyError, PtyEvent, PtyEventSink, PtySize, Spawn
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to watch for stray events after an exit. Only used to assert that nothing else arrives.
 const QUIET: Duration = Duration::from_millis(300);
-
-pub fn suite<P: Pty>(make: impl Fn(Arc<dyn PtyEventSink>) -> P) {
-    let h = || PtyHarness::new(&make);
-    output_then_exit_code(h());
-    exit_is_sent_once_and_last(h());
-    writes_reach_the_child(h());
-    resize_is_visible_to_the_child(h());
-    kill_ends_the_process(h());
-    env_is_honored(h());
-    cwd_is_honored(h());
-    exited_session_is_unknown(h());
-    unknown_session_is_an_error(h());
-    spawning_a_live_id_again_is_already_exists(h());
-    spawning_a_missing_command_is_spawn_failed(h());
-}
 
 /// A port plus the receiving end of the sink it was built with.
 pub struct PtyHarness<P> {
@@ -145,7 +163,7 @@ fn sid(id: &str) -> SessionId {
     SessionId::new(id)
 }
 
-fn output_then_exit_code<P: Pty>(mut h: PtyHarness<P>) {
+pub fn output_then_exit_code<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("printf");
     h.pty.spawn(s.clone(), spec("printf", &["hi"])).unwrap();
     let (output, code) = h.run_to_exit(&s);
@@ -153,25 +171,73 @@ fn output_then_exit_code<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(code, Some(0));
 }
 
-fn exit_is_sent_once_and_last<P: Pty>(mut h: PtyHarness<P>) {
+pub fn exit_is_sent_once_and_last<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("printf");
     h.pty.spawn(s.clone(), spec("printf", &["hi"])).unwrap();
     h.run_to_exit(&s);
     h.assert_quiet(QUIET);
 }
 
-fn writes_reach_the_child<P: Pty>(mut h: PtyHarness<P>) {
+/// Children that exit right away must not lose output, even when many run at once.
+pub fn short_lived_sessions_deliver_all_output<P: Pty>(mut h: PtyHarness<P>) {
+    const N: usize = 20;
+    let expected = |i: usize| format!("output-of-session-{i}");
+    for i in 0..N {
+        h.pty
+            .spawn(sid(&format!("s{i}")), spec("printf", &[&expected(i)]))
+            .unwrap();
+    }
+
+    let mut exits = 0;
+    let events = h.wait_for(
+        |e| {
+            exits += usize::from(matches!(e, PtyEvent::Exited { .. }));
+            exits == N
+        },
+        TIMEOUT,
+    );
+
+    for i in 0..N {
+        let s = sid(&format!("s{i}"));
+        let mut output = Vec::new();
+        let mut exited = false;
+        for event in &events {
+            match event {
+                PtyEvent::Output { session, bytes } if *session == s => {
+                    assert!(!exited, "{s}: output after Exited");
+                    output.extend_from_slice(bytes);
+                }
+                PtyEvent::Exited { session, code } if *session == s => {
+                    assert!(!exited, "{s}: second Exited");
+                    assert_eq!(*code, Some(0), "{s}");
+                    exited = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(String::from_utf8_lossy(&output), expected(i), "{s}");
+    }
+}
+
+pub fn writes_reach_the_child<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("cat");
-    h.pty.spawn(s.clone(), spec("cat", &[])).unwrap();
+    // With echo off, anything we see after "ready" was printed by cat, not echoed by the terminal.
+    h.pty
+        .spawn(
+            s.clone(),
+            spec("sh", &["-c", "stty -echo; echo ready; cat"]),
+        )
+        .unwrap();
+    h.wait_for_output(&s, "ready");
     h.pty.write(&s, b"hello\n").unwrap();
     h.wait_for_output(&s, "hello");
-    // ^D at the start of a line is EOF to cat; a clean exit proves it read what we wrote.
+    // ^D at the start of a line is EOF to cat.
     h.pty.write(&s, b"\x04").unwrap();
     let (_, code) = h.run_to_exit(&s);
     assert_eq!(code, Some(0));
 }
 
-fn resize_is_visible_to_the_child<P: Pty>(mut h: PtyHarness<P>) {
+pub fn resize_is_visible_to_the_child<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("stty");
     h.pty
         .spawn(s.clone(), spec("sh", &["-c", "read _; stty size"]))
@@ -191,7 +257,7 @@ fn resize_is_visible_to_the_child<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(code, Some(0));
 }
 
-fn kill_ends_the_process<P: Pty>(mut h: PtyHarness<P>) {
+pub fn kill_ends_the_process<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("cat");
     h.pty.spawn(s.clone(), spec("cat", &[])).unwrap();
     h.pty.kill(&s).unwrap();
@@ -199,7 +265,21 @@ fn kill_ends_the_process<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(code, None, "a killed process has no exit code");
 }
 
-fn env_is_honored<P: Pty>(mut h: PtyHarness<P>) {
+pub fn kill_ends_a_process_that_ignores_hangup<P: Pty>(mut h: PtyHarness<P>) {
+    let s = sid("stubborn");
+    h.pty
+        .spawn(
+            s.clone(),
+            spec("sh", &["-c", "trap '' HUP; echo ready; cat"]),
+        )
+        .unwrap();
+    h.wait_for_output(&s, "ready");
+    h.pty.kill(&s).unwrap();
+    let (_, code) = h.run_to_exit(&s);
+    assert_eq!(code, None, "a killed process has no exit code");
+}
+
+pub fn env_is_honored<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("printenv");
     let mut spec = spec("printenv", &["SHEPHERD_PTY_CONTRACT"]);
     spec.env
@@ -210,7 +290,7 @@ fn env_is_honored<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(code, Some(0));
 }
 
-fn cwd_is_honored<P: Pty>(mut h: PtyHarness<P>) {
+pub fn cwd_is_honored<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("pwd");
     let spec = spec("pwd", &[]);
     let cwd = spec.cwd.display().to_string();
@@ -220,7 +300,7 @@ fn cwd_is_honored<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(code, Some(0));
 }
 
-fn exited_session_is_unknown<P: Pty>(mut h: PtyHarness<P>) {
+pub fn exited_session_is_unknown<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("printf");
     h.pty.spawn(s.clone(), spec("printf", &["hi"])).unwrap();
     h.run_to_exit(&s);
@@ -230,7 +310,7 @@ fn exited_session_is_unknown<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(h.run_to_exit(&s), ("again".into(), Some(0)));
 }
 
-fn unknown_session_is_an_error<P: Pty>(mut h: PtyHarness<P>) {
+pub fn unknown_session_is_an_error<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("nobody");
     let size = PtySize { cols: 80, rows: 24 };
     assert_eq!(h.pty.write(&s, b"x"), Err(PtyError::UnknownSession));
@@ -238,7 +318,7 @@ fn unknown_session_is_an_error<P: Pty>(mut h: PtyHarness<P>) {
     assert_eq!(h.pty.kill(&s), Err(PtyError::UnknownSession));
 }
 
-fn spawning_a_live_id_again_is_already_exists<P: Pty>(mut h: PtyHarness<P>) {
+pub fn spawning_a_live_id_again_is_already_exists<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("cat");
     h.pty.spawn(s.clone(), spec("cat", &[])).unwrap();
     assert_eq!(
@@ -249,7 +329,7 @@ fn spawning_a_live_id_again_is_already_exists<P: Pty>(mut h: PtyHarness<P>) {
     h.run_to_exit(&s);
 }
 
-fn spawning_a_missing_command_is_spawn_failed<P: Pty>(mut h: PtyHarness<P>) {
+pub fn spawning_a_missing_command_is_spawn_failed<P: Pty>(mut h: PtyHarness<P>) {
     let s = sid("missing");
     let result = h
         .pty

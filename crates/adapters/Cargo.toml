@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 shepherd-core.workspace = true
 portable-pty.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 shepherd-testkit.workspace = true
