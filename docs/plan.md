@@ -78,7 +78,7 @@ notes: Commit the report as `docs/spikes/T01-acp-types.md` on the task branch. T
 in architecture.md and a note in T03.
 
 ### T02: Spike: terminal emulator
-status: in-progress
+status: done (0c92cc6)
 depends: T00
 touches: docs only
 goal: Pick the VT emulator for rendering PTY output in the TUI. v1's emulation bugs were a main failure.
@@ -221,17 +221,27 @@ Adapters are constructed with an `Arc<dyn PtyEventSink>`. The contract harness w
 with `wait_for(predicate, timeout)` (std mpsc `recv_timeout`; no sleeps). Exactly one `Exited` per session, and it comes after all
 its `Output`. Use `SessionId` from `shepherd_core::ids`. New deps allowed: `portable-pty` (adapters).
 
-### T09: Terminal screen model
+### T09: `shepherd-term` screen + TUI rendering
 status: todo
 depends: T02
-touches: tui::screen
-goal: Turn PTY bytes into a renderable screen per session, using the emulator chosen in T02.
+touches: term (new crate), tui::screen
+goal: Turn PTY bytes into a screen, answer terminal queries, snapshot for attach, and render into ratatui (decision 0007).
 acceptance:
-- `Screens::feed(session, &[u8])` and `Screens::resize(session, cols, rows)`.
-- `render_screen(&Screen, Rect, &mut Buffer)` draws cells with fg, bg, and modifiers. The cursor position is exposed.
-- Snapshot tests replay the T02 fixtures (the `claude` session, `vim`, `htop`-like alt screen) at two sizes.
-- Wide characters and emoji occupy two cells. 24-bit color maps to ratatui `Color::Rgb`.
-scope: crates/tui
+- New crate `crates/term` (`shepherd-term`), depending on `alacritty_terminal` with `default-features = false`.
+  `Screen::new(cols, rows)`, `feed(&[u8])`, `resize(cols, rows)`, `take_replies() -> Vec<u8>` (query answers such as DA
+  and cursor position), `modes() -> Modes { kitty_keyboard, mouse, bracketed_paste, focus, alt_screen }`, `cursor()`,
+  read-only cell iteration, and `snapshot_ansi() -> Vec<u8>`.
+- Snapshot round-trip: feeding `snapshot_ansi()` of screen A into a fresh screen B of the same size gives identical
+  cells, cursor and modes. Tested on every T02 fixture segment.
+- Chunking invariance: feeding a fixture in 1-byte, 7-byte, and whole chunks gives identical screens.
+- The queries both agents send at startup (listed in the T02 report) get replies.
+- The sync-update timeout is driven by an injected `Timeout` with no clock reads. A test shows output held during sync
+  and released on the end marker or on an injected timeout.
+- `shepherd-tui::render_screen(&Screen, Rect, &mut Buffer)` draws cells with fg, bg and modifiers, mapping 24-bit color
+  to `Color::Rgb`, and wide chars take two cells. Snapshot tests render the Claude and Codex fixtures at their recorded sizes.
+scope: crates/term (new), crates/tui, workspace Cargo.toml
+notes: The T02 report's alacritty section is binding on API gotchas. The `check-arch.sh` rules for `shepherd-term` already
+exist.
 
 ### T10: Link ports (transport)
 status: todo
@@ -247,13 +257,17 @@ scope: core::ports, testkit, adapters
 
 ### T11: Host runtime
 status: todo
-depends: T04, T06, T08, T10
+depends: T04, T06, T08, T09, T10
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
 acceptance:
 - On start, it folds every log from `EventLog` to rebuild state. Sessions whose PTY no longer exists become Exited
   (an exited frame is appended).
 - Executes `Append` (stamping it with id, ts, and machine), `SpawnPty`, `WritePty`, `ResizePty`, `KillPty`, and `Reply`.
+- Keeps a `shepherd_term::Screen` per PTY. PTY output is fed into it, and `take_replies()` is written back to the PTY, so
+  agents get their terminal-query answers with no client attached (decision 0007).
+- Attach: subscribing to a session's output first sends `snapshot_ansi()`, then live bytes. A scenario test shows a
+  client attaching mid-session and seeing the current screen.
 - Fans new envelopes and PTY output out to subscribed clients. A subscribe with `from` replays history first, then goes live
   with no gap and no duplicate.
 - Scenario (all fakes): client sends session/new, then input, then sees the output and the log entries. The host
@@ -291,6 +305,8 @@ acceptance:
 - Snapshot tests: empty state (a hint for how to create a session), 3 sessions with mixed status, rename input,
   close confirmation, help popup, and a narrow terminal (40 cols) where the sidebar collapses to glyphs.
 - `map_key` unit tests cover each binding and the passthrough.
+- Input encoding follows the selected session's `Screen::modes()`: kitty keyboard, SGR mouse, bracketed paste, and focus
+  events. Mouse and wheel input go to the agent when it has mouse mode on.
 scope: crates/tui
 notes: The status glyph shapes and colors are decided in this task and recorded in tui module docs.
 
