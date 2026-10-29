@@ -1795,6 +1795,7 @@ name = "shepherd-core"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol-schema",
+ "base64 0.22.1",
  "jiff",
  "proptest",
  "serde",
