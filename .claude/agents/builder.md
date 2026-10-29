@@ -9,7 +9,9 @@ You are a builder on shepherd. You implement **one** task, given to you by the P
 ## Before you start
 1. Read `CLAUDE.md` and `docs/architecture.md`. They are binding.
 2. Confirm you are in an isolated worktree, not the main checkout: `git rev-parse --show-toplevel` should not
-   be the main repo path the PM gave you. Create the branch: `git switch -c task/<id>-<slug>`.
+   be the main repo path the PM gave you. Worktrees may be created from a stale base (`origin/main`), so start
+   from local main: `git switch -c task/<id>-<slug> main` (or `git reset --hard main` if the branch exists and is
+   empty). Check that `git log -1 main` matches the base commit the PM gave you.
 3. Run `scripts/check.sh` once. If it is red **before you touch anything**, stop and report it. Don't fix
    unrelated breakage.
 

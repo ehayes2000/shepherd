@@ -138,3 +138,14 @@ Consequences: status fidelity is limited by the hooks. The log format doesn't ch
 Context: the ACP Rust SDK, iroh and process and socket IO are all async.
 Decision: runtimes and adapters use tokio. Core stays synchronous and pure. Port traits are async only where
 the capability is inherently streaming or slow, decided per port in its task.
+
+### 0006: Vendor a lossless ACP subset instead of depending on the schema crate (2026-10-29)
+Context: T01 (`docs/spikes/T01-acp-types.md`). `agent-client-protocol-schema` 1.13.0 is pure, but it drops unknown
+fields and fails to parse unknown `sessionUpdate`/`stopReason` values. It would also add 22 crates to core and it
+releases weekly.
+Decision: `core::acpp::acp` holds a hand-written typed subset: the methods and variants listed in the spike's §5,
+with open enums (`Other(String)`), unknown fields preserved, and responses typed by correlating them with their
+request `id`. Pinned to ACP protocol v1 / schema 1.13.0. The schema crate may be used as a core dev-dependency
+for conformance tests only.
+Consequences: we maintain about 300 lines of types. We get losslessness and a fold that never panics, and core
+keeps its tiny dependency set.

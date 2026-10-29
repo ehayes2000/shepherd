@@ -49,8 +49,9 @@ Unknown envelope fields must be preserved and ignored.
 ### Standard ACP frames
 These are used verbatim with their ACP meaning: `session/prompt` (request and response with `stopReason`),
 `session/update` (message, thought, and user chunks, `tool_call`, `tool_call_update`, `plan`, mode and
-command updates), `session/request_permission`, `session/cancel`, `elicitation/*`, and so on. Pin the ACP
-schema version in `Cargo.toml`. Upgrading it is a PM decision.
+command updates), `session/request_permission`, `session/cancel`, `elicitation/*`, and so on. Shepherd keeps its own typed subset of ACP
+in `core::acpp::acp`, pinned to **ACP protocol v1 / schema 1.13.0** (see decision 0006). Every enum in it is open,
+with a catch-all variant. Upgrading the pin is a PM decision.
 
 **Synthesized frames.** If the source isn't a real ACP wire (`source.kind == "hook"`), the producer may
 *synthesize* ACP frames so the fold logic is shared:

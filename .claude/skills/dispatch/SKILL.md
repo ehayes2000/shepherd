@@ -16,6 +16,7 @@ You are the PM. You don't write feature code here. You schedule, review and merg
 For each task, call `Agent` with `subagent_type: "builder"` and `isolation: "worktree"`. The prompt is:
 - the full task spec block, copied verbatim from plan.md
 - the main repo path (so the builder can check it isn't working there)
+- the current `main` commit hash as the base (worktrees may otherwise start from a stale `origin/main`)
 - "Branch name: task/<id>-<slug>"
 
 Don't add hints about how to implement it unless they're in the spec. If you want to add a hint, it belongs in the spec.
@@ -23,6 +24,8 @@ Don't add hints about how to implement it unless they're in the spec. If you wan
 ## 3. Review each finished builder
 - Read the builder's report. If it's **blocked**, resolve it (amend the spec, record a decision in
   `docs/architecture.md`, or split the task), set the task back to `ready`, and re-dispatch.
+- Spikes (docs-only research tasks) are reviewed by the PM directly: check the evidence, accept or reject the
+  recommendation, record the decision.
 - Otherwise spawn a `reviewer` with **only** the spec block and the branch name. Never pass along the builder's report.
 - `CHANGES` → send the findings to the builder with SendMessage (same agent, context intact) and review again
   when it's done. After 2 failed rounds, stop and rethink the spec. The spec is probably the problem.

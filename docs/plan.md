@@ -63,7 +63,7 @@ acceptance:
 notes: v1 code stays in git history and can be consulted, but is never copied wholesale.
 
 ### T01: Spike: ACP schema types in core
-status: in-progress
+status: done
 depends: T00
 touches: docs only
 goal: Decide how core gets ACP types without breaking purity.
@@ -98,7 +98,7 @@ comparison code goes in a scratch dir outside the repo, not in the workspace.
 ## M1 Log + host/client skeleton
 
 ### T03: ACP++ envelope and frame types
-status: todo
+status: in-progress
 depends: T00, T01
 touches: core::acpp
 goal: Typed, lossless parsing and serialization of ACP++ entries per docs/acpp.md.
@@ -112,7 +112,16 @@ acceptance:
 - `FrameDraft` (frame + source + dir + session) is what producers create. Only the host turns it into an `Envelope`.
 - Synthesized frames are marked with `_meta.shepherd.synthesized`, and a helper reports whether a frame is synthesized.
 scope: crates/core
-notes: Keep the raw `serde_json::Value` next to the typed parse (see "Lossless" in acpp.md).
+- `StopReason`, `ToolCallStatus`, `ToolKind`, `SessionUpdate`, and `ContentBlock` are open enums with an
+  `Other`/raw catch-all. An unknown `sessionUpdate` or `stopReason` parses successfully.
+- JSON-RPC responses parse as a generic `Response { id, result | error }`. Typed interpretation of a response
+  (e.g. `session/prompt` → `stopReason`) happens by correlating it with its request's method, through a helper the
+  folds can use (`PendingRequests` mapping `id → method`).
+- A dev-dependency conformance test checks that sample frames accepted by `agent-client-protocol-schema =1.13.0`
+  round-trip identically through our types.
+notes: Keep the raw `serde_json::Value` next to the typed parse (see "Lossless" in acpp.md). Decision 0006 and
+`docs/spikes/T01-acp-types.md` §3–§5 are binding: types live in `core::acpp::acp` and cover exactly the methods and
+variants in §5. `agent-client-protocol-schema` is allowed **only** as a core dev-dependency.
 
 ### T04: `EventLog` port
 status: todo
