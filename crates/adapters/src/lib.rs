@@ -5,6 +5,7 @@
 pub mod config;
 pub mod event_log;
 pub mod link;
+pub mod private_fs;
 pub mod pty;
 pub mod worktrees;
 

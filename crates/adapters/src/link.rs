@@ -9,15 +9,15 @@
 //! socket down, which ends the reader.
 //!
 //! Anyone who can connect to the socket can drive the user's agents, so it is private: its directory must not be
-//! accessible to group or others (it is created `0700` if missing, and an existing one that is open to others is
-//! refused with [`UnixLinkError::InsecureDir`], never chmodded), and the socket itself is set to `0600` right after
-//! it is bound.
+//! accessible to group or others (it is created exactly `0700` if missing, and an existing one that is open to
+//! others is refused with [`UnixLinkError::InsecureDir`], never chmodded; a symlink there is refused too), and
+//! the socket itself is set to `0600` right after it is bound. See [`crate::private_fs`].
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -30,6 +30,8 @@ use shepherd_core::ports::{
     ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
 };
 use shepherd_core::wire::Decoder;
+
+use crate::private_fs::{self, PrivateFsError};
 
 /// The longest socket path the OS accepts, in bytes (`sizeof(sun_path)` minus the trailing NUL).
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
@@ -131,29 +133,16 @@ impl UnixListenLink {
     }
 }
 
-/// Makes sure the socket's directory is private, creating it `0700` if it doesn't exist.
+/// Makes sure the socket's directory is private, creating it exactly `0700` if it doesn't exist.
 fn ensure_private_dir(path: &Path) -> Result<(), UnixLinkError> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     };
-    match std::fs::metadata(dir) {
-        Ok(meta) => {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                return Err(UnixLinkError::InsecureDir {
-                    dir: dir.to_path_buf(),
-                    mode,
-                });
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?),
-        Err(e) => Err(e.into()),
-    }
+    private_fs::ensure_private_dir(dir).map_err(|e| match e {
+        PrivateFsError::Insecure { path, mode } => UnixLinkError::InsecureDir { dir: path, mode },
+        other => UnixLinkError::Io(other.to_string()),
+    })
 }
 
 /// Sets the freshly bound socket to `0600` and makes the listener non-blocking for the accept loop. Returns the
@@ -641,6 +630,54 @@ mod tests {
 
         assert_eq!(mode(&parent), 0o700, "dir mode {:o}", mode(&parent));
         assert_eq!(mode(&path), 0o600, "socket mode {:o}", mode(&path));
+    }
+
+    /// Reruns the test above in a child under a permissive umask (000) and one that strips owner bits (277),
+    /// since the process umask is never changed: the created dir must be exactly 0700 either way.
+    #[test]
+    fn created_dir_is_0700_whatever_the_umask() {
+        let exe = std::env::current_exe().unwrap();
+        for umask in ["000", "277"] {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "umask {umask} && exec \"$0\" --exact --test-threads=1 \"$1\""
+                ))
+                .arg(&exe)
+                .arg("link::tests::socket_is_0600_and_created_dir_is_0700")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "umask {umask}: {stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// A symlink planted where the socket's dir goes is refused even when it points at a private dir: it is
+    /// never followed, and its target is never chmodded or bound into.
+    #[test]
+    fn socket_dir_that_is_a_symlink_is_refused_and_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        for target_mode in [0o700, 0o755] {
+            let dir = short_tempdir();
+            let target = dir.path().join("elsewhere");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(target_mode))
+                .unwrap();
+            let parent = dir.path().join("shepherd");
+            std::os::unix::fs::symlink(&target, &parent).unwrap();
+
+            let result = bind(&parent.join("host.sock")).map(|_| ());
+            assert!(
+                matches!(&result, Err(UnixLinkError::Io(msg)) if msg.contains("symlink")),
+                "{result:?}"
+            );
+            assert_eq!(mode(&target), target_mode);
+            assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        }
     }
 
     #[test]
