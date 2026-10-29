@@ -7,11 +7,16 @@
 
 /// Builders for domain values (`AppBuilder`, `SessionBuilder`, ...), so tests don't construct large structs inline.
 pub mod builders {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
     use serde_json::Value;
     use shepherd_core::acpp::{
         Dir, EntryId, Envelope, Frame, FrameDraft, Seq, Source, SourceKind, Stamp, Timestamp,
     };
+    use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
     use shepherd_core::ids::{MachineId, SessionId};
+    use shepherd_core::ports::pty::{PtySize, SpawnSpec};
 
     /// Seals frames into envelopes for one session log, as the host's append path would: `seq` starts at 1 and
     /// increments with every envelope built.
@@ -86,6 +91,119 @@ pub mod builders {
         pub fn internal(&mut self, frame: Value) -> Envelope {
             self.envelope(Dir::Internal, frame)
         }
+    }
+
+    /// Runs a [`Host`] the way the runtime does: each [`HostCommand::Append`] that `handle` returns is sealed at its
+    /// log's next seq and passed to `apply` before the next event. Every other command is only returned.
+    ///
+    /// ```text
+    /// let mut host = HostDriver::new();
+    /// host.new_session("s1");
+    /// host.rename("s1", "api");
+    /// assert_eq!(host.host().sessions()[0].name, "api");
+    /// ```
+    #[derive(Debug, Clone, Default)]
+    pub struct HostDriver {
+        host: Host,
+        log: Vec<Envelope>,
+        /// The last seq of each log: the host log (`None`) and one per session.
+        seqs: BTreeMap<Option<SessionId>, u64>,
+        next_reply: u64,
+    }
+
+    impl HostDriver {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn host(&self) -> &Host {
+            &self.host
+        }
+
+        /// Every envelope appended so far, in append order.
+        pub fn log(&self) -> &[Envelope] {
+            &self.log
+        }
+
+        /// A fresh token for a request event.
+        pub fn reply_to(&mut self) -> ReplyTo {
+            self.next_reply += 1;
+            ReplyTo::new(self.next_reply)
+        }
+
+        /// Handles `event`, appends and applies its `Append`s, and returns all its commands.
+        pub fn handle(&mut self, event: HostEvent) -> Vec<HostCommand> {
+            let commands = self.host.handle(event);
+            for command in &commands {
+                if let HostCommand::Append(draft) = command {
+                    let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
+                    *seq += 1;
+                    let stamp = Stamp {
+                        id: EntryId::new(format!("e{}", self.log.len() + 1)),
+                        ts: ts(),
+                        machine: MachineId::new("m_test"),
+                    };
+                    let env = (**draft).clone().seal(Seq::new(*seq), stamp);
+                    self.host.apply(&env);
+                    self.log.push(env);
+                }
+            }
+            commands
+        }
+
+        /// A `NewSession` for `id`, with no name and [`shell_spawn`].
+        pub fn new_session(&mut self, id: &str) -> Vec<HostCommand> {
+            let reply = self.reply_to();
+            self.handle(HostEvent::NewSession {
+                reply,
+                id: SessionId::new(id),
+                at: ts(),
+                spec: NewSessionSpec {
+                    name: None,
+                    spawn: shell_spawn(),
+                },
+            })
+        }
+
+        pub fn rename(&mut self, id: &str, name: &str) -> Vec<HostCommand> {
+            let reply = self.reply_to();
+            self.handle(HostEvent::Rename {
+                reply,
+                session: SessionId::new(id),
+                name: name.to_owned(),
+            })
+        }
+
+        pub fn close(&mut self, id: &str) -> Vec<HostCommand> {
+            let reply = self.reply_to();
+            self.handle(HostEvent::Close {
+                reply,
+                session: SessionId::new(id),
+            })
+        }
+
+        pub fn pty_exited(&mut self, id: &str, code: Option<i32>) -> Vec<HostCommand> {
+            self.handle(HostEvent::PtyExited {
+                session: SessionId::new(id),
+                code,
+            })
+        }
+    }
+
+    /// What the M1 runtime spawns for a plain session: a shell in `/home/test`, 80x24.
+    pub fn shell_spawn() -> SpawnSpec {
+        SpawnSpec {
+            command: "/bin/zsh".to_owned(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/home/test"),
+            env: Vec::new(),
+            size: PtySize { cols: 80, rows: 24 },
+        }
+    }
+
+    fn ts() -> Timestamp {
+        Timestamp::parse("2026-10-29T12:00:00.000Z")
+            .unwrap_or_else(|e| panic!("HostDriver: bad timestamp: {e}"))
     }
 }
 
