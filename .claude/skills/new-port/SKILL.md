@@ -27,6 +27,13 @@ pub fn suite<P: Worktrees>(make: impl Fn() -> Harness<P>) {
 Each case is a plain function that panics on failure. Cover the behavior core relies on, error cases included.
 This suite *is* the spec of the port.
 
+Expose it through a macro that expands to **one `#[test]` per case**, so a failure names its case and doesn't hide
+the others: `worktrees_contract!(FakeWorktrees::harness)`. Copy the pattern from the `Pty` contract.
+
+Write cases for the ways real resources misbehave, not just the happy path. That means processes that exit
+instantly, children that ignore signals, buffers filling up, concurrent use, and partial reads and writes. These are
+where adapters break.
+
 ## 3. Fake (`crates/testkit/src/fakes/<name>.rs`)
 - Stateful and in-memory. It behaves like the real thing, it doesn't just return canned answers.
 - It can inject failures, e.g. `fake.fail_next(WorktreeError::BranchExists)`.
@@ -37,6 +44,9 @@ This suite *is* the spec of the port.
 - Thin. Translate the domain call to IO and the IO result back to domain types. No policy.
 - Its test runs the **same** suite against real resources in a tempdir:
   `#[test] fn git_worktrees_satisfy_contract() { contracts::worktrees::suite(GitWorktrees::temp_harness) }`.
+- **Run the adapter's contract under parallel load** before you ship, e.g.
+  `for i in $(seq 48); do target/debug/deps/<test-bin> & done; wait`, repeated a few times, and report the pass rate.
+  T08's adapter passed 40 out of 40 runs one at a time and failed 4% of runs under load, losing output.
 - If a case passes on the fake but fails on the real adapter, fix the fake *and* note it in your report. It means
   core tests were testing a world that doesn't exist.
 
@@ -47,6 +57,7 @@ Build the real adapter in `main.rs` and pass it into the runtime. Add the fake t
 - [ ] trait + domain errors in core, no IO types leaked
 - [ ] contract suite covers happy paths and each error variant core handles
 - [ ] fake passes the suite
-- [ ] real adapter passes the suite
+- [ ] real adapter passes the suite, including under parallel load (pass rate in report)
+- [ ] contract macro gives one `#[test]` per case
 - [ ] wired in main and the scenario harness
 - [ ] `docs/plan.md` ports list updated (tell the PM in your report if you can't edit it)
