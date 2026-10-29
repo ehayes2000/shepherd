@@ -88,7 +88,7 @@ acceptance:
 scope: crates/core, crates/testkit, crates/adapters
 
 ### F06: Snapshots preserve partial parser input
-status: todo (required before T11's attach feature)
+status: done (f7a6d79)
 depends: T09
 touches: term
 goal: A snapshot taken in the middle of an escape sequence or UTF-8 char doesn't corrupt the reattached client's screen.
@@ -113,6 +113,8 @@ acceptance:
 - Colours set with OSC 4/10/11 are carried by `snapshot_ansi`, so the copy renders and reports them identically. Remove them from
   the fuzz `GAPS` list and the "Not carried over" docs.
 - Kitty flags set with `CSI = flags;1u` on an empty stack round-trip, so `CSI ? u` answers the same on both screens.
+- The `unfinished.rs` cap proptest tries every next byte in `0x00..=0xFF` and adds `>`, `X`, `^`, `_`, `\x07`, `\x1a`, `\x9b`,
+  `\xc2` and `\xe6` to its alphabet, so a vte upgrade that changes a transition is caught.
 scope: crates/term
 
 ### F08: Clean up after a timed-out worktree create
