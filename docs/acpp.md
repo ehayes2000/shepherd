@@ -35,7 +35,7 @@ and worktree. This gives us:
 | `acpp`    | Envelope version. It only bumps for breaking *envelope* changes, never for new frame types. |
 | `seq`     | Monotonic per log, starting at 1, gapless. Assigned by the host at append time. Readers resume with `from: seq`, the last seq they already have, and receive the entries after it. |
 | `id`      | ULID, globally unique. Used to dedupe when logs are relayed between machines. |
-| `ts`      | Host wall-clock time at append (RFC 3339, UTC, ms). Informational. Ordering comes from `seq`. |
+| `ts`      | Host wall-clock time at append. Writers emit RFC 3339 UTC with ms; readers accept any ISO 8601 instant jiff parses and keep the original text. Ordering within a log comes from `seq`; across logs, by instant. |
 | `machine` | ID of the machine whose host appended the entry. |
 | `session` | Shepherd session ID, or `null` for host-level entries (workspace and machine events). |
 | `source`  | Who produced the frame. `kind` ∈ `acp` (a real ACP wire), `hook` (translated from agent hooks), `shepherd` (the host itself), `ext` (third-party producer). Optional `agent` names the agent. |

@@ -9,8 +9,6 @@ disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "core is pure: time arrives as an event field" },
   { path = "jiff::Timestamp::now", reason = "core is pure: time arrives as an event field" },
   { path = "jiff::Zoned::now", reason = "core is pure: time arrives as an event field" },
-  { path = "jiff::civil::DateTime::now", reason = "core is pure" },
-  { path = "jiff::civil::Date::now", reason = "core is pure" },
   { path = "std::thread::spawn", reason = "core is pure: concurrency lives in the runtime" },
   { path = "std::thread::sleep", reason = "core is pure" },
   { path = "std::env::var", reason = "core is pure: config arrives via the Config port" },
