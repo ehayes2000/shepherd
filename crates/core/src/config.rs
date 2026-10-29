@@ -163,7 +163,8 @@ impl fmt::Display for KeyPrefix {
 /// always one of its profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    default_agent: String,
+    /// A copy of the default entry in `profiles`, resolved once so lookup can't fail.
+    default_agent: AgentProfile,
     profiles: BTreeMap<String, AgentProfile>,
     key_prefix: KeyPrefix,
 }
@@ -175,9 +176,9 @@ impl Config {
     /// Merges `raw` over the built-in defaults and validates the result. `None` (no config file) gives the
     /// built-in defaults.
     ///
-    /// Built-ins: `claude` (claude-code, `claude`), `codex` (codex, `codex`) and `shell` (shell, `sh`). Core cannot
-    /// read `$SHELL`, so the `shell` profile's built-in command is `sh`; the runtime substitutes the user's shell
-    /// for it when the command was not configured.
+    /// Built-ins: `claude` (claude-code, `claude`), `codex` (codex, `codex`) and `shell` (shell, `login_shell`).
+    /// `login_shell` is the user's shell as the runtime found it (e.g. `$SHELL`); when it is `None` or empty the
+    /// `shell` profile runs `sh`. A command set in `[agents.shell]` always wins, even `command = "sh"`.
     ///
     /// Merge rules:
     /// - Built-in profiles always exist. A user `[agents.<builtin>]` table overlays the built-in field by field:
@@ -188,13 +189,17 @@ impl Config {
     /// - A profile that is not built in must give `kind` and `command`.
     /// - `[defaults] agent` defaults to `claude` and must name a resulting profile.
     /// - `[keys] prefix` defaults to `ctrl-b` and must be `ctrl-<a..z>` or `ctrl-space`.
-    pub fn resolve(raw: Option<RawConfig>) -> Result<Self, ConfigError> {
+    pub fn resolve(
+        raw: Option<RawConfig>,
+        login_shell: Option<String>,
+    ) -> Result<Self, ConfigError> {
         let raw = raw.unwrap_or_default();
         let defaults = raw.defaults.unwrap_or_default();
         let default_env = defaults.env.unwrap_or_default();
 
-        let mut profiles: BTreeMap<String, AgentProfile> =
-            builtin_profiles().map(|p| (p.name.clone(), p)).collect();
+        let mut profiles: BTreeMap<String, AgentProfile> = builtin_profiles(login_shell)
+            .map(|p| (p.name.clone(), p))
+            .collect();
         for (name, user) in raw.agents.unwrap_or_default() {
             let profile = match profiles.remove(&name) {
                 Some(builtin) => overlay(builtin, user)?,
@@ -208,10 +213,11 @@ impl Config {
             profile.env = env;
         }
 
-        let default_agent = defaults.agent.unwrap_or_else(|| DEFAULT_AGENT.to_owned());
-        if !profiles.contains_key(&default_agent) {
-            return Err(ConfigError::UnknownDefaultAgent(default_agent));
-        }
+        let default_name = defaults.agent.unwrap_or_else(|| DEFAULT_AGENT.to_owned());
+        let default_agent = profiles
+            .get(&default_name)
+            .cloned()
+            .ok_or(ConfigError::UnknownDefaultAgent(default_name))?;
 
         let key_prefix = match raw.keys.and_then(|k| k.prefix) {
             Some(p) => KeyPrefix::parse(&p).ok_or(ConfigError::InvalidKeyPrefix(p))?,
@@ -227,7 +233,7 @@ impl Config {
 
     /// The profile used when none is named.
     pub fn default_agent(&self) -> &AgentProfile {
-        &self.profiles[&self.default_agent]
+        &self.default_agent
     }
 
     pub fn profile(&self, name: &str) -> Option<&AgentProfile> {
@@ -244,17 +250,20 @@ impl Config {
     }
 }
 
-fn builtin_profiles() -> impl Iterator<Item = AgentProfile> {
+fn builtin_profiles(login_shell: Option<String>) -> impl Iterator<Item = AgentProfile> {
+    let shell = login_shell
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "sh".to_owned());
     [
-        ("claude", AgentKind::ClaudeCode, "claude"),
-        ("codex", AgentKind::Codex, "codex"),
-        ("shell", AgentKind::Shell, "sh"),
+        ("claude", AgentKind::ClaudeCode, "claude".to_owned()),
+        ("codex", AgentKind::Codex, "codex".to_owned()),
+        ("shell", AgentKind::Shell, shell),
     ]
     .into_iter()
     .map(|(name, kind, command)| AgentProfile {
         name: name.to_owned(),
         kind,
-        command: command.to_owned(),
+        command,
         args: Vec::new(),
         env: BTreeMap::new(),
     })

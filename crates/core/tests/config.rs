@@ -11,7 +11,7 @@ fn raw(value: Value) -> RawConfig {
 }
 
 fn resolve(value: Value) -> Result<Config, ConfigError> {
-    Config::resolve(Some(raw(value)))
+    Config::resolve(Some(raw(value)), None)
 }
 
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -25,7 +25,7 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[test]
 fn missing_file_gives_builtin_profiles() {
-    let config = Config::resolve(None).unwrap();
+    let config = Config::resolve(None, None).unwrap();
 
     let names: Vec<_> = config.profiles().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["claude", "codex", "shell"]);
@@ -51,7 +51,7 @@ fn missing_file_gives_builtin_profiles() {
 
 #[test]
 fn missing_file_defaults_to_claude_and_ctrl_b() {
-    let config = Config::resolve(None).unwrap();
+    let config = Config::resolve(None, None).unwrap();
     assert_eq!(config.default_agent().name, "claude");
     assert_eq!(config.key_prefix(), KeyPrefix::DEFAULT);
     assert_eq!(config.key_prefix().to_string(), "ctrl-b");
@@ -59,7 +59,10 @@ fn missing_file_defaults_to_claude_and_ctrl_b() {
 
 #[test]
 fn empty_file_is_the_same_as_missing_file() {
-    assert_eq!(resolve(json!({})).unwrap(), Config::resolve(None).unwrap());
+    assert_eq!(
+        resolve(json!({})).unwrap(),
+        Config::resolve(None, None).unwrap()
+    );
 }
 
 // ---------- merge rules ----------
@@ -249,4 +252,36 @@ fn raw_config_rejects_unknown_fields() {
     let agent_typo: Result<RawConfig, _> =
         serde_json::from_value(json!({ "agents": { "claude": { "comand": "x" } } }));
     assert!(agent_typo.is_err());
+}
+
+// ---------- login shell ----------
+
+#[test]
+fn builtin_shell_uses_the_login_shell() {
+    let config = Config::resolve(None, Some("/bin/zsh".into())).unwrap();
+    let shell = config.profile("shell").unwrap();
+    assert_eq!(
+        (shell.kind, shell.command.as_str()),
+        (AgentKind::Shell, "/bin/zsh")
+    );
+}
+
+#[test]
+fn builtin_shell_without_a_login_shell_is_sh() {
+    let config = Config::resolve(None, None).unwrap();
+    assert_eq!(config.profile("shell").unwrap().command, "sh");
+}
+
+#[test]
+fn user_set_sh_wins_over_the_login_shell() {
+    let raw = raw(json!({ "agents": { "shell": { "command": "sh" } } }));
+    let config = Config::resolve(Some(raw), Some("/bin/zsh".into())).unwrap();
+    assert_eq!(config.profile("shell").unwrap().command, "sh");
+}
+
+#[test]
+fn login_shell_only_affects_the_shell_profile() {
+    let config = Config::resolve(None, Some("/bin/zsh".into())).unwrap();
+    assert_eq!(config.profile("claude").unwrap().command, "claude");
+    assert_eq!(config.profile("codex").unwrap().command, "codex");
 }
