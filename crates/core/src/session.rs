@@ -118,7 +118,7 @@ impl SessionState {
                 });
                 match (m.body(), request) {
                     (AcpFrame::Prompt(p), Some(request)) => {
-                        self.prompt(p, request);
+                        self.prompt(p, request, frame.is_continuation());
                         self.pending.record(env.dir(), frame);
                     }
                     (AcpFrame::RequestPermission(r), Some(request)) => {
@@ -157,12 +157,14 @@ impl SessionState {
         }
     }
 
-    /// How many prompts the user has sent.
+    /// How many prompts the user has sent. Continuation prompts (`_meta.shepherd.continuation: true`, e.g. a turn
+    /// a Claude Code Stop hook kept going) open a turn for activity but aren't counted.
     pub fn turns(&self) -> u32 {
         self.turns
     }
 
-    /// The text of the latest prompt that had any, with its text blocks joined by newlines.
+    /// The text of the latest user prompt that had any, with its text blocks joined by newlines. Continuation
+    /// prompts never change it.
     pub fn last_prompt(&self) -> Option<&str> {
         self.last_prompt.as_deref()
     }
@@ -192,7 +194,17 @@ impl SessionState {
         }
     }
 
-    fn prompt(&mut self, prompt: &PromptRequest, request: Request) {
+    /// Opens a turn. A `continuation` isn't a user prompt, so it leaves `turns` and `last_prompt` alone.
+    fn prompt(&mut self, prompt: &PromptRequest, request: Request, continuation: bool) {
+        if !continuation {
+            self.user_prompt(prompt);
+        }
+        self.end_turn();
+        self.prompt = Some(request);
+        self.work();
+    }
+
+    fn user_prompt(&mut self, prompt: &PromptRequest) {
         self.turns = self.turns.saturating_add(1);
         let text: Vec<&str> = prompt
             .prompt
@@ -205,9 +217,6 @@ impl SessionState {
         if !text.is_empty() {
             self.last_prompt = Some(text.join("\n"));
         }
-        self.end_turn();
-        self.prompt = Some(request);
-        self.work();
     }
 
     fn tool_call(&mut self, call: &ToolCall) {

@@ -694,6 +694,26 @@ fn a_turn_continued_after_stop_works_again_until_the_next_stop() {
 }
 
 #[test]
+fn a_continued_turn_is_still_one_user_turn() {
+    let mut st = state();
+    let mut log = EnvelopeBuilder::new();
+    let mut session = SessionState::default();
+    let payloads = [
+        fx!("UserPromptSubmit"),
+        fx!("Stop"),
+        fx!("PreToolUse.Bash"),
+        fx!("PostToolUse.Bash"),
+        fx!("Stop.continued"),
+    ];
+    let user_text = payloads[0]["prompt"].as_str().unwrap().to_owned();
+    for d in run(&mut st, &payloads) {
+        session.apply(&log.envelope(d.dir.clone(), d.frame.raw().clone()));
+    }
+    assert_eq!(session.turns(), 1);
+    assert_eq!(session.last_prompt(), Some(user_text.as_str()));
+}
+
+#[test]
 fn a_main_agent_tool_with_no_open_prompt_opens_a_marked_continuation() {
     let drafts = last(&[fx!("UserPromptSubmit"), fx!("Stop"), fx!("PreToolUse.Bash")]);
     assert_eq!(
