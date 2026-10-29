@@ -1,10 +1,11 @@
+mod core;
 mod config;
 mod history;
 mod pty_widget;
 mod session;
 mod session_manager;
 mod status_socket;
-mod workflows;
+mod worktree;
 
 use session_manager::TuiSessionManager;
 

@@ -10,7 +10,6 @@ use ratatui::{
 };
 use vt100::Screen;
 
-use super::super::session_pair::SessionView;
 use crate::pty_widget::PtyWidget;
 
 pub struct MainView;
@@ -27,7 +26,6 @@ impl MainView {
         screen: Option<&Arc<Screen>>,
         active_name: Option<&str>,
         active_path: Option<&Path>,
-        active_view: SessionView,
         background_count: usize,
         stopped_count: usize,
         bottom_left: Line<'static>,
@@ -37,13 +35,7 @@ impl MainView {
         let area = frame.area();
 
         let top_title = match active_name {
-            Some(name) => {
-                let view_indicator = match active_view {
-                    SessionView::Claude => "",
-                    SessionView::Shell => " [shell]",
-                };
-                format!(" {}{} ", name, view_indicator)
-            }
+            Some(name) => format!(" {} ", name),
             None => " No Session ".to_string(),
         };
 

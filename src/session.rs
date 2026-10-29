@@ -189,16 +189,6 @@ impl DerefMut for AttachedSession {
 }
 
 impl AttachedSession {
-    pub fn new(
-        command: &str,
-        args: &[&str],
-        _tx: std::sync::mpsc::Sender<Screen>,
-        size: SharedSize,
-        cwd: Option<&Path>,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_env(command, args, _tx, size, cwd, &[])
-    }
-
     pub fn new_with_env(
         command: &str,
         args: &[&str],

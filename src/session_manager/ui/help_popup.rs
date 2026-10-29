@@ -16,7 +16,6 @@ impl HelpPopup {
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let hotkeys = [
             ("ctrl+h", "Help"),
-            ("ctrl+t", "Toggle shell"),
             ("ctrl+n", "New session"),
             ("ctrl+l", "List sessions"),
             ("ctrl+k", "Cleanup worktrees"),

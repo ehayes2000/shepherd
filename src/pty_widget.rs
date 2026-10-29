@@ -9,7 +9,6 @@ use vt100::Screen;
 /// A widget that renders a vt100 terminal screen
 pub struct PtyWidget<'a> {
     screen: &'a Screen,
-    dimmed: bool,
     scroll_offset: usize,
 }
 
@@ -17,14 +16,8 @@ impl<'a> PtyWidget<'a> {
     pub fn new(screen: &'a Screen) -> Self {
         Self {
             screen,
-            dimmed: false,
             scroll_offset: 0,
         }
-    }
-
-    pub fn dimmed(mut self, dimmed: bool) -> Self {
-        self.dimmed = dimmed;
-        self
     }
 
     pub fn scroll_offset(mut self, offset: usize) -> Self {
@@ -66,10 +59,7 @@ impl PtyWidget<'_> {
         for row in 0..display_rows {
             for col in 0..cols {
                 if let Some(cell) = screen.cell(row, col) {
-                    let mut style = vt100_to_ratatui_style(cell);
-                    if self.dimmed {
-                        style = style.add_modifier(Modifier::DIM);
-                    }
+                    let style = vt100_to_ratatui_style(cell);
                     let x = area.x + col;
                     let y = area.y + row;
 

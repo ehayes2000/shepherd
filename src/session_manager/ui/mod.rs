@@ -6,7 +6,6 @@ mod main_view;
 mod quit_confirm;
 mod session_selector;
 mod status_bar;
-mod terminal_multiplexer;
 mod worktree_cleanup;
 
 pub use create_dialog::CreateDialog;
@@ -17,5 +16,4 @@ pub use main_view::MainView;
 pub use quit_confirm::QuitConfirmDialog;
 pub use session_selector::{SelectorItemKind, SessionSelector};
 pub use status_bar::{StatusBar, StatusMessage};
-pub use terminal_multiplexer::TerminalMultiplexer;
 pub use worktree_cleanup::WorktreeCleanupDialog;

@@ -2,14 +2,6 @@ use std::path::PathBuf;
 
 use crate::session::{AttachedSession, DetachedSession};
 
-/// Which view is currently active in a session pair
-#[derive(Clone, Copy, PartialEq, Default)]
-pub enum SessionView {
-    #[default]
-    Claude,
-    Shell,
-}
-
 /// Activity status of a Claude session (for hook notifications)
 #[derive(Clone, PartialEq, Default)]
 pub enum SessionActivity {
@@ -23,11 +15,9 @@ pub enum SessionActivity {
 }
 
 /// An active session pair - claude session is attached (can receive input)
-/// Shell sessions are managed separately in TerminalMultiplexer
 pub struct ActivePair {
     pub name: String,
     pub path: PathBuf,
-    pub view: SessionView,
     pub claude: AttachedSession,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
@@ -42,7 +32,6 @@ impl ActivePair {
         Self {
             name,
             path,
-            view: SessionView::Claude,
             claude,
             resumed,
             scroll_offset: 0,
@@ -54,7 +43,6 @@ impl ActivePair {
         BackgroundPair {
             name: self.name,
             path: self.path,
-            last_view: self.view,
             claude: self.claude.detach(),
             resumed: self.resumed,
             scroll_offset: self.scroll_offset,
@@ -64,11 +52,9 @@ impl ActivePair {
 }
 
 /// A background session pair - claude session is detached
-/// Shell sessions are managed separately in TerminalMultiplexer
 pub struct BackgroundPair {
     pub name: String,
     pub path: PathBuf,
-    pub last_view: SessionView,
     pub claude: DetachedSession,
     /// Whether this session was started via resume (--continue flag)
     pub resumed: bool,
@@ -83,7 +69,6 @@ impl BackgroundPair {
         Ok(ActivePair {
             name: self.name,
             path: self.path,
-            view: self.last_view,
             claude: self.claude.attach()?,
             resumed: self.resumed,
             scroll_offset: self.scroll_offset,

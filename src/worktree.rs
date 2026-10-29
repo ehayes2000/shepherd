@@ -2,8 +2,6 @@ use crate::config::Config;
 use crate::session_manager::StatusMessage;
 use std::process::Command;
 
-use super::{SessionMetadata, Workflow};
-
 /// Workflow that creates git worktrees for each session
 pub struct WorktreeWorkflow;
 
@@ -69,16 +67,10 @@ impl WorktreeWorkflow {
     }
 }
 
-impl Workflow for WorktreeWorkflow {
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
-    fn pre_session_hook(
-        &self,
+impl WorktreeWorkflow {
+    pub fn pre_session_hook(
         session_name: &str,
         config: &Config,
-        _startup_path: &std::path::Path,
     ) -> Result<SessionMetadata, StatusMessage> {
         let repo_name = Self::get_repo_name()?;
         let main_branch = Self::get_main_branch()?;
@@ -126,8 +118,11 @@ impl Workflow for WorktreeWorkflow {
             )));
         }
 
-        Ok(SessionMetadata {
-            path: worktree_path,
-        })
+        Ok(SessionMetadata { path: worktree_path })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionMetadata {
+    pub path: std::path::PathBuf,
 }

@@ -15,10 +15,8 @@ use crate::session_manager::session_pair::SessionActivity;
 pub enum SelectorItemKind {
     /// A live session (can be previewed/switched to)
     Live,
-    /// A recent session from history (should be resumed)
-    Recent,
-    /// A worktree directory (start fresh session)
-    Worktree,
+    /// A dead session (should be resumed)
+    Dead,
 }
 
 /// A filterable session selector with incremental search.
@@ -33,8 +31,8 @@ pub struct SessionSelector {
     active_index: Option<usize>,
     /// Number of live sessions
     live_count: usize,
-    /// Number of recent sessions (after live, before worktrees)
-    recent_count: usize,
+    /// Number of dead sessions (after live)
+    dead_count: usize,
 }
 
 impl SessionSelector {
@@ -47,7 +45,7 @@ impl SessionSelector {
             filtered_indices: Vec::new(),
             active_index: None,
             live_count: 0,
-            recent_count: 0,
+            dead_count: 0,
         }
     }
 
@@ -57,7 +55,7 @@ impl SessionSelector {
         self.filtered_indices.clear();
         self.state.select(Some(0));
         self.live_count = 0;
-        self.recent_count = 0;
+        self.dead_count = 0;
     }
 
     /// Set the index of the active session (will be highlighted green).
@@ -66,9 +64,9 @@ impl SessionSelector {
     }
 
     /// Set the counts for different item categories.
-    pub fn set_counts(&mut self, live_count: usize, recent_count: usize) {
+    pub fn set_counts(&mut self, live_count: usize, dead_count: usize) {
         self.live_count = live_count;
-        self.recent_count = recent_count;
+        self.dead_count = dead_count;
     }
 
     /// Add a character to the query and update the filter.
@@ -98,10 +96,8 @@ impl SessionSelector {
     fn item_kind(&self, idx: usize) -> SelectorItemKind {
         if idx < self.live_count {
             SelectorItemKind::Live
-        } else if idx < self.live_count + self.recent_count {
-            SelectorItemKind::Recent
         } else {
-            SelectorItemKind::Worktree
+            SelectorItemKind::Dead
         }
     }
 
@@ -165,7 +161,6 @@ impl SessionSelector {
 
     /// Render the session selector.
     /// `sessions` is a slice of (name, path) tuples.
-    /// For worktree directories, name is empty and only path is shown.
     /// `session_states` maps session names to their current activity state.
     pub fn render(
         &mut self,
@@ -239,22 +234,6 @@ impl SessionSelector {
                 let activity = session_states.get(name);
                 let available_width = (popup_width as usize).saturating_sub(4);
 
-                // For worktree directories (empty name), show only the path
-                if name.is_empty() {
-                    let path_display = if path.len() > available_width {
-                        format!(
-                            "...{}",
-                            &path[path.len().saturating_sub(available_width - 3)..]
-                        )
-                    } else {
-                        path.clone()
-                    };
-
-                    let path_style = Style::default().fg(Color::DarkGray);
-
-                    return Line::from(vec![Span::styled(path_display, path_style)]);
-                }
-
                 // Account for status indicator in width calculation (2 chars: "● ")
                 // Live sessions always have an indicator (purple=running, yellow=stopped)
                 let has_indicator = kind == SelectorItemKind::Live;
@@ -274,16 +253,16 @@ impl SessionSelector {
                     .saturating_sub(path_display.len())
                     .saturating_sub(indicator_width);
 
-                // Active session: green, recent: dark gray, normal live: white
+                // Active session: green, dead: dark gray, normal live: white
                 let name_style = if is_active {
                     Style::default().fg(Color::Green)
-                } else if kind == SelectorItemKind::Recent {
+                } else if kind == SelectorItemKind::Dead {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::White)
                 };
 
-                let path_style = if kind == SelectorItemKind::Recent {
+                let path_style = if kind == SelectorItemKind::Dead {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::Gray)
