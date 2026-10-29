@@ -75,7 +75,8 @@ A port is a trait in `shepherd-core::ports`. It describes a capability in domain
 
 1. the trait and its domain types (in core)
 2. a fake in `shepherd-testkit::fakes` (stateful, in-memory, and able to inject failures)
-3. a contract suite in `shepherd-testkit::contracts`, a generic `fn suite<P: Port>(make: impl Fn() -> P)`
+3. a contract suite in `shepherd-testkit::contracts`: one `pub fn` per case, plus a `<port>_contract!(make)` macro that
+   expands to one `#[test]` per case (template: `contracts/pty.rs`)
 4. a real adapter in `shepherd-adapters`, whose tests call the same contract suite
 5. wiring in `shepherd/src/main.rs`
 

@@ -17,13 +17,9 @@ A port isn't done until all five pieces exist. Build them in this order, because
 - If the PM's spec didn't say this trait shape, stop and report your proposed trait before going further.
 
 ## 2. Contract suite (`crates/testkit/src/contracts/<name>.rs`)
-```rust
-pub fn suite<P: Worktrees>(make: impl Fn() -> Harness<P>) {
-    create_then_list_contains_it(make());
-    create_twice_same_branch_is_branch_exists(make());
-    remove_deletes_and_list_omits_it(make());
-}
-```
+Copy `contracts/pty.rs`. It has one `pub fn <case>(make: ...)` per case, and a `#[macro_export] <name>_contract!(make)`
+that expands to one `#[test]` per case. `make` builds the port from whatever it needs (the Pty port takes an event
+sink). **Adding a case means adding it to the macro's list.** There's a comment in the template saying so.
 Each case is a plain function that panics on failure. Cover the behavior core relies on, error cases included.
 This suite *is* the spec of the port.
 
