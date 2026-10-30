@@ -9,9 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F36 display-safe gaps (minus ZWJ) | re-review | task/f36-display-gaps @ 3921826 (on 7844d8f) | 2 | sealed draw::render + ShownLine; PM-accepted: no Into::into ban (sealed types instead); Prepend rule; later-cluster cap test |
+| F36 display-safe gaps (minus ZWJ) | fixing (CHANGES r2) | task/f36-display-gaps @ 3921826 | 2 | Blocking: Buffer::merge/filled, buffer::Cell::new/from, .content[ writes bypass draw. Minor: Block::border_set |
 | F38+F40 adapter test hygiene | in review | task/f38-f40-test-hygiene @ fec5f02 (on 71df32d) | 1 | idle bound + byte limit; watchdog + group kill on drop (PM asked reviewer: pgid reuse?) |
-| F42 new session wrong size | re-review | task/f42-spawn-size @ 4648f06 (on 971a533) | 2 | runtime adopt test; one decide() path; sizes clamped to Screen bounds |
 | F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ b0867bd (on 971a533) | 3 | N1/N2 tests; update-ref timeout fails the create; update-ref with old value |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F42 | 2 | runtime adopt-size wiring untested; sizes unclamped |
 | T25b | 2 | orphan hook branch taken from the client; disconnect shown as kept |
 | T27 | 2 | conflicted with F33; fixture leaked env to disk; CLICOLOR_FORCE broke JSON; real_worktrees could reach real gh |
 | F33 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
@@ -798,7 +798,7 @@ acceptance:
 scope: crates/adapters, crates/core (tests), crates/shepherd (tests)
 
 ### F42: A new session starts at the wrong size until the window is resized
-status: in-progress
+status: done (2d82053)
 depends: T22
 touches: core::host, core::client, wire (SessionNew), shepherd::host::runtime (spawn size)
 goal: User report: a new session's terminal is sized wrong until the window is resized. PM diagnosis: every spawn uses
