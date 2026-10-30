@@ -22,7 +22,7 @@ use shepherd_core::client::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
-use shepherd_term::Screen;
+use shepherd_term::{PANIC_TRIGGER, Screen};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_tui::{Screens, layout, pane_size};
@@ -395,6 +395,23 @@ fn the_selected_session_is_resized_to_the_pane_not_the_window() {
     // The client's own screen of the session is resized to match.
     let screen = h.runtime.screen(&SessionId::new("s1")).map(Screen::size);
     assert_eq!(screen, Some((pane.cols, pane.rows)));
+}
+
+#[test]
+fn a_session_whose_screen_panics_gets_a_blank_one_of_the_same_size_and_the_client_keeps_going() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n')]);
+    h.term(Event::Resize(120, 40));
+    h.typed("before");
+    let s1 = SessionId::new("s1");
+    let size = h.runtime.screen(&s1).map(Screen::size);
+    // The fake host echoes input, so this is fed to the client's screen of s1.
+    h.user(Intent::Input(PANIC_TRIGGER.to_vec()));
+    assert!(!h.runtime.done());
+    assert_eq!(h.runtime.screen(&s1).map(Screen::size), size);
+    assert_eq!(h.screen("s1"), "");
+    h.typed("after");
+    assert_eq!(h.screen("s1"), "after");
 }
 
 #[test]

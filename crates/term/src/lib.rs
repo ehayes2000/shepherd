@@ -6,6 +6,7 @@
 //! synchronized-update timeout is driven by the caller through [`Screen::sync_hold`] and [`Screen::expire_sync`].
 
 mod convert;
+mod guard;
 mod replies;
 mod snapshot;
 mod sync;
@@ -19,8 +20,10 @@ use alacritty_terminal::vte::ansi::{
     Handler, KeyboardModes, KeyboardModesApplyBehavior, Processor,
 };
 
+pub use guard::KITTY_STACK_CAP;
 pub use types::*;
 
+use guard::{Guarded, KittyDepths};
 use replies::{Listener, ReportedColors};
 use sync::ManualTimeout;
 use unfinished::Unfinished;
@@ -31,6 +34,10 @@ pub const MIN_ROWS: u16 = 1;
 /// Largest grid. Bigger sizes are clamped so a bogus resize can't allocate gigabytes.
 pub const MAX_COLS: u16 = 1000;
 pub const MAX_ROWS: u16 = 500;
+
+/// With the `panic-trigger` feature (tests only), [`Screen::feed`] panics when a chunk contains these bytes.
+#[cfg(feature = "panic-trigger")]
+pub const PANIC_TRIGGER: &[u8] = b"\x1b]shepherd-test-panic\x07";
 
 /// Primary-screen lines kept above the viewport, so reflow on resize can bring them back.
 const SCROLLBACK_LINES: usize = 1000;
@@ -51,6 +58,8 @@ pub struct Screen {
     /// The flags on top of the kitty keyboard stack, which `CSI ? u` reports. They differ from the active flags
     /// after `CSI = flags u`, and alacritty keeps the stack private. See [`Screen::read_kitty_top`].
     kitty_top: u8,
+    /// How deep each screen's kitty keyboard stack is, so pushes past [`KITTY_STACK_CAP`] can be dropped.
+    kitty: KittyDepths,
 }
 
 struct Size {
@@ -99,6 +108,7 @@ impl Screen {
             unfinished: Unfinished::default(),
             reported: ReportedColors::default(),
             kitty_top: 0,
+            kitty: KittyDepths::default(),
         }
     }
 
@@ -110,9 +120,21 @@ impl Screen {
         )
     }
 
-    /// Parses PTY output. Escape sequences and UTF-8 may be split across calls.
+    /// Parses PTY output. Escape sequences and UTF-8 may be split across calls. A kitty keyboard push onto a stack
+    /// already holding [`KITTY_STACK_CAP`] entries is dropped.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        #[cfg(feature = "panic-trigger")]
+        if bytes
+            .windows(PANIC_TRIGGER.len())
+            .any(|w| w == PANIC_TRIGGER)
+        {
+            panic!("Screen::feed: test panic trigger");
+        }
+        let mut handler = Guarded {
+            term: &mut self.term,
+            kitty: &mut self.kitty,
+        };
+        self.parser.advance(&mut handler, bytes);
         self.track_parsed(bytes);
         self.read_kitty_top();
         self.collect_replies();
@@ -176,7 +198,11 @@ impl Screen {
     /// ended or a newer begin marker restarted the timeout.
     pub fn expire_sync(&mut self, id: u64) {
         if self.sync_hold().is_some_and(|hold| hold.id == id) {
-            self.parser.stop_sync(&mut self.term);
+            let mut handler = Guarded {
+                term: &mut self.term,
+                kitty: &mut self.kitty,
+            };
+            self.parser.stop_sync(&mut handler);
             let held = std::mem::take(&mut self.held);
             self.unfinished.advance(&held);
             self.read_kitty_top();

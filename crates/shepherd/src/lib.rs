@@ -3,4 +3,5 @@
 pub mod client;
 pub mod hook;
 pub mod host;
+pub mod screen_guard;
 pub mod terminal;

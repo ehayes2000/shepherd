@@ -19,6 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]
+shepherd-term = { workspace = true, features = ["panic-trigger"] }
 shepherd-testkit.workspace = true
 tempfile.workspace = true
 portable-pty.workspace = true
