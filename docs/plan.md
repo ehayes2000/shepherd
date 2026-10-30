@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T21 workspaces | building | task/t21-workspaces @ 7d2a1cf | 0 | – |
+| T21 workspaces | in review | task/t21-workspaces @ a2986c3 (on 62e768e) | 1 | PM-accepted: no repo-root mapping, blocking default_branch probe, no ~ expansion (→ F27/F28); show-all with dim marks |
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -436,6 +436,38 @@ acceptance:
   selected session's mark clears. Core table tests; the existing focus-forwarding keys test keeps passing (the event is both
   forwarded to a session that asked for focus events and reported to core).
 scope: crates/core (client), crates/tui
+
+### F27: Worktrees calls run off the host runtime thread
+status: todo (must land before T22)
+depends: T21
+touches: ports::worktrees (or a runtime worker), shepherd::host
+goal: `Worktrees` calls (`default_branch` may run `git remote set-head --auto` over the network; T22's `create` fetches) run
+synchronously on the host's single runtime thread, freezing every session's output and every client while git works.
+acceptance:
+- Worktrees operations run on a worker thread and report back as runtime events (decision 0011's pattern: ports push events
+  into the runtime channel). Core issues the command and handles the result event; it never waits.
+- A host scenario with a fake Worktrees whose call blocks until the test releases it: while it's blocked, another session's
+  PTY output still reaches a client and a client request is still answered (counted, not timed). Then release → the result
+  is applied.
+- Results that arrive for a request that no longer matters (workspace already selected by someone else, session closed) are
+  handled by core without side effects. Core table tests.
+scope: crates/core, crates/shepherd, crates/testkit
+notes: Decide in the report whether this is an async port shape (`start_*` + events) or a generic worker wrapper around the
+sync port; prefer the wrapper if it keeps the port trait and its contract suite unchanged.
+
+### F28: Workspace from a subdirectory, and `~` in typed paths
+status: todo
+depends: T21
+touches: ports::worktrees, adapters::worktrees, core::host (workspace)
+goal: Running `shepherd` in `<repo>/crates` should pick `<repo>`, and typing `~/Code/x` in the switcher should work.
+acceptance:
+- `Worktrees` gains `repo_root(&Path) -> Result<PathBuf, WorktreeError>` (git `rev-parse --show-toplevel` with T20's pinned
+  options and env stripping; for a linked worktree, the main repo root via `--git-common-dir`). Contract cases for: repo root,
+  subdirectory, linked worktree, not a repo. Fake supports it.
+- Workspace selection (hello cwd and typed paths) resolves to the repo root. Selecting a subdirectory of the current workspace
+  is the same workspace (no append).
+- A typed path starting with `~/` (or exactly `~`) expands to the host's home; other relative paths are still refused.
+scope: crates/core, crates/adapters, crates/testkit, crates/shepherd
 
 ## Out of scope for the initial feature set
 
