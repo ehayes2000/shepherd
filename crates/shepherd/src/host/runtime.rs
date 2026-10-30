@@ -24,9 +24,12 @@
 //!   ([`Worker::run_alone`]), since its checkout has no time cap: creates for different sessions run at the same time,
 //!   and none holds up the worker. Closing a session whose create is running cancels it (`Worktrees::cancel_create`,
 //!   which never waits on git), and the create's answer comes back as usual; shutting the host down cancels every
-//!   running create. The `Commands` port (a worktree's
-//!   post-create and pre-remove hooks) runs on a worker of its own the same way, its results coming back as
-//!   [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
+//!   running create. The `Commands` port (a worktree's post-create and pre-remove hooks) runs each hook on a thread of
+//!   its own the same way, its results coming back as [`RuntimeEvent::Commands`], so a long hook never holds up git
+//!   calls, the loop, or another session's hooks. Closing a session whose hook is running cancels it
+//!   (`Commands::cancel`, which kills its process group and never waits), and its answer comes back as usual. Shutting
+//!   the host down cancels every running hook and waits (within the shutdown grace) for their answers, which it drops:
+//!   a session stopping with the host spawns nothing.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -69,8 +72,8 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, WorktreeError,
-    WorktreeName, WorktreePath, Worktrees,
+    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId,
+    WorktreeError, WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -376,8 +379,11 @@ pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
     /// `Worktrees` calls submitted and not yet answered.
     worktree_calls: usize,
     commands: Worker<C>,
-    /// `Commands` calls (hooks) submitted and not yet answered.
-    hook_calls: usize,
+    /// `Commands` calls (hooks) running and not yet answered, by session (a session runs one hook at a time), for
+    /// `Commands::cancel`.
+    hooks: HashMap<SessionId, RunId>,
+    /// The id the next hook runs as: never reused.
+    next_run: u64,
     link: L,
     log: E,
     env: V,
@@ -492,7 +498,8 @@ impl<
             worktrees,
             worktree_calls: 0,
             commands,
-            hook_calls: 0,
+            hooks: HashMap::new(),
+            next_run: 0,
             link,
             log,
             env,
@@ -736,7 +743,7 @@ impl<
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
             self.run_until_idle();
-            if self.worktree_calls + self.hook_calls == 0 && !self.preflighting || self.finished {
+            if self.worktree_calls + self.hooks.len() == 0 && !self.preflighting || self.finished {
                 return true;
             }
             match self.rx.0.recv_timeout(limit) {
@@ -806,7 +813,16 @@ impl<
                 }
             }
             RuntimeEvent::Commands(event) => {
-                self.hook_calls = self.hook_calls.saturating_sub(1);
+                if let HostEvent::HookFinished { session, .. }
+                | HostEvent::PreRemoveFinished { session, .. } = &event
+                {
+                    self.hooks.remove(session);
+                }
+                // A hook cancelled by the shutdown: its session stops with the host, so nothing follows from it.
+                if self.shutdown_by.is_some() {
+                    self.check_shutdown_done();
+                    return;
+                }
                 match &event {
                     HostEvent::HookFinished { session, .. } => {
                         let session = session.clone();
@@ -986,6 +1002,12 @@ impl<
                         self.worktrees.port().cancel_create(repo, name);
                     }
                 }
+                HostCommand::CancelHook { session } => {
+                    // Never waits: the hook's own thread waits for its process group to be gone, then answers.
+                    if let Some(id) = self.hooks.get(&session) {
+                        self.commands.port().cancel(*id);
+                    }
+                }
                 HostCommand::RunHook {
                     session,
                     command,
@@ -1004,17 +1026,21 @@ impl<
                             "running it failed unexpectedly".into(),
                         )),
                     };
+                    let (id, thread) = self.next_hook(&session);
+                    let running = session.clone();
                     let call = move |commands: &C| HostEvent::HookFinished {
-                        result: commands.run(&command),
+                        result: commands.run(id, &command),
                         session,
                         command,
                         rest,
                         spawn,
                     };
-                    match self.commands.submit(call, panicked) {
-                        Ok(()) => self.hook_calls += 1,
+                    // On a thread of its own, so it holds up no other session's hooks.
+                    match self.commands.run_alone(&thread, call, panicked) {
+                        Ok(()) => {
+                            self.hooks.insert(running, id);
+                        }
                         Err(unanswered) => {
-                            tracing::error!("the hooks thread is gone");
                             // Core still spawns after a hook that couldn't run: its run files are ready for it.
                             if let HostEvent::HookFinished { session, .. } = &*unanswered
                                 && let Some(files) = self.awaiting_worktree.remove(session)
@@ -1089,20 +1115,21 @@ impl<
                             "running it failed unexpectedly".into(),
                         )),
                     };
+                    let (id, thread) = self.next_hook(&session);
+                    let running = session.clone();
                     let call = move |commands: &C| HostEvent::PreRemoveFinished {
-                        result: commands.run(&command),
+                        result: commands.run(id, &command),
                         session,
                         command,
                         rest,
                         path,
                         force,
                     };
-                    match self.commands.submit(call, panicked) {
-                        Ok(()) => self.hook_calls += 1,
-                        Err(unanswered) => {
-                            tracing::error!("the hooks thread is gone");
-                            follow_up.push_back(*unanswered);
+                    match self.commands.run_alone(&thread, call, panicked) {
+                        Ok(()) => {
+                            self.hooks.insert(running, id);
                         }
+                        Err(unanswered) => follow_up.push_back(*unanswered),
                     }
                 }
                 HostCommand::RemoveWorktree {
@@ -1137,6 +1164,13 @@ impl<
                 }
             }
         }
+    }
+
+    /// A new id for a hook of `session`, and the name of the thread it runs on.
+    fn next_hook(&mut self, session: &SessionId) -> (RunId, String) {
+        let id = RunId(self.next_run);
+        self.next_run += 1;
+        (id, format!("hook-{session}"))
     }
 
     /// Hands a session's worktree or hook result (`event`) to core, with the run files that waited for it ready for its
@@ -1549,7 +1583,7 @@ impl<
             installed,
             force: pending.force,
             work: Work {
-                port_calls: self.worktree_calls + self.hook_calls,
+                port_calls: self.worktree_calls + self.hooks.len(),
                 run_files: self.pending_run_files(),
             },
             failed,
@@ -1985,6 +2019,11 @@ impl<
         for (repo, name) in self.creating.values() {
             self.worktrees.port().cancel_create(repo, name);
         }
+        // Hooks run in sessions of their own, so one left running would outlive the host too. Each answers once its
+        // process group is gone, and the shutdown waits for that.
+        for id in self.hooks.values() {
+            self.commands.port().cancel(*id);
+        }
         let live: Vec<SessionId> = self.screens.keys().cloned().collect();
         for session in live {
             if let Err(error) = self.pty.kill(&session) {
@@ -1995,7 +2034,7 @@ impl<
     }
 
     fn check_shutdown_done(&mut self) {
-        if self.shutdown_by.is_some() && self.screens.is_empty() {
+        if self.shutdown_by.is_some() && self.screens.is_empty() && self.hooks.is_empty() {
             self.finish();
         }
     }

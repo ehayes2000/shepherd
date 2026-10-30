@@ -470,3 +470,19 @@ fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
         );
     }
 }
+
+/// F33: a pre-remove hook still running when the host stopped outlived it. Its worktree is kept: nothing removed it.
+#[test]
+fn shutting_the_host_down_cancels_a_running_pre_remove_hook() {
+    let mut s = Setup::new();
+    let (_, hold) = s.close_with_hook_held();
+    s.h.runtime()
+        .sender()
+        .send(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.poll();
+    assert!(hold.wait_cancelled(LIMIT), "the hook was left running");
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(s.commands.running(), 0);
+    assert!(s.listed(), "the worktree was removed");
+}

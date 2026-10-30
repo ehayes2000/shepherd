@@ -1,5 +1,5 @@
 //! A new worktree runs its workspace's post-create hooks before the agent starts (T23): a host runtime on all-fake
-//! ports, with the fake `Commands` port running the hooks on its own worker thread. As in `session_worktrees.rs`, the
+//! ports, with the fake `Commands` port running each hook on a thread of its own (F33). As in `session_worktrees.rs`, the
 //! workspace and each worktree are real directories in a tempdir, made by the test where git would make them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -286,4 +286,85 @@ fn a_session_closed_while_a_hook_runs_runs_no_more_hooks_and_never_spawns() {
     assert!(!s.h.runtime().pty().is_running(&id));
     assert!(s.claude.lock().unwrap().is_empty());
     assert_eq!(s.h.runtime().pending_run_files(), 0);
+}
+
+/// F33: hooks shared one worker thread, so a session's hooks waited behind another's, up to their timeout.
+#[test]
+fn hooks_of_two_sessions_run_at_the_same_time() {
+    let mut s = Setup::new(&["setup-a"]);
+    let first_path = s.make_worktree_dir("claude-1");
+    let second_path = s.make_worktree_dir("claude-2");
+    let (first, first_hold) = s.start_with_first_hook_held();
+    // The second session's hook reaches the port while the first's is still held.
+    let (second, second_hold) = s.start_with_first_hook_held();
+    assert_eq!(
+        s.commands.running(),
+        2,
+        "both hooks are in the port at once"
+    );
+
+    second_hold.release();
+    assert!(s.h.runtime_mut().run_next(LIMIT));
+    assert!(s.h.runtime().pty().is_running(&second));
+    assert!(!s.h.runtime().pty().is_running(&first), "still in its hook");
+    first_hold.release();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().pty().is_running(&first));
+    assert_eq!(
+        *s.claude.lock().unwrap(),
+        [(second_path, true), (first_path, true)]
+    );
+}
+
+/// F33: a closed session's hook went on running, up to its timeout.
+#[test]
+fn closing_a_session_cancels_its_running_hook() {
+    let mut s = Setup::new(&["setup-a", "setup-b"]);
+    s.make_worktree_dir("claude-1");
+    let (id, hold) = s.start_with_first_hook_held();
+    s.client.request(ClientRequest::SessionClose(SessionClose {
+        session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+    }));
+    s.h.poll();
+    assert!(hold.wait_cancelled(LIMIT), "the hook was left running");
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+
+    assert_eq!(s.commands.running(), 0);
+    let runs: Vec<String> = s.commands.runs().into_iter().map(|r| r.script).collect();
+    assert_eq!(runs, ["setup-a"]);
+    let frames = frames(&s.h, &id);
+    assert!(
+        matches!(frames.last(), Some(ShepherdFrame::WorktreeHook(hook))
+            if hook.hook == "setup-a" && hook.error.as_deref() == Some("cancelled")),
+        "{frames:?}"
+    );
+    assert!(!s.h.runtime().pty().is_running(&id));
+    assert!(s.claude.lock().unwrap().is_empty());
+    assert_eq!(s.h.runtime().pending_run_files(), 0);
+}
+
+/// F33: a hook still running when the host stopped outlived it (it runs in a session of its own).
+#[test]
+fn shutting_the_host_down_cancels_running_hooks_and_waits_for_them() {
+    let mut s = Setup::new(&["setup-a"]);
+    s.make_worktree_dir("claude-1");
+    s.make_worktree_dir("claude-2");
+    let (_, first) = s.start_with_first_hook_held();
+    let (_, second) = s.start_with_first_hook_held();
+    s.h.runtime()
+        .sender()
+        .send(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.poll();
+    assert!(first.wait_cancelled(LIMIT), "a hook was left running");
+    assert!(second.wait_cancelled(LIMIT), "a hook was left running");
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        s.commands.running(),
+        0,
+        "the host stopped before its hooks did"
+    );
+    // Nothing was started after them.
+    assert!(s.claude.lock().unwrap().is_empty());
 }

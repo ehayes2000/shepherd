@@ -322,6 +322,43 @@ fn a_session_closed_while_its_hooks_run_records_the_result_and_runs_and_spawns_n
     assert!(host.host().sessions().is_empty());
 }
 
+/// F33: the hook would otherwise go on running (up to its timeout) for a session nobody wants any more.
+#[test]
+fn closing_a_session_while_its_hooks_run_cancels_the_running_hook() {
+    let (mut host, _) = worktree_made(&["a", "b"]);
+    let commands = host.close("s1");
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| matches!(c, HostCommand::CancelHook { .. }))
+            .collect::<Vec<_>>(),
+        [&HostCommand::CancelHook { session: sid("s1") }]
+    );
+    assert!(!commands.iter().any(|c| matches!(
+        c,
+        HostCommand::KillPty { .. } | HostCommand::CancelWorktree { .. }
+    )));
+}
+
+#[test]
+fn a_cancelled_hook_is_recorded_as_cancelled_with_its_output() {
+    let (mut host, _) = worktree_made(&["a", "b"]);
+    host.close("s1");
+    let cancelled = Ok(CommandOutput {
+        exit: CommandExit::Cancelled,
+        tail: b"installing".to_vec(),
+    });
+    let commands = finished(&mut host, "a", &["b"], cancelled);
+    assert_eq!(
+        commands,
+        vec![append(
+            "s1",
+            "_shepherd/worktree/hook",
+            json!({ "hook": "a", "output_tail": "installing", "error": "cancelled" })
+        )]
+    );
+}
+
 #[test]
 fn a_hook_result_for_a_session_not_running_hooks_does_nothing() {
     let (mut host, _) = worktree_made(&[]);

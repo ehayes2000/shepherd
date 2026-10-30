@@ -22,6 +22,10 @@ macro_rules! commands_contract {
             a_file_as_cwd_is_an_error,
             timeout_kills_the_whole_group,
             a_background_child_does_not_hold_it_open,
+            chatty_output_keeps_only_its_tail,
+            cancel_kills_the_whole_group,
+            a_run_cancelled_before_it_starts_runs_nothing,
+            cancelling_one_run_leaves_another_alone,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -38,7 +42,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use shepherd_core::ports::{
-    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL,
+    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL, RunId,
 };
 
 /// Prints `out` to stdout, then `err` to stderr, and exits 3.
@@ -58,6 +62,13 @@ pub const READS_STDIN: &str = "cat; printf done";
 /// `child.pid`, and waits for it: it never finishes on its own.
 pub const FORK_AND_HANG: &str =
     "echo started; echo $$ > shell.pid; sleep 300 & echo $! > child.pid; wait";
+/// Like [`FORK_AND_HANG`], for a case that cancels it rather than letting it time out (the comment only tells the two
+/// apart, for the fake).
+pub const FORK_AND_WAIT: &str =
+    "echo started; echo $$ > shell.pid; sleep 300 & echo $! > child.pid; wait # until cancelled";
+/// Writes 8 MiB of `0123456789abcde\n` lines, then `end`: far more than any tail, or than a file of output should
+/// grow to.
+pub const CHATTY: &str = "yes 0123456789abcde | head -c 8388608; printf end";
 /// Records its own pid in `shell.pid`, starts a `sleep` in the background, records its pid in `child.pid`, and exits 0
 /// without waiting for it.
 pub const FORK_AND_EXIT: &str = "echo $$ > shell.pid; sleep 300 & echo $! > child.pid";
@@ -71,9 +82,12 @@ pub trait CommandsFixture {
     fn port(&self) -> &Self::Port;
     /// An existing directory, with symlinks resolved, that commands may write in. Empty at first.
     fn dir(&self) -> &Path;
-    /// Whether the background child of [`FORK_AND_HANG`] or [`FORK_AND_EXIT`] is still alive. `None` if the script
-    /// never got as far as recording it.
+    /// Whether the background child of [`FORK_AND_HANG`], [`FORK_AND_WAIT`] or [`FORK_AND_EXIT`] is still alive.
+    /// `None` if the script never got as far as recording it.
     fn forked_child_alive(&self) -> Option<bool>;
+    /// Blocks until the running script has recorded its background child, up to `limit` (a liveness bound). Whether it
+    /// did.
+    fn wait_for_child(&self, limit: Duration) -> bool;
 }
 
 fn spec<F: CommandsFixture>(f: &F, script: &str, timeout: Duration) -> CommandSpec {
@@ -85,9 +99,12 @@ fn spec<F: CommandsFixture>(f: &F, script: &str, timeout: Duration) -> CommandSp
     }
 }
 
+/// The id every case's one run uses, unless it says otherwise.
+const ONE: RunId = RunId(1);
+
 fn run<F: CommandsFixture>(f: &F, spec: &CommandSpec) -> CommandOutput {
     f.port()
-        .run(spec)
+        .run(ONE, spec)
         .unwrap_or_else(|e| panic!("running {:?}: {e}", spec.script))
 }
 
@@ -131,7 +148,7 @@ pub fn a_missing_cwd_is_an_error<F: CommandsFixture>(f: &F) {
     let mut spec = spec(f, PRINT_AND_EXIT, GENEROUS);
     spec.cwd = f.dir().join("missing");
     assert_eq!(
-        f.port().run(&spec),
+        f.port().run(ONE, &spec),
         Err(CommandError::NoSuchDir(spec.cwd.clone()))
     );
 }
@@ -141,7 +158,7 @@ pub fn a_file_as_cwd_is_an_error<F: CommandsFixture>(f: &F) {
     std::fs::write(&file, b"").unwrap();
     let mut spec = spec(f, PRINT_AND_EXIT, GENEROUS);
     spec.cwd = file.clone();
-    assert_eq!(f.port().run(&spec), Err(CommandError::NoSuchDir(file)));
+    assert_eq!(f.port().run(ONE, &spec), Err(CommandError::NoSuchDir(file)));
 }
 
 /// The command never finishes, so any timeout is passed. A short one may pass before the script has even recorded its
@@ -168,4 +185,70 @@ pub fn a_background_child_does_not_hold_it_open<F: CommandsFixture>(f: &F) {
     let out = run(f, &spec(f, FORK_AND_EXIT, GENEROUS));
     assert_eq!(out.exit, CommandExit::Code(0));
     assert_eq!(f.forked_child_alive(), Some(true));
+}
+
+/// However much a command writes, only its tail is kept, and it comes back whole and in order.
+pub fn chatty_output_keeps_only_its_tail<F: CommandsFixture>(f: &F) {
+    let out = run(f, &spec(f, CHATTY, GENEROUS));
+    assert_eq!(out.exit, CommandExit::Code(0));
+    let mut all = b"0123456789abcde\n".repeat(8 * 1024 * 1024 / 16);
+    all.extend_from_slice(b"end");
+    assert_eq!(out.tail, all[all.len() - OUTPUT_TAIL..]);
+}
+
+/// A cancel while the command runs kills it and everything it started, and the run says it was cancelled. Bounded: a
+/// cancel that did nothing ends in the generous timeout instead, and fails.
+pub fn cancel_kills_the_whole_group<F: CommandsFixture + Sync>(f: &F) {
+    let spec = spec(f, FORK_AND_WAIT, GENEROUS);
+    let out = std::thread::scope(|s| {
+        let call = s.spawn(|| f.port().run(ONE, &spec));
+        assert!(
+            f.wait_for_child(GENEROUS),
+            "the script never started its child"
+        );
+        f.port().cancel(ONE);
+        call.join().unwrap()
+    });
+    let out = out.unwrap_or_else(|e| panic!("running {FORK_AND_WAIT:?}: {e}"));
+    assert_eq!(out.exit, CommandExit::Cancelled);
+    assert_eq!(out.tail, b"started\n");
+    assert_eq!(
+        f.forked_child_alive(),
+        Some(false),
+        "the hook's background child outlived the cancel"
+    );
+}
+
+pub fn a_run_cancelled_before_it_starts_runs_nothing<F: CommandsFixture>(f: &F) {
+    f.port().cancel(ONE);
+    let out = run(f, &spec(f, FORK_AND_EXIT, GENEROUS));
+    assert_eq!(
+        out,
+        CommandOutput {
+            exit: CommandExit::Cancelled,
+            tail: Vec::new()
+        }
+    );
+    assert_eq!(f.forked_child_alive(), None, "it ran");
+}
+
+/// A cancel names one run: the next run, and a run going on at the same time, are left alone.
+pub fn cancelling_one_run_leaves_another_alone<F: CommandsFixture + Sync>(f: &F) {
+    let waiting = spec(f, FORK_AND_WAIT, GENEROUS);
+    let printing = spec(f, PRINT_AND_EXIT, GENEROUS);
+    std::thread::scope(|s| {
+        let call = s.spawn(|| f.port().run(RunId(1), &waiting));
+        assert!(
+            f.wait_for_child(GENEROUS),
+            "the script never started its child"
+        );
+        f.port().cancel(RunId(2));
+        let other = f.port().run(RunId(3), &printing).unwrap();
+        assert_eq!(other.exit, CommandExit::Code(3));
+        assert_eq!(f.forked_child_alive(), Some(true));
+        f.port().cancel(RunId(1));
+        assert_eq!(call.join().unwrap().unwrap().exit, CommandExit::Cancelled);
+    });
+    let after = f.port().run(RunId(4), &printing).unwrap();
+    assert_eq!(after.exit, CommandExit::Code(3));
 }

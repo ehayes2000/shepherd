@@ -42,7 +42,8 @@
 //! [`HostCommand::RunHook`] off the runtime thread whose result comes back as [`HostEvent::HookFinished`] and is
 //! recorded in `worktree/hook`. The first that fails (non-zero exit, timeout, signal, couldn't run) stops the rest and
 //! marks the session with a warning, and the PTY spawns either way once the hooks are done. A session closed meanwhile
-//! records the result it was waiting for and runs and spawns nothing more.
+//! records the result it was waiting for and runs and spawns nothing more; closing it cancels the hook running
+//! ([`HostCommand::CancelHook`]), whose result comes back as cancelled.
 //!
 //! Auto-naming: a session keeps the name it was created with (the runtime always asks for the placeholder,
 //! `<profile>-<n>`) until its first user prompt (a `session/prompt` that isn't a continuation) is in its log. Once the
@@ -416,6 +417,11 @@ pub enum HostCommand {
     /// killed and what it made removed, and its answer comes back as usual, as [`WorktreeError::Cancelled`]. Never
     /// waits on git.
     CancelWorktree {
+        session: SessionId,
+    },
+    /// Stop session `session`'s running hook, if it has one (`Commands::cancel`): its whole process group is killed.
+    /// Never waits: the hook's answer comes back as usual once the group is gone, as cancelled.
+    CancelHook {
         session: SessionId,
     },
     /// Run a post-create hook with the `Commands` port, and feed the result back as [`HostEvent::HookFinished`] with
@@ -1004,6 +1010,9 @@ impl Host {
             Phase::Starting => commands.push(HostCommand::CancelWorktree {
                 session: session.clone(),
             }),
+            Phase::Hooks { .. } => commands.push(HostCommand::CancelHook {
+                session: session.clone(),
+            }),
             _ => {}
         }
         let confirmed = match worktree {
@@ -1590,6 +1599,7 @@ fn hook_record(command: &CommandSpec, result: Result<CommandOutput, CommandError
                     tail,
                     Some(format!("timed out after {}s", command.timeout.as_secs())),
                 ),
+                CommandExit::Cancelled => (None, tail, Some("cancelled".to_owned())),
             }
         }
         Err(error) => (None, String::new(), Some(error.to_string())),
