@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | builder fixing round-1 findings | `task/T11-host-runtime` @ bd1ce34 | 1 | Fix: paced catch-up per decision 0013 (new `Link::queued_bytes`, test with more than `MAX_QUEUED` of history); service deadlines every iteration (`yes` starvation); startup errors also to host.log; startup messages name paths. PM-accepted: ack after catch-up completes; the rest of round 0 stands |
+| T11 host runtime | re-review (round 2) | `task/T11-host-runtime` @ 9286f73 | 1 | Round-1 fixes in: paced catch-up (`Link::queued_bytes` added), deadlines every iteration, Shutdown jumps the queue, startup errors logged and name paths. PM-accepted: the debug-build `yes` backlog is handled by F14 (PTY backpressure), not blocking. Must merge before T12 (T12 rebases onto the new `Link` method) |
 | T12 client core + runtime | builder fixing round-2 findings | `task/T12-client` @ 07ebee7 | 2 | Fix: flaky `ask_alive` test helper (ESRCH after a report); monotonic `at` in the client runtime. PM-accepted: request-id counter; `Start`/`ConnectFailed`; double-fork launcher; fd sweep cap 65,536; F13 for post-hello reconnect backoff |
 
 Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
@@ -228,6 +228,22 @@ acceptance:
 - Consecutive outages that each end within a short window back off exponentially (capped). A stable connection resets the
   backoff. Driven by `Tick`, no clocks. Core table tests.
 scope: crates/core
+
+### F14: PTY read backpressure
+status: todo (high priority: right after M1)
+depends: T11
+touches: ports::pty, adapters::pty, testkit pty, shepherd::host
+goal: A session that floods output (`yes`, a huge `cat`) can't grow host memory without bound or starve other sessions.
+acceptance:
+- Credit-based flow control: the Pty adapter's pump stops reading a session once its unacknowledged output passes a limit
+  (e.g. 1 MiB). The runtime acknowledges bytes after processing them (`Pty::ack(session, n)`, additive). The kernel pty buffer
+  then fills and the child blocks, as in a real terminal.
+- Contract cases: a child that floods while nothing is acknowledged stops being read (bounded outstanding bytes, counted not
+  timed), and resumes after the ack. Exactly-one-`Exited` and output ordering still hold.
+- A host scenario: one session floods, and another session's terminal query is still answered and a client request still
+  handled, with bounded queued events (counted).
+- Fake supports the same semantics.
+scope: crates/core (port), crates/adapters, crates/testkit, crates/shepherd
 
 ## Out of scope for the initial feature set
 
