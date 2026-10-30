@@ -9,8 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | re-review (round 2) | `task/T11-host-runtime` @ 9286f73 | 1 | Round-1 fixes in: paced catch-up (`Link::queued_bytes` added), deadlines every iteration, Shutdown jumps the queue, startup errors logged and name paths. PM-accepted: the debug-build `yes` backlog is handled by F14 (PTY backpressure), not blocking. Must merge before T12 (T12 rebases onto the new `Link` method) |
-| T12 client core + runtime | builder fixing round-2 findings | `task/T12-client` @ 07ebee7 | 2 | Fix: flaky `ask_alive` test helper (ESRCH after a report); monotonic `at` in the client runtime. PM-accepted: request-id counter; `Start`/`ConnectFailed`; double-fork launcher; fd sweep cap 65,536; F13 for post-hello reconnect backoff |
+| T11 host runtime | re-review (round 2) | `task/T11-host-runtime` @ 9286f73 | 1 | Round-1 fixes in: paced catch-up (`Link::queued_bytes` added), deadlines every iteration, Shutdown jumps the queue, startup errors logged and name paths. PM-accepted: the debug-build `yes` backlog is handled by F14 (PTY backpressure), not blocking. T12 merged first: T11 must rebase onto main (conflicts in main.rs, lib.rs, crates/shepherd/Cargo.toml, tests/support) |
 
 Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T17 (M2), T18b, F11.
 
@@ -32,6 +31,7 @@ Next up when these merge: T13 (needs T12, finishes M1), T16 (needs T11), then T1
 | F06 | 3 | quadratic stall |
 | F09 | 1 | – |
 | F10 | 2 | symlinked log truncated an outside file |
+| T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
 
 ## Milestones
 
@@ -552,7 +552,7 @@ notes (PM design, binding):
   `crates/shepherd/tests/support/` or testkit, so T12, T13 and M2 reuse it.
 
 ### T12: Client core + runtime
-status: in-progress
+status: done (5d47ee2)
 depends: T07, T10
 touches: core::client, shepherd::client
 goal: The TUI's brain: connect, subscribe, keep view state, and turn user intents into wire requests.
