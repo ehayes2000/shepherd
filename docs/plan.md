@@ -12,7 +12,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | T24 auto-naming | building | task/t24-auto-naming @ 83746d2 | 0 | – |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
-| F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
+| F31 real answers only | in review | task/f31-answer-input @ 4acc88f (on ec8b1b5) | 1 | PM-accepted: Enter/printable/paste answer; ESC-prefixed etc don't; Esc/Ctrl-C dismissal → F34 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -553,6 +553,17 @@ acceptance:
   No leaked processes (check pids you recorded).
 - Hook output is bounded on disk (cap the file, e.g. 1 MiB, then keep only the tail) — contract case with a chatty hook.
 scope: crates/adapters, crates/core, crates/testkit, crates/shepherd
+
+### F34: The client marks keys that can answer a dialog
+status: todo
+depends: F31
+touches: tui::keys, core::wire (input kind)
+goal: F31 classifies answers from bytes, so Esc and Ctrl-C (which dismiss Claude's permission dialog without a hook) don't
+count, and in kitty "report all keys" mode (flag 8) no key counts. The client knows the actual key event and can tag it.
+acceptance:
+- The tui tags key input that can answer (Enter, Esc, Ctrl-C, printable) as `kind: answer` (additive) regardless of encoding
+  mode; the quiet watch counts `answer` and `paste`. Table tests over key events × keyboard modes (legacy, kitty flags 1/8).
+scope: crates/core, crates/tui
 
 ## Out of scope for the initial feature set
 
