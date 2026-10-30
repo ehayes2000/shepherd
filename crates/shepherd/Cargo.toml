@@ -7,10 +7,13 @@ license.workspace = true
 [dependencies]
 shepherd-core.workspace = true
 shepherd-tui.workspace = true
+shepherd-term.workspace = true
 shepherd-adapters.workspace = true
+jiff.workspace = true
 
 [dev-dependencies]
 shepherd-testkit.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

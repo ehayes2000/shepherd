@@ -4,6 +4,7 @@
 
 pub mod acpp;
 pub mod agents;
+pub mod client;
 pub mod config;
 pub mod host;
 pub mod ids;
