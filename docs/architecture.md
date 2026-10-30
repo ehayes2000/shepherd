@@ -820,3 +820,17 @@ median per keystroke echo; two endpoints with one key stall each other. Decision
 Consequences: tokio enters `shepherd-adapters` only, one current-thread runtime thread per process (amends 0011: core and the
 runtime stay synchronous). T29–T32 follow the spike's proposals (now accepted). pkarr/DNS discovery, relay throughput and
 catch-up, and real NATs/Linux are verified in T30/T31.
+
+### 0020: Conversation archive as an independent crate (2026-10-30)
+Context: the user's proposal `docs/proposals/conversation-archive.md`; cleanup must never lose agent context. Decision:
+- `crates/archive` (`shepherd-archive`) depends on no internal crate; only the `shepherd` binary depends on it, wiring it to
+  core's `Archive` port through an adapter in `crates/shepherd`. check-arch enforces both directions.
+- Allowed deps there: `rusqlite` (feature `bundled`, no system SQLite) and `zstd`, plus workspace crates already allowed
+  (`sha2`, `serde`, `serde_json`, `jiff`, `thiserror`). Not in core.
+- The archive is on-device only (`~/.shepherd/archive/`, 0700/0600), one per machine; no network ever.
+- Real-agent end-to-end tests (T44) are outside the gate: they need the network, auth and tokens. They live behind an opt-in
+  script, `scripts/e2e-agents.sh`, run only by the user (or the PM with the user's go-ahead), with agent state in throwaway
+  dirs, and they re-record the fixtures the gated tests use. Builders never run the real agents (standing rule).
+Consequences: one new crate and port; T42 adds `Worktrees::commits_since`; a Claude cwd-rewrite on restore is decided by
+T44's evidence, not assumed.
+
