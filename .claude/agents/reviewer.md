@@ -42,6 +42,8 @@ builder's account of what they did, on purpose. Judge the code, not the story. D
    hunt for races, lost output, leaked threads, fds and processes, and signals that don't actually kill.
    Test fixtures that run git (or any tool that reads `GIT_*`) must clear their environment: the pre-commit hook exports
    `GIT_DIR`/`GIT_INDEX_FILE`, and a fixture that inherits them writes to the real repo. Flag any that don't.
+   Tests must not exec a file they just wrote (macOS scans each new executable on first exec, stalling load rounds):
+   flag new 0755 writes; use the committed stand-in script (F45) or `/bin/sh <file>`.
    For adapters that run external tools, try a hostile user config and environment (config settings that change defaults,
    injected `GIT_*` vars, a controlling tty), because production runs in the user's real environment.
 
