@@ -10,7 +10,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | F35 | One display-safe text rule for everything agents and hooks can name | done | f79d427 | 1 | idempotence claim false (unbounded clusters), clippy ban gaps (title_top, List, &str Widget) → F36 |
-| F36 | Close the display-safe gaps from F35's review | review | task/f36-display-gaps @ 5333595 (on 24f1b49) | 3 | buffer/cell mutators and border_set/shadow banned; with_lines allowed for test assertions |
+| F36 | Close the display-safe gaps from F35's review | done | 78b85e5 | 4 | later clusters uncapped; .render/.into()/buffer-cell bypasses of draw; last gap (with_lines) closed by PM in the gate (501e62a) |
 
 ## Specs
 

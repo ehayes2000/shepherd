@@ -15,7 +15,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | building | task/t38-archive-blobs @ 17c8d64 | 0 |  |
-| F36 Close the display-safe gaps from F35's review | [display-safety](features/display-safety.md) | review | task/f36-display-gaps @ 5333595 (on 24f1b49) | 3 | buffer/cell mutators and border_set/shadow banned; with_lines allowed for test assertions |
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | building | task/f45-standin-load @ 33fd53a | 0 |  |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | F43 Tab next to wide chars stored as a '\t' spacer | [terminal](features/terminal.md) | building | task/f43-tab-spacer @ 33fd53a | 0 |  |
@@ -41,7 +40,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 0 | 7 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
-| [Display-safe text](features/display-safety.md) | M2–M3 | 1 | 1 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
+| [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 7 | 2 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 3 | 1 | A new build replaces the running host in place without stopping sessions |
