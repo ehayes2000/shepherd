@@ -595,3 +595,13 @@ Consequences: names are display-safe and bounded; no hand-rolled Unicode tables.
 Second amendment (F35): `unicode-properties` (unicode-rs, no deps) is allowed in core for exact general-category checks, so
 `display_safe` can drop every Cc/Cf character while keeping spaces, punctuation and symbols in error text and paths.
 
+### 0018: The host updates itself by re-exec in place (2026-10-30)
+Context: spike T36 (section "Spike T36: host hot-swap" above). A host started before a feature landed answered new requests
+with "method not found".
+Decision: hellos carry a `BuildId` (sha256 digest of the executable; version for display). The client's core decides from
+the hello. The host re-execs the binary at its startup path, carrying the PTY, lock and listener fds plus a versioned handoff
+file, only after a `handoff-check` preflight passes. A restart that kills sessions happens only when the user clicks it.
+Option (b) (second host + SCM_RIGHTS, herdr's approach) is not built: it loses agent exit codes and overlaps two runtimes.
+Consequences: one new port (`PtyHandoff`); the handoff format is versioned and read by older and newer builds; agents
+survive host updates on unix. Linux `ETXTBSY` / `/proc/self/exe (deleted)` behaviour must be verified in T36b.
+

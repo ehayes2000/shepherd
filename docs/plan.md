@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
 | F35 display-safe text | building | task/f35-display-safe @ b9df22b | 0 | T24 follow-ups done; PM: unicode-properties allowed (0017 amended) for display_safe |
-| T36 spike host hot-swap | building (spike) | task/t36-hotswap-spike @ 0e68fe1 | 0 | docs only; read herdr's live handoff |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -590,7 +589,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### T36: Spike: hot-swap the host on a version mismatch
-status: in-progress
+status: done (spike merged 4e2ec1d; decision 0018)
 depends: –
 touches: docs only (spike)
 goal: Installing or rebuilding `shepherd` leaves the old host daemon running; new clients then hit "method not found" on new
@@ -638,6 +637,69 @@ acceptance:
 - From the F32 review: give `an_add_blocked_by_a_foreign_branch_lock_…` a short cleanup timeout and assert no "timed out",
   so removing the cleanup-delete lock pin fails fast instead of hanging.
 scope: crates/adapters, crates/core, crates/shepherd, crates/testkit
+
+### T36a: Build identity in the hello, and a clear mismatch UX
+status: todo
+depends: –
+touches: core::wire, core::client, ports::launcher, adapters::launcher, shepherd (build id, host hello), tui::popup
+goal: When the client and host are different builds, the user finds out at hello and is told what to do, instead of a
+later "method not found". Restarting the host is offered with a count of the sessions it will stop, and never happens
+without the user's click.
+acceptance:
+- Each process computes a `BuildId { version, digest }` once at startup. `digest` is the sha256 of the file at
+  `current_exe()`, and the host keeps that path. `Hello.build`, `HelloOk.build` and `HelloOk.installed` are additive,
+  defaulted fields. Wire tests: the old shapes (no build) still decode, and the new shapes round-trip.
+- The host answers `installed`: the digest of the file now at its startup exe path. It recomputes the digest only
+  when the file's `(dev, ino, size, mtime)` changes. Test: rename a different file over a tempdir path and count the
+  digests computed (no timing).
+- The client's core decides each row of the spike T36 table, with one unit test per row: same build, host without
+  build (and `VersionMismatch`, which no longer quits), host stale, client odd one out, all differ.
+- The restart dialog has clickable [Restart host] and [Not now] buttons (decision 0014) and says how many sessions
+  will stop. Restart calls a new `HostLauncher::terminate`: it reads the host's pid from the socket's peer
+  credentials (`LOCAL_PEERPID`, `SO_PEERCRED`) and sends SIGTERM. It works against a pre-T36a host. Real-adapter test:
+  a stand-in listener process gets the signal.
+- A `-32601` answer shows "the shepherd host is older than this client: restart it to use this" (unit test).
+- Scenario: host build A, client build B → dialog → Restart → host shuts down → the reconnect loop relaunches (the
+  fake launcher records the launch). Snapshots of the dialog and the notice; hit tests click the buttons.
+scope: crates/core, crates/tui, crates/adapters, crates/testkit, crates/shepherd
+notes: This ships before T36b. Its stale-host row is replaced by the swap in T36b.
+
+### T36b: Hot-swap the host by re-exec, keeping sessions running
+status: todo
+depends: T36a
+touches: ports::pty (new `PtyHandoff` port, needs PM approval: new-port skill), adapters::{pty, event_log, link},
+shepherd::host (swap, `host --adopt`, `handoff-check`), core::wire (`_shepherd/host/upgrade`), core::client
+goal: When the host is stale, the client asks it to upgrade, and it re-execs the installed binary in place. The agents
+keep running, and screens and status carry over. If that isn't possible, the user is asked before anything is killed.
+acceptance:
+- `shepherd handoff-check` prints one JSON line `{build, handoff_versions}` and exits 0. A binary without it counts as
+  "can't hand off" (test with a stand-in exe that prints "unknown command" and exits 1).
+- `_shepherd/host/upgrade` answers `NothingToDo`, `Busy { reason }`, `Unavailable { reason }` or `Accepted`, decided
+  by a pure core function with one unit test per answer. A preflight child killed by a signal is reported as
+  "overwritten in place? reinstall it".
+- The swap runs in the order given in spike T36: preflight, pause and ack the pumps, drain, close conns, handoff file
+  (0600), clear `CLOEXEC` on exactly the carried fds, then `execv` of the startup path (never `current_exe()` at
+  swap time). If `execv` returns an error, the host restores `CLOEXEC`, resumes its pumps and keeps serving (test with
+  a nonexistent path).
+- The log is never dropped before the exec. The new image adopts the lock fd and the listener fd. Real-adapter
+  tests: a second `JsonlEventLog::open` fails `Locked` while a lock is adopted, and a connect made during the
+  hand-over is accepted by the adopter.
+- `PtyHandoff` comes with a fake, a contract suite and the real adapter. Export then adopt into a fresh instance: a
+  write echoes, resize works, kill works, and the exit code is reported. Export then resume: nothing changes. The real
+  adopted sessions use the carried fds and `waitpid`.
+- The new image adopts the PTYs before folding the logs. It feeds each `snapshot_ansi` into a `Screen` of the carried
+  size and restores the translators (one that doesn't parse is dropped, tested). It records no exit for an adopted
+  session and doesn't sweep its run directory. It nudges a redraw. A session it can't adopt is killed (`killpg`) and
+  its exit is appended.
+- End to end, with the built binary (`CARGO_BIN_EXE_shepherd`) and a tempdir `HOME`: start a shell session, send
+  `upgrade { force: true }` (same-binary swap, for tests). Then check: same host pid; the shell's pid alive and
+  echoing; a reconnecting client resubscribes with no missing or duplicate entries; no exit in the log for that
+  session. Timeouts are liveness bounds only.
+- Client: the stale row sends upgrade and shows "host is older — updating…", then "host updated". `Busy` retries on a
+  deadline. `Unavailable` falls back to T36a's dialog, which asks first. Snapshots of both notices.
+scope: crates/core, crates/adapters, crates/testkit, crates/shepherd, crates/tui
+notes: Not verified on Linux in the spike (`ETXTBSY`, `/proc/self/exe` "(deleted)"). Run the end-to-end test in CI on
+Linux too.
 
 ## Out of scope for the initial feature set
 
