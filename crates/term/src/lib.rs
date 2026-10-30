@@ -15,7 +15,9 @@ mod unfinished;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{
+    Handler, KeyboardModes, KeyboardModesApplyBehavior, Processor,
+};
 
 pub use types::*;
 
@@ -46,6 +48,9 @@ pub struct Screen {
     /// The escape sequence or UTF-8 char the parser is in the middle of, so a snapshot can carry it.
     unfinished: Unfinished,
     reported: ReportedColors,
+    /// The flags on top of the kitty keyboard stack, which `CSI ? u` reports. They differ from the active flags
+    /// after `CSI = flags u`, and alacritty keeps the stack private. See [`Screen::read_kitty_top`].
+    kitty_top: u8,
 }
 
 struct Size {
@@ -93,6 +98,7 @@ impl Screen {
             held: Vec::new(),
             unfinished: Unfinished::default(),
             reported: ReportedColors::default(),
+            kitty_top: 0,
         }
     }
 
@@ -108,6 +114,7 @@ impl Screen {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
         self.track_parsed(bytes);
+        self.read_kitty_top();
         self.collect_replies();
     }
 
@@ -172,12 +179,14 @@ impl Screen {
             self.parser.stop_sync(&mut self.term);
             let held = std::mem::take(&mut self.held);
             self.unfinished.advance(&held);
+            self.read_kitty_top();
             self.collect_replies();
         }
     }
 
     /// An escape sequence that redraws this screen. Fed into a screen of the same size, it reproduces the visible
-    /// cells, cursor, input modes and pen, so a client attaching mid-session can then follow live output.
+    /// cells, cursor, input modes and pen, so a client attaching mid-session can then follow live output. Colours set
+    /// with OSC 4 / 10 / 11 / 12 are carried too (the copy's own are reset), so colour queries get the same answers.
     ///
     /// Output held by an open synchronized update is appended after a begin marker, so the copy is left holding
     /// the same bytes. An escape sequence or UTF-8 char the parser is in the middle of is carried too, so the copy
@@ -185,11 +194,10 @@ impl Screen {
     /// so its parameters or payload may be cut short.
     ///
     /// Not carried over: the primary screen while the alt screen is active, scrollback, the scroll region, tab
-    /// stops, hyperlinks, the title, the charset state, colours set with OSC 4 / 10 / 11 (so colour queries can get
-    /// different answers), the last printed character that REP repeats, and whether the saved cursor (DECSC) was
-    /// waiting to wrap. Only the top of the active screen's kitty keyboard stack is re-pushed; deeper entries and the
-    /// inactive screen's stack are lost, and flags set with `CSI = u` on an empty stack are pushed, so the copy
-    /// reports them to `CSI ? u` where the original reports 0. A widening resize can leave the cursor
+    /// stops, hyperlinks, the title, the charset state, the last printed character that REP repeats, and whether the
+    /// saved cursor (DECSC) was waiting to wrap. Of the kitty keyboard stacks, only the top of the active screen's is
+    /// re-pushed (with the active flags set over it when `CSI = u` changed them), so `CSI ? u` gets the same answer,
+    /// but deeper entries and the inactive screen's stack are lost. A widening resize can leave the cursor
     /// waiting to wrap away from the last column, so the next character or tab starts a new line; the copy's cursor
     /// doesn't wait. After a widening resize alacritty can also stop resetting the blank cells of a row erased with
     /// a background colour, so a later erase, insert or reset leaves that colour in the original but not the copy.
@@ -198,7 +206,7 @@ impl Screen {
     /// a broken half in the last column with only broken halves before it comes out as a blank, and when the
     /// cursor is waiting to wrap after a tab or broken half in the last column, the saved cursor (DECSC) is lost.
     pub fn snapshot_ansi(&self) -> Vec<u8> {
-        let mut out = snapshot::ansi(&self.term);
+        let mut out = snapshot::ansi(&self.term, self.kitty_top);
         if self.sync_hold().is_some() {
             // The parser reads the unfinished bytes before the held ones when the update ends, so the copy holds
             // them too. Fed before the marker, a broken UTF-8 char would be drawn while the original still holds it.
@@ -235,6 +243,19 @@ impl Screen {
             let parsed: Vec<u8> = self.held.drain(..split).collect();
             self.unfinished.advance(&parsed);
         }
+    }
+
+    /// Updates `kitty_top`. Popping no entries makes the top of the stack the active flags; they are read, then the
+    /// active flags are put back. Neither step sends an event.
+    fn read_kitty_top(&mut self) {
+        let active = convert::kitty_flags(*self.term.mode());
+        self.term.pop_keyboard_modes(0);
+        self.kitty_top = convert::kitty_flags(*self.term.mode());
+        Handler::set_keyboard_mode(
+            &mut self.term,
+            KeyboardModes::from_bits_truncate(active),
+            KeyboardModesApplyBehavior::Replace,
+        );
     }
 
     fn collect_replies(&mut self) {

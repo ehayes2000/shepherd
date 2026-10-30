@@ -383,8 +383,10 @@ mod tests {
         trace.0
     }
 
-    /// Bytes from every class vte's sequence states tell apart, but no ESC.
-    const ALPHABET: &[u8] = b" !/09:;<=?@P[]q~\x7f\x80\x9c\n\x18";
+    /// Bytes from every class vte's sequence states tell apart, but no ESC: intermediates, parameters, private
+    /// markers, the string introducers, finals, DEL, C0 controls including the ones that end a sequence, C1 bytes
+    /// (vte reads them as UTF-8 continuation bytes, not as controls), and UTF-8 lead bytes.
+    const ALPHABET: &[u8] = b" !/09:;<=>?@PX[]^_q~\x7f\x80\x9b\x9c\xc2\xe6\x07\n\x18\x1a";
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
@@ -404,7 +406,7 @@ mod tests {
             if unfinished.open.is_none() {
                 return Ok(());
             }
-            for next in (0x18..=0x7f).chain([0x9c]) {
+            for next in 0x00..=0xff {
                 let rest = [next, b'Z', b'z'];
                 prop_assert_eq!(
                     trace_after(unfinished.bytes(), &rest),
