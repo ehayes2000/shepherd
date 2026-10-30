@@ -191,6 +191,17 @@ fn kitty_flags_cleared_over_a_pushed_entry_are_reported_alike() {
     assert_eq!(answer(&mut copy, KITTY_QUERY), "\x1b[?5u");
 }
 
+#[test]
+fn kitty_flags_pushed_in_an_expired_sync_update_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[?2026h\x1b[>5u");
+    let hold = screen.sync_hold().expect("sync update open");
+    screen.expire_sync(hold.id);
+    let mut copy = copy_of(&screen);
+    assert_eq!(answer(&mut screen, KITTY_QUERY), "\x1b[?5u");
+    assert_eq!(answer(&mut copy, KITTY_QUERY), "\x1b[?5u");
+}
+
 const COLOR_QUERIES: &[u8] =
     b"\x1b]4;1;?\x07\x1b]4;255;?\x07\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07";
 
