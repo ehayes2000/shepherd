@@ -84,6 +84,12 @@ pub enum Intent {
     ScrollSidebar(i32),
     /// How many sessions the sidebar shows at once, from the TUI's layout. The list scrolls to fit.
     SidebarRows(usize),
+    /// Scroll the open profile picker by `by` rows (down for positive), when it shows `shown` profiles at once, from
+    /// the TUI's layout. Ignored when the picker isn't open.
+    ScrollPicker {
+        by: i32,
+        shown: usize,
+    },
     /// Start a session with the default profile.
     NewSession,
     /// The `+ New session` button: open the profile picker, or, with at most one profile, start a session at once.
@@ -277,6 +283,8 @@ pub struct Client {
     scroll: usize,
     /// How many sessions the sidebar shows at once, once the TUI has said.
     sidebar_rows: Option<usize>,
+    /// The index of the first profile the open picker shows.
+    picker_scroll: usize,
     notice: Option<Notice>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
@@ -318,6 +326,7 @@ impl Client {
             size: None,
             scroll: 0,
             sidebar_rows: None,
+            picker_scroll: 0,
             notice: None,
             profiles: Vec::new(),
             default_profile: None,
@@ -388,6 +397,11 @@ impl Client {
     /// The index of the first session the sidebar shows.
     pub fn sidebar_scroll(&self) -> usize {
         self.scroll.min(self.max_scroll())
+    }
+
+    /// The index of the first profile the open picker shows, before the TUI fits it to the picker's height.
+    pub fn picker_scroll(&self) -> usize {
+        self.picker_scroll
     }
 
     /// The terminal view's size, once the runtime has reported it.
@@ -800,14 +814,7 @@ impl Client {
     }
 
     fn scroll_by(&mut self, rows: i32) {
-        let by = usize::try_from(rows.unsigned_abs()).unwrap_or(usize::MAX);
-        let from = self.sidebar_scroll();
-        let to = if rows < 0 {
-            from.saturating_sub(by)
-        } else {
-            from.saturating_add(by)
-        };
-        self.scroll = to.min(self.max_scroll());
+        self.scroll = scrolled(self.sidebar_scroll(), rows, self.max_scroll());
     }
 
     /// Scrolls the least that shows the selected session, if the sidebar's height is known.
@@ -922,6 +929,13 @@ impl Client {
                 self.scroll_to_selected();
                 Vec::new()
             }
+            Intent::ScrollPicker { by, shown } => {
+                if self.popup == Some(Popup::PickProfile) {
+                    let max = self.profiles.len().saturating_sub(shown);
+                    self.picker_scroll = scrolled(self.picker_scroll.min(max), by, max);
+                }
+                Vec::new()
+            }
             Intent::NewSession => self.new_session(None),
             Intent::BeginNewSession => match &self.profiles[..] {
                 [] => self.new_session(None),
@@ -931,6 +945,7 @@ impl Client {
                 }
                 _ => {
                     self.popup = Some(Popup::PickProfile);
+                    self.picker_scroll = 0;
                     Vec::new()
                 }
             },
@@ -1115,4 +1130,15 @@ fn alert_message(session: &ClientSession) -> String {
         Activity::NeedsInput => format!("shepherd: {name} needs input"),
         _ => format!("shepherd: {name} is idle"),
     }
+}
+
+/// A list's first shown row `from`, moved `rows` (down for positive) and kept within `0..=max`.
+fn scrolled(from: usize, rows: i32, max: usize) -> usize {
+    let by = usize::try_from(rows.unsigned_abs()).unwrap_or(usize::MAX);
+    let to = if rows < 0 {
+        from.saturating_sub(by)
+    } else {
+        from.saturating_add(by)
+    };
+    to.min(max)
 }

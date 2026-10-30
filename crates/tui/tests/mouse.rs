@@ -1050,6 +1050,150 @@ fn clicking_outside_the_picker_dismisses_it() {
     assert_eq!(c.client().popup(), None);
 }
 
+/// A connected client whose host has `n` shell profiles, `p001` (the default) to `p<n>`, with the picker open by
+/// clicking `+ New session`.
+fn picker_of(n: usize, window: Rect) -> ClientDriver {
+    let names: Vec<String> = (1..=n).map(|i| format!("p{i:03}")).collect();
+    let profiles: Vec<(&str, AgentKind)> = names
+        .iter()
+        .map(|n| (n.as_str(), AgentKind::Shell))
+        .collect();
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(&profiles, "p001");
+    c.user(Intent::SidebarRows(shepherd_tui::layout::sidebar_rows(
+        window,
+    )));
+    let button = at(&buffer(&c, window), "+");
+    click(&mut c, window, button);
+    assert_eq!(c.client().popup(), Some(&Popup::PickProfile));
+    c
+}
+
+#[test]
+fn a_long_profile_list_fits_the_window_and_shows_its_first_rows() {
+    let c = picker_of(30, SHORT);
+    let buf = buffer(&c, SHORT);
+    // 12 rows: the border, the prompt, the buttons and the border leave 8 for profiles.
+    let first = at(&buf, "p001");
+    assert_eq!(at(&buf, "p008"), below(first, 7));
+    assert_eq!(find(&buf, "p009"), None, "{buf:?}");
+    at(&buf, "[Cancel]");
+}
+
+#[test]
+fn the_wheel_over_the_picker_scrolls_it() {
+    let mut c = picker_of(30, SHORT);
+    let buf = buffer(&c, SHORT);
+    let (top, row) = (at(&buf, "p001"), at(&buf, "p003"));
+    let prompt = at(&buf, "Which agent");
+    assert_eq!(hit_at(&c, SHORT, prompt), Some(Target::Popup));
+    assert_eq!(
+        events(
+            &mut c,
+            SHORT,
+            &[
+                mouse(MouseEventKind::ScrollDown, row),
+                mouse(MouseEventKind::ScrollDown, prompt),
+                mouse(MouseEventKind::ScrollUp, row),
+            ]
+        ),
+        [
+            vec![Intent::ScrollPicker { by: 1, shown: 8 }],
+            vec![Intent::ScrollPicker { by: 1, shown: 8 }],
+            vec![Intent::ScrollPicker { by: -1, shown: 8 }],
+        ]
+    );
+    let buf = buffer(&c, SHORT);
+    assert_eq!(at(&buf, "p002"), top, "scrolled down one row: {buf:?}");
+    assert_eq!(find(&buf, "p001"), None, "{buf:?}");
+}
+
+#[test]
+fn a_profile_below_the_fold_is_reached_by_wheel_then_click() {
+    let mut c = picker_of(30, SHORT);
+    let over = at(&buffer(&c, SHORT), "p001");
+    let wheel: Vec<Event> = (0..100)
+        .map(|_| mouse(MouseEventKind::ScrollDown, over))
+        .collect();
+    events(&mut c, SHORT, &wheel);
+    let buf = buffer(&c, SHORT);
+    assert_eq!(find(&buf, "p001"), None, "{buf:?}");
+    let last = at(&buf, "p030");
+    assert_eq!(at(&buf, "p023"), Position::new(last.x, last.y - 7));
+    assert_eq!(
+        click(&mut c, SHORT, last),
+        [vec![], vec![Intent::PickProfile("p030".to_owned())]]
+    );
+}
+
+#[test]
+fn the_wheel_outside_the_picker_does_not_scroll_it() {
+    let mut c = picker_of(30, SHORT);
+    let outside = Position::new(1, SHORT.bottom() - 1);
+    assert_eq!(hit_at(&c, SHORT, outside), Some(Target::Backdrop));
+    assert_eq!(
+        events(&mut c, SHORT, &[mouse(MouseEventKind::ScrollDown, outside)]),
+        [vec![]]
+    );
+}
+
+#[test]
+fn a_huge_profile_list_is_capped_to_the_window() {
+    // More profiles than a u16 counts, on both sides of where the count wraps.
+    for n in [65_535, 65_536] {
+        let c = picker_of(n, SHORT);
+        let buf = buffer(&c, SHORT);
+        let first = at(&buf, "p001");
+        assert_eq!(at(&buf, "p008"), below(first, 7), "{n}: {buf:?}");
+        at(&buf, "[Cancel]");
+    }
+}
+
+/// A connected client whose host has `profiles`, the first the default, with the picker open by clicking
+/// `+ New session`.
+fn picker_with(profiles: &[(&str, AgentKind)], window: Rect) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(profiles, profiles[0].0);
+    let button = at(&buffer(&c, window), "+");
+    click(&mut c, window, button);
+    assert_eq!(c.client().popup(), Some(&Popup::PickProfile));
+    c
+}
+
+#[test]
+fn the_pickers_columns_are_as_wide_as_their_longest_entries() {
+    let c = picker_with(&[("xq", AgentKind::Shell), ("xqz", AgentKind::Shell)], WIDE);
+    let buf = buffer(&c, WIDE);
+    let name = at(&buf, "xq ");
+    // The name column is 3 wide and the agent column 5 (`shell`), each followed by 2 blanks.
+    assert_eq!(at(&buf, "shell"), right(name, 5));
+    assert_eq!(at(&buf, "(default)"), right(name, 12));
+}
+
+#[test]
+fn a_long_profile_name_is_cut_short_so_the_default_mark_stays_visible() {
+    let long = "a-profile-name-far-too-long-for-the-dialog";
+    for window in [WIDE, NARROW] {
+        let mut c = picker_with(
+            &[(long, AgentKind::ClaudeCode), ("shell", AgentKind::Shell)],
+            window,
+        );
+        let buf = buffer(&c, window);
+        let start = at(&buf, "a-profile");
+        let mark = at(&buf, "(default)");
+        assert_eq!(mark.y, start.y, "{buf:?}");
+        assert_eq!(find(&buf, long), None, "{buf:?}");
+        let cut = buf[(at(&buf, "claude-code").x - 3, start.y)]
+            .symbol()
+            .to_owned();
+        assert_eq!(cut, "…", "{buf:?}");
+        assert_eq!(
+            click(&mut c, window, start),
+            [vec![], vec![Intent::PickProfile(long.to_owned())]]
+        );
+    }
+}
+
 // ---------- resume ----------
 
 /// [`sessions`] plus a newest Claude Code session `s9`, `name-09`, whose agent reported `agent_session` and exited,

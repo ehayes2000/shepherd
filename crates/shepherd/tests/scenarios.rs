@@ -19,9 +19,11 @@ use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{
     Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, NOTICE_TIMEOUT, RETRY_INTERVAL,
 };
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::SessionNew;
 use shepherd_term::{PANIC_TRIGGER, Screen};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
@@ -569,6 +571,37 @@ fn clicks_create_sessions_and_pick_the_one_that_gets_typing() {
         (h.typed_into("s1"), h.typed_into("s2")),
         ("one".into(), "two".into())
     );
+}
+
+#[test]
+fn clicking_new_session_then_a_profile_starts_a_session_with_that_profile() {
+    let mut h = Harness::with_launcher(|net, host| {
+        FakeHostLauncher::new().on_launch(move || {
+            let profiles = [
+                ("claude", AgentKind::ClaudeCode),
+                ("shell", AgentKind::Shell),
+            ];
+            *lock(&host) = Some(FakeHost::start(&net).with_profiles(&profiles));
+        })
+    });
+    h.runtime.start();
+    h.settle();
+    h.wait_retry();
+    h.term(Event::Resize(WINDOW.0, WINDOW.1));
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "+ New session"));
+    h.draw(&mut view);
+    h.click(find(&view, "shell "));
+    let news = h.host(|host| host.session_news().to_vec());
+    assert_eq!(
+        news,
+        [SessionNew {
+            profile: Some("shell".to_owned()),
+            cwd: None,
+        }]
+    );
+    assert_eq!(h.host(FakeHost::sessions).len(), 1);
 }
 
 impl Harness {
