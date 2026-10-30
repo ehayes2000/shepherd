@@ -213,7 +213,8 @@ pub trait Worktrees {
     /// If making the worktree times out (e.g. a slow `post-checkout` hook), the half-made worktree and its new branch
     /// are removed before returning [`WorktreeError::Timeout`], so a retry with the same name can succeed. If that
     /// cleanup fails too, the error is [`WorktreeError::Other`], saying the create timed out, why cleanup failed, and
-    /// that the directory and branch must be removed by hand.
+    /// that the directory and branch must be removed by hand. That includes finding a directory at the worktree's path
+    /// that git doesn't list as a worktree: it may not be ours, so it is left alone.
     fn create(
         &self,
         repo: &RepoRef,
