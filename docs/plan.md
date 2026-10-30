@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-3 findings | `task/T11-host-runtime` @ 15ad661 | 3 | Fix: add `EventLog::read_batch(log, from, max)` (port, adapter, fake, contract) and batch the catch-up cursor (no quadratic re-reads); forget the conn when `queued_bytes` is None. PM-accepted: F14 for the `yes` backlog; the stall metric is per-line coarse (noted on T31) |
-| T13 TUI layout, sidebar, keys (finishes M1) | review (round 1) | `task/T13-tui` @ 98fe2a3 | 0 | PM-accepted: `map_key`/`map_event` return `Vec<Intent>`; take `&Modes` and window `Rect`; ratatui + signal-hook deps in shepherd; sidebar 24 cols (3 under 60); mouse capture only when the session has mouse mode. Follow-ups in F15 |
+| T13 TUI layout, sidebar, keys (finishes M1) | builder fixing round-1 findings | `task/T13-tui` @ 98fe2a3 | 1 | Fix: ctrl-\ ] ^ _ / encode as digits; push kitty flags to the outer terminal (Shift+Enter); paste end-marker stripping; pane_size min clamp; non-main panic shuts down; vacuous scenario assertion; 7 surviving mutations. PM-accepted deviations stand |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
