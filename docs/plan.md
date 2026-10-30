@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-2 findings | `task/T11-host-runtime` @ 9286f73 | 2 | Rebase onto main (T12 merged). Fix: disconnect a client that stalls mid-catch-up (stall window plus tick backoff); flaky `a_startup_error_is_also_logged` (tracing interest cache, so its own binary); scenarios for subscribe replacement and disconnect mid-catch-up. PM-accepted: F14 handles the `yes` backlog |
-| T13 TUI layout, sidebar, keys (finishes M1) | building | `task/T13-tui` from 6c9e8ac | 0 | Includes real-terminal wiring in the client runtime; terminal restore on every exit path; rebase if T11 lands |
+| T13 TUI layout, sidebar, keys (finishes M1) | review (round 1) | `task/T13-tui` @ 98fe2a3 | 0 | PM-accepted: `map_key`/`map_event` return `Vec<Intent>`; take `&Modes` and window `Rect`; ratatui + signal-hook deps in shepherd; sidebar 24 cols (3 under 60); mouse capture only when the session has mouse mode. Follow-ups in F15 |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
@@ -245,6 +245,18 @@ acceptance:
   handled, with bounded queued events (counted).
 - Fake supports the same semantics.
 scope: crates/core (port), crates/adapters, crates/testkit, crates/shepherd
+
+### F15: Client display polish from T13
+status: todo
+depends: T13
+touches: shepherd::client, core::client, tui
+goal: Small display gaps found while building the TUI.
+acceptance:
+- The client runtime services `Screen::sync_hold()` deadlines (`expire_sync`), so a session stuck mid synchronized update
+  doesn't freeze its displayed frame. Driven by runtime deadlines, no sleeps.
+- `ClientState::notice()` is cleared on the next user action or after a deadline. Core table test.
+- The cursor shape and blink from the session's `Screen` are passed to the real terminal.
+scope: crates/core, crates/tui, crates/shepherd
 
 ## Out of scope for the initial feature set
 
