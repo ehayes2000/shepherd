@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | T22 new session creates worktree | building (finishing sidebar error text) | task/t22-session-worktree @ a231a1d | 0 | PM: extend scope to show failure reason + 'creating worktree…' on sidebar line 2; acpp.md edit accepted |
-| F24 profile picker polish | building | task/f24-picker-polish @ 5dc8c79 | 0 | – |
+| F24 profile picker polish | in review | task/f24-picker-polish @ d49739d (on 1c52039) | 1 | PM-accepted: core owns picker scroll (ScrollPicker), shared scrolled() helper |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -476,6 +476,17 @@ acceptance:
   the client gets `workspace/selected` live, not in catch-up); and either a worker unit test with a dead thread/dropped receiver
   or soften `Worker::submit`'s "every call is answered" doc (queued jobs are dropped if the thread dies).
 scope: crates/core, crates/adapters, crates/testkit, crates/shepherd
+
+### F29: Workspace switcher list scrolls and fits the window
+status: todo
+depends: T21, F24
+touches: tui::popup, core::client
+goal: The T21 workspace switcher has the same unscrolled, uncapped list the profile picker had before F24.
+acceptance:
+- Reuse F24's approach (core-owned scroll, saturating height capped to the window, wheel scrolls, rows below the fold are
+  reachable by wheel then click, long paths truncated from the left so the repo name stays visible). Hit tests click rendered
+  cells; snapshot of a scrolled switcher; a huge list doesn't overflow.
+scope: crates/core (client), crates/tui
 
 ## Out of scope for the initial feature set
 
