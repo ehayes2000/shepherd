@@ -1111,6 +1111,29 @@ mod tests {
         assert_wrong_type(appended);
     }
 
+    /// A socket or directory swapped in for a log is the wrong kind of file for read and append alike, however
+    /// the OS reports it.
+    #[test]
+    fn a_socket_or_dir_at_a_log_path_is_refused_by_read_and_append() {
+        for kind in ["socket", "dir"] {
+            let dir = private_tempdir();
+            let mut log = three_entries(dir.path());
+            let path = s1_path(dir.path());
+            fs::remove_file(&path).unwrap();
+            let _listener = match kind {
+                "socket" => Some(std::os::unix::net::UnixListener::bind(&path).unwrap()),
+                _ => {
+                    fs::create_dir(&path).unwrap();
+                    None
+                }
+            };
+            chmod(&path, if kind == "dir" { 0o700 } else { 0o600 });
+
+            assert_wrong_type(log.read(session("s1"), Seq::ZERO).map(|_| ()));
+            assert_wrong_type(try_push(&mut log, &session("s1"), 4).map(|_| ()));
+        }
+    }
+
     fn assert_wrong_type(result: Result<(), LogError>) {
         assert!(
             matches!(&result, Err(LogError::Io(msg)) if msg.contains("wrong kind of file")),

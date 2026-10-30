@@ -183,12 +183,15 @@ fn clear_nonblock(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// `O_NOFOLLOW` reports a symlink as `ELOOP`. With `O_NONBLOCK`, opening a FIFO for writing with no reader is
-/// `ENXIO`: not a regular file.
+/// `O_NOFOLLOW` reports a symlink as `ELOOP`. Some kinds of file fail in `open` itself rather than at the fstat
+/// check, all meaning "not a regular file": a FIFO opened for writing with no reader (with `O_NONBLOCK`) is
+/// `ENXIO`, a directory opened for writing is `EISDIR`, and a Unix socket is `EOPNOTSUPP` (macOS) or `ENXIO`.
 fn open_err(path: &Path, e: io::Error) -> PrivateFsError {
     match e.raw_os_error() {
         Some(libc::ELOOP) => PrivateFsError::Symlink(path.to_path_buf()),
-        Some(libc::ENXIO) => PrivateFsError::WrongType(path.to_path_buf()),
+        Some(libc::ENXIO | libc::EISDIR | libc::EOPNOTSUPP) => {
+            PrivateFsError::WrongType(path.to_path_buf())
+        }
         _ => io_err(path, e),
     }
 }
@@ -659,5 +662,46 @@ pub(crate) mod tests {
         );
         assert_eq!(mode(&target), 0o755);
         assert_eq!(fs::read_link(&link).unwrap(), target);
+    }
+
+    #[test]
+    fn a_unix_socket_is_wrong_type_for_read_and_append() {
+        let dir = private_tempdir();
+        let sock = dir.path().join("s");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        chmod(&sock, 0o600);
+
+        let mut read = OpenOptions::new();
+        read.read(true);
+        let mut append = OpenOptions::new();
+        append.append(true);
+        for opts in [read, append] {
+            assert_eq!(
+                open_existing_private_file(&sock, &opts).map(|_| ()),
+                Err(PrivateFsError::WrongType(sock.clone())),
+                "{opts:?}"
+            );
+        }
+    }
+
+    /// Read-only opens a directory and fstat refuses it; writing modes fail in `open` itself (`EISDIR`).
+    #[test]
+    fn a_directory_is_wrong_type_for_append_and_read_write() {
+        let dir = private_tempdir();
+        let sub = dir.path().join("d");
+        fs::create_dir(&sub).unwrap();
+        chmod(&sub, 0o700);
+
+        let mut append = OpenOptions::new();
+        append.append(true);
+        let mut read_write = OpenOptions::new();
+        read_write.read(true).write(true);
+        for opts in [append, read_write] {
+            assert_eq!(
+                open_existing_private_file(&sub, &opts).map(|_| ()),
+                Err(PrivateFsError::WrongType(sub.clone())),
+                "{opts:?}"
+            );
+        }
     }
 }
