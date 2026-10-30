@@ -11,6 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T18 attention | building | task/t18-attention @ 0fa5b1e | 0 | – |
 | T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | PM: hook trust via session-flags hooks.state + sha2 in core (decision 0016); never bypass-hook-trust |
+| F08 worktree create timeout cleanup | building | task/f08-worktree-timeout @ 55c4694 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -172,7 +173,7 @@ acceptance:
 scope: crates/term
 
 ### F08: Clean up after a timed-out worktree create
-status: todo
+status: in-progress
 depends: T20
 touches: adapters::worktrees, ports::worktrees (docs)
 goal: A `create` that times out (e.g. a slow post-checkout hook) leaves no half-made branch or worktree behind.
