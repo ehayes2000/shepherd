@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T18 attention | fixing (APPROVE + 2 minor) | task/t18-attention @ 9147ef6 | 1 | Fix: C1 strip test; OSC 9 payload starts with fixed text (no ConEmu subcommand from session names). Note: NeedsInput detection must set waiting_since |
 | T19 Codex | in review | task/t19-codex @ 09f87b9 (on 1a63b20) | 1 | Decision 0016. PM-accepted: single -c hooks= arg; no notify; NotShellSafe; translator replaced on agent-kind change |
-| F08 worktree create timeout cleanup | in review | task/f08-worktree-timeout @ 065762e | 1 | Reviewer to judge 5 s injected timeout under load |
+| F08 worktree create timeout cleanup | fixing (CHANGES) | task/f08-worktree-timeout @ 065762e | 1 | Load flakes (new tests 40%, T20 test regressed); separate cleanup timeout; FIFO-blocked hook; stale ref lock; fallback untested; TOCTOU on dir delete |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
