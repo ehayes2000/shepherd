@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T36b host hot-swap by re-exec | building | task/t36b-hotswap @ 18410d7 | 0 | PtyHandoff port approved; rebases after T37 |
-| T37 worktree no cap + concurrent + cancel | fixing (CHANGES) | task/t37-worktree-nocap @ 8934970 | 1 | Blocking: F32 test item not done; 2-reader FIFO gate hang; inherited GIT_ASKPASS/core.askPass can hang uncapped create. PM: cancel creates on shutdown |
+| T37 worktree no cap + concurrent + cancel | re-review | task/t37-worktree-nocap @ f358a59 (on f3b54d4) | 2 | GIT_ASKPASS cleared; per-waiter gate release; bounded joins; shutdown cancels creates. Builder: round-1 restack dropped edits (now included) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
