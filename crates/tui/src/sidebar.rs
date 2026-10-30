@@ -133,6 +133,8 @@ const CLOSE: &str = "×";
 const DETACH: &str = "Detach";
 /// The footer.s button that reopens the restart dialog, while the host should be restarted.
 const RESTART: &str = "Restart host";
+/// The footer's button that shows the host's warning again, while it warns ([`Client::host_warning`]).
+const HOST_WARNING: &str = "Host warning";
 const HELP: &str = "?";
 /// The collapsed sidebar's `Detach` button.
 const DETACH_COLLAPSED: &str = "⏏";
@@ -152,7 +154,8 @@ pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
 }
 
 /// The footer's buttons, left to right: `Restart host` while the host should be restarted ([`Client::restart_offer`],
-/// full sidebar only), `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
+/// full sidebar only), else `Host warning` while the host warns ([`Client::host_warning`]), `Detach`, then `?` in the
+/// last column. Collapsed, they are glyphs in the
 /// glyph column: `⏏` just above `?` on the last line. Not shown while the prefix is pending, when the footer shows
 /// it instead, nor in the full sidebar while a notice shows, which then has the whole footer.
 pub(crate) fn footer_buttons(
@@ -188,11 +191,20 @@ pub(crate) fn footer_buttons(
     let help = Rect::new(inner.right() - 1, y, 1, 1);
     let detach = Rect::new(help.x - 1 - width, y, width, 1);
     let mut buttons = vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)];
-    let restart = u16::try_from(columns(RESTART)).unwrap_or(u16::MAX);
-    // A blank column between it and `Detach`.
-    if client.restart_offer().is_some() && detach.x > inner.x + 1 + restart {
-        let at = Rect::new(inner.x + 1, y, restart, 1);
-        buttons.insert(0, (at, Target::OfferRestart, RESTART));
+    let first = if client.restart_offer().is_some() {
+        Some((Target::OfferRestart, RESTART))
+    } else if client.host_warning().is_some() {
+        Some((Target::ShowHostWarning, HOST_WARNING))
+    } else {
+        None
+    };
+    if let Some((target, label)) = first {
+        let width = u16::try_from(columns(label)).unwrap_or(u16::MAX);
+        // A blank column between it and `Detach`.
+        if detach.x > inner.x + 1 + width {
+            let at = Rect::new(inner.x + 1, y, width, 1);
+            buttons.insert(0, (at, target, label));
+        }
     }
     buttons
 }

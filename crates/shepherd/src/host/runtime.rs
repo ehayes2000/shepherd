@@ -193,9 +193,11 @@ pub fn adopt_sessions<P: PtyHandoff>(pty: &mut P, plan: SwapPlan<P::Token>) -> A
                 rows,
                 snapshot,
             }),
-            Err(error) => {
-                tracing::warn!(session = %id, %error, "cannot adopt session; it was killed")
+            // The port's error says whether it killed the session; a live id always is.
+            Err(PtyError::AlreadyExists) => {
+                tracing::warn!(session = %id, "cannot adopt a session already live; killed it")
             }
+            Err(error) => tracing::warn!(session = %id, %error, "cannot adopt session"),
         }
     }
     Adoption {

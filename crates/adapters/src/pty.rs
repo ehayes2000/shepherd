@@ -441,13 +441,16 @@ impl PtyHandoff for PortablePty {
             Ok(pid) if pid > 0 => pid,
             _ => {
                 close_terminals(&token.fds());
-                return Err(io_error(format!("pid {} is not a process", token.pid)));
+                return Err(io_error(format!(
+                    "pid {} is not a process; nothing was killed",
+                    token.pid
+                )));
             }
         };
         // Only a child of ours is ever signalled: a pid that isn't may be anyone's by now.
         if let Err(e) = our_child(pid) {
             close_terminals(&token.fds());
-            return Err(io_error(e));
+            return Err(io_error(format!("{e}; left it alone")));
         }
         if sessions.contains_key(&session) || self.exported.contains_key(&session) {
             refuse(pid, &token);
@@ -455,7 +458,7 @@ impl PtyHandoff for PortablePty {
         }
         if let Err(e) = check_terminals(&token) {
             refuse(pid, &token);
-            return Err(io_error(e));
+            return Err(io_error(format!("{e}; killed process group {pid}")));
         }
         // SAFETY: checked open above; the token hands us their ownership.
         let (master, slave) = unsafe {
@@ -832,37 +835,75 @@ mod tests {
     }
 
     /// A process that is no child of ours, leading a process group of its own: what a stale or forged token's pid
-    /// could name. Killed by its pid when dropped.
-    struct Stranger(u32);
+    /// could name. It writes `ready` to its log once it leads its group, and `pong` on each SIGUSR1. Killed by its pid
+    /// when dropped.
+    struct Stranger {
+        pid: u32,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
 
     impl Stranger {
         fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("log");
+            let script = r#"use POSIX; setsid(); $| = 1; $SIG{USR1} = sub { print "pong\n" }; print "ready\n"; sleep 1 while 1"#;
             let out = std::process::Command::new("sh")
                 .args([
                     "-c",
-                    "perl -e 'use POSIX; setsid(); sleep 600' </dev/null >/dev/null 2>&1 & echo $!",
+                    r#"perl -e "$1" </dev/null >"$2" 2>&1 & echo $!"#,
+                    "sh",
+                    script,
                 ])
+                .arg(&log)
                 .output()
                 .unwrap();
-            Self(
-                String::from_utf8(out.stdout)
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap(),
-            )
+            let pid = String::from_utf8(out.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let stranger = Self {
+                pid,
+                log,
+                _dir: dir,
+            };
+            stranger.wait_for("ready", 1);
+            let id = libc::pid_t::try_from(pid).unwrap();
+            // SAFETY: plain syscall.
+            assert_eq!(
+                unsafe { libc::getpgid(id) },
+                id,
+                "not leading its own group"
+            );
+            stranger
         }
 
-        fn alive(&self) -> bool {
-            // SAFETY: plain syscall; signal 0 only checks the pid exists.
-            unsafe { libc::kill(libc::pid_t::try_from(self.0).unwrap(), 0) == 0 }
+        /// Waits (a liveness bound) until its log holds `count` lines saying `word`. Whether it did.
+        fn wait_for(&self, word: &str, count: usize) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let said = std::fs::read_to_string(&self.log).unwrap_or_default();
+                if said.lines().filter(|l| *l == word).count() >= count {
+                    return true;
+                }
+                std::thread::yield_now();
+            }
+            false
+        }
+
+        /// Whether it is alive and answering: a signal sent before this one (a SIGKILL) would be acted on first.
+        fn answers(&self) -> bool {
+            // SAFETY: plain syscall on the pid this test started.
+            unsafe { libc::kill(libc::pid_t::try_from(self.pid).unwrap(), libc::SIGUSR1) };
+            self.wait_for("pong", 1)
         }
     }
 
     impl Drop for Stranger {
         fn drop(&mut self) {
             // SAFETY: plain syscall on the pid this test started.
-            unsafe { libc::kill(libc::pid_t::try_from(self.0).unwrap(), libc::SIGKILL) };
+            unsafe { libc::kill(libc::pid_t::try_from(self.pid).unwrap(), libc::SIGKILL) };
         }
     }
 
@@ -883,10 +924,9 @@ mod tests {
         let mut old = PortablePty::new(Arc::new(ChannelSink(tx.clone())));
         let real = exported(&mut old, &rx);
         let stranger = Stranger::start();
-        assert!(stranger.alive());
         // Terminals of its own: adopting takes the token's descriptors, and the exporter resumes with the real ones.
         let token = super::PtyToken {
-            pid: stranger.0,
+            pid: stranger.pid,
             master: std::os::fd::IntoRawFd::into_raw_fd(super::dup_cloexec(real.master).unwrap()),
             slave: std::os::fd::IntoRawFd::into_raw_fd(super::dup_cloexec(real.slave).unwrap()),
         };
@@ -896,7 +936,7 @@ mod tests {
             new.adopt(SessionId::new("forged"), token),
             Err(PtyError::Io(_))
         ));
-        assert!(stranger.alive(), "a process that isn't ours was signalled");
+        assert!(stranger.answers(), "a process that isn't ours was killed");
         old.resume();
     }
 

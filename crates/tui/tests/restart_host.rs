@@ -312,3 +312,40 @@ fn a_long_notice_takes_as_many_lines_as_its_words_wrap_to() {
         ]
     );
 }
+
+// ---------- a host that warned (T36b: its config couldn't be used after it updated) ----------
+
+const WARNING: &str = "the host couldn't use its config and runs with the defaults";
+
+/// A host that warned in its hello answer, whose notice has timed out since.
+fn warned() -> ClientDriver {
+    let mut answer = hello_ok(Some(1), Some(1)).unwrap_or_else(|e| panic!("{e}"));
+    answer["warning"] = json!(WARNING);
+    let mut c = answered(Ok(answer));
+    for at in ["2026-10-29T12:00:01.000Z", "2026-10-29T12:01:00.000Z"] {
+        c.handle(ClientEvent::Tick {
+            at: Timestamp::parse(at).unwrap_or_else(|e| panic!("{e}")),
+        });
+    }
+    assert_eq!(c.client().notice(), None);
+    c
+}
+
+#[test]
+fn footer_while_the_host_warns() {
+    insta::assert_snapshot!(text(&buffer(&warned(), WIDE)));
+}
+
+#[test]
+fn the_footers_host_warning_shows_the_warning_again() {
+    let mut c = warned();
+    let buf = buffer(&c, WIDE);
+    let footer = at(&buf, " Host warning  Detach");
+    let button = Position::new(footer.x + 1, footer.y);
+    assert_eq!(
+        hit(&layout(WIDE), c.client(), button.x, button.y),
+        Some(Target::ShowHostWarning)
+    );
+    assert_eq!(click(&mut c, button), []);
+    assert_eq!(c.client().notice(), Some(WARNING));
+}

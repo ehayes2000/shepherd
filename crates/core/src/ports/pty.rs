@@ -100,8 +100,9 @@ pub trait PtyHandoff: Pty {
     /// Calls off the last export: the exported sessions are served again as before it, and their tokens are void.
     fn resume(&mut self);
 
-    /// Takes over an exported session as `session`. A session that can't be adopted (its process or terminal is
-    /// gone, or the token is unusable) is killed, process group and all, so nothing is left running unattended, and
-    /// the error says why; it gets no `Exited`.
+    /// Takes over an exported session as `session`. A session that can't be adopted (its terminal is gone, the token
+    /// is unusable, or `session` is already live: [`PtyError::AlreadyExists`]) is killed, process group and all, so
+    /// nothing is left running unattended, and the error says why; it gets no `Exited`. The one exception is a token
+    /// whose process isn't a child of the adopter: whoever it is, it isn't signalled, and the error says so.
     fn adopt(&mut self, session: SessionId, token: Self::Token) -> Result<(), PtyError>;
 }

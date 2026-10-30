@@ -541,13 +541,51 @@ fn a_workspace_switch_the_host_does_not_know_says_the_host_is_older_in_the_switc
     );
 }
 
+const WARNING: &str = "the host couldn't use its config and runs with the defaults";
+
+/// A client whose host's hello answer carries [`WARNING`].
+fn warned() -> ClientDriver {
+    let mut answer = hello_ok(Some(1), Some(1));
+    answer["warning"] = json!(WARNING);
+    answered(Ok(answer))
+}
+
 #[test]
 fn a_warning_in_the_hello_answer_is_shown_as_a_notice() {
-    let mut answer = hello_ok(Some(1), Some(1));
-    answer["warning"] = json!("the host couldn't read its config and runs with the defaults");
-    let c = answered(Ok(answer));
+    let c = warned();
+    assert_eq!(c.client().notice(), Some(WARNING));
+    assert_eq!(c.client().host_warning(), Some(WARNING));
+}
+
+#[test]
+fn a_host_warning_outlasts_its_notice_and_can_be_shown_again() {
+    let mut c = warned();
+    c.handle(ClientEvent::Tick {
+        at: ts("2026-10-29T12:00:01.000Z"),
+    });
+    c.handle(ClientEvent::Tick {
+        at: ts("2026-10-29T12:01:00.000Z"),
+    });
+    assert_eq!(c.client().notice(), None, "the notice timed out");
+    assert_eq!(c.client().host_warning(), Some(WARNING));
+    assert_eq!(c.user(Intent::ShowHostWarning), []);
+    assert_eq!(c.client().notice(), Some(WARNING));
+}
+
+#[test]
+fn a_host_warning_lasts_until_a_hello_without_one() {
+    let mut c = warned();
+    c.handle(ClientEvent::Disconnected);
     assert_eq!(
-        c.client().notice(),
-        Some("the host couldn't read its config and runs with the defaults")
+        c.client().host_warning(),
+        Some(WARNING),
+        "kept across the outage"
     );
+    let sent = c.handle(ClientEvent::Connected {
+        at: ts("2026-10-29T12:00:01.000Z"),
+    });
+    c.answer(&sent, Ok(hello_ok(Some(1), Some(1))));
+    assert_eq!(c.client().host_warning(), None);
+    assert_eq!(c.user(Intent::ShowHostWarning), []);
+    assert_eq!(c.client().notice(), None);
 }

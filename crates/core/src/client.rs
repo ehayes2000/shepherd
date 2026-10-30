@@ -166,6 +166,8 @@ pub enum Intent {
     OfferRestart,
     /// Restart the host, from the open restart dialog (a click on its `[Restart host]`). Ignored when that isn't open.
     RestartHost,
+    /// Show the host's warning again ([`Client::host_warning`]); ignored when it has none.
+    ShowHostWarning,
     /// Detach. Sessions keep running on the host.
     Quit,
 }
@@ -356,6 +358,8 @@ pub struct Client {
     restart_offer: Option<HostOutdated>,
     /// A stale host being asked to update itself in place.
     upgrade: Option<Upgrade>,
+    /// What the host's last hello answer warned about, until a hello answer without one.
+    host_warning: Option<String>,
     connection: Connection,
     /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
@@ -437,6 +441,7 @@ impl Client {
             build: None,
             restart_offer: None,
             upgrade: None,
+            host_warning: None,
             connection: Connection::Idle,
             launched: false,
             next_request: 0,
@@ -595,6 +600,12 @@ impl Client {
     /// version, a stale one, or one that didn't know a request. [`Intent::OfferRestart`] reopens the dialog for it.
     pub fn restart_offer(&self) -> Option<HostOutdated> {
         self.restart_offer
+    }
+
+    /// What the host warned about in its last hello answer, e.g. that it runs with the default config: shown until a
+    /// hello answer without one, and again on [`Intent::ShowHostWarning`]. A notice times out; this doesn't.
+    pub fn host_warning(&self) -> Option<&str> {
+        self.host_warning.as_deref()
     }
 
     /// Why the client gave up, once it has.
@@ -778,9 +789,10 @@ impl Client {
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
                 let update = self.check_build(&ok);
-                if let Some(warning) = ok.warning {
-                    self.set_notice(warning);
+                if let Some(warning) = &ok.warning {
+                    self.set_notice(warning.clone());
                 }
+                self.host_warning = ok.warning;
                 self.set_profiles(ok.profiles, ok.default_profile);
                 self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
@@ -1451,6 +1463,12 @@ impl Client {
             }
             Intent::Dismiss => {
                 self.popup = None;
+                Vec::new()
+            }
+            Intent::ShowHostWarning => {
+                if let Some(warning) = self.host_warning.clone() {
+                    self.set_notice(warning);
+                }
                 Vec::new()
             }
             Intent::OfferRestart => {
