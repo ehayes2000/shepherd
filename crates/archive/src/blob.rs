@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,13 +13,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
 use crate::private::{
-    check_regular_file, create_new_private_file, ensure_private_dir, io_err, normalize,
-    open_existing_private_file, sync_dir,
+    create_new_private_file, ensure_private_dir, io_err, normalize, open_existing_private_file,
+    sync_dir,
 };
 
 /// The largest blob [`BlobStore::put`] accepts and [`BlobStore::get`] inflates, unless set with
 /// [`BlobStore::with_max_len`]. Transcripts are text and rarely reach tens of megabytes.
-pub const DEFAULT_MAX_BLOB_LEN: u64 = 1 << 30;
+pub const DEFAULT_MAX_BLOB_LEN: u64 = 256 << 20;
 
 /// zstd's default level: fast, and transcripts (JSON lines) compress well at it.
 const ZSTD_LEVEL: i32 = 3;
@@ -108,6 +108,21 @@ pub struct BlobStore {
     blobs: PathBuf,
     max_len: u64,
     writes: AtomicU64,
+    inflated: AtomicU64,
+}
+
+/// Counts the bytes read through it into `total`.
+struct Counting<'a, R> {
+    inner: R,
+    total: &'a AtomicU64,
+}
+
+impl<R: Read> Read for Counting<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.total.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
 }
 
 impl BlobStore {
@@ -122,6 +137,7 @@ impl BlobStore {
             blobs,
             max_len: DEFAULT_MAX_BLOB_LEN,
             writes: AtomicU64::new(0),
+            inflated: AtomicU64::new(0),
         })
     }
 
@@ -135,6 +151,12 @@ impl BlobStore {
         self.writes.load(Ordering::Relaxed)
     }
 
+    /// How many decompressed bytes this handle has produced while reading blobs, including blobs it then rejected.
+    /// Reading stops one byte past the cap, so a blob that inflates without bound adds at most `max_len + 1`.
+    pub fn inflated(&self) -> u64 {
+        self.inflated.load(Ordering::Relaxed)
+    }
+
     fn shard_dir(&self, id: &BlobId) -> PathBuf {
         self.blobs.join(format!("{:02x}", id.0[0]))
     }
@@ -143,7 +165,8 @@ impl BlobStore {
         self.shard_dir(id).join(format!("{id}.zst"))
     }
 
-    /// Stores `bytes` under their sha256 and returns it. Content already stored is not written again.
+    /// Stores `bytes` under their sha256 and returns it. Content already stored intact is not written again; a
+    /// stored copy that is corrupt or truncated is replaced.
     pub fn put(&self, bytes: &[u8]) -> Result<BlobId, BlobError> {
         let id = BlobId::of(bytes);
         if bytes.len() as u64 > self.max_len {
@@ -155,10 +178,15 @@ impl BlobStore {
         let shard = self.shard_dir(&id);
         ensure_private_dir(&shard)?;
         let path = self.path(&id);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) => return check_regular_file(&path, &meta).map(|()| id),
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err(&path, e)),
+        // Already stored only if it reads back right: a corrupt or truncated blob is replaced, so a successful put
+        // always means `get` returns these bytes. A blob that is insecure, a symlink or not a file is refused as
+        // `get` would refuse it, and left alone.
+        match self.get(&id) {
+            Ok(_) => return Ok(id),
+            Err(
+                BlobError::Missing { .. } | BlobError::Corrupt { .. } | BlobError::TooLarge { .. },
+            ) => {}
+            Err(e) => return Err(e),
         }
 
         let compressed = zstd::encode_all(bytes, ZSTD_LEVEL).map_err(|e| io_err(&path, e))?;
@@ -219,13 +247,24 @@ impl BlobStore {
             reason,
         };
 
-        let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| io_err(&path, e))?;
+        let mut file = BufReader::new(file);
+        // Reserve what the frame header says it holds, but never more than the cap: the header is the file's word.
+        let declared = file.fill_buf().map_err(|e| io_err(&path, e))?;
+        let reserve = zstd::zstd_safe::get_frame_content_size(declared)
+            .ok()
+            .flatten()
+            .map_or(0, |n| n.min(self.max_len));
+        let mut bytes = Vec::with_capacity(usize::try_from(reserve).unwrap_or(0));
+        let decoder =
+            zstd::stream::read::Decoder::with_buffer(file).map_err(|e| io_err(&path, e))?;
         // Read at most one byte past the cap: enough to tell "too large" without inflating the rest.
-        let mut bytes = Vec::new();
-        decoder
-            .take(self.max_len.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|e| corrupt(e.to_string()))?;
+        Counting {
+            inner: decoder,
+            total: &self.inflated,
+        }
+        .take(self.max_len.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| corrupt(e.to_string()))?;
         if bytes.len() as u64 > self.max_len {
             return Err(BlobError::TooLarge {
                 id: *id,

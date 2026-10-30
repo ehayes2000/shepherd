@@ -62,7 +62,7 @@ fn check_existing_dir(path: &Path, meta: &Metadata) -> Result<(), BlobError> {
 }
 
 /// `meta` is `path`'s `lstat`: refuses a symlink and anything but a regular file.
-pub(crate) fn check_regular_file(path: &Path, meta: &Metadata) -> Result<(), BlobError> {
+fn check_regular_file(path: &Path, meta: &Metadata) -> Result<(), BlobError> {
     if meta.file_type().is_symlink() {
         return Err(BlobError::Symlink(path.to_path_buf()));
     }
@@ -97,7 +97,12 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), BlobError> {
             }
             opened
                 .set_permissions(fs::Permissions::from_mode(DIR_MODE))
-                .map_err(|e| io_err(dir, e))
+                .map_err(|e| io_err(dir, e))?;
+            // Make the new entry durable, so a blob renamed into it later can't outlive its directory.
+            match dir.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => sync_dir(parent),
+                _ => sync_dir(Path::new(".")),
+            }
         }
         // Already there (before us or racing us): the user's, so check it and never chmod it.
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {

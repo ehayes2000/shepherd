@@ -1999,6 +1999,7 @@ dependencies = [
 name = "shepherd-archive"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sha2",
  "shepherd-archive",
  "tempfile",

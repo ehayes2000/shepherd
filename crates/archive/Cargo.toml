@@ -18,6 +18,8 @@ thiserror.workspace = true
 # The crate's own tests turn the fault injection on; normal builds of anything that depends on it never do.
 shepherd-archive = { path = ".", features = ["fault-injection-crash-before-rename"] }
 tempfile.workspace = true
+# Tests only: a child process sets a strict umask to prove created modes are exact.
+libc.workspace = true
 
 [lints]
 workspace = true

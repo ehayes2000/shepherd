@@ -255,6 +255,105 @@ fn a_blob_that_inflates_past_the_cap_is_an_error_not_an_allocation() {
         "{err:?}"
     );
     assert!(err.to_string().contains(&sha256_hex(&bomb)), "{err}");
+    assert!(
+        store.inflated() <= 1025,
+        "inflation stops one byte past the cap, not at the end of the bomb: {} bytes",
+        store.inflated()
+    );
+}
+
+/// Writes `body` as the blob file for `content`, 0600, the way a corrupted or tampered archive would hold it.
+fn plant_blob_file(root: &Path, content: &[u8], body: &[u8]) -> PathBuf {
+    let path = blob_path(root, content);
+    fs::write(&path, body).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+#[test]
+fn put_heals_an_existing_blob_whose_content_does_not_match() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap();
+    let id = store.put(b"original").unwrap();
+    plant_blob_file(
+        &root,
+        b"original",
+        &zstd::encode_all(&b"tampered"[..], 3).unwrap(),
+    );
+
+    assert_eq!(store.put(b"original").unwrap(), id);
+
+    assert_eq!(store.writes(), 2, "the bad blob was replaced");
+    assert_eq!(store.get(&id).unwrap(), b"original");
+    assert_eq!(mode(&blob_path(&root, b"original")), 0o600);
+}
+
+#[test]
+fn put_heals_an_existing_truncated_blob() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap();
+    let content: Vec<u8> = (0..50_000u32).flat_map(|n| n.to_le_bytes()).collect();
+    let id = store.put(&content).unwrap();
+    let full = fs::read(blob_path(&root, &content)).unwrap();
+    plant_blob_file(&root, &content, &full[..full.len() / 2]);
+
+    assert_eq!(store.put(&content).unwrap(), id);
+
+    assert_eq!(store.writes(), 2);
+    assert_eq!(store.get(&id).unwrap(), content);
+}
+
+#[test]
+fn put_over_an_existing_blob_group_or_others_can_read_is_refused_and_leaves_it_alone() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap();
+    store.put(b"real").unwrap();
+    let path = blob_path(&root, b"real");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(matches!(
+        store.put(b"real"),
+        Err(BlobError::Insecure { mode: 0o644, .. })
+    ));
+    assert_eq!(store.writes(), 1);
+    assert_eq!(mode(&path), 0o644, "never chmodded");
+}
+
+#[test]
+fn put_over_a_symlink_at_the_blob_path_is_refused_and_writes_nothing_outside() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap();
+    store.put(b"real").unwrap();
+    let path = blob_path(&root, b"real");
+    let outside = dir.path().join("outside");
+    fs::write(&outside, b"not yours").unwrap();
+    fs::remove_file(&path).unwrap();
+    symlink(&outside, &path).unwrap();
+
+    assert!(matches!(store.put(b"real"), Err(BlobError::Symlink(p)) if p == path));
+    assert_eq!(store.writes(), 1);
+    assert_eq!(fs::read(&outside).unwrap(), b"not yours");
+    assert!(
+        fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn put_over_a_directory_at_the_blob_path_is_refused() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap();
+    let path = blob_path(&root, b"real");
+    fs::create_dir_all(&path).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(store.put(b"real"), Err(BlobError::WrongType(p)) if p == path));
 }
 
 #[test]
@@ -309,6 +408,18 @@ fn list_enumerates_stored_blob_ids_and_ignores_anything_else() {
     fs::write(shard.join("README"), b"x").unwrap();
     fs::write(root.join("blobs").join("stray"), b"x").unwrap();
     fs::create_dir(root.join("blobs").join("zz")).unwrap();
+    // A correctly named blob in the wrong shard, and a directory named like a blob in its own shard.
+    let misplaced = BlobId::of(b"misplaced").to_string();
+    let wrong_shard = if &misplaced[..2] == "00" { "01" } else { "00" };
+    fs::create_dir_all(root.join("blobs").join(wrong_shard)).unwrap();
+    fs::write(
+        root.join("blobs")
+            .join(wrong_shard)
+            .join(format!("{misplaced}.zst")),
+        b"x",
+    )
+    .unwrap();
+    fs::create_dir_all(blob_path(&root, b"a directory")).unwrap();
 
     let mut expected = vec![a, b, c];
     expected.sort();
@@ -327,24 +438,70 @@ fn a_blob_id_round_trips_through_its_hex_form() {
     );
 }
 
-/// The parent passes the child its archive root through this variable.
-const CHILD_ROOT: &str = "T38_CRASH_CHILD_ROOT";
+/// The parent passes the child its archive root, and what to do there, through these variables.
+const CHILD_ROOT: &str = "T38_CHILD_ROOT";
+const CHILD_JOB: &str = "T38_CHILD_JOB";
 
-/// Runs only as the child of `a_crash_between_temp_write_and_rename_leaves_no_blob_under_its_id`.
+/// Runs only as a child process started by `run_child`; does nothing in a normal test run.
 #[test]
-fn crash_child() {
+fn child_process() {
     #[allow(
         clippy::disallowed_methods,
-        reason = "test plumbing: the parent passes the root to its child"
+        reason = "test plumbing: the parent passes the root and job to its child"
     )]
-    let Some(root) = std::env::var_os(CHILD_ROOT) else {
+    let (Some(root), Some(job)) = (std::env::var_os(CHILD_ROOT), std::env::var_os(CHILD_JOB))
+    else {
         return;
     };
-    let store = BlobStore::open(Path::new(&root)).unwrap();
+    let root = Path::new(&root);
+    match job.to_str() {
+        Some("crash") => {
+            let store = BlobStore::open(root).unwrap();
+            store.put(&crash_content()).unwrap();
+            unreachable!("put must exit the process before the rename");
+        }
+        Some("umask") => {
+            // SAFETY: umask only sets this process's file mode mask; this child runs a single test.
+            unsafe { libc::umask(0o277) };
+            let store = BlobStore::open(root).unwrap();
+            store.put(b"under a strict umask").unwrap();
+        }
+        other => panic!("unknown child job {other:?}"),
+    }
+}
+
+/// Runs `child_process` in a new process with `job` on `root` and returns its exit code.
+fn run_child(job: &str, root: &Path) -> Option<i32> {
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_process", "--test-threads=1"])
+        .env(CHILD_ROOT, root)
+        .env(CHILD_JOB, job)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap()
+        .code()
+}
+
+fn crash_content() -> Vec<u8> {
     let mut content = shepherd_archive::CRASH_BEFORE_RENAME.to_vec();
     content.extend_from_slice(&[7u8; 100_000]);
-    store.put(&content).unwrap();
-    unreachable!("put must exit the process before the rename");
+    content
+}
+
+#[test]
+fn modes_are_exact_whatever_the_umask() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    assert_eq!(
+        run_child("umask", &root),
+        Some(0),
+        "the child stored a blob under umask 277"
+    );
+    let path = blob_path(&root, b"under a strict umask");
+    assert_eq!(mode(&root), 0o700);
+    assert_eq!(mode(&root.join("blobs")), 0o700);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+    assert_eq!(mode(&path), 0o600);
 }
 
 #[test]
@@ -353,20 +510,13 @@ fn a_crash_between_temp_write_and_rename_leaves_no_blob_under_its_id() {
     let root = dir.path().join("archive");
     BlobStore::open(&root).unwrap();
 
-    let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "crash_child", "--test-threads=1"])
-        .env(CHILD_ROOT, &root)
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
     assert_eq!(
-        status.code(),
+        run_child("crash", &root),
         Some(shepherd_archive::CRASH_EXIT_CODE),
         "the child crashed where we injected it"
     );
 
-    let mut content = shepherd_archive::CRASH_BEFORE_RENAME.to_vec();
-    content.extend_from_slice(&[7u8; 100_000]);
+    let content = crash_content();
     let path = blob_path(&root, &content);
     assert!(!path.exists(), "no partial blob under its id");
     let leftovers = files_under(&root.join("blobs"));
