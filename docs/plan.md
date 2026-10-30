@@ -12,7 +12,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | F36 display-safe gaps (minus ZWJ) | fixing (CHANGES) | task/f36-display-gaps @ efeae89 | 1 | Blocking: cap on later clusters untested; .render grep misses variables → clippy ban Widget::render; draw::spans .into() hole. PM: Prepend can't take a cluster's last slot |
 | F38+F40 adapter test hygiene | in review | task/f38-f40-test-hygiene @ fec5f02 (on 71df32d) | 1 | idle bound + byte limit; watchdog + group kill on drop (PM asked reviewer: pgid reuse?) |
 | F42 new session wrong size | in review | task/f42-spawn-size @ 19f5f48 (on b4d68f6) | 1 | PM-accepted: core host::sizes::Sizes wraps Host::handle; SessionNew.size; exited sizes not carried across swap |
-| F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ 7f7e811 (on b821b28) | 2 | private fetch ref + pinned update-ref; grace test; group wait probes with SIGKILL (PM asked reviewer: pgid reuse?) |
+| F37 worktree lock/shutdown leftovers | fixing (CHANGES r2) | task/f37-worktree-leftovers @ 7f7e811 | 2 | SIGKILL probe cleared (pgid reuse needs full pid wrap). Blocking: kill condition and before-check untested. Minors: pin observable, update-ref with old value |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
