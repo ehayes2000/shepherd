@@ -1,5 +1,6 @@
 //! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, the
-//! profile picker for a new session, the workspace switcher, and the offer to restart an outdated host.
+//! profile picker for a new session, the workspace switcher, the offer to restart an outdated host, the finder
+//! ([`crate::finder`]), and the offer to start a session in an orphan worktree.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
@@ -11,12 +12,15 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget};
-use shepherd_core::client::{Cell, Client, CloseCheck, HostOutdated, MenuEntry, MenuItem, Popup};
+use shepherd_core::client::{
+    Cell, Client, CloseCheck, HostOutdated, MenuEntry, MenuItem, Orphan, Popup,
+};
 use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
 
 use crate::draw::{self, shown};
+use crate::finder;
 use crate::layout::Target;
 use crate::width::{columns, cut, cut_left, pad, tail};
 
@@ -59,6 +63,8 @@ const AT_RISK_HINT: &str = "enter keeps the worktree · esc cancels";
 const HELP_WIDTH: u16 = 56;
 /// The restart dialog's width, its border included.
 const RESTART_DIALOG_WIDTH: u16 = 48;
+/// The offer to start a session in a worktree: its width, its border included.
+const START_DIALOG_WIDTH: u16 = 48;
 
 /// The profile picker's line above its rows.
 const PICK_PROMPT: &str = "Which agent should the session run?";
@@ -138,8 +144,39 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
                 ],
             )
         }
+        Popup::Finder { .. } => finder::place(client, window),
+        Popup::StartInWorktree { worktree } => {
+            let height = u16::try_from(start_lines(worktree).len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(3);
+            dialog(
+                centered(window, START_DIALOG_WIDTH, height),
+                &[
+                    ("[Start session]", Target::Confirm),
+                    ("[Cancel]", Target::Dismiss),
+                ],
+            )
+        }
     })
 }
+
+/// The offer's lines above its buttons: the question, the worktree's branch, and its path, cut from the left to fit.
+fn start_lines(worktree: &Orphan) -> Vec<Line<'static>> {
+    let branch = match &worktree.branch {
+        Some(branch) => format!("{WORKTREE} {branch}"),
+        None => format!("{WORKTREE} detached HEAD"),
+    };
+    let room = usize::from(START_DIALOG_WIDTH.saturating_sub(4));
+    let path = cut_left(shown(&worktree.path.display().to_string()).as_str(), room);
+    vec![
+        draw::line(shown("Start a session in this worktree?"), Style::new()),
+        draw::line(shown(&branch), Style::new().add_modifier(Modifier::BOLD)),
+        draw::line(shown(&path), Style::new().fg(Color::Gray)),
+    ]
+}
+
+/// An orphan worktree's glyph.
+const WORKTREE: &str = "⎇";
 
 /// The restart dialog's lines above its buttons: why the host should be restarted, and how many sessions that stops
 /// (`to_stop`, when the client knows).
@@ -168,7 +205,7 @@ fn restart_lines(why: HostOutdated, to_stop: Option<usize>) -> Vec<Line<'static>
 }
 
 /// A dialog in `area` with `buttons` right-aligned on its last line, a column in from the border.
-fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
+pub(crate) fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
     let inside = inner(area);
     let mut controls = Vec::new();
     if inside.height > 0 {
@@ -387,6 +424,8 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::PickProfile => " new session ",
         Popup::Workspace { .. } => " workspace ",
         Popup::RestartHost { .. } => " restart the host ",
+        Popup::Finder { .. } => " find ",
+        Popup::StartInWorktree { .. } => " start a session ",
     };
     frame(placed.area, title, buf);
     let inside = inner(placed.area);
@@ -426,9 +465,19 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             draw::paragraph(restart_lines(*why, client.sessions_to_stop())).render(body, buf);
             None
         }
+        Popup::Finder { query } => finder::render(client, query, &placed, buf),
+        Popup::StartInWorktree { worktree } => {
+            draw::paragraph(start_lines(worktree)).render(body, buf);
+            None
+        }
     };
     let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    for control in &placed.controls {
+    // The finder draws its own rows.
+    let drawn = placed
+        .controls
+        .iter()
+        .filter(|c| !matches!(c.target, Target::FinderRow(_)));
+    for control in drawn {
         let style = match (popup, &control.target) {
             (Popup::Menu { .. }, _) | (_, Target::Profile(_) | Target::WorkspaceRow(_)) => {
                 Style::new()
@@ -478,7 +527,7 @@ fn help_lines() -> Vec<Line<'static>> {
 
 /// A one-line text input showing `text` in `line`, keeping its end in view with a column for the cursor. Returns
 /// where the cursor goes.
-fn text_input(text: &str, line: Rect, buf: &mut Buffer) -> Option<Position> {
+pub(crate) fn text_input(text: &str, line: Rect, buf: &mut Buffer) -> Option<Position> {
     if line.width < 2 {
         return None;
     }
@@ -577,12 +626,12 @@ fn frame(area: Rect, title: &str, buf: &mut Buffer) {
         .render(area, buf);
 }
 
-fn inner(area: Rect) -> Rect {
+pub(crate) fn inner(area: Rect) -> Rect {
     Block::bordered().inner(area)
 }
 
 /// A `width` x `height` rect in the middle of `area`, shrunk to fit.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
     Rect::new(
         area.x + (area.width - width) / 2,

@@ -21,6 +21,7 @@
 
 mod draw;
 pub mod encode;
+mod finder;
 mod keys;
 pub mod layout;
 mod popup;

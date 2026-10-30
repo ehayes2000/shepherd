@@ -2,6 +2,7 @@
 source: crates/tui/tests/display_safe.rs
 expression: "text(&buffer(&evil_sidebar(), 100, 12))"
 ---
+ ⌕ Search…             │
  ⌂ shxá̂̃ep              │
  + New session         │
  ◌ renxá̂̃amed          ×│
@@ -12,5 +13,4 @@ expression: "text(&buffer(&evil_sidebar(), 100, 12))"
    fetching origin fai…│
  ◌ awayxá̂̃             ×│
    in elxá̂̃sewhere      │
-                       │
  ctrl-b ? help Detach ?│

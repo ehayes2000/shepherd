@@ -124,6 +124,7 @@ impl Setup {
         self.client.request(ClientRequest::SessionNew(SessionNew {
             profile: Some("claude".to_owned()),
             cwd: None,
+            branch: None,
         }))
     }
 

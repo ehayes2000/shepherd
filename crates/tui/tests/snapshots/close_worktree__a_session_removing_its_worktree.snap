@@ -1,11 +1,10 @@
 ---
 source: crates/tui/tests/close_worktree.rs
-assertion_line: 171
 expression: "text(&buffer(&c, Rect::new(0, 0, 80, 6)))"
 ---
+ ⌕ Search…             │
  ⌂ shepherd            │
  + New session         │
  ✕ refactor           ×│
    removing worktree…  │
-                       │
  ctrl-b ? help Detach ?│

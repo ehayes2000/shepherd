@@ -1053,6 +1053,25 @@ impl<
                         }
                     }
                 }
+                HostCommand::ListWorktrees { reply, repo } => {
+                    let panicked = HostEvent::WorktreesListed {
+                        reply,
+                        result: Err(WorktreeError::Other(format!(
+                            "listing the worktrees of {repo} failed unexpectedly"
+                        ))),
+                    };
+                    let call = move |worktrees: &W| HostEvent::WorktreesListed {
+                        reply,
+                        result: worktrees.list_managed(&repo),
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
                 HostCommand::RunPreRemove {
                     session,
                     command,
@@ -1464,6 +1483,10 @@ impl<
                     session: check.session,
                 });
             }
+            ClientRequest::WorktreeList(_) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::ListWorktrees { reply });
+            }
             ClientRequest::WorkspaceSelect(select) => {
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::SelectWorkspace {
@@ -1650,6 +1673,7 @@ impl<
             profile: profile.name.clone(),
             agent: profile.kind,
             explicit_cwd: new.cwd.is_some(),
+            worktree_branch: new.branch.clone().filter(|_| new.cwd.is_some()),
             spawn: launch.spawn,
             hooks,
         };

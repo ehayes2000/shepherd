@@ -18,7 +18,7 @@ pub use message::{
     LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, RawResponse, Request,
     RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
     SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WorkspaceSelect,
-    WorktreeCheck, WorktreeStatusOk, decode_client_message, decode_host_message,
-    encode_client_notification, encode_host_notification, encode_request, encode_response,
-    negotiate,
+    WorktreeCheck, WorktreeInfo, WorktreeList, WorktreeListOk, WorktreeStatusOk,
+    decode_client_message, decode_host_message, encode_client_notification,
+    encode_host_notification, encode_request, encode_response, negotiate,
 };

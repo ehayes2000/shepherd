@@ -132,13 +132,13 @@ fn help_popup() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
-/// Right-clicked on the first line of `docs` (under the two header lines), which isn't the selected session.
+/// Right-clicked on the first line of `docs` (under the three header lines), which isn't the selected session.
 #[test]
 fn context_menu_open() {
     let (mut c, screens) = three_sessions();
     c.user(Intent::OpenMenu {
         session: SessionId::new("s2"),
-        at: Cell { col: 5, row: 4 },
+        at: Cell { col: 5, row: 5 },
     });
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
@@ -154,7 +154,7 @@ fn exited_claude_menu(agent_session: Option<&str>) -> ClientDriver {
     c.sync();
     c.user(Intent::OpenMenu {
         session: SessionId::new("s1"),
-        at: Cell { col: 3, row: 2 },
+        at: Cell { col: 3, row: 3 },
     });
     c
 }
@@ -308,6 +308,25 @@ fn every_popup() -> Vec<(&'static str, ClientDriver)> {
     );
     restart.connect();
     popups.push(("restart dialog", restart));
+    popups.push(("finder loading", opened(&[Intent::BeginFind])));
+    popups.push((
+        "finder with no results",
+        opened(&[Intent::BeginFind, Intent::EditFind("zzz".into())]),
+    ));
+    let (mut found, _) = three_sessions();
+    let asked = found.user(Intent::BeginFind);
+    found.answer(
+        &asked,
+        Ok(json!({ "worktrees": [{ "path": "/wt/app/old-idea", "branch": "old-idea" }] })),
+    );
+    popups.push(("finder with a worktree", found.clone()));
+    found.user(Intent::FinderChoose(
+        shepherd_core::client::FinderItem::Worktree(shepherd_core::client::Orphan {
+            path: "/wt/app/old-idea".into(),
+            branch: Some("old-idea".into()),
+        }),
+    ));
+    popups.push(("offer to start a session in a worktree", found));
     popups
 }
 
@@ -629,10 +648,10 @@ fn a_taller_window_than_the_client_was_told_still_fills_the_list_to_its_end() {
             .trim_end()
             .to_owned()
     };
-    // The last 10 sessions, newest first: shell-10 under the two header lines, down to shell-1 on the last row that
+    // The last 10 sessions, newest first: shell-10 under the three header lines, down to shell-1 on the last row that
     // fits above the footer.
-    assert!(row_of(2).ends_with("shell-10"), "{buf:?}");
-    assert!(row_of(20).ends_with("shell-1"), "{buf:?}");
+    assert!(row_of(3).ends_with("shell-10"), "{buf:?}");
+    assert!(row_of(21).ends_with("shell-1"), "{buf:?}");
 }
 
 #[test]
@@ -641,8 +660,8 @@ fn the_selected_row_is_highlighted_across_both_lines() {
     let buf = buffer(c.client(), &screens, 80, 24);
     let side = layout(buf.area).sidebar;
     let highlighted = |y: u16| buf[(side.x + 2, y)].bg != Color::Reset;
-    // The newest session is at the top, under the two header lines, and selected.
-    let rows: Vec<bool> = (2..8).map(highlighted).collect();
+    // The newest session is at the top, under the three header lines, and selected.
+    let rows: Vec<bool> = (3..9).map(highlighted).collect();
     assert_eq!(rows, [true, true, false, false, false, false]);
 }
 
@@ -806,6 +825,7 @@ fn status_glyphs_follow_the_documented_table() {
         failed: None,
         warning: None,
         worktree: None,
+        branch: None,
         removing_worktree: false,
     };
     let table = [
@@ -1130,7 +1150,7 @@ fn a_wide_workspace_name_heads_the_sidebar_whole() {
     c.host().select_workspace("/src/羊🐑群れ");
     c.sync();
     let buf = buffer(c.client(), &Screens::new(), 80, 8);
-    assert!(line_text(&buf, 0).starts_with(" ⌂ 羊🐑群れ "), "{buf:?}");
+    assert!(line_text(&buf, 1).starts_with(" ⌂ 羊🐑群れ "), "{buf:?}");
 }
 
 /// A session with a wide name, from another workspace whose wide name is too long for the row: the name is drawn

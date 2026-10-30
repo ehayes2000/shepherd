@@ -256,6 +256,10 @@ impl FakeHost {
                     )),
                 }
             }
+            // Nor has it any to list.
+            ClientRequest::WorktreeList(_) => Ok(HostResult::WorktreeList(
+                shepherd_core::wire::WorktreeListOk::default(),
+            )),
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

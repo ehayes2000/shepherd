@@ -1,13 +1,12 @@
 ---
 source: crates/tui/tests/close_worktree.rs
-assertion_line: 162
 expression: "text(&buffer(&confirming(Some(Err(refused))), WIDE))"
 ---
+ ⌕ Search…             │
  ⌂ shepherd            │
  + New session         │
  ◌ refactor           ×│
    local · —           │
-                       │
                        │
                        │
                        │

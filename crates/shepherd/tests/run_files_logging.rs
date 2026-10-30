@@ -18,6 +18,7 @@ fn new_session(h: &mut HostHarness, client: &mut FakeClient, profile: &str) -> S
     let sent = client.request(ClientRequest::SessionNew(SessionNew {
         profile: Some(profile.to_owned()),
         cwd: None,
+        branch: None,
     }));
     h.step();
     let result = response(&client.take(), &sent).unwrap();

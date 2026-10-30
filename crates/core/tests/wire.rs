@@ -14,8 +14,9 @@ use shepherd_core::wire::{
     HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput,
     Request, RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
     SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
-    WorkspaceSelect, code, decode_client_message, decode_host_message, encode_client_notification,
-    encode_host_notification, encode_request, encode_response, negotiate,
+    WorkspaceSelect, WorktreeInfo, WorktreeList, WorktreeListOk, code, decode_client_message,
+    decode_host_message, encode_client_notification, encode_host_notification, encode_request,
+    encode_response, negotiate,
 };
 
 fn sid(s: &str) -> SessionId {
@@ -61,6 +62,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         ClientRequest::SessionNew(SessionNew {
             profile: Some("claude".into()),
             cwd: Some("/src/shepherd".into()),
+            branch: None,
         }),
         ClientRequest::SessionNew(SessionNew::default()),
         ClientRequest::SessionRename(SessionRename {
@@ -101,6 +103,12 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::HostUpgrade(HostUpgrade { force: false }),
         ClientRequest::HostUpgrade(HostUpgrade { force: true }),
+        ClientRequest::WorktreeList(WorktreeList::default()),
+        ClientRequest::SessionNew(SessionNew {
+            profile: None,
+            cwd: Some("/wt/shepherd/old-idea".into()),
+            branch: Some("old-idea".into()),
+        }),
     ]
 }
 
@@ -224,6 +232,8 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/worktree/status",
         "_shepherd/host/upgrade",
         "_shepherd/host/upgrade",
+        "_shepherd/worktree/list",
+        "_shepherd/session/new",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -330,6 +340,64 @@ fn session_new_without_params_uses_defaults() {
     assert_eq!(
         request(line.as_bytes()).body,
         ClientRequest::SessionNew(SessionNew::default())
+    );
+}
+
+#[test]
+fn session_new_names_the_branch_of_the_worktree_it_runs_in_only_when_it_has_one() {
+    let line = request_line(
+        "_shepherd/session/new",
+        json!({ "cwd": "/wt/app/old", "branch": "old" }),
+    );
+    assert_eq!(
+        request(&line).body,
+        ClientRequest::SessionNew(SessionNew {
+            profile: None,
+            cwd: Some("/wt/app/old".into()),
+            branch: Some("old".into()),
+        })
+    );
+    let encoded = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::SessionNew(SessionNew {
+            profile: Some("claude".into()),
+            ..SessionNew::default()
+        }),
+    });
+    assert_eq!(
+        wire_json(&encoded)["params"],
+        json!({ "profile": "claude" })
+    );
+}
+
+#[test]
+fn worktree_list_has_no_params_and_its_answer_lists_paths_and_branches() {
+    let line = request_line("_shepherd/worktree/list", json!({}));
+    assert_eq!(
+        request(&line).body,
+        ClientRequest::WorktreeList(WorktreeList::default())
+    );
+    let answer = encode_response(&HostResponse {
+        id: 3.into(),
+        result: Ok(HostResult::WorktreeList(WorktreeListOk {
+            worktrees: vec![
+                WorktreeInfo {
+                    path: "/wt/app/old".into(),
+                    branch: Some("old".into()),
+                },
+                WorktreeInfo {
+                    path: "/wt/app/detached".into(),
+                    branch: None,
+                },
+            ],
+        })),
+    });
+    assert_eq!(
+        wire_json(&answer)["result"],
+        json!({ "worktrees": [
+            { "path": "/wt/app/old", "branch": "old" },
+            { "path": "/wt/app/detached" },
+        ] })
     );
 }
 
@@ -802,6 +870,25 @@ fn successful_responses_round_trip_by_method() {
         (
             Method::WorktreeStatus,
             HostResult::WorktreeStatus(shepherd_core::wire::WorktreeStatusOk::default()),
+        ),
+        (
+            Method::WorktreeList,
+            HostResult::WorktreeList(WorktreeListOk {
+                worktrees: vec![
+                    WorktreeInfo {
+                        path: "/wt/shepherd/old-idea".into(),
+                        branch: Some("old-idea".into()),
+                    },
+                    WorktreeInfo {
+                        path: "/wt/shepherd/detached".into(),
+                        branch: None,
+                    },
+                ],
+            }),
+        ),
+        (
+            Method::WorktreeList,
+            HostResult::WorktreeList(WorktreeListOk::default()),
         ),
     ];
     for (method, result) in cases {

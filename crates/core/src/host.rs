@@ -26,6 +26,11 @@
 //! one that finished first) is recorded the same way but spawns nothing; a created worktree is left in place for
 //! cleanup to find through its record.
 //!
+//! Orphans (the finder, T26): a client can ask for the workspace's managed worktrees that no session that isn't closed
+//! runs in or is having made ([`HostEvent::ListWorktrees`], answered from `Worktrees::list_managed` off the runtime
+//! thread). A new session asked to run in one of them, with its branch, records both in its `session/created`: the
+//! worktree is the session's own from the start, so closing it treats it like one the host made.
+//!
 //! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
 //! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a
 //! [`HostCommand::RunHook`] off the runtime thread whose result comes back as [`HostEvent::HookFinished`] and is
@@ -82,10 +87,12 @@ use crate::ids::SessionId;
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{
-    BaseSpec, BaseUsed, Created, RepoRef, WorktreeError, WorktreeName, WorktreePath, WorktreeStatus,
+    BaseSpec, BaseUsed, Created, RepoRef, Worktree, WorktreeError, WorktreeName, WorktreePath,
+    WorktreeStatus,
 };
 use crate::wire::{
-    CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeStatusOk,
+    CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeInfo, WorktreeListOk,
+    WorktreeStatusOk,
 };
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
@@ -115,6 +122,9 @@ pub struct NewSessionSpec {
     pub agent: AgentKind,
     /// The client asked for `spawn.cwd`. Otherwise a session in a workspace runs in a new worktree instead.
     pub explicit_cwd: bool,
+    /// With `explicit_cwd`: `spawn.cwd` is a managed worktree on this branch (one [`HostEvent::ListWorktrees`] listed),
+    /// and the session runs in it as its own worktree. Ignored without `explicit_cwd`.
+    pub worktree_branch: Option<String>,
     pub spawn: SpawnSpec,
     /// The current workspace's hooks (`Config::workspace_hooks`). A new worktree runs their `post_create`.
     pub hooks: WorkspaceHooks,
@@ -256,6 +266,13 @@ pub enum HostEvent {
     },
     /// A client asked what removing a session's worktree would lose.
     WorktreeStatus { reply: ReplyTo, session: SessionId },
+    /// A client asked for the current workspace's managed worktrees that no open session runs in (the finder).
+    ListWorktrees { reply: ReplyTo },
+    /// The answer to a [`HostCommand::ListWorktrees`].
+    WorktreesListed {
+        reply: ReplyTo,
+        result: Result<Vec<Worktree>, WorktreeError>,
+    },
     /// Bytes a client typed into a session, and what made them. A notification: never answered.
     Input {
         session: SessionId,
@@ -413,6 +430,13 @@ pub enum HostCommand {
         path: WorktreePath,
         purpose: Inspect,
     },
+    /// List `repo`'s managed worktrees (`Worktrees::list_managed`), and feed the answer back as
+    /// [`HostEvent::WorktreesListed`] with the same `reply`. Runs off the runtime thread, like
+    /// [`HostCommand::ProbeWorkspace`].
+    ListWorktrees {
+        reply: ReplyTo,
+        repo: RepoRef,
+    },
     /// Run a pre-remove hook with the `Commands` port, and feed the result back as [`HostEvent::PreRemoveFinished`]
     /// with the same `session`, `command`, `rest` (the hooks after it), `path` and `force` (how to remove the worktree
     /// once they are done). Runs off the runtime thread, like [`HostCommand::RunHook`].
@@ -451,8 +475,10 @@ pub struct HostSession {
     pub creating_worktree: bool,
     /// Something went wrong that didn't stop it starting, e.g. a post-create hook failed, for the user.
     pub warning: Option<String>,
-    /// Its worktree, once made (`worktree/created`).
+    /// Its worktree, once made (`worktree/created`), or the one it was started in.
     pub worktree: Option<PathBuf>,
+    /// Its worktree's branch: the one it was given while its worktree is being made, then its worktree's.
+    pub branch: Option<String>,
     /// It is closing, and its worktree is being dealt with. Its PTY is gone.
     pub removing_worktree: bool,
 }
@@ -493,8 +519,10 @@ struct Entry {
     prompted: bool,
     /// The name its first user prompt gives it ([`naming::auto_name`]), if any.
     auto_name: Option<String>,
-    /// Its worktree's path and branch, from `worktree/created`.
+    /// Its worktree's path and branch, from `worktree/created`, or the `session/created` of a session started in one.
     worktree: Option<(PathBuf, String)>,
+    /// The branch its `session/created` gave it, until its worktree says.
+    branch: Option<String>,
     /// Closing it is removing its worktree (`worktree/removing`), until its `session/closed`.
     removing: bool,
 }
@@ -592,6 +620,10 @@ impl Host {
                 creating_worktree: matches!(e.phase, Phase::Starting | Phase::Hooks { .. }),
                 warning: e.warning.clone(),
                 worktree: e.worktree.as_ref().map(|(path, _)| path.clone()),
+                branch: match &e.worktree {
+                    Some((_, branch)) => Some(branch.clone()),
+                    None => e.branch.clone(),
+                },
                 removing_worktree: e.removing,
             })
             .collect()
@@ -646,11 +678,25 @@ impl Host {
                         naming::worktree_name(&name, &self.branches),
                     )
                 });
+                // A worktree the client chose to run in (the finder's orphans) is the session's own from the start.
+                let adopted = match (
+                    spec.explicit_cwd,
+                    spec.worktree_branch,
+                    spec.spawn.cwd.to_str(),
+                ) {
+                    (true, Some(branch), Some(path)) => Some((path.to_owned(), branch)),
+                    _ => None,
+                };
+                let branch = match (&worktree, &adopted) {
+                    (Some((_, name)), _) => Some(name.as_str().to_owned()),
+                    (None, Some((_, branch))) => Some(branch.clone()),
+                    (None, None) => None,
+                };
                 let created = ShepherdFrame::SessionCreated(SessionCreated {
                     name,
                     workspace: workspace.map(str::to_owned),
-                    worktree: None,
-                    branch: worktree.as_ref().map(|(_, name)| name.as_str().to_owned()),
+                    worktree: adopted.map(|(path, _)| path),
+                    branch,
                     agent: Some(spec.agent.as_str().to_owned()),
                     machine: None,
                     profile: Some(spec.profile),
@@ -719,6 +765,23 @@ impl Host {
                     purpose: Inspect::Ask(reply),
                 }]
             }
+            HostEvent::ListWorktrees { reply } => match self.workspace() {
+                Some(repo) => vec![HostCommand::ListWorktrees {
+                    reply,
+                    repo: RepoRef::new(repo),
+                }],
+                None => vec![HostCommand::Reply {
+                    to: reply,
+                    result: Ok(HostResult::WorktreeList(WorktreeListOk::default())),
+                }],
+            },
+            HostEvent::WorktreesListed { reply, result } => vec![HostCommand::Reply {
+                to: reply,
+                result: match result {
+                    Ok(worktrees) => Ok(HostResult::WorktreeList(self.orphans(worktrees))),
+                    Err(error) => Err(WireError::InvalidParams(error.to_string())),
+                },
+            }],
             HostEvent::Hook {
                 reply,
                 session,
@@ -1286,7 +1349,13 @@ impl Host {
                     renamed: false,
                     prompted: false,
                     auto_name: None,
-                    worktree: None,
+                    // A session started in an existing worktree has it from the start.
+                    worktree: created
+                        .worktree
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .zip(created.branch.clone()),
+                    branch: created.branch.clone(),
                     removing: false,
                 };
                 self.sessions.insert(id.clone(), entry);
@@ -1363,6 +1432,37 @@ impl Host {
             }
             _ => {}
         }
+    }
+
+    /// The worktrees in `listed` (a repo's managed ones) that no session that isn't closed runs in, or is having made:
+    /// told apart by path, and by branch for a worktree still being made. A path that isn't UTF-8 can't be a client's
+    /// cwd, so it is left out.
+    fn orphans(&self, listed: Vec<Worktree>) -> WorktreeListOk {
+        let live: Vec<&Entry> = self.sessions.values().filter(|e| !e.closed).collect();
+        let taken = |w: &Worktree| {
+            live.iter().any(|e| {
+                let by_path = e
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|(path, _)| path == w.path.as_path());
+                let by_branch = match (&e.branch, &w.branch) {
+                    (Some(theirs), Some(branch)) => theirs == branch.as_str(),
+                    _ => false,
+                };
+                by_path || by_branch
+            })
+        };
+        let worktrees = listed
+            .into_iter()
+            .filter(|w| !taken(w))
+            .filter_map(|w| {
+                Some(WorktreeInfo {
+                    path: w.path.as_path().to_str()?.to_owned(),
+                    branch: w.branch.map(|b| b.as_str().to_owned()),
+                })
+            })
+            .collect();
+        WorktreeListOk { worktrees }
     }
 
     /// A session that exists and isn't closed or closing.

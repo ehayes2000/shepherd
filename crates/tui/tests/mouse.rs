@@ -234,7 +234,7 @@ fn a_scrolled_list_is_hit_where_its_rows_are_drawn() {
         hit_at(&c, SHORT, Position::new(first.x, first.y - 1)),
         Some(Target::NewSession)
     );
-    // Four rows fit under the two header lines: name-12 down to name-09.
+    // Four rows fit under the three header lines: name-12 down to name-09.
     let last = at(&buf, "name-09");
     assert_eq!(hit_at(&c, SHORT, below(last, 1)), session("s9"));
     // The line below the last row is the footer.

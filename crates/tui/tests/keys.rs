@@ -355,7 +355,7 @@ fn a_resize_reports_the_sessions_pane_size_and_how_many_sessions_the_sidebar_sho
                 cols: pane.width,
                 rows: pane.height
             }),
-            // 40 lines: the two header lines, the footer, and 18 sessions of two lines.
+            // 40 lines: the three header lines, the footer, and 18 sessions of two lines.
             Intent::SidebarRows(18),
         ]
     );

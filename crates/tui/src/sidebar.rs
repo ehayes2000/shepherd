@@ -1,7 +1,8 @@
 //! The session list on the left.
 //!
-//! The first two lines are the header: the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the
-//! switcher, then a `+ New session` button (`⌂` and `+` when collapsed). Each session is two lines: its status glyph,
+//! The first three lines are the header: the search field (`⌕ Search…` across the sidebar), which opens the finder,
+//! the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the switcher, then a `+ New session` button
+//! (`⌕`, `⌂` and `+` when collapsed). Each session is two lines: its status glyph,
 //! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
 //! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
 //! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
@@ -19,7 +20,7 @@
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
 //! a right click opens the row's menu, which has Close.
 //!
-//! [`crate::hit`] reads the same geometry ([`workspace_button`], [`new_session_button`], [`visible_rows`],
+//! [`crate::hit`] reads the same geometry ([`search_field`], [`workspace_button`], [`new_session_button`], [`visible_rows`],
 //! [`close_button`], [`footer_buttons`]) that drawing uses.
 
 use std::path::Path;
@@ -41,8 +42,8 @@ const MAX_NOTICE_LINES: u16 = 3;
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
-/// Lines above the list: the workspace and `+ New session`.
-const HEADER_HEIGHT: u16 = 2;
+/// Lines above the list: the search field, the workspace and `+ New session`.
+const HEADER_HEIGHT: u16 = 3;
 const SELECTED_BG: Color = Color::DarkGray;
 const ATTENTION: Color = Color::Yellow;
 const ATTENTION_BAR: &str = "▌";
@@ -68,6 +69,10 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
         Activity::Unknown => ("·", Color::DarkGray),
     }
 }
+
+/// The search field's placeholder, and the collapsed sidebar's.
+const SEARCH: &str = "⌕ Search…";
+const SEARCH_COLLAPSED: &str = "⌕";
 
 /// The button's label, and the collapsed sidebar's.
 const NEW_SESSION: &str = "+ New session";
@@ -113,19 +118,31 @@ fn header_button(layout: &Layout, line: u16, label: &str) -> Rect {
     Rect::new(inner.x + 1, inner.y + line, width, 1)
 }
 
-/// Where the workspace button is: its label, on the first line.
-pub(crate) fn workspace_button(client: &Client, layout: &Layout) -> Rect {
-    header_button(layout, 0, workspace_label(client, layout).as_str())
+/// Where the search field is: the first line, a column in from either side (its glyph alone when collapsed).
+pub(crate) fn search_field(layout: &Layout) -> Rect {
+    if layout.collapsed {
+        return header_button(layout, 0, SEARCH_COLLAPSED);
+    }
+    let inner = inner(layout);
+    if inner.width < 3 || inner.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(inner.x + 1, inner.y, inner.width - 2, 1)
 }
 
-/// Where the `+ New session` button is: its label, on the second line.
+/// Where the workspace button is: its label, on the second line.
+pub(crate) fn workspace_button(client: &Client, layout: &Layout) -> Rect {
+    header_button(layout, 1, workspace_label(client, layout).as_str())
+}
+
+/// Where the `+ New session` button is: its label, on the third line.
 pub(crate) fn new_session_button(layout: &Layout) -> Rect {
     let label = if layout.collapsed {
         NEW_SESSION_COLLAPSED
     } else {
         NEW_SESSION
     };
-    header_button(layout, 1, label)
+    header_button(layout, 2, label)
 }
 
 /// A row's close button, drawn as `×`.
@@ -257,6 +274,15 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     for y in area.top()..area.bottom() {
         draw::set(buf, area.right() - 1, y, &shown("│"), 1, border);
     }
+    let field = search_field(layout);
+    let label = if layout.collapsed {
+        SEARCH_COLLAPSED
+    } else {
+        SEARCH
+    };
+    let placeholder = Style::new().fg(Color::Gray);
+    let width = usize::from(field.width);
+    draw::set(buf, field.x, field.y, &shown(label), width, placeholder);
     let workspace = workspace_button(client, layout);
     let style = match client.workspace() {
         Some(_) => Style::new().add_modifier(Modifier::BOLD),

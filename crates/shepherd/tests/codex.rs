@@ -155,6 +155,7 @@ impl Codex {
         let sent = client.request(ClientRequest::SessionNew(SessionNew {
             profile: Some("codex".to_owned()),
             cwd: cwd.map(str::to_owned),
+            branch: None,
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -440,6 +441,7 @@ env > "$FAKE_OUT/env"
                     ClientRequest::SessionNew(SessionNew {
                         profile: Some("codex".into()),
                         cwd: None,
+                        branch: None,
                     }),
                 );
                 let session = SessionId::new(conn.response(2)["session"].as_str().unwrap());

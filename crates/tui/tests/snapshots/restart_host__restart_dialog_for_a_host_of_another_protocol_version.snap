@@ -2,9 +2,9 @@
 source: crates/tui/tests/restart_host.rs
 expression: "text(&buffer(&c, WIDE))"
 ---
+ ⌕ Search…             │
  ⌂ choose a workspace  │
  + New session         │
-                       │
                        │
                        │
                        │
