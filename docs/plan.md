@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F22 agent session polish | fixing (CHANGES) | task/f22-agent-session-polish @ 8b98124 | 1 | Blocking: hook-sourced agent/exited (SessionEnd) must not remove run files — untested. PM: drop sweep's live param |
 | T18 attention | building | task/t18-attention @ 0fa5b1e | 0 | – |
 | T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | PM: hook trust via session-flags hooks.state + sha2 in core (decision 0016); never bypass-hook-trust |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F22 | 2 | hook-sourced agent/exited could delete a live session's run files (untested guard) |
 | F23 | 2 | sync-timeout path unguarded; pop count, guard-flag reset untested; missing_trait_methods lint added |
 
 ## Milestones
@@ -359,7 +359,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F22: Agent session polish from T17
-status: in-progress
+status: done (83099a3)
 depends: T17
 touches: core::host (new session spec), shepherd::host (run files)
 goal: Small gaps left by T17.
