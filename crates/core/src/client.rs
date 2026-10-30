@@ -14,14 +14,15 @@ use std::collections::{BTreeMap, HashMap};
 use jiff::SignedDuration;
 
 use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
-use crate::host::{Host, HostSession};
+use crate::host::{Host, HostSession, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::pty::PtySize;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
     ClientMessage, ClientNotification, ClientRequest, Hello, HostMessage, HostNotification,
     HostResult, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request, SessionClose,
-    SessionInput, SessionNew, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
+    SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe,
+    SubscribeFrom, WireError,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -138,6 +139,16 @@ pub struct Cell {
 pub enum MenuItem {
     Rename,
     Close,
+    /// Resume an exited session's agent where it left off. Offered only on exited sessions.
+    Resume,
+}
+
+/// One line of the open context menu: [`Client::menu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub item: MenuItem,
+    /// Why it can't be chosen, for the user. `None` when it can.
+    pub unavailable: Option<ResumeUnavailable>,
 }
 
 /// What is open over everything else. It takes the keys and the clicks until it's answered or dismissed.
@@ -196,6 +207,8 @@ pub struct ClientSession {
     pub activity: Activity,
     /// It wants the user: it started waiting on them (blocked, or idle) since the user last had it selected.
     pub attention: bool,
+    /// Whether it can be resumed, see [`Host::resume_target`].
+    pub resume: Result<(), ResumeUnavailable>,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -282,6 +295,27 @@ impl Client {
 
     pub fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
+    }
+
+    /// The lines of the open context menu, in order: rename and close, then resume on an exited session, saying why
+    /// when it can't be resumed. Empty when no menu is open.
+    pub fn menu(&self) -> Vec<MenuEntry> {
+        let Some(Popup::Menu { session, .. }) = &self.popup else {
+            return Vec::new();
+        };
+        let available = |item| MenuEntry {
+            item,
+            unavailable: None,
+        };
+        let mut entries = vec![available(MenuItem::Rename), available(MenuItem::Close)];
+        match self.sessions.iter().find(|s| &s.id == session) {
+            Some(s) if s.exited => entries.push(MenuEntry {
+                item: MenuItem::Resume,
+                unavailable: s.resume.err(),
+            }),
+            _ => {}
+        }
+        entries
     }
 
     pub fn connection(&self) -> &Connection {
@@ -616,6 +650,7 @@ impl Client {
                     name: s.name,
                     created: s.created,
                     exited: s.exited,
+                    resume: s.resume,
                 }
             })
             .collect();
@@ -823,6 +858,7 @@ impl Client {
                 match item {
                     MenuItem::Rename => self.begin_rename(session),
                     MenuItem::Close => self.begin_close(session),
+                    MenuItem::Resume => return self.resume(session),
                 }
                 Vec::new()
             }
@@ -859,6 +895,35 @@ impl Client {
         if self.listed(&session) {
             self.popup = Some(Popup::ConfirmClose { session });
         }
+    }
+
+    /// Asks the host to resume exited `session`, then selects it and sizes it to the view: its new PTY starts at the
+    /// host's initial size, and the host handles the request before the resize. A session that can't be resumed gets
+    /// a notice saying why instead; a running or unlisted one, nothing.
+    fn resume(&mut self, session: SessionId) -> Vec<ClientCommand> {
+        let Some(listed) = self.sessions.iter().find(|s| s.id == session) else {
+            return Vec::new();
+        };
+        match listed.resume {
+            Ok(()) => {}
+            Err(ResumeUnavailable::Running) => return Vec::new(),
+            Err(why) => {
+                self.notice = Some(format!("can't resume: {why}"));
+                return Vec::new();
+            }
+        }
+        let mut commands = self.user_request(ClientRequest::SessionResume(SessionResume {
+            session: session.clone(),
+        }));
+        if commands.is_empty() {
+            return commands;
+        }
+        self.chosen = true;
+        self.selected = Some(session);
+        self.mark_seen();
+        self.scroll_to_selected();
+        commands.extend(self.resize_selected());
+        commands
     }
 
     /// Starts a session running `profile`, or the host's default.

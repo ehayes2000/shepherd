@@ -18,7 +18,7 @@ use shepherd_core::config::RawConfig;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogId, PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
-use shepherd_core::wire::{ClientRequest, SessionClose, SessionNew, WireError};
+use shepherd_core::wire::{ClientRequest, SessionClose, SessionNew, SessionResume, WireError};
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::FakeNetwork;
@@ -523,6 +523,109 @@ fn a_claude_sessions_status_follows_its_hooks_through_a_permission_prompt() {
         }
     }
     assert_eq!(seen, ["Working", "NeedsPermission", "Working", "Idle"]);
+}
+
+// ---------- resume ----------
+
+impl Claude {
+    /// Asks to resume `session`, and returns the host's answer.
+    fn resume(&mut self, client: &mut FakeClient, session: &SessionId) -> Result<Value, WireError> {
+        let sent = client.request(ClientRequest::SessionResume(SessionResume {
+            session: session.clone(),
+        }));
+        self.h.step();
+        response(&client.take(), &sent)
+    }
+
+    /// Types hook fixture `name` into `session`'s fake `claude` and waits for its hook to be answered.
+    fn hook(&mut self, client: &mut FakeClient, session: &SessionId, name: &str) {
+        let mut line = serde_json::to_vec(&fixture(name)).unwrap();
+        line.push(b'\r');
+        client.input(session, &line);
+        self.h.step();
+        assert_eq!(self.run_hooks(), vec![Ok(())], "{name}");
+    }
+
+    fn all_spawned(&self) -> Vec<SpawnSpec> {
+        self.spawned.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn an_exited_claude_session_resumes_its_agent_session_in_the_same_session_after_a_restart() {
+    let mut c = Claude::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("claude"), dir.path().to_str())
+        .unwrap();
+    // `SessionStart.startup` reports agent session `abc123`.
+    c.hook(&mut client, &session, "SessionStart.startup");
+    c.h.restart();
+    assert!(c.h.host().sessions()[0].exited);
+
+    let mut client = c.h.connect();
+    assert_eq!(c.resume(&mut client, &session), Ok(json!({})));
+
+    let spawned = c.all_spawned();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+    let resumed = &spawned[1];
+    let settings = c.h.run_root().join(session.as_str()).join("settings.json");
+    assert_eq!(
+        resumed.args,
+        [
+            "--settings",
+            settings.to_str().unwrap(),
+            "--resume",
+            "abc123"
+        ]
+    );
+    assert_eq!(resumed.cwd, dir.path());
+    assert_eq!(env_var(resumed, "SHEPHERD_SESSION"), Some(session.as_str()));
+    // The hooks are injected again, exactly as for a new session.
+    assert_eq!(
+        read_json(&settings)["hooks"]["Stop"],
+        json!([{ "hooks": [{ "type": "command", "command": SHEPHERD_EXE, "args": ["hook", "claude-code"] }] }])
+    );
+    // Still the one session, running again, and its log goes on: the resumed agent's hooks land in it.
+    let listed = c.h.host().sessions();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(!listed[0].exited);
+    let mut client = c.h.connect();
+    c.hook(&mut client, &session, "UserPromptSubmit");
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    let methods: Vec<&str> = log.iter().filter_map(|e| e.frame().method()).collect();
+    assert_eq!(
+        methods[..4],
+        [
+            "_shepherd/session/created",
+            "_shepherd/agent/started",
+            "_shepherd/agent/exited",
+            "_shepherd/agent/started",
+        ],
+        "{methods:?}"
+    );
+    assert!(methods[4..].contains(&"session/prompt"), "{methods:?}");
+}
+
+#[test]
+fn a_claude_session_whose_agent_never_reported_its_session_cannot_be_resumed() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    client.input(&session, b"/exit\r");
+    c.h.step();
+
+    let result = c.resume(&mut client, &session);
+    assert!(
+        matches!(&result, Err(WireError::InvalidParams(m)) if m.contains("no agent session id")),
+        "{result:?}"
+    );
+    assert_eq!(c.all_spawned().len(), 1);
+    assert!(!c.h.run_root().join(session.as_str()).exists());
 }
 
 // ---------- the real adapters ----------

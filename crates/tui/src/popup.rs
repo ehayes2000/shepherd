@@ -2,7 +2,8 @@
 //! profile picker for a new session.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
-//! where it was asked for, moved in to fit the window. [`place`] says where a popup and its controls are, for both
+//! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
+//! is drawn dim with the reason, and isn't a control. [`place`] says where a popup and its controls are, for both
 //! drawing and [`crate::hit`].
 
 use ratatui::buffer::Buffer;
@@ -10,7 +11,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
-use shepherd_core::client::{Cell, Client, MenuItem, Popup};
+use shepherd_core::client::{Cell, Client, MenuEntry, MenuItem, Popup};
 
 use crate::layout::Target;
 
@@ -36,9 +37,7 @@ const MOUSE: [&str; 6] = [
     "and Terminal.app).",
 ];
 
-/// The menu's items, with their labels as drawn.
-const MENU: [(MenuItem, &str); 2] = [(MenuItem::Rename, " Rename"), (MenuItem::Close, " Close")];
-/// The menu's width, its border included.
+/// The menu's narrowest width, its border included.
 const MENU_WIDTH: u16 = 10;
 /// A dialog's width, its border included.
 const DIALOG_WIDTH: u16 = 40;
@@ -63,6 +62,8 @@ pub(crate) struct Placed {
     /// Its box, border included.
     pub area: Rect,
     pub controls: Vec<Control>,
+    /// Lines drawn dim that aren't controls: a menu's items that can't be chosen.
+    pub disabled: Vec<(Position, String)>,
 }
 
 /// Where the open popup, if any, and its controls are in `window`.
@@ -83,7 +84,7 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
             centered(window, DIALOG_WIDTH, DIALOG_HEIGHT),
             &[("[Close]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
         ),
-        Popup::Menu { at, .. } => menu(*at, window),
+        Popup::Menu { at, .. } => menu(&client.menu(), *at, window),
         Popup::PickProfile => pick_profile(client, window),
     })
 }
@@ -109,27 +110,55 @@ fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
         }
         controls.reverse();
     }
-    Placed { area, controls }
+    Placed {
+        area,
+        controls,
+        disabled: Vec::new(),
+    }
+}
+
+/// How a menu entry is drawn: its name, and why it can't be chosen if it can't.
+fn menu_label(entry: &MenuEntry) -> String {
+    let name = match entry.item {
+        MenuItem::Rename => "Rename",
+        MenuItem::Close => "Close",
+        MenuItem::Resume => "Resume",
+    };
+    match entry.unavailable {
+        None => format!(" {name}"),
+        Some(why) => format!(" {name} ({why})"),
+    }
 }
 
 /// The menu, its top-left corner at `at` or as near as fits in `window`. Each item is a whole line of it.
-fn menu(at: Cell, window: Rect) -> Placed {
-    let width = MENU_WIDTH.min(window.width);
-    let height = (MENU.len() as u16 + 2).min(window.height);
+fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
+    let labels: Vec<String> = entries.iter().map(menu_label).collect();
+    // A column after the longest label, and the border.
+    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let wanted = u16::try_from(longest + 3).unwrap_or(u16::MAX);
+    let width = wanted.max(MENU_WIDTH).min(window.width);
+    let height = (entries.len() as u16 + 2).min(window.height);
     let x = at.col.min(window.right() - width).max(window.x);
     let y = at.row.min(window.bottom() - height).max(window.y);
     let area = Rect::new(x, y, width, height);
     let inside = inner(area);
-    let controls = MENU
-        .iter()
-        .zip(inside.y..inside.bottom())
-        .map(|((item, label), y)| Control {
-            area: Rect::new(inside.x, y, inside.width, 1),
-            target: Target::MenuItem(*item),
-            label: (*label).to_owned(),
-        })
-        .collect();
-    Placed { area, controls }
+    let mut placed = Placed {
+        area,
+        controls: Vec::new(),
+        disabled: Vec::new(),
+    };
+    for ((entry, label), y) in entries.iter().zip(labels).zip(inside.y..inside.bottom()) {
+        if entry.unavailable.is_some() {
+            placed.disabled.push((Position::new(inside.x, y), label));
+        } else {
+            placed.controls.push(Control {
+                area: Rect::new(inside.x, y, inside.width, 1),
+                target: Target::MenuItem(entry.item),
+                label,
+            });
+        }
+    }
+    placed
 }
 
 /// The profile picker: a prompt, then one row per profile (the default first and marked), each a whole line of the
@@ -216,6 +245,11 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         };
         let at = control.area;
         buf.set_stringn(at.x, at.y, &control.label, usize::from(at.width), style);
+    }
+    let dim = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
+    for (at, label) in &placed.disabled {
+        let room = usize::from(inside.right().saturating_sub(at.x));
+        buf.set_stringn(at.x, at.y, label, room, dim);
     }
     cursor
 }

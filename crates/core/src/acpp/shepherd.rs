@@ -97,6 +97,12 @@ pub struct SessionCreated {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<MachineId>,
+    /// The agent profile the session was started with, by name. Resume runs it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The directory the agent was started in. Resume starts it there again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

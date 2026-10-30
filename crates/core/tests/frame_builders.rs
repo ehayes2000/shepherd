@@ -443,18 +443,24 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             arb_opt_string(),
             arb_opt_string(),
             arb_opt_string(),
+            arb_opt_string(),
+            arb_opt_string(),
             arb_opt_string()
         )
-            .prop_map(|(name, workspace, worktree, branch, agent, machine)| {
-                ShepherdFrame::SessionCreated(SessionCreated {
-                    name,
-                    workspace,
-                    worktree,
-                    branch,
-                    agent,
-                    machine: machine.map(MachineId::new),
-                })
-            }),
+            .prop_map(
+                |(name, workspace, worktree, branch, agent, machine, profile, cwd)| {
+                    ShepherdFrame::SessionCreated(SessionCreated {
+                        name,
+                        workspace,
+                        worktree,
+                        branch,
+                        agent,
+                        machine: machine.map(MachineId::new),
+                        profile,
+                        cwd,
+                    })
+                }
+            ),
         (arb_string(), any::<bool>())
             .prop_map(|(name, auto)| ShepherdFrame::SessionRenamed(SessionRenamed { name, auto })),
         any::<bool>().prop_map(

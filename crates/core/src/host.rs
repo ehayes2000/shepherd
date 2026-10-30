@@ -1,4 +1,10 @@
-//! The host's session registry: which sessions exist, their names, and whether their PTY has exited.
+//! The host's session registry: which sessions exist, their names, whether their PTY has exited, and whether an
+//! exited one can be resumed.
+//!
+//! Resume: a session can be resumed when its PTY has exited, it runs an agent that can resume (Claude Code or Codex),
+//! its `session/created` recorded the profile and cwd it started with, and its agent reported its own session id in an
+//! `agent/started` (the latest one wins: `/clear` starts a new agent session in the same process). Resuming appends
+//! the host's own `agent/started` and spawns the agent again in the same session, so its log continues.
 //!
 //! Host state is only a fold over `_shepherd/*` frames (`docs/acpp.md`, "State is a fold"). [`Host::handle`] reads
 //! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
@@ -7,12 +13,13 @@
 pub mod launch;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde_json::Value;
 
 use crate::acpp::{
-    AgentExited, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated, SessionRenamed,
-    ShepherdFrame, Source, SourceKind, Timestamp,
+    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
+    SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp,
 };
 use crate::agents::Translators;
 use crate::config::AgentKind;
@@ -46,6 +53,46 @@ pub struct NewSessionSpec {
     /// What kind of agent that profile runs, recorded in `session/created`.
     pub agent: AgentKind,
     pub spawn: SpawnSpec,
+}
+
+/// What to resume an exited session with. The runtime builds it from the profile in [`Host::resume_target`]
+/// (`launch::plan_resume`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSpec {
+    /// The name of the agent profile it runs, which must be the one the session started with.
+    pub profile: String,
+    /// What kind of agent that profile runs now, which must be what the session started with.
+    pub agent: AgentKind,
+    pub spawn: SpawnSpec,
+}
+
+/// What resuming a session runs: [`Host::resume_target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeTarget {
+    /// The agent profile the session started with, by name.
+    pub profile: String,
+    pub agent: AgentKind,
+    /// Where the session's agent started.
+    pub cwd: PathBuf,
+    /// The agent's own id for its session, to resume.
+    pub agent_session_id: String,
+}
+
+/// Why a session can't be resumed. Its text is short, for the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeUnavailable {
+    /// Its PTY is still running.
+    #[error("still running")]
+    Running,
+    /// It doesn't run an agent that can resume, e.g. a shell.
+    #[error("not an agent session")]
+    NotAnAgent,
+    /// Its `session/created` predates resume: it doesn't say which profile and directory to resume with.
+    #[error("started before resume")]
+    NotRecorded,
+    /// Its agent never reported its own session id.
+    #[error("no agent session id")]
+    NoAgentSession,
 }
 
 /// Something that happened, for the host to decide on.
@@ -89,6 +136,12 @@ pub enum HostEvent {
     PtyExited {
         session: SessionId,
         code: Option<i32>,
+    },
+    /// A client asked to resume an exited session's agent.
+    Resume {
+        reply: ReplyTo,
+        session: SessionId,
+        spec: ResumeSpec,
     },
 }
 
@@ -135,6 +188,8 @@ pub struct HostSession {
     pub created: Timestamp,
     /// Its PTY process has ended.
     pub exited: bool,
+    /// Whether it can be resumed, see [`Host::resume_target`].
+    pub resume: Result<(), ResumeUnavailable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +199,37 @@ struct Entry {
     created: Timestamp,
     exited: bool,
     closed: bool,
+    /// From `session/created`: what it runs, and how it was started (absent from logs older than resume).
+    agent: Option<AgentKind>,
+    profile: Option<String>,
+    cwd: Option<PathBuf>,
+    /// The agent's own session id, from the latest `agent/started` that had one.
+    agent_session_id: Option<String>,
+}
+
+impl Entry {
+    fn resume_target(&self) -> Result<ResumeTarget, ResumeUnavailable> {
+        if !self.exited {
+            return Err(ResumeUnavailable::Running);
+        }
+        let agent = self
+            .agent
+            .filter(|a| matches!(a, AgentKind::ClaudeCode | AgentKind::Codex))
+            .ok_or(ResumeUnavailable::NotAnAgent)?;
+        let (Some(profile), Some(cwd)) = (&self.profile, &self.cwd) else {
+            return Err(ResumeUnavailable::NotRecorded);
+        };
+        let agent_session_id = self
+            .agent_session_id
+            .clone()
+            .ok_or(ResumeUnavailable::NoAgentSession)?;
+        Ok(ResumeTarget {
+            profile: profile.clone(),
+            agent,
+            cwd: cwd.clone(),
+            agent_session_id,
+        })
+    }
 }
 
 /// The host's state and decisions.
@@ -183,8 +269,14 @@ impl Host {
                 name: e.name.clone(),
                 created: e.created.clone(),
                 exited: e.exited,
+                resume: e.resume_target().map(|_| ()),
             })
             .collect()
+    }
+
+    /// What resuming open session `id` runs, or why it can't be resumed. `None` for a session that isn't open.
+    pub fn resume_target(&self, id: &SessionId) -> Option<Result<ResumeTarget, ResumeUnavailable>> {
+        self.open(id).map(Entry::resume_target)
     }
 
     /// Decides what to do about `event`. Never changes state, see the type docs.
@@ -211,6 +303,9 @@ impl Host {
                     branch: None,
                     agent: Some(spec.agent.as_str().to_owned()),
                     machine: None,
+                    profile: Some(spec.profile),
+                    // A cwd that isn't UTF-8 isn't recorded, so the session can't be resumed.
+                    cwd: spec.spawn.cwd.to_str().map(str::to_owned),
                 });
                 vec![
                     append(&id, created),
@@ -292,13 +387,53 @@ impl Host {
                 let exited = ShepherdFrame::AgentExited(AgentExited { code, signal: None });
                 vec![append(&session, exited)]
             }
+            HostEvent::Resume {
+                reply,
+                session,
+                spec,
+            } => {
+                let target = match self.resume_target(&session) {
+                    None => return vec![unknown_session(reply, session)],
+                    Some(Err(why)) => {
+                        let error =
+                            WireError::InvalidParams(format!("can't resume {session}: {why}"));
+                        return vec![reply_err(reply, error)];
+                    }
+                    Some(Ok(target)) => target,
+                };
+                if spec.profile != target.profile || spec.agent != target.agent {
+                    let error = WireError::InvalidParams(format!(
+                        "can't resume {session}: it started as profile `{}` ({}), not `{}` ({})",
+                        target.profile,
+                        target.agent.as_str(),
+                        spec.profile,
+                        spec.agent.as_str()
+                    ));
+                    return vec![reply_err(reply, error)];
+                }
+                let started = ShepherdFrame::AgentStarted(AgentStarted {
+                    agent: target.agent.as_str().to_owned(),
+                    agent_session_id: Some(target.agent_session_id),
+                    pid: None,
+                    command: None,
+                });
+                vec![
+                    append(&session, started),
+                    HostCommand::SpawnPty {
+                        session,
+                        spec: spec.spawn,
+                    },
+                    ack(reply),
+                ]
+            }
         }
     }
 
     /// Folds one log entry into the state. Entries the registry doesn't read change nothing, and no entry panics.
     ///
     /// Only the host's own `agent/exited` (source `shepherd`) marks a PTY exited: one from a hook is about an agent
-    /// the shell ran, and the shell is still running.
+    /// the shell ran, and the shell is still running. Likewise only the host's own `agent/started` (a resume) marks
+    /// it running again. An `agent/started` from any source records its agent session id.
     pub fn apply(&mut self, env: &Envelope) {
         let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
             return;
@@ -313,6 +448,10 @@ impl Host {
                     created: env.ts().clone(),
                     exited: false,
                     closed: false,
+                    agent: created.agent.as_deref().and_then(AgentKind::parse),
+                    profile: created.profile.clone(),
+                    cwd: created.cwd.as_ref().map(PathBuf::from),
+                    agent_session_id: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -329,6 +468,16 @@ impl Host {
             ShepherdFrame::AgentExited(_) if env.source().kind == SourceKind::Shepherd => {
                 if let Some(entry) = self.sessions.get_mut(id) {
                     entry.exited = true;
+                }
+            }
+            ShepherdFrame::AgentStarted(started) => {
+                if let Some(entry) = self.sessions.get_mut(id) {
+                    if env.source().kind == SourceKind::Shepherd {
+                        entry.exited = false;
+                    }
+                    if let Some(agent_session) = &started.agent_session_id {
+                        entry.agent_session_id = Some(agent_session.clone());
+                    }
                 }
             }
             _ => {}

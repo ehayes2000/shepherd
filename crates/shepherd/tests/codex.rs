@@ -16,7 +16,7 @@ use shepherd_core::agents::codex;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
-use shepherd_core::wire::{ClientRequest, SessionNew, WireError};
+use shepherd_core::wire::{ClientRequest, SessionNew, SessionResume, WireError};
 use shepherd_testkit::fakes::link::FakeNetwork;
 use shepherd_testkit::fakes::pty::ProgramInput;
 use support::{FakeClient, HOME, HostHarness, Program, SHEPHERD_EXE, SOCKET, entries, response};
@@ -271,6 +271,41 @@ fn a_codex_sessions_status_follows_its_hooks_through_a_permission_prompt_and_an_
             "Idle"
         ]
     );
+}
+
+#[test]
+fn an_exited_codex_session_resumes_with_the_resume_subcommand_and_the_same_trusted_hooks() {
+    let mut c = Codex::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client).unwrap();
+    let mut line = serde_json::to_vec(&fixture("SessionStart.startup")).unwrap();
+    line.push(b'\r');
+    client.input(&session, &line);
+    c.h.step();
+    assert_eq!(c.run_hooks(), vec![Ok(())]);
+    let first = c.spawned();
+    c.h.restart();
+
+    let mut client = c.h.connect();
+    let sent = client.request(ClientRequest::SessionResume(SessionResume {
+        session: session.clone(),
+    }));
+    c.h.step();
+    assert_eq!(
+        response(&client.take(), &sent),
+        Ok(Value::Object(Default::default()))
+    );
+
+    let spawned = c.spawned.lock().unwrap().clone();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+    let resumed = &spawned[1];
+    assert_eq!(resumed.args[..2], first.args[..2]);
+    assert_eq!(
+        resumed.args[2..],
+        ["resume", "019a0000-0000-7000-8000-00000000c0de"]
+    );
+    assert_eq!(resumed.cwd, first.cwd);
+    assert_eq!(resumed.env, first.env);
 }
 
 // ---------- the real adapters ----------

@@ -366,3 +366,63 @@ fn a_new_session_without_a_profile_uses_the_default_agent() {
     );
     assert_eq!(config.profile_or_default(Some("nope")), None);
 }
+
+// ---------- resume ----------
+
+fn plan_resume(profile: &AgentProfile, agent_session: &str) -> Launch {
+    launch::plan_resume(profile, &ctx(), agent_session).unwrap_or_else(|e| panic!("{e}"))
+}
+
+#[test]
+fn resuming_a_claude_session_adds_the_resume_flag_after_the_settings_and_before_the_profiles_args()
+{
+    let p = profile(AgentKind::ClaudeCode, "claude", &["--model", "opus"], &[]);
+    let launch = plan_resume(&p, "abc123");
+    assert_eq!(
+        launch.spawn.args,
+        [
+            "--settings",
+            "/home/me/.shepherd/run/s_1/settings.json",
+            "--resume",
+            "abc123",
+            "--model",
+            "opus"
+        ]
+    );
+}
+
+#[test]
+fn resuming_a_codex_session_runs_the_resume_subcommand_after_the_hooks_override() {
+    let p = profile(AgentKind::Codex, "codex", &["--model", "o3"], &[]);
+    let launch = plan_resume(&p, "019a-uuid");
+    let args = &launch.spawn.args;
+    assert_eq!(args.len(), 6, "{args:?}");
+    assert_eq!(args[0], "-c");
+    assert!(args[1].starts_with("hooks="), "{args:?}");
+    assert_eq!(args[2..], ["resume", "019a-uuid", "--model", "o3"]);
+}
+
+#[test]
+fn a_resumed_session_gets_the_same_hooks_files_env_and_cwd_as_a_new_one() {
+    for p in [
+        profile(AgentKind::ClaudeCode, "claude", &[], &[("A", "1")]),
+        profile(AgentKind::Codex, "codex", &[], &[("A", "1")]),
+    ] {
+        let new = plan(&p);
+        let resumed = plan_resume(&p, "id-1");
+        assert_eq!(resumed.files, new.files, "{:?}", p.kind);
+        assert_eq!(resumed.spawn.env, new.spawn.env, "{:?}", p.kind);
+        assert_eq!(resumed.spawn.cwd, new.spawn.cwd, "{:?}", p.kind);
+        assert_eq!(resumed.spawn.command, new.spawn.command, "{:?}", p.kind);
+        assert_eq!(resumed.spawn.args[..2], new.spawn.args[..2], "{:?}", p.kind);
+    }
+}
+
+#[test]
+fn a_shell_session_cannot_be_resumed() {
+    let p = profile(AgentKind::Shell, "zsh", &[], &[]);
+    assert_eq!(
+        launch::plan_resume(&p, &ctx(), "x"),
+        Err(LaunchError::CannotResume(AgentKind::Shell))
+    );
+}

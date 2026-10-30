@@ -4,17 +4,20 @@ use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind, Timestamp};
 use shepherd_core::client::{
     Cell, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
-    MAX_CONNECT_ATTEMPTS, MenuItem, Popup,
+    MAX_CONNECT_ATTEMPTS, MenuEntry, MenuItem, Popup,
 };
 use shepherd_core::config::AgentKind;
+use shepherd_core::host::ResumeUnavailable;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
-    ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput, SessionNew,
-    SessionRename, SessionResize, Subscribe, WireError,
+    ClientMessage, ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput,
+    SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError,
 };
-use shepherd_testkit::builders::{ClientDriver, log_entry, notifications, requests, ts};
+use shepherd_testkit::builders::{
+    ClientDriver, claude_session_spec, log_entry, notifications, requests, ts,
+};
 
 fn connected() -> ClientEvent {
     connected_at(0)
@@ -860,6 +863,138 @@ fn confirming_a_menu_does_nothing_but_close_it() {
     });
     assert_eq!(c.user(Intent::Confirm), []);
     assert_eq!(c.client().popup(), None);
+}
+
+// ---------- resume ----------
+
+/// A connected client sent shell session `s1`, then Claude Code session `s2` whose agent reported `agent_session`
+/// and exited.
+fn with_exited_claude(agent_session: Option<&str>) -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.host().new_session_with("s2", claude_session_spec());
+    c.host().agent_started("s2", "claude-code", agent_session);
+    c.host().pty_exited("s2", Some(0));
+    c.sync();
+    c
+}
+
+fn open_menu(c: &mut ClientDriver, id: &str) {
+    c.user(Intent::OpenMenu {
+        session: sid(id),
+        at: cell(1, 1),
+    });
+}
+
+fn entry(item: MenuItem, unavailable: Option<ResumeUnavailable>) -> MenuEntry {
+    MenuEntry { item, unavailable }
+}
+
+#[test]
+fn a_running_sessions_menu_offers_rename_and_close() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    assert_eq!(c.client().menu(), [], "no menu open");
+    open_menu(&mut c, "s1");
+    assert_eq!(
+        c.client().menu(),
+        [entry(MenuItem::Rename, None), entry(MenuItem::Close, None)]
+    );
+}
+
+#[test]
+fn an_exited_agent_sessions_menu_offers_resume() {
+    let mut c = with_exited_claude(Some("abc123"));
+    assert_eq!(c.client().sessions()[0].resume, Ok(()));
+    open_menu(&mut c, "s2");
+    assert_eq!(
+        c.client().menu(),
+        [
+            entry(MenuItem::Rename, None),
+            entry(MenuItem::Close, None),
+            entry(MenuItem::Resume, None),
+        ]
+    );
+}
+
+#[test]
+fn an_exited_session_with_no_agent_session_id_shows_resume_unavailable() {
+    let mut c = with_exited_claude(None);
+    open_menu(&mut c, "s2");
+    assert_eq!(
+        c.client().menu().last(),
+        Some(&entry(
+            MenuItem::Resume,
+            Some(ResumeUnavailable::NoAgentSession)
+        ))
+    );
+}
+
+#[test]
+fn choosing_resume_asks_the_host_to_resume_the_menus_session() {
+    let mut c = with_exited_claude(Some("abc123"));
+    open_menu(&mut c, "s2");
+    let sent = c.user(Intent::MenuChoose(MenuItem::Resume));
+    assert_eq!(
+        bodies(&sent),
+        [ClientRequest::SessionResume(SessionResume {
+            session: sid("s2")
+        })]
+    );
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn choosing_an_unavailable_resume_says_why_and_sends_nothing() {
+    let mut c = with_exited_claude(None);
+    open_menu(&mut c, "s2");
+    assert_eq!(c.user(Intent::MenuChoose(MenuItem::Resume)), []);
+    assert_eq!(
+        c.client().notice(),
+        Some("can't resume: no agent session id")
+    );
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn choosing_resume_on_a_running_session_sends_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    open_menu(&mut c, "s1");
+    assert_eq!(c.user(Intent::MenuChoose(MenuItem::Resume)), []);
+}
+
+#[test]
+fn a_resumed_session_is_selected_and_sized_to_the_view_after_the_resume() {
+    let mut c = with_exited_claude(Some("abc123"));
+    c.user(Intent::Resize(PtySize {
+        cols: 100,
+        rows: 30,
+    }));
+    c.user(Intent::SelectSession(sid("s1")));
+    open_menu(&mut c, "s2");
+    let sent = c.user(Intent::MenuChoose(MenuItem::Resume));
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    // The host handles a connection's messages in order: the resize reaches the new PTY.
+    assert!(
+        matches!(
+            &sent[..],
+            [ClientCommand::Send(ClientMessage::Request(_)), ClientCommand::Send(ClientMessage::Notification(n))]
+                if *n == resize("s2", 100, 30)
+        ),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn resuming_the_selected_session_resizes_it_again() {
+    // Its new PTY starts at the host's initial size.
+    let mut c = with_exited_claude(Some("abc123"));
+    c.user(Intent::Resize(PtySize {
+        cols: 100,
+        rows: 30,
+    }));
+    c.user(Intent::SelectSession(sid("s2")));
+    open_menu(&mut c, "s2");
+    let sent = c.user(Intent::MenuChoose(MenuItem::Resume));
+    assert_eq!(notifications(&sent), [&resize("s2", 100, 30)]);
 }
 
 #[test]

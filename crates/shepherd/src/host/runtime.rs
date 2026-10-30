@@ -20,7 +20,8 @@
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
-//!   `session/closed` is appended. At startup, when no PTY is running, every leftover run directory is swept.
+//!   `session/closed` is appended. At startup, when no PTY is running, every leftover run directory is swept. A
+//!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ use shepherd_core::acpp::{
 use shepherd_core::agents::Translators;
 use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
-use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
+use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
@@ -736,6 +737,24 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                     session: close.session,
                 });
             }
+            ClientRequest::SessionResume(resume) => {
+                let reply = self.reply_to(conn, id);
+                let session = resume.session;
+                let (spec, files) = match self.plan_resume(&session) {
+                    Ok(planned) => planned,
+                    Err(error) => return self.reply(reply, Err(error)),
+                };
+                if !files.is_empty() {
+                    self.pending_run_files.insert(session.clone(), files);
+                }
+                self.dispatch(HostEvent::Resume {
+                    reply,
+                    session: session.clone(),
+                    spec,
+                });
+                // Left over only if core refused the resume and nothing was spawned.
+                self.pending_run_files.remove(&session);
+            }
         }
     }
 
@@ -766,6 +785,51 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let launch = launch::plan(profile, &ctx).map_err(|e| WireError::Internal(e.to_string()))?;
         let spec = NewSessionSpec {
             name: None,
+            profile: profile.name.clone(),
+            agent: profile.kind,
+            spawn: launch.spawn,
+        };
+        Ok((spec, launch.files))
+    }
+
+    /// What resuming `session` runs, and the run files to write before spawning it: its profile, as it is in the
+    /// config now, planned with the agent session to resume in the directory it started in (see
+    /// [`Host::resume_target`]). Core checks the profile is still the kind the session started with.
+    fn plan_resume(&self, session: &SessionId) -> Result<(ResumeSpec, Vec<RunFile>), WireError> {
+        let target = match self.host.resume_target(session) {
+            None => {
+                return Err(WireError::UnknownSession {
+                    session: session.clone(),
+                });
+            }
+            Some(Err(why)) => {
+                return Err(WireError::InvalidParams(format!(
+                    "can't resume {session}: {why}"
+                )));
+            }
+            Some(Ok(target)) => target,
+        };
+        let profile = self
+            .settings
+            .config
+            .profile(&target.profile)
+            .ok_or_else(|| {
+                WireError::InvalidParams(format!(
+                    "can't resume {session}: profile `{}` no longer exists",
+                    target.profile
+                ))
+            })?;
+        let ctx = LaunchContext {
+            session: session.clone(),
+            cwd: target.cwd,
+            size: INITIAL_SIZE,
+            run_dir: run_files::session_dir(&self.settings.run_root, session),
+            shepherd: self.settings.shepherd.clone(),
+            socket: self.settings.socket.clone(),
+        };
+        let launch = launch::plan_resume(profile, &ctx, &target.agent_session_id)
+            .map_err(|e| WireError::InvalidParams(format!("can't resume {session}: {e}")))?;
+        let spec = ResumeSpec {
             profile: profile.name.clone(),
             agent: profile.kind,
             spawn: launch.spawn,
