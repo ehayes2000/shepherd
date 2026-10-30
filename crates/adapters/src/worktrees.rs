@@ -928,10 +928,14 @@ impl Worktrees for GitWorktrees {
             // all the same. Never cancelled (it is short). Timing out means it waited, which it must never do: the
             // create fails, and a lock it may have left is left alone, as it can't be told from another process's.
             let old = tracking_before.as_deref().unwrap_or("");
+            // `--no-deref`: should `origin/<default>` be a symbolic ref (say, to the user's own branch), this never
+            // moves what it points at. (Finding the default branch refuses such a ref today, since git resolves
+            // `origin/HEAD` through it; this doesn't rely on that.)
             let update = [
                 "-c",
                 NO_REF_LOCK_WAIT,
                 "update-ref",
+                "--no-deref",
                 &tracking,
                 base_oid,
                 old,
@@ -2631,6 +2635,24 @@ close $out;
     /// Someone moves `origin/<default>` while the fetch runs (here the "ssh" serving it, as the user's own fetch might):
     /// moving it to what this fetch got would undo that, so it is left where they put it, and the worktree starts from
     /// the fetched commit all the same.
+    /// `origin/<default>` missing before the create (`origin/HEAD` still names it) is made at the fetched commit.
+    #[test]
+    fn a_missing_origin_default_is_made_at_the_fetched_commit() {
+        let f = GitFixture::new();
+        f.delete_remote_tracking_default();
+        f.advance_origin();
+        let created = f
+            .port
+            .create(&f.repo(), &name("fresh"), BaseSpec::OriginDefault)
+            .unwrap();
+        let fetched = BaseUsed::Origin {
+            branch: BranchName::new(DEFAULT),
+        };
+        assert_eq!(created.base, fetched);
+        let tracking = format!("refs/remotes/origin/{DEFAULT}");
+        assert_eq!(f.git(&f.app(), &["rev-parse", &tracking]), f.origin_tip());
+    }
+
     #[test]
     fn moving_origin_default_never_undoes_a_move_made_meanwhile() {
         let f = GitFixture::new();

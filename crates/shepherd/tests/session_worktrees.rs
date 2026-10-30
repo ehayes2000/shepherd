@@ -353,6 +353,7 @@ fn a_create_that_finishes_as_the_host_shuts_down_is_recorded_and_spawns_nothing(
         profile: None,
         cwd: Some(s.app.to_str().unwrap().to_owned()),
         branch: None,
+        size: None,
     }));
     s.h.step();
     s.client.take();
