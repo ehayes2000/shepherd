@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T27 PR status | building | task/t27-pr-status @ 62595e5 | 0 | – |
-| F33 hooks concurrent + bounded | in review | task/f33-hooks @ 1cb6c18 (on bbc0e20) | 1 | PM-accepted: Commands port gets RunId + cancel + Cancelled (like T37); run_alone per hook; pipe with 4 KiB tail, no file |
+| F33 hooks concurrent + bounded | fixing (CHANGES) | task/f33-hooks @ 1cb6c18 | 1 | Blocking: hooks started during shutdown never cancelled; real cancel test vacuous; tail cap untested. PM: close mid post-create hook goes through T25 inspection |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
