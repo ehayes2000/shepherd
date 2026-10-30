@@ -8,7 +8,7 @@
 //! `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
 //! ssh included. Output goes to temp files rather than pipes, so a background process left behind by a hook can't hold
 //! a call open. A `worktree add` killed this way is undone: its worktree and new branch are removed (see
-//! [`Worktrees::create`]).
+//! [`Worktrees::create`]). So is one that fails any other way, e.g. a `post-checkout` hook that exits non-zero.
 //!
 //! # The user's config
 //!
@@ -32,7 +32,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -188,6 +188,11 @@ impl GitWorktrees {
             // syscall in flight, such as renaming a ref lock into place, completes first. Callers that clean up
             // after a timeout need them gone.
             wait_group_gone(child.id());
+        } else if matches!(&waited, Ok(Some(status)) if status.signal().is_some()) {
+            // git was killed (e.g. by its own hook), so nothing stopped its children: kill them as for a timeout.
+            // git is reaped already, but its pid (the group id) can't be reused while the group has members.
+            kill_group(child.id());
+            wait_group_gone(child.id());
         }
         match waited {
             Err(e) => Err(Failure::Io(e.to_string())),
@@ -205,11 +210,18 @@ impl GitWorktrees {
         }
     }
 
-    /// Undoes a `worktree add` of `path` on the new `branch` that was killed part way (its whole process group is
-    /// dead by now): removes the worktree's directory, git's record of it and the branch, whichever of them exist.
-    /// `create` checked that neither the path nor the branch existed before, so the branch and anything git lists at
-    /// `path` are ours. A directory at `path` that git doesn't list is left alone: someone else may have made it since.
-    fn undo_add(&self, common: &Path, path: &Path, branch: &BranchName) -> Result<(), String> {
+    /// Undoes a failed `worktree add` of `path` on the new `branch` (its whole process group is dead by now): removes
+    /// the worktree's directory, git's record of it and the branch, whichever of them exist and `ours` allows.
+    /// `create` checked just before the add that neither the path nor the branch existed, so the branch is ours, and
+    /// so is anything git lists at `path` unless it was listed before the add. A directory at `path` that git doesn't
+    /// list is left alone, since someone else may have made it since; the `Ok` value then says so.
+    fn undo_add(
+        &self,
+        common: &Path,
+        path: &Path,
+        branch: &BranchName,
+        ours: Leftovers,
+    ) -> Result<Option<String>, String> {
         let cleanup = |op: &str, args: &[&OsStr]| {
             self.git_within(common, args, self.cleanup_timeout)
                 .map(drop)
@@ -224,7 +236,9 @@ impl GitWorktrees {
             path.as_os_str(),
         ];
         let mut left_alone = None;
-        if self.registered(common, path)? {
+        if !ours.worktree {
+            // Listed before the add: not ours.
+        } else if self.registered(common, path)? {
             if let Err(refused) = cleanup("worktree remove", &remove) {
                 if path.symlink_metadata().is_err() {
                     return Err(refused);
@@ -237,15 +251,15 @@ impl GitWorktrees {
             }
         } else if path.symlink_metadata().is_ok() {
             left_alone = Some(format!(
-                "{} exists but git doesn't list it as a worktree, so it was left alone",
+                "{} wasn't created by shepherd, so it was left alone",
                 path.display()
             ));
         }
         // An add killed while it was making the branch leaves the branch's lock behind, which would block deleting
         // the branch and any retry.
         let lock = common.join("refs/heads").join(format!("{branch}.lock"));
-        match std::fs::remove_file(&lock) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+        match ours.branch_lock.then(|| std::fs::remove_file(&lock)) {
+            Some(Err(e)) if e.kind() != io::ErrorKind::NotFound => {
                 return Err(format!("can't delete {}: {e}", lock.display()));
             }
             _ => {}
@@ -266,7 +280,32 @@ impl GitWorktrees {
             )
             .map_err(|e| format!("can't delete branch {branch}: {e}"))?,
         }
-        left_alone.map_or(Ok(()), Err)
+        Ok(left_alone)
+    }
+
+    /// Undoes a `worktree add` that `what` (e.g. "timed out") with [`Self::undo_add`] and returns `error`, or, if
+    /// cleaning up fails too, an error saying so and what to remove by hand, or, if a directory was left alone, an
+    /// error saying that.
+    fn undo_failed_add(
+        &self,
+        common: &Path,
+        path: &Path,
+        branch: &BranchName,
+        ours: Leftovers,
+        what: &str,
+        error: WorktreeError,
+    ) -> WorktreeError {
+        match self.undo_add(common, path, branch, ours) {
+            Ok(None) => error,
+            Ok(Some(left_alone)) => {
+                WorktreeError::Other(format!("git worktree add {what}. {left_alone}"))
+            }
+            Err(cleanup) => WorktreeError::Other(format!(
+                "git worktree add {what}, and cleaning up failed: {cleanup}. \
+                 Remove {} and branch {branch}, and any stale lock git names, by hand",
+                path.display()
+            )),
+        }
     }
 
     /// Whether git lists a worktree at `path`.
@@ -511,25 +550,43 @@ impl Worktrees for GitWorktrees {
             path.as_os_str(),
             start.as_ref(),
         ];
-        match self.git(dir, &args) {
-            Ok(_) => {}
-            Err(Failure::Timeout) => {
-                return Err(match self.undo_add(&common, &path, &branch) {
-                    Ok(()) => WorktreeError::Timeout("worktree add".to_owned()),
-                    Err(cleanup) => WorktreeError::Other(format!(
-                        "git worktree add timed out, and cleaning up failed: {cleanup}. \
-                         Remove {} and branch {branch}, and any stale lock git names, by hand",
-                        path.display()
-                    )),
+        // A stale record of a missing directory at `path` makes the add fail, and isn't ours to remove.
+        let registered_before = self
+            .registered(&common, &path)
+            .map_err(WorktreeError::Other)?;
+        // Another process may have made the branch since the check above, e.g. during the fetch. The add would then
+        // fail without creating anything, and cleaning up after it would delete their branch.
+        if self.ref_exists(dir, &format!("refs/heads/{branch}"))? {
+            return Err(WorktreeError::BranchExists(branch));
+        }
+        let failure = match self.git(dir, &args) {
+            Ok(_) => {
+                return Ok(Created {
+                    path: WorktreePath::new(path),
+                    branch,
+                    base,
                 });
             }
-            Err(other) => return Err(other.into_error("worktree add")),
-        }
-        Ok(Created {
-            path: WorktreePath::new(path),
-            branch,
-            base,
-        })
+            Err(failure) => failure,
+        };
+        // A git that exits on its own releases its locks, so a lock of the new branch left after that belongs to
+        // another git process. One killed by a timeout or a signal may have died holding it.
+        let ours = Leftovers {
+            worktree: !registered_before,
+            branch_lock: matches!(failure, Failure::Timeout | Failure::Exit { code: None, .. }),
+        };
+        let (what, error) = match failure {
+            Failure::Timeout => (
+                "timed out".to_owned(),
+                WorktreeError::Timeout("worktree add".to_owned()),
+            ),
+            other => {
+                let failure = other.describe(self.git_timeout);
+                let error = WorktreeError::Other(format!("git worktree add: {failure}"));
+                (format!("failed ({failure})"), error)
+            }
+        };
+        Err(self.undo_failed_add(&common, &path, &branch, ours, &what, error))
     }
 
     fn list_managed(&self, repo: &RepoRef) -> Result<Vec<Worktree>, WorktreeError> {
@@ -673,6 +730,15 @@ impl Failure {
     }
 }
 
+/// What a failed `worktree add` may have left behind that is ours to remove, besides the new branch.
+#[derive(Debug, Clone, Copy)]
+struct Leftovers {
+    /// The worktree git lists at the path, and its directory.
+    worktree: bool,
+    /// The new branch's ref lock.
+    branch_lock: bool,
+}
+
 #[derive(Debug, Default)]
 struct Porcelain {
     dirty: bool,
@@ -691,8 +757,8 @@ fn read_all(file: &mut File) -> io::Result<Vec<u8>> {
 
 fn kill_group(pid: u32) {
     if let Ok(pid) = libc::pid_t::try_from(pid) {
-        // SAFETY: plain syscall. The leader is not reaped yet, so the group id still names our group; if the group
-        // has no members left it fails with ESRCH, which is fine.
+        // SAFETY: plain syscall. While the leader is unreaped or the group has members, the group id still names our
+        // group; if the group has no members left it fails with ESRCH, which is fine.
         unsafe { libc::killpg(pid, libc::SIGKILL) };
     }
 }
@@ -1220,7 +1286,9 @@ mod tests {
             panic!("{result:?}");
         };
         assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("wasn't created by shepherd"), "{message}");
         assert!(message.contains("left alone"), "{message}");
+        assert!(!message.contains("by hand"), "{message}");
         assert!(theirs.exists());
         assert!(!branch_exists(&f, "taken"));
     }
@@ -1237,6 +1305,174 @@ mod tests {
         };
         assert!(message.contains("timed out"), "{message}");
         assert!(message.contains("can't delete branch stuck"), "{message}");
+    }
+
+    /// `post-checkout` runs after git has registered the worktree and made its branch; its exit code is the add's.
+    #[test]
+    fn a_create_whose_hook_fails_leaves_nothing_behind_and_can_be_retried() {
+        let f = GitFixture::new();
+        hook(&f, "post-checkout", "exit 1");
+        let result = f
+            .port
+            .create(&f.repo(), &name("failed"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("worktree add"), "{message}");
+        assert_nothing_left(&f, "failed");
+        retry_succeeds(&f, "failed");
+    }
+
+    /// The new branch's lock held by another git process makes the add fail before it creates anything. Cleanup
+    /// would delete that lock, which isn't ours.
+    #[test]
+    fn a_create_that_fails_before_creating_anything_cleans_up_nothing() {
+        let f = GitFixture::new();
+        let lock = f.app().join(".git/refs/heads/busy.lock");
+        std::fs::write(&lock, "").unwrap();
+        let result = f
+            .port
+            .create(&f.repo(), &name("busy"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("worktree add"), "{message}");
+        assert!(!message.contains("clean"), "{message}");
+        assert!(lock.exists());
+        assert_nothing_left(&f, "busy");
+    }
+
+    /// Someone else's worktree used to be at the path and its directory is gone, but git still lists it, so the add
+    /// fails. That record isn't ours to remove.
+    #[test]
+    fn a_create_refused_by_a_stale_worktree_record_leaves_the_record_alone() {
+        let f = GitFixture::new();
+        let path = worktree_path(&f, "stale");
+        let path_arg = path.to_str().unwrap();
+        f.git(&f.app(), &["worktree", "add", "-b", "theirs", path_arg]);
+        std::fs::remove_dir_all(&path).unwrap();
+        let result = f
+            .port
+            .create(&f.repo(), &name("stale"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(!message.contains("clean"), "{message}");
+        let listed = f.git(&f.app(), &["worktree", "list", "--porcelain"]);
+        assert!(listed.contains("refs/heads/theirs"), "{listed}");
+        assert!(!branch_exists(&f, "stale"));
+    }
+
+    /// A git killed by a signal (here by its own hook) may have died holding the new branch's lock.
+    #[test]
+    fn a_create_whose_git_is_killed_removes_the_new_branchs_stale_lock() {
+        let f = GitFixture::new();
+        let lock = f.app().join(".git/refs/heads/killed.lock");
+        hook(
+            &f,
+            "post-checkout",
+            &format!("touch '{}'\nkill -KILL $PPID", lock.display()),
+        );
+        let result = f
+            .port
+            .create(&f.repo(), &name("killed"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("killed by a signal"), "{message}");
+        assert!(!lock.exists());
+        assert_nothing_left(&f, "killed");
+        retry_succeeds(&f, "killed");
+    }
+
+    /// Whether `pid` is a live process (a zombie counts as dead).
+    fn running(pid: libc::pid_t) -> bool {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// The hook and its `sleep` are in git's process group; killing git leaves them running unless the group is
+    /// killed too.
+    #[test]
+    fn a_create_whose_git_is_killed_leaves_no_hook_running() {
+        let f = GitFixture::new();
+        let pid_file = f.tmp().join("hook.pids");
+        hook(
+            &f,
+            "post-checkout",
+            &format!(
+                "sleep 900 &\necho \"$$ $!\" > '{}'\nkill -KILL $PPID\nwait",
+                pid_file.display()
+            ),
+        );
+        let result = f
+            .port
+            .create(&f.repo(), &name("orphans"), BaseSpec::OriginDefault);
+        assert!(result.is_err(), "{result:?}");
+        let pids: Vec<libc::pid_t> = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        let alive: Vec<_> = pids.iter().copied().filter(|&pid| running(pid)).collect();
+        for &pid in &alive {
+            // SAFETY: plain syscall on a pid the hook reported.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert_eq!(pids.len(), 2, "{pids:?}");
+        assert!(alive.is_empty(), "still running: {alive:?}");
+    }
+
+    /// Another process makes the branch while the fetch runs (here a `reference-transaction` hook, run when the
+    /// fetch updates the remote-tracking ref). That branch isn't ours to delete.
+    #[test]
+    fn a_create_whose_branch_appears_during_the_fetch_leaves_that_branch_alone() {
+        let f = GitFixture::new();
+        f.advance_origin();
+        hook(
+            &f,
+            "reference-transaction",
+            "[ \"$1\" = committed ] || exit 0\n\
+             grep -q ' refs/remotes/origin/' || exit 0\n\
+             git update-ref -m theirs refs/heads/raced HEAD",
+        );
+        let result = f
+            .port
+            .create(&f.repo(), &name("raced"), BaseSpec::OriginDefault);
+        assert!(branch_exists(&f, "raced"), "{result:?}");
+        let reflog = f.git(&f.app(), &["reflog", "show", "refs/heads/raced"]);
+        assert!(reflog.contains("theirs"), "{reflog}");
+        assert_eq!(
+            result,
+            Err(WorktreeError::BranchExists(BranchName::new("raced")))
+        );
+        assert!(!worktree_path(&f, "raced").exists());
+    }
+
+    /// `packed-refs.lock` (not ours to remove) makes deleting the new branch fail.
+    #[test]
+    fn a_failed_create_whose_cleanup_fails_says_so() {
+        let f = GitFixture::new();
+        let lock = f.app().join(".git/packed-refs.lock");
+        hook(
+            &f,
+            "post-checkout",
+            &format!("touch '{}'\nexit 1", lock.display()),
+        );
+        let result = f
+            .port
+            .create(&f.repo(), &name("stuck"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("worktree add failed"), "{message}");
+        assert!(message.contains("can't delete branch stuck"), "{message}");
+        assert!(lock.exists());
     }
 
     /// The background `sleep` keeps git's stdout and stderr open long after git exits.
