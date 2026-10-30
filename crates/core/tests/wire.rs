@@ -10,7 +10,7 @@ use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
-    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method,
+    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
     PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose, SessionInput,
     SessionNew, SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
     code, decode_client_message, decode_host_message, encode_client_notification,
@@ -481,6 +481,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
             machine: MachineId::new("m_host"),
             profiles: Vec::new(),
             default_profile: None,
+            notify: Notify::default(),
         })
     );
 }
@@ -554,8 +555,38 @@ fn a_hello_ok_from_an_older_host_has_no_profiles() {
             machine: MachineId::new("m_host"),
             profiles: Vec::new(),
             default_profile: None,
+            notify: Notify::default(),
         }))
     );
+}
+
+#[test]
+fn hello_ok_carries_the_hosts_bell_setting() {
+    let config = config(json!({ "notify": { "bell": true } }));
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_notify(&config);
+    assert_eq!(ok.notify, Notify { bell: true });
+    let line = encode_response(&HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    });
+    assert_eq!(
+        wire_json(&line)["result"]["notify"],
+        json!({ "bell": true })
+    );
+}
+
+#[test]
+fn hello_ok_with_the_bell_off_leaves_notify_off_the_wire() {
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_notify(&config(json!({})));
+    let line = encode_response(&HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    });
+    assert_eq!(wire_json(&line)["result"].get("notify"), None);
 }
 
 fn hello() -> Hello {
@@ -606,6 +637,7 @@ fn successful_responses_round_trip_by_method() {
                     agent: AgentKind::Codex,
                 }],
                 default_profile: Some("codex".into()),
+                notify: Notify { bell: true },
             }),
         ),
         (

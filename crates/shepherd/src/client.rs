@@ -205,6 +205,8 @@ pub struct ClientRuntime<L, C, H> {
     keyboard_enhanced: bool,
     /// Where a mouse press went down, so a release on the same control clicks it.
     pointer: Pointer,
+    /// The terminal alerts go to, once the TUI has taken it over.
+    terminal: Option<Restorer>,
     done: bool,
 }
 
@@ -237,6 +239,7 @@ where
             panicked: false,
             keyboard_enhanced: false,
             pointer: Pointer::default(),
+            terminal: None,
             done: false,
         }
     }
@@ -312,6 +315,12 @@ where
             view.draw(&self.client, &self.screens)?;
         }
         Ok(handled > 0)
+    }
+
+    /// Sends alerts ([`ClientCommand::Alert`]) to the terminal `restorer` holds, while it's taken over. Without one
+    /// they are dropped.
+    pub fn set_terminal(&mut self, restorer: Restorer) {
+        self.terminal = Some(restorer);
     }
 
     /// Whether the outer terminal reports keys unambiguously. Until it does, keys are read as a legacy terminal
@@ -517,6 +526,12 @@ where
                     }),
                 }
             }
+            ClientCommand::Alert { message, .. } => {
+                if let Some(terminal) = &self.terminal {
+                    terminal.alert(&message);
+                }
+                None
+            }
             ClientCommand::Quit => {
                 self.done = true;
                 if let Some((mut link, conn)) = self.link.take() {
@@ -548,6 +563,7 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
     with_terminal(setup.clone(), |restorer| {
         install_client_panic_hook(restorer.clone(), events.clone());
         runtime.set_keyboard_enhanced(restorer.keyboard_enhanced());
+        runtime.set_terminal(restorer.clone());
         read_terminal_events(events)?;
         runtime.run_with(&mut TerminalView::new(backend))
     })

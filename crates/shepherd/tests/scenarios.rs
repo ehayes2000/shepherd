@@ -907,3 +907,34 @@ fn sighup_sigterm_and_sigint_each_quit_the_client_so_the_terminal_is_restored() 
         assert_eq!(terminal.calls(), RESTORED, "signal {signal}");
     }
 }
+
+#[test]
+fn a_session_that_goes_idle_while_unselected_rings_the_terminal_and_is_marked_until_clicked() {
+    let mut h = Harness::with_launcher(|net, host| {
+        FakeHostLauncher::new().on_launch(move || {
+            *lock(&host) = Some(FakeHost::start(&net).with_bell());
+        })
+    });
+    let terminal = FakeTerminal::new();
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    with_terminal(setup, |restorer| {
+        h.runtime.set_terminal(restorer.clone());
+        h.runtime.start();
+        h.settle();
+        h.wait_retry();
+        h.user(Intent::NewSession);
+        h.user(Intent::NewSession);
+        assert_eq!(h.selected().as_deref(), Some("s2"));
+        lock(&h.host)
+            .as_mut()
+            .unwrap_or_else(|| panic!("no host"))
+            .agent_idle("s1");
+        h.settle();
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(terminal.alerts(), ["shell-1 is idle"]);
+    let s1 = |h: &Harness| h.runtime.client().sessions()[1].attention;
+    assert!(s1(&h), "marked while unselected");
+    h.user(Intent::SelectSession(SessionId::new("s1")));
+    assert!(!s1(&h), "cleared once selected");
+}

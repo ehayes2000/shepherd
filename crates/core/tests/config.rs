@@ -171,6 +171,23 @@ fn key_prefix_accepts_ctrl_letter_and_ctrl_space() {
     assert_eq!(space.key_prefix().to_string(), "ctrl-space");
 }
 
+#[test]
+fn the_attention_bell_is_off_unless_turned_on() {
+    assert!(!Config::resolve(None, None).unwrap().notify_bell());
+    assert!(!resolve(json!({ "notify": {} })).unwrap().notify_bell());
+    assert!(
+        resolve(json!({ "notify": { "bell": true } }))
+            .unwrap()
+            .notify_bell()
+    );
+}
+
+#[test]
+fn an_unknown_notify_field_is_rejected() {
+    let result = serde_json::from_value::<RawConfig>(json!({ "notify": { "bel": true } }));
+    assert!(result.is_err());
+}
+
 // ---------- validation ----------
 
 #[test]

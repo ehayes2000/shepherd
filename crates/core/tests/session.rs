@@ -500,8 +500,29 @@ fn inferred_permission_clears_do_not_accumulate_pending_requests() {
 
 #[test]
 fn attention_when_permission_is_needed() {
+    // prompt is seq 1, the permission request is seq 2.
     let state = fold(&[prompt(1, "hi"), permission(7, "t1", "ok?")]);
-    assert!(state.attention(Seq::new(100)));
+    assert!(state.attention(Seq::new(1)));
+}
+
+#[test]
+fn a_permission_request_already_seen_wants_no_attention() {
+    let state = fold(&[prompt(1, "hi"), permission(7, "t1", "ok?")]);
+    assert!(!state.attention(Seq::new(2)));
+    assert!(!state.attention(Seq::new(3)));
+}
+
+#[test]
+fn a_second_permission_request_in_a_turn_wants_attention_again() {
+    // The first request (seq 2) was seen; the second (seq 4) wasn't.
+    let state = fold(&[
+        prompt(1, "hi"),
+        permission(7, "t1", "ok?"),
+        tool_call("t1", "ls"),
+        permission(8, "t2", "really?"),
+    ]);
+    assert!(state.attention(Seq::new(2)));
+    assert!(!state.attention(Seq::new(4)));
 }
 
 #[test]

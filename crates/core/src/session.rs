@@ -81,8 +81,8 @@ pub struct SessionState {
     tools: Vec<ToolSummary>,
     permission: Option<Permission>,
     prompt: Option<Request>,
-    /// The seq at which the current [`Activity::Idle`] was reached.
-    idle_since: Option<Seq>,
+    /// The seq at which the current wait on the user ([`Activity::Idle`] or [`Activity::NeedsPermission`]) began.
+    waiting_since: Option<Seq>,
     /// Holds at most the current prompt and permission requests.
     pending: PendingRequests,
     turns: u32,
@@ -96,7 +96,7 @@ impl Default for SessionState {
             tools: Vec::new(),
             permission: None,
             prompt: None,
-            idle_since: None,
+            waiting_since: None,
             pending: PendingRequests::default(),
             turns: 0,
             last_prompt: None,
@@ -122,7 +122,7 @@ impl SessionState {
                         self.pending.record(env.dir(), frame);
                     }
                     (AcpFrame::RequestPermission(r), Some(request)) => {
-                        self.request_permission(r, request);
+                        self.request_permission(env.seq(), r, request);
                         self.pending.record(env.dir(), frame);
                     }
                     (AcpFrame::Update(n), _) => match &n.update {
@@ -147,12 +147,13 @@ impl SessionState {
         &self.tools
     }
 
-    /// Whether the session wants the user: it is blocked on them, or went idle after `last_seen`, the last seq
-    /// the user has seen.
+    /// Whether the session wants the user: it started waiting on them (blocked, or idle) after `last_seen`, the last
+    /// seq the user has seen. A wait the user has already seen doesn't want them again.
     pub fn attention(&self, last_seen: Seq) -> bool {
         match self.activity {
-            Activity::NeedsPermission { .. } | Activity::NeedsInput => true,
-            Activity::Idle => self.idle_since.is_some_and(|seq| seq > last_seen),
+            Activity::NeedsPermission { .. } | Activity::NeedsInput | Activity::Idle => {
+                self.waiting_since.is_some_and(|seq| seq > last_seen)
+            }
             _ => false,
         }
     }
@@ -260,7 +261,7 @@ impl SessionState {
         }
     }
 
-    fn request_permission(&mut self, request: &RequestPermissionRequest, req: Request) {
+    fn request_permission(&mut self, seq: Seq, request: &RequestPermissionRequest, req: Request) {
         let call = &request.tool_call;
         let known = self.tools.iter().find(|t| t.id == call.tool_call_id);
         let title = call
@@ -275,7 +276,7 @@ impl SessionState {
             waits_on,
         });
         self.activity = Activity::NeedsPermission { title };
-        self.idle_since = None;
+        self.waiting_since = Some(seq);
     }
 
     fn response(&mut self, env: &Envelope, response: &Response) {
@@ -306,7 +307,7 @@ impl SessionState {
         self.activity = Activity::Working {
             tool: self.tools.last().cloned(),
         };
-        self.idle_since = None;
+        self.waiting_since = None;
     }
 
     /// Drops the in-flight state of the current turn, forgetting requests whose responses no longer matter.
@@ -330,7 +331,7 @@ impl SessionState {
         self.end_turn();
         if self.activity != Activity::Idle {
             self.activity = Activity::Idle;
-            self.idle_since = Some(seq);
+            self.waiting_since = Some(seq);
         }
     }
 }

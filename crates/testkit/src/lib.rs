@@ -314,6 +314,18 @@ pub mod builders {
             self.connect_answering(answer)
         }
 
+        /// Like [`ClientDriver::connect`], with a host whose config has `[notify] bell = bell`, and the subscribe
+        /// answered, as the host does once the catch-up is sent: the client is live.
+        pub fn connect_live_with_bell(&mut self, bell: bool) -> Vec<ClientCommand> {
+            let answer = json!({
+                "version": PROTOCOL_VERSION,
+                "machine": "m_test",
+                "notify": { "bell": bell },
+            });
+            let subscribe = self.connect_answering(answer);
+            self.answer(&subscribe, Ok(json!({})))
+        }
+
         fn connect_answering(&mut self, answer: Value) -> Vec<ClientCommand> {
             let started = self.handle(ClientEvent::Start);
             assert_eq!(started, vec![ClientCommand::Connect], "ClientDriver: start");
