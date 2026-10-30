@@ -10,14 +10,16 @@ CORE_ALLOWED="serde serde_json thiserror jiff base64 sha2 toml unicode-segmentat
 TUI_ALLOWED="ratatui crossterm unicode-width"
 # External crates shepherd-term may use.
 TERM_ALLOWED="alacritty_terminal"
+# External crates shepherd-archive may use (decision 0020).
+ARCHIVE_ALLOWED="zstd sha2 rusqlite serde serde_json jiff thiserror"
 
 # Internal crates each crate may depend on (normal + build deps). Unknown crates are not checked.
 internal_allowed() {
   case "$1" in
-    shepherd-core | shepherd-term) echo "" ;;
+    shepherd-core | shepherd-term | shepherd-archive) echo "" ;;
     shepherd-tui) echo "shepherd-core shepherd-term" ;;
     shepherd-adapters | shepherd-testkit) echo "shepherd-core" ;;
-    shepherd) echo "shepherd-core shepherd-term shepherd-tui shepherd-adapters" ;;
+    shepherd) echo "shepherd-core shepherd-term shepherd-tui shepherd-adapters shepherd-archive" ;;
     *) return 1 ;;
   esac
 }
@@ -31,6 +33,12 @@ internal=$(jq -r '.packages[].name' <<<"$meta" | tr '\n' ' ')
 
 # name, dep, kind ("normal" | "dev" | "build")
 while IFS=$'\t' read -r pkg dep kind; do
+  # Only the binary wires the archive in (decision 0020), so no other crate may depend on it in any way. Its own
+  # dev-dependency on itself turns on its test-only fault injection.
+  if [[ "$dep" == "shepherd-archive" && "$pkg" != "shepherd" && "$pkg" != "shepherd-archive" ]]; then
+    err "$pkg must not depend on shepherd-archive (only the shepherd crate may)"
+    continue
+  fi
   allowed=$(internal_allowed "$pkg") || continue
 
   if in_list "$dep" "$internal"; then
@@ -50,6 +58,8 @@ while IFS=$'\t' read -r pkg dep kind; do
       in_list "$dep" "$CORE_ALLOWED $TUI_ALLOWED" || err "shepherd-tui: external dep '$dep' not in TUI_ALLOWED" ;;
     shepherd-term)
       in_list "$dep" "$TERM_ALLOWED" || err "shepherd-term: external dep '$dep' not in TERM_ALLOWED" ;;
+    shepherd-archive)
+      in_list "$dep" "$ARCHIVE_ALLOWED" || err "shepherd-archive: external dep '$dep' not in ARCHIVE_ALLOWED" ;;
   esac
 done < <(jq -r '.packages[] | .name as $p | .dependencies[] | [$p, .name, (.kind // "normal")] | @tsv' <<<"$meta")
 
