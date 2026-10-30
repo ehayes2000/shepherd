@@ -495,6 +495,7 @@ mod real {
                 profile: Some("shell".to_owned()),
                 cwd: None,
                 branch: None,
+                size: None,
             }),
         });
         stream.write_all(&request).unwrap();

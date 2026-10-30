@@ -60,6 +60,7 @@ impl Setup {
             profile: Some("claude".to_owned()),
             cwd: None,
             branch: None,
+            size: None,
         }))
     }
 }
@@ -315,6 +316,7 @@ fn a_session_with_an_explicit_cwd_runs_there_without_a_worktree() {
         profile: None,
         cwd: Some(s.app.to_str().unwrap().to_owned()),
         branch: None,
+        size: None,
     }));
     s.h.step();
     let msgs = s.client.take();

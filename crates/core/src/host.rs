@@ -87,6 +87,7 @@ pub mod launch;
 pub mod naming;
 pub mod pr;
 pub mod quiet;
+pub mod sizes;
 pub mod upgrade;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -336,7 +337,8 @@ pub enum HostEvent {
         bytes: Vec<u8>,
         kind: InputKind,
     },
-    /// A client resized a session's terminal. A notification: never answered.
+    /// A client resized a session's terminal. A notification: never answered. Its PTY spawns at the latest such size
+    /// ([`sizes::Sizes`]).
     Resize { session: SessionId, size: PtySize },
     /// `shepherd hook` sent a hook payload from an agent running in `session`.
     Hook {
@@ -747,6 +749,11 @@ impl Host {
         self.open(id).and_then(|e| e.workspace.as_deref())
     }
 
+    /// Session `id` is open: created, not closed, and not closing.
+    pub fn is_open(&self, id: &SessionId) -> bool {
+        self.open(id).is_some()
+    }
+
     /// Decides what to do about `event`. Never changes state, see the type docs.
     pub fn handle(&self, event: HostEvent) -> Vec<HostCommand> {
         match event {
@@ -979,7 +986,7 @@ impl Host {
                 vec![append(&session, failed)]
             }
             // Input, resize and exits for a session that isn't running are dropped: notifications are never
-            // answered, and a PTY exits once.
+            // answered, and a PTY exits once. A resize's size is kept for the session's spawn by [`sizes::Sizes`].
             HostEvent::Input { session, .. }
             | HostEvent::Resize { session, .. }
             | HostEvent::PtyExited { session, .. }

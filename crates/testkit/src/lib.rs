@@ -16,6 +16,7 @@ pub mod builders {
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
     use shepherd_core::config::{AgentKind, WorkspaceHooks};
+    use shepherd_core::host::sizes::Sizes;
     use shepherd_core::host::{
         Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ReplyTo, ResumeSpec, WorkspaceAsk,
     };
@@ -105,9 +106,10 @@ pub mod builders {
         }
     }
 
-    /// Runs a [`Host`] the way the runtime does: each [`HostCommand::Append`] that `handle` returns is sealed at its
-    /// log's next seq and passed to `apply` before the next event. Every other command is only returned. Each entry's
-    /// `ts` is 1 ms after the previous one's, unless pinned with [`HostDriver::pin_ts`].
+    /// Runs a [`Host`] the way the runtime does: each event goes through its [`Sizes`], and each [`HostCommand::Append`]
+    /// that `handle` returns is sealed at its log's next seq and passed to `apply` before the next event. Every other
+    /// command is only returned. Each entry's `ts` is 1 ms after the previous one's, unless pinned with
+    /// [`HostDriver::pin_ts`].
     ///
     /// ```text
     /// let mut host = HostDriver::new();
@@ -118,6 +120,7 @@ pub mod builders {
     #[derive(Debug, Clone, Default)]
     pub struct HostDriver {
         host: Host,
+        sizes: Sizes,
         log: Vec<Envelope>,
         /// The last seq of each log: the host log (`None`) and one per session.
         seqs: BTreeMap<Option<SessionId>, u64>,
@@ -166,7 +169,7 @@ pub mod builders {
 
         /// Handles `event`, appends and applies its `Append`s, and returns all its commands.
         pub fn handle(&mut self, event: HostEvent) -> Vec<HostCommand> {
-            let commands = self.host.handle(event);
+            let commands = self.sizes.handle(&self.host, event);
             for command in &commands {
                 if let HostCommand::Append(draft) = command {
                     self.seal((**draft).clone());
@@ -360,6 +363,19 @@ pub mod builders {
                     exit: CommandExit::Code(code),
                     tail: Vec::new(),
                 }),
+            })
+        }
+
+        /// Session `id`'s PTY was carried over from the previous image at `size`, as the runtime records on adopt.
+        pub fn adopted(&mut self, id: &str, size: PtySize) {
+            self.sizes.adopted(SessionId::new(id), size);
+        }
+
+        /// A client's resize of session `id`'s terminal to `cols`x`rows`.
+        pub fn resize(&mut self, id: &str, cols: u16, rows: u16) -> Vec<HostCommand> {
+            self.handle(HostEvent::Resize {
+                session: SessionId::new(id),
+                size: PtySize { cols, rows },
             })
         }
 

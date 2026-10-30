@@ -54,6 +54,9 @@
 //!   same way: a tick stamped with `Env::now` returns the `Forge` calls to make, which run on a worker of their own (each
 //!   bounded, since `gh` waits on the network), their answers coming back as [`RuntimeEvent::Forge`] and going to the
 //!   watch, which returns the `session/pr` frames to append. An upgrade doesn't wait for them: the new image polls again.
+//! - **Spawn sizes.** Every event goes to core through a [`Sizes`], which keeps the latest size each session's terminal
+//!   was given (a client's resize, even before its PTY exists, or an adopted session's carried size) and spawns its
+//!   PTY at it. A new session's spec asks for the client's view size from its `session/new`, else [`INITIAL_SIZE`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -71,6 +74,7 @@ use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::pr::{PrEvent, PrWatch};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
+use shepherd_core::host::sizes::Sizes;
 use shepherd_core::host::upgrade::{Preflight, UpgradeFacts, UpgradeStep, Work, decide};
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, Inspect, InspectedOrphans, Inspection, NewSessionSpec, Remover,
@@ -97,7 +101,8 @@ use crate::screen_guard;
 
 /// The machine id every entry is stamped with until machines get names (T29).
 pub const LOCAL_MACHINE: &str = "local";
-/// The size a new session's PTY starts at, until a client resizes it.
+/// The size a session's PTY starts at when no size is known for it: its `session/new` gave none and no client has
+/// resized it (see [`Sizes`]).
 pub const INITIAL_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 /// How long shutdown waits for killed PTYs to report their exit before giving up on them.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -426,6 +431,8 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
+    /// The latest size each session's terminal was given, which its PTY spawns at.
+    sizes: Sizes,
     quiet: QuietWatch,
     /// When the quiet watch's deadline is due on the monotonic clock.
     quiet_due: Option<Instant>,
@@ -550,6 +557,7 @@ impl<
             creating: HashMap::new(),
             shutdown_by: None,
             finished: false,
+            sizes: Sizes::new(),
             quiet,
             quiet_due: None,
             pr,
@@ -607,6 +615,7 @@ impl<
             // Queries in a replayed screen were answered by the image that saw them first.
             screen.take_replies();
             self.screens.insert(id.clone(), screen);
+            self.sizes.adopted(id.clone(), PtySize { cols, rows });
             self.after_feed(&id);
             self.nudge(&id, PtySize { cols, rows });
         }
@@ -919,7 +928,7 @@ impl<
 
     /// Runs `event` through core and executes what it returns, then any events that execution produced.
     fn dispatch(&mut self, event: HostEvent) {
-        let commands = self.host.handle(event);
+        let commands = self.sizes.handle(&self.host, event);
         self.run_commands(commands);
     }
 
@@ -928,7 +937,7 @@ impl<
         let mut queue = VecDeque::new();
         self.execute(commands, &mut queue);
         while let Some(event) = queue.pop_front() {
-            let commands = self.host.handle(event);
+            let commands = self.sizes.handle(&self.host, event);
             self.execute(commands, &mut queue);
         }
     }
@@ -1867,8 +1876,8 @@ impl<
     }
 
     /// What a new session runs, and the run files to write before spawning it: the named profile, else
-    /// `[defaults] agent`, in the requested directory, else the workspace's root, else the home directory, at
-    /// [`INITIAL_SIZE`].
+    /// `[defaults] agent`, in the requested directory, else the workspace's root, else the home directory, at the
+    /// client's view size, else [`INITIAL_SIZE`] (a resize before it spawns wins, see [`Sizes`]).
     fn plan_session(
         &self,
         session: &SessionId,
@@ -1892,10 +1901,14 @@ impl<
             })?,
             (None, None) => self.settings.home.clone(),
         };
+        let size = new.size.map_or(INITIAL_SIZE, |s| PtySize {
+            cols: s.cols,
+            rows: s.rows,
+        });
         let ctx = LaunchContext {
             session: session.clone(),
             cwd,
-            size: INITIAL_SIZE,
+            size,
             run_dir: run_files::session_dir(&self.settings.run_root, session),
             shepherd: self.settings.shepherd.clone(),
             socket: self.settings.socket.clone(),
@@ -1919,8 +1932,8 @@ impl<
 
     /// What resuming `session` runs, and the run files to write before spawning it: its profile, as it is in the
     /// config now, planned with the agent session to resume in the directory it started in (see
-    /// [`Host::resume_target`]), which must still be a directory. Core checks the profile is still the kind the
-    /// session started with.
+    /// [`Host::resume_target`]), which must still be a directory, at [`INITIAL_SIZE`] unless a size is known for it
+    /// ([`Sizes`]). Core checks the profile is still the kind the session started with.
     fn plan_resume(&self, session: &SessionId) -> Result<(ResumeSpec, Vec<RunFile>), WireError> {
         let target = match self.host.resume_target(session) {
             None => {

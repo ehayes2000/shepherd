@@ -17,7 +17,7 @@ pub use message::{
     Hello, HelloOk, HookFrame, HostMessage, HostNotification, HostResponse, HostResult,
     HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput,
     RawResponse, Request, RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk,
-    SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer,
+    SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, ViewSize,
     WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeCleanupOk, WorktreeInfo, WorktreeList,
     WorktreeListOk, WorktreeRemove, WorktreeRemoveOk, WorktreeStatusOk, decode_client_message,
     decode_host_message, encode_client_notification, encode_host_notification, encode_request,

@@ -166,6 +166,7 @@ impl Claude {
             profile: profile.map(str::to_owned),
             cwd: cwd.map(str::to_owned),
             branch: None,
+            size: None,
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -851,6 +852,58 @@ fn an_exited_claude_session_resumes_its_agent_session_in_the_same_session_after_
 }
 
 #[test]
+fn a_resumed_claude_session_spawns_at_the_size_its_client_last_gave_it() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    client.resize(&session, 132, 40);
+    client.input(&session, b"/exit\r");
+    c.h.step();
+    assert!(c.h.host().sessions()[0].exited);
+
+    assert_eq!(c.resume(&mut client, &session), Ok(json!({})));
+
+    let spawned = c.all_spawned();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+    assert_eq!(
+        spawned[1].size,
+        PtySize {
+            cols: 132,
+            rows: 40
+        }
+    );
+}
+
+#[test]
+fn a_session_resized_while_exited_after_a_restart_resumes_at_that_size() {
+    let mut c = Claude::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("claude"), dir.path().to_str())
+        .unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    c.h.restart();
+
+    // The client selects it after reconnecting, and resizes it before it resumes it.
+    let mut client = c.h.connect();
+    client.resize(&session, 101, 31);
+    c.h.step();
+    assert_eq!(c.resume(&mut client, &session), Ok(json!({})));
+
+    let spawned = c.all_spawned();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+    assert_eq!(
+        spawned[1].size,
+        PtySize {
+            cols: 101,
+            rows: 31
+        }
+    );
+}
+
+#[test]
 fn a_claude_session_whose_agent_never_reported_its_session_cannot_be_resumed() {
     let mut c = Claude::start();
     let mut client = c.h.connect();
@@ -1128,6 +1181,7 @@ read line
                         profile: Some("claude".into()),
                         cwd: None,
                         branch: None,
+                        size: None,
                     }),
                 );
                 let session = SessionId::new(conn.response(2)["session"].as_str().unwrap());
