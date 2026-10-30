@@ -395,6 +395,19 @@ fn log_recording(app: &Path, recorded: &Path) -> FakeEventLog {
 
 #[test]
 fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
+    refuses_recorded_paths_outside_the_managed_root(false);
+}
+
+/// F41: the recorded path is matched against the listed worktrees by path, not taken to be whichever is listed.
+#[test]
+fn removal_never_touches_a_recorded_path_outside_the_managed_root_beside_a_managed_worktree() {
+    refuses_recorded_paths_outside_the_managed_root(true);
+}
+
+/// A session recorded at a path that escapes the managed root (through `..` or a symlink in it) to a clean, merged
+/// worktree of the workspace: closing it keeps that worktree and runs no hook. With `with_neighbour`, a real managed
+/// worktree is listed beside it, and is left alone too.
+fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).unwrap();
     let (origin, seed, app, root, victim, home) = (
@@ -442,9 +455,38 @@ fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
         ],
     );
     std::os::unix::fs::symlink(&victim, root.join("app").join("link")).unwrap();
+    let neighbour = root.join("app").join("neighbour");
+    if with_neighbour {
+        let neighbour_arg = neighbour.to_str().unwrap();
+        git(
+            &app,
+            &env,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "neighbour",
+                neighbour_arg,
+                "origin/main",
+            ],
+        );
+    }
     let probe = GitWorktrees::new(&root).with_isolated_env(env.clone());
     let victim_status = probe.status(&WorktreePath::new(&victim)).unwrap();
     assert!(victim_status.losses().is_empty(), "{victim_status:?}");
+    let listed: Vec<PathBuf> = probe
+        .list_managed(&shepherd_core::ports::RepoRef::new(&app))
+        .unwrap()
+        .into_iter()
+        .map(|w| w.path.as_path().to_owned())
+        .collect();
+    let expected = if with_neighbour {
+        vec![neighbour.clone()]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(listed, expected, "the managed worktrees git lists");
 
     for recorded in [
         root.join("app").join("..").join("..").join("victim"),
@@ -502,6 +544,13 @@ fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
             kept.contains("isn't a worktree shepherd manages"),
             "{recorded:?}: {kept}"
         );
+        if with_neighbour {
+            assert_eq!(
+                std::fs::read_to_string(neighbour.join("precious")).unwrap(),
+                "keep me",
+                "{recorded:?}: the managed neighbour"
+            );
+        }
     }
 }
 

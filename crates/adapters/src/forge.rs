@@ -707,12 +707,55 @@ if [ -f "$dir/prs/$head.json" ]; then /bin/cat "$dir/prs/$head.json"; else echo 
             );
         }
         assert!(env.lines().any(|l| l == "T27_KEPT=kept"), "{env}");
+        // Nothing of this process's own environment is passed on either, beyond what it was given.
+        assert!(std::env::var_os("HOME").is_some(), "the test run has HOME");
+        assert!(!env.lines().any(|l| l.starts_with("HOME=")), "{env}");
+    }
+
+    /// Set for [`gh_stdin_helper`]: the [`GhFixture`] directory it asks gh in.
+    const STDIN_HELPER_DIR: &str = "SHEPHERD_TEST_GH_STDIN_HELPER_DIR";
+
+    /// Not a case on its own: [`gh_reads_nothing_from_stdin`] runs this test binary with only this test, its stdin a
+    /// pipe with data, and [`STDIN_HELPER_DIR`] set. Then it asks gh as the port does. Otherwise it does nothing.
+    #[test]
+    fn gh_stdin_helper() {
+        let Some(dir) = std::env::var_os(STDIN_HELPER_DIR) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        GhForge::new()
+            .with_search_path(dir.join("bin"))
+            .with_inherited_env(Vec::new())
+            .with_timeout(LIVENESS)
+            .pr_for_branch(&RepoRef::new(dir.join("checkout")), &BranchName::new("b"))
+            .unwrap();
     }
 
     #[test]
     fn gh_reads_nothing_from_stdin() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Whatever this test run's own stdin is (`/dev/null` under the gate), the port runs in a process whose stdin
+        // is a pipe with data in it: gh must not get it.
         let f = GhFixture::new();
-        f.ask("b").unwrap();
+        let mut helper = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "forge::tests::gh_stdin_helper", "--nocapture"])
+            .args(["--test-threads", "1"])
+            .env(STDIN_HELPER_DIR, f.dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        helper.stdin.take().unwrap().write_all(b"yes\n").unwrap();
+        let out = helper.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(f.recorded("stdin").trim(), "null");
     }
 
