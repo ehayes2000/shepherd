@@ -313,6 +313,10 @@ fn last_column(out: &mut Writer, row: usize, line: &Row<Cell>, col: usize) {
     }
     out.raw("\x1b[@");
     draw_cell(out, row, line, p, 0, true);
+    if rest == p + 2 {
+        // Printing the wide char at `p` re-created its spacer, but not a tab mark on it.
+        draw_cell(out, row, line, p + 1, 0, true);
+    }
     out.restore(pen);
 }
 
