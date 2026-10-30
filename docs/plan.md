@@ -9,8 +9,9 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F21 collapsed sidebar targets | building | task/f21-collapsed-sidebar @ a45f034 | 0 | – |
-| F07 palette in snapshots | building | task/f07-palette-snapshots @ a45f034 | 0 | – |
+| F21 collapsed sidebar targets | in review | task/f21-collapsed-sidebar @ 3644212 | 1 | PM-accepted: Rename popup also closes with its session. Reviewer asked about ⏏ emoji width |
+| F07 palette in snapshots | in review | task/f07-palette-snapshots @ 694310a | 1 | Builder found host-crash bug → F23 |
+| F23 kitty push panic | building | task/f23-kitty-push-panic @ BASE | 0 | high priority; merges after F07 (both crates/term) |
 | T17 launch Claude sessions | in review | task/t17-launch-claude @ dc247bf (on 069e3b6) | 1 | PM-accepted: run files written by runtime (no port); default agent claude; exec-form hooks; names/agent field/startup sweep → F22 |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -361,6 +362,27 @@ acceptance:
 - Run directories are removed when the PTY exits as well as on close, and stale `<root>/run/*` dirs with no live session
   are swept at host startup (never following symlinks; never outside `<root>/run`).
 scope: crates/core, crates/shepherd, crates/testkit
+
+### F23: A program's output can panic the emulator (and the host)
+status: in-progress (high priority)
+depends: T09
+touches: term (feed), shepherd::host (screen feed), shepherd::client (screen feed)
+goal: Feeding `\x1b[>1u` about 5,000 times panics alacritty_terminal 0.26 (`term/mod.rs:1296`): when the kitty keyboard
+stack reaches its max depth, `push_keyboard_mode` calls `self.title_stack.remove(0)` on the (empty) title stack. Any
+program in any session can crash the host and every client. Found by the F07 builder.
+acceptance:
+- Regression test first (`fix-bug` skill): feeding `CSI > 1 u` well past the max depth to a `Screen` doesn't panic, and
+  `CSI ? u` still answers the top's flags. Then fix in `shepherd-term` without forking alacritty: e.g. track the kitty stack
+  depth in `Screen` (it already tracks `kitty_top` after F07, if merged) and drop `CSI > … u` pushes past a cap below
+  alacritty's limit, filtering at the byte level only where the parser state allows it (reuse the existing unfinished-sequence
+  tracking; never split a sequence wrongly). Document the cap.
+- Defense in depth: a panic inside `Screen::feed` for one session must not take down the host or the client. The host and
+  client runtimes run each feed under `catch_unwind`; on panic they replace that session's `Screen` with a fresh one of the
+  same size, log it (host.log), and continue. Test with a test-only way to make a `Screen` panic (e.g. a cfg(test) hook or a
+  trait seam), never by relying on the alacritty bug.
+- Check the same pattern for other alacritty stacks reachable from output (title stack push `CSI 22 t`, etc.) and add a
+  regression test for each that holds; report any that panic.
+scope: crates/term, crates/shepherd
 
 ## Out of scope for the initial feature set
 
