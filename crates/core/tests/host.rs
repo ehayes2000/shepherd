@@ -10,7 +10,7 @@ use shepherd_core::host::{Host, HostCommand, HostEvent, HostSession, NewSessionS
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::wire::{HostResult, SessionNewOk, WireError};
-use shepherd_testkit::builders::{HostDriver, shell_spawn};
+use shepherd_testkit::builders::{HostDriver, shell_session_spec, shell_spawn};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id)
@@ -61,10 +61,7 @@ fn new_session_appends_created_spawns_the_shell_and_replies_with_the_id() {
         reply,
         id: sid("s1"),
         at: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
-        spec: NewSessionSpec {
-            name: None,
-            spawn: shell_spawn(),
-        },
+        spec: shell_session_spec(),
     });
     assert_eq!(
         cmds,
@@ -72,7 +69,7 @@ fn new_session_appends_created_spawns_the_shell_and_replies_with_the_id() {
             append(
                 "s1",
                 "_shepherd/session/created",
-                json!({ "name": "shell-1" })
+                json!({ "name": "shell-1", "agent": "shell" })
             ),
             HostCommand::SpawnPty {
                 session: sid("s1"),
@@ -96,12 +93,16 @@ fn new_session_uses_the_name_from_the_spec() {
         at: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
         spec: NewSessionSpec {
             name: Some("api".to_owned()),
-            spawn: shell_spawn(),
+            ..shell_session_spec()
         },
     });
     assert_eq!(
         cmds[0],
-        append("s1", "_shepherd/session/created", json!({ "name": "api" }))
+        append(
+            "s1",
+            "_shepherd/session/created",
+            json!({ "name": "api", "agent": "shell" })
+        )
     );
     assert_eq!(names(host.host()), ["api"]);
 }
@@ -114,6 +115,33 @@ fn placeholder_names_count_every_session_ever_created() {
     host.close("s1");
     host.new_session("s3");
     assert_eq!(names(host.host()), ["shell-3", "shell-2"]);
+}
+
+#[test]
+fn placeholder_names_follow_the_profile_and_created_records_the_agent_kind() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    let reply = host.reply_to();
+    let at = host.now();
+    let cmds = host.handle(HostEvent::NewSession {
+        reply,
+        id: sid("s2"),
+        at,
+        spec: NewSessionSpec {
+            profile: "claude".to_owned(),
+            agent: AgentKind::ClaudeCode,
+            ..shell_session_spec()
+        },
+    });
+    assert_eq!(
+        cmds[0],
+        append(
+            "s2",
+            "_shepherd/session/created",
+            json!({ "name": "claude-2", "agent": "claude-code" })
+        )
+    );
+    assert_eq!(names(host.host()), ["claude-2", "shell-1"]);
 }
 
 #[test]
@@ -142,10 +170,7 @@ fn handle_never_changes_state_before_apply() {
         reply: ReplyTo::new(1),
         id: sid("s1"),
         at: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
-        spec: NewSessionSpec {
-            name: None,
-            spawn: shell_spawn(),
-        },
+        spec: shell_session_spec(),
     });
     assert_eq!(appends(&cmds), 1);
     assert_eq!(host, Host::new());

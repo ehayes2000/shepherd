@@ -55,3 +55,85 @@ pub fn remove(run_root: &Path, session: &SessionId) -> io::Result<()> {
         other => other,
     }
 }
+
+/// Removes every session directory in `run_root`, logging what it can't. Only for host startup: the runtime calls it
+/// in `HostRuntime::start`, which runs with the root's log lock held (so no other host is using these) and before
+/// anything is spawned (so no session of this host is either). Never follows a symlink and never leaves `run_root`:
+/// a run root that isn't a real directory is left alone, an entry that isn't one (a symlink, a file) is skipped, and
+/// `remove_dir_all` removes links inside a directory without following them.
+pub fn sweep(run_root: &Path) {
+    match std::fs::symlink_metadata(run_root) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(run_root = %run_root.display(), %error, "cannot sweep run files");
+            return;
+        }
+        Ok(meta) if !meta.is_dir() => {
+            tracing::warn!(run_root = %run_root.display(), "not sweeping run files: not a directory");
+            return;
+        }
+        Ok(_) => {}
+    }
+    let entries = match std::fs::read_dir(run_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(run_root = %run_root.display(), %error, "cannot sweep run files");
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(run_root = %run_root.display(), %error, "cannot sweep run files");
+                return;
+            }
+        };
+        let path = entry.path();
+        // `DirEntry::file_type` doesn't follow a symlink.
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "swept stale run files"),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "cannot sweep run files")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str) -> RunFile {
+        RunFile {
+            name: name.to_owned(),
+            contents: b"x".to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_run_file_name_that_is_a_path_is_refused_and_written_nowhere() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_root = tmp.path().join("run");
+        let session = SessionId::new("s1");
+        for name in ["../x", "a/b"] {
+            let result = write(&run_root, &session, &[file(name)]);
+            assert!(
+                matches!(&result, Err(RunFilesError::BadName(n)) if n == name),
+                "{name}: {result:?}"
+            );
+        }
+        assert!(!run_root.join("x").exists());
+        assert!(!session_dir(&run_root, &session).join("a").exists());
+    }
+
+    #[test]
+    fn removing_a_session_that_never_had_run_files_is_fine() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = remove(&tmp.path().join("run"), &SessionId::new("s1"));
+        assert!(result.is_ok(), "{result:?}");
+    }
+}

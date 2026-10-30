@@ -192,17 +192,14 @@ pub mod builders {
             env
         }
 
-        /// A `NewSession` for `id`, with no name and [`shell_spawn`].
+        /// A `NewSession` for `id`, with [`shell_session_spec`].
         pub fn new_session(&mut self, id: &str) -> Vec<HostCommand> {
             let reply = self.reply_to();
             self.handle(HostEvent::NewSession {
                 reply,
                 id: SessionId::new(id),
                 at: self.now(),
-                spec: NewSessionSpec {
-                    name: None,
-                    spawn: shell_spawn(),
-                },
+                spec: shell_session_spec(),
             })
         }
 
@@ -396,6 +393,16 @@ pub mod builders {
             cwd: PathBuf::from("/home/test"),
             env: Vec::new(),
             size: PtySize { cols: 80, rows: 24 },
+        }
+    }
+
+    /// A new session of the `shell` profile with no name, running [`shell_spawn`].
+    pub fn shell_session_spec() -> NewSessionSpec {
+        NewSessionSpec {
+            name: None,
+            profile: "shell".to_owned(),
+            agent: AgentKind::Shell,
+            spawn: shell_spawn(),
         }
     }
 

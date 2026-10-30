@@ -19,7 +19,8 @@
 //!   JSON-RPC id.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
-//!   (a failure to write them fails the spawn), and the directory is removed when its `session/closed` is appended.
+//!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
+//!   `session/closed` is appended. At startup, when no PTY is running, every leftover run directory is swept.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -29,7 +30,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use shepherd_core::acpp::{Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, Stamp};
+use shepherd_core::acpp::{
+    Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp,
+};
 use shepherd_core::agents::Translators;
 use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
@@ -41,7 +44,7 @@ use shepherd_core::ports::{
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
-    HostResponse, HostResult, LogEntry, PtyOutput, SubscribeFrom, WireError,
+    HostResponse, HostResult, LogEntry, PtyOutput, SessionNew, SubscribeFrom, WireError,
 };
 use shepherd_term::Screen;
 
@@ -285,6 +288,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 code: None,
             });
         }
+        // Every run directory is stale: the log lock is held and nothing has been spawned yet.
+        run_files::sweep(&runtime.settings.run_root);
         Ok(runtime)
     }
 
@@ -298,6 +303,11 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 
     pub fn translators(&self) -> &Translators {
         &self.translators
+    }
+
+    /// How many sessions have run files waiting for their spawn. Zero between requests.
+    pub fn pending_run_files(&self) -> usize {
+        self.pending_run_files.len()
     }
 
     pub fn pty(&self) -> &P {
@@ -521,7 +531,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let log = LogId::of(&draft);
         let envelope = self.log.append(log.clone(), draft, stamp)?;
         self.host.apply(&envelope);
-        self.release_if_closed(&envelope);
+        self.release_if_ended(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
             .conns
@@ -693,21 +703,18 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             ClientRequest::SessionNew(new) => {
                 let reply = self.reply_to(conn, id);
                 let session = self.env.new_session_id();
-                let launch = match self.plan_launch(&session, new.profile.as_deref()) {
-                    Ok(launch) => launch,
+                let (spec, files) = match self.plan_session(&session, &new) {
+                    Ok(planned) => planned,
                     Err(error) => return self.reply(reply, Err(error)),
                 };
-                if !launch.files.is_empty() {
-                    self.pending_run_files.insert(session.clone(), launch.files);
+                if !files.is_empty() {
+                    self.pending_run_files.insert(session.clone(), files);
                 }
                 let event = HostEvent::NewSession {
                     reply,
                     id: session.clone(),
                     at: self.env.now(),
-                    spec: NewSessionSpec {
-                        name: None,
-                        spawn: launch.spawn,
-                    },
+                    spec,
                 };
                 self.dispatch(event);
                 // Left over only if core refused the session and nothing was spawned.
@@ -731,26 +738,38 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         }
     }
 
-    /// What a new session runs: the named profile, else `[defaults] agent`, in the home directory, at
-    /// [`INITIAL_SIZE`].
-    fn plan_launch(
+    /// What a new session runs, and the run files to write before spawning it: the named profile, else
+    /// `[defaults] agent`, in the requested directory, else the home directory, at [`INITIAL_SIZE`].
+    fn plan_session(
         &self,
         session: &SessionId,
-        profile: Option<&str>,
-    ) -> Result<launch::Launch, WireError> {
+        new: &SessionNew,
+    ) -> Result<(NewSessionSpec, Vec<RunFile>), WireError> {
         let config = &self.settings.config;
-        let profile = config.profile_or_default(profile).ok_or_else(|| {
-            WireError::InvalidParams(format!("unknown profile `{}`", profile.unwrap_or_default()))
+        let name = new.profile.as_deref();
+        let profile = config.profile_or_default(name).ok_or_else(|| {
+            WireError::InvalidParams(format!("unknown profile `{}`", name.unwrap_or_default()))
         })?;
+        let cwd = match new.cwd.as_deref() {
+            Some(cwd) => existing_dir(cwd)?,
+            None => self.settings.home.clone(),
+        };
         let ctx = LaunchContext {
             session: session.clone(),
-            cwd: self.settings.home.clone(),
+            cwd,
             size: INITIAL_SIZE,
             run_dir: run_files::session_dir(&self.settings.run_root, session),
             shepherd: self.settings.shepherd.clone(),
             socket: self.settings.socket.clone(),
         };
-        launch::plan(profile, &ctx).map_err(|e| WireError::Internal(e.to_string()))
+        let launch = launch::plan(profile, &ctx).map_err(|e| WireError::Internal(e.to_string()))?;
+        let spec = NewSessionSpec {
+            name: None,
+            profile: profile.name.clone(),
+            agent: profile.kind,
+            spawn: launch.spawn,
+        };
+        Ok((spec, launch.files))
     }
 
     /// Writes the run files waiting for `session`'s spawn, if any.
@@ -762,17 +781,21 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             .map_err(|e| format!("cannot write run files: {e}"))
     }
 
-    /// Releases what a session holds for this host run once its `session/closed` is in the log: its run files and
-    /// its hook translator. A closed session takes no more hooks, so neither is needed again.
-    fn release_if_closed(&mut self, envelope: &Envelope) {
+    /// Releases what a session holds for this host run once it has ended. Its run files go when its PTY's
+    /// `agent/exited` (source `shepherd`) or its `session/closed` is in the log: only the agent reads them. Its hook
+    /// translator goes when it closes: a closed session takes no more hooks.
+    fn release_if_ended(&mut self, envelope: &Envelope) {
         let (Some(session), Frame::Shepherd(message)) = (envelope.session(), envelope.frame())
         else {
             return;
         };
-        let ShepherdFrame::SessionClosed(_) = message.body() else {
-            return;
-        };
-        self.translators.remove(session);
+        match message.body() {
+            ShepherdFrame::SessionClosed(_) => {
+                self.translators.remove(session);
+            }
+            ShepherdFrame::AgentExited(_) if envelope.source().kind == SourceKind::Shepherd => {}
+            _ => return,
+        }
         if let Err(error) = run_files::remove(&self.settings.run_root, session) {
             tracing::warn!(%session, %error, "cannot remove run files");
         }
@@ -1026,6 +1049,24 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
     if let Err(panic) = result {
         tracing::error!(%session, %panic, "screen panicked; replaced it with a blank one");
+    }
+}
+
+/// `cwd` as a directory a session can start in: absolute, since a client can't know where the host started, and an
+/// existing directory.
+fn existing_dir(cwd: &str) -> Result<PathBuf, WireError> {
+    let path = PathBuf::from(cwd);
+    if !path.is_absolute() {
+        return Err(WireError::InvalidParams(format!(
+            "cwd `{cwd}` is not an absolute path"
+        )));
+    }
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => Ok(path),
+        Ok(_) => Err(WireError::InvalidParams(format!(
+            "cwd `{cwd}` is not a directory"
+        ))),
+        Err(e) => Err(WireError::InvalidParams(format!("cwd `{cwd}`: {e}"))),
     }
 }
 

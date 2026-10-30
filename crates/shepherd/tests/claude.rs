@@ -13,15 +13,19 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use shepherd::hook::{self, HookError};
+use shepherd_core::acpp::Seq;
 use shepherd_core::config::RawConfig;
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{EventLog, PtySize, SpawnSpec};
+use shepherd_core::ports::{EventLog, LogId, PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
 use shepherd_core::wire::{ClientRequest, SessionClose, SessionNew, WireError};
+use shepherd_testkit::builders::HostDriver;
+use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::FakeNetwork;
 use shepherd_testkit::fakes::pty::ProgramInput;
 use support::{
-    FakeClient, HOME, HostHarness, Program, SHEPHERD_EXE, SOCKET, entries, new_session_id, response,
+    FakeClient, HOME, HarnessBuilder, HostHarness, Program, SHEPHERD_EXE, SOCKET, entries,
+    new_session_id, response,
 };
 
 /// The command of the built-in `claude` profile.
@@ -53,6 +57,7 @@ fn fake_claude(net: &FakeNetwork, hooks: &Hooks, spawned: &Spawned) -> Program {
         let spec = p.spec().clone();
         let bytes = match input {
             ProgramInput::Start => return spawned.lock().unwrap().push(spec),
+            ProgramInput::Stdin(b"/exit\r") => return p.exit(0),
             ProgramInput::Stdin(bytes) => bytes,
             ProgramInput::Resized => return,
         };
@@ -106,14 +111,19 @@ impl Claude {
     }
 
     fn with_config(config: RawConfig) -> Self {
+        Self::with(|b| b.config(config))
+    }
+
+    /// Starts on what `setup` makes of a builder with [`support::shell_default_config`].
+    fn with(setup: impl FnOnce(HarnessBuilder) -> HarnessBuilder) -> Self {
         let net = FakeNetwork::new();
         let hooks = Hooks::default();
         let spawned = Spawned::default();
-        let h = HostHarness::builder()
+        let builder = HostHarness::builder()
             .network(net.clone())
-            .config(config)
-            .program(CLAUDE, fake_claude(&net, &hooks, &spawned))
-            .start();
+            .config(support::shell_default_config())
+            .program(CLAUDE, fake_claude(&net, &hooks, &spawned));
+        let h = setup(builder).start();
         Self { h, hooks, spawned }
     }
 
@@ -123,9 +133,19 @@ impl Claude {
         client: &mut FakeClient,
         profile: Option<&str>,
     ) -> Result<SessionId, WireError> {
+        self.new_session_in(client, profile, None)
+    }
+
+    /// Creates a session with `profile` starting in `cwd`, and returns its id, or the host's error.
+    fn new_session_in(
+        &mut self,
+        client: &mut FakeClient,
+        profile: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<SessionId, WireError> {
         let sent = client.request(ClientRequest::SessionNew(SessionNew {
             profile: profile.map(str::to_owned),
-            cwd: None,
+            cwd: cwd.map(str::to_owned),
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -261,6 +281,195 @@ fn a_claude_session_whose_run_files_cannot_be_written_shows_as_exited_without_sp
     );
 }
 
+#[test]
+fn a_claude_session_gets_a_claude_placeholder_name_and_records_its_agent_kind() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+
+    let listed = c.h.host().sessions();
+    assert_eq!(listed[0].name, "claude-1", "{listed:?}");
+    let log = c.h.log().read(LogId::Session(session), Seq::ZERO).unwrap();
+    let created = serde_json::to_value(log[0].frame()).unwrap();
+    assert_eq!(created["method"], "_shepherd/session/created");
+    assert_eq!(created["params"]["agent"], "claude-code");
+}
+
+#[test]
+fn a_new_session_starts_in_the_directory_it_asks_for() {
+    let mut c = Claude::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    c.new_session_in(&mut client, Some("claude"), dir.path().to_str())
+        .unwrap();
+    assert_eq!(c.spawned().cwd, dir.path());
+}
+
+/// Asks for a session starting in `cwd`, and checks it was refused with `InvalidParams` and nothing was created.
+fn assert_cwd_refused(cwd: &str) {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let result = c.new_session_in(&mut client, Some("claude"), Some(cwd));
+    assert!(
+        matches!(&result, Err(WireError::InvalidParams(m)) if m.contains(cwd)),
+        "{result:?}"
+    );
+    assert!(c.h.host().sessions().is_empty());
+    assert!(c.h.log().logs().unwrap().is_empty());
+    assert!(c.spawned.lock().unwrap().is_empty());
+    assert!(!c.h.run_root().exists());
+}
+
+#[test]
+fn a_new_session_in_a_missing_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_cwd_refused(dir.path().join("missing").to_str().unwrap());
+}
+
+#[test]
+fn a_new_session_in_a_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"").unwrap();
+    assert_cwd_refused(file.to_str().unwrap());
+}
+
+#[test]
+fn a_new_session_in_a_relative_directory_is_refused() {
+    // Relative to wherever the host happened to start, which the client can't know.
+    assert_cwd_refused(".");
+}
+
+#[test]
+fn a_claude_session_whose_pty_exits_has_its_run_files_removed() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    let dir = c.h.run_root().join(session.as_str());
+    assert!(dir.join("settings.json").exists());
+
+    client.input(&session, b"/exit\r");
+    c.h.step();
+    let listed = c.h.host().sessions();
+    assert!(
+        listed.iter().any(|s| s.id == session && s.exited),
+        "{listed:?}"
+    );
+    assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
+fn a_session_end_hook_keeps_the_run_files_until_the_pty_exits() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    let dir = c.h.run_root().join(session.as_str());
+
+    // Claude's own `agent/exited` (source `hook`): its process, and the settings it reads, may live on.
+    let mut line = serde_json::to_vec(&fixture("SessionEnd.other")).unwrap();
+    line.push(b'\r');
+    client.input(&session, &line);
+    c.h.step();
+    assert_eq!(c.run_hooks(), vec![Ok(())]);
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    assert!(
+        log.iter()
+            .any(|e| e.frame().method() == Some("_shepherd/agent/exited")),
+        "the hook recorded no exit: {log:?}"
+    );
+    assert!(dir.join("settings.json").exists());
+
+    client.input(&session, b"/exit\r");
+    c.h.step();
+    assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
+fn stale_run_directories_are_swept_at_startup_without_following_symlinks() {
+    let mut c = Claude::start();
+    let run_root = c.h.run_root().to_path_buf();
+    let outside = tempfile::tempdir().unwrap();
+    let precious = outside.path().join("precious");
+    std::fs::create_dir(&precious).unwrap();
+    std::fs::write(precious.join("keep"), b"mine").unwrap();
+    std::fs::create_dir_all(run_root.join("s_old")).unwrap();
+    std::fs::write(run_root.join("s_old").join("settings.json"), b"{}").unwrap();
+    std::os::unix::fs::symlink(&precious, run_root.join("s_old").join("inner")).unwrap();
+    std::os::unix::fs::symlink(&precious, run_root.join("s_link")).unwrap();
+
+    c.h.restart();
+
+    assert!(!run_root.join("s_old").exists());
+    // The link isn't a directory shepherd made: neither it nor what it points to is touched.
+    assert!(
+        std::fs::symlink_metadata(run_root.join("s_link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(precious.join("keep")).unwrap(), b"mine");
+    assert!(run_root.exists());
+}
+
+#[test]
+fn a_symlinked_run_root_is_not_swept() {
+    let mut c = Claude::start();
+    let run_root = c.h.run_root().to_path_buf();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("s_old")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &run_root).unwrap();
+
+    c.h.restart();
+
+    assert!(outside.path().join("s_old").exists());
+}
+
+#[test]
+fn settings_written_over_a_longer_stale_file_replace_it_entirely() {
+    let mut c = Claude::start();
+    // The id the host gives its first session.
+    let stale = c.h.run_root().join("s_t1");
+    // Private, as the host made them (decision 0010): only the length is stale.
+    for dir in [c.h.run_root(), stale.as_path()] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(stale.join("settings.json"), vec![b' '; 64 * 1024]).unwrap();
+    std::fs::set_permissions(
+        stale.join("settings.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    assert_eq!(session.as_str(), "s_t1");
+    let written = std::fs::read(stale.join("settings.json")).unwrap();
+    assert!(written.len() < 64 * 1024, "{} bytes", written.len());
+    let settings: Value = serde_json::from_slice(&written).unwrap();
+    assert!(settings["hooks"]["Stop"].is_array(), "{settings}");
+}
+
+#[test]
+fn a_session_core_refuses_leaves_no_run_files_behind() {
+    // A previous host already used the id this host gives its first session.
+    let mut prev = HostDriver::new();
+    prev.new_session("s_t1");
+    let log = FakeEventLog::new()
+        .with_envelopes(LogId::Session(SessionId::new("s_t1")), prev.log().to_vec());
+    let mut c = Claude::with(|b| b.log(log));
+    let mut client = c.h.connect();
+
+    let result = c.new_session(&mut client, Some("claude"));
+    assert!(matches!(result, Err(WireError::Internal(_))), "{result:?}");
+    assert!(c.spawned.lock().unwrap().is_empty());
+    assert!(!c.h.run_root().join("s_t1").exists());
+    assert_eq!(c.h.runtime().pending_run_files(), 0);
+}
+
 /// What the sidebar shows for an activity, without the details.
 fn status(activity: &Activity) -> &'static str {
     match activity {
@@ -331,18 +540,22 @@ mod real {
     use shepherd_core::acpp::{Envelope, RequestId};
     use shepherd_core::ids::SessionId;
     use shepherd_core::wire::{
-        ClientRequest, HostMessage, HostNotification, Request, SessionClose, SessionNew, Subscribe,
-        SubscribeFrom, decode_host_message, encode_request,
+        ClientNotification, ClientRequest, HostMessage, HostNotification, Request, SessionClose,
+        SessionInput, SessionNew, Subscribe, SubscribeFrom, decode_host_message,
+        encode_client_notification, encode_request,
     };
 
     /// A liveness bound on each read from the host, never a measurement.
     const GENEROUS: Duration = Duration::from_secs(60);
 
-    /// Records its argv, environment and `--settings` file into `$FAKE_OUT`, then exits.
+    /// Records its argv, environment and `--settings` file into `$FAKE_OUT`, says `ready`, and exits once it reads a
+    /// line.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 printf '%s\n' "$@" > "$FAKE_OUT/args"
 env > "$FAKE_OUT/env"
 cp "$2" "$FAKE_OUT/settings.json"
+echo ready
+read line
 "#;
 
     struct Conn {
@@ -366,6 +579,24 @@ cp "$2" "$FAKE_OUT/settings.json"
                 body,
             });
             self.writer.write_all(&line).unwrap();
+        }
+
+        fn notify(&mut self, note: &ClientNotification) {
+            self.writer
+                .write_all(&encode_client_notification(note))
+                .unwrap();
+        }
+
+        /// Reads until `session`'s PTY output so far contains `needle`.
+        fn output(&mut self, session: &SessionId, needle: &[u8]) {
+            let mut seen = Vec::new();
+            while !seen.windows(needle.len()).any(|w| w == needle) {
+                if let HostMessage::Notification(HostNotification::PtyOutput(o)) = self.next()
+                    && &o.session == session
+                {
+                    seen.extend_from_slice(&o.bytes);
+                }
+            }
         }
 
         fn next(&mut self) -> HostMessage {
@@ -409,7 +640,7 @@ cp "$2" "$FAKE_OUT/settings.json"
     }
 
     #[test]
-    fn the_host_launches_claude_with_its_own_executable_as_the_hook_and_cleans_up_on_close() {
+    fn the_host_launches_claude_with_its_own_executable_as_the_hook_and_cleans_up_on_exit() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("shepherd");
         let out = tmp.path().join("out");
@@ -452,14 +683,20 @@ cp "$2" "$FAKE_OUT/settings.json"
                     }),
                 );
                 let session = SessionId::new(conn.response(2)["session"].as_str().unwrap());
-                // The script has written everything once it has exited.
-                conn.entry(&session, "_shepherd/agent/exited");
+                // The script has written everything once it says so.
+                conn.output(&session, b"ready");
                 let dir = run_root.join(session.as_str());
                 let modes = (
                     mode(&run_root),
                     mode(&dir),
                     mode(&dir.join("settings.json")),
                 );
+                conn.notify(&ClientNotification::SessionInput(SessionInput {
+                    session: session.clone(),
+                    data: b"\n".to_vec(),
+                }));
+                conn.entry(&session, "_shepherd/agent/exited");
+                let exists_after_exit = dir.exists();
                 conn.send(
                     3,
                     ClientRequest::SessionClose(SessionClose {
@@ -467,15 +704,14 @@ cp "$2" "$FAKE_OUT/settings.json"
                     }),
                 );
                 conn.response(3);
-                let exists_after_close = dir.exists();
-                (session, dir, modes, exists_after_close)
+                (session, dir, modes, exists_after_exit)
             });
             tx.send(RuntimeEvent::Shutdown);
             result
         });
         host.run();
         drop(host);
-        let (session, dir, modes, exists_after_close) = client
+        let (session, dir, modes, exists_after_exit) = client
             .join()
             .unwrap()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
@@ -499,6 +735,6 @@ cp "$2" "$FAKE_OUT/settings.json"
         assert_eq!(handler["command"].as_str(), exe.to_str());
         assert_eq!(handler["args"], serde_json::json!(["hook", "claude-code"]));
         assert_eq!(modes, (0o700, 0o700, 0o600));
-        assert!(!exists_after_close, "{} survived the close", dir.display());
+        assert!(!exists_after_exit, "{} survived the exit", dir.display());
     }
 }

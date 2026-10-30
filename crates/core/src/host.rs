@@ -35,11 +35,16 @@ impl ReplyTo {
     }
 }
 
-/// What to start a new session with. The runtime fills it in: in M1 `spawn.command` is the user's `$SHELL`.
+/// What to start a new session with. The runtime fills it in from the session's agent profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSessionSpec {
-    /// The session's name. `None` gives it a placeholder, `shell-<n>`.
+    /// The session's name. `None` gives it a placeholder, `<profile>-<n>`, where `n` counts every session ever
+    /// created on this host.
     pub name: Option<String>,
+    /// The name of the agent profile it runs.
+    pub profile: String,
+    /// What kind of agent that profile runs, recorded in `session/created`.
+    pub agent: AgentKind,
     pub spawn: SpawnSpec,
 }
 
@@ -198,13 +203,13 @@ impl Host {
                 // The placeholder is picked here and written into the frame. The fold only reads it back.
                 let name = spec
                     .name
-                    .unwrap_or_else(|| format!("shell-{}", self.sessions.len() + 1));
+                    .unwrap_or_else(|| format!("{}-{}", spec.profile, self.sessions.len() + 1));
                 let created = ShepherdFrame::SessionCreated(SessionCreated {
                     name,
                     workspace: None,
                     worktree: None,
                     branch: None,
-                    agent: None,
+                    agent: Some(spec.agent.as_str().to_owned()),
                     machine: None,
                 });
                 vec![
