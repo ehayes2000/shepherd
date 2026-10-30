@@ -62,6 +62,8 @@ struct State {
     /// `parents[c]` are commit `c`'s parents.
     parents: Vec<Vec<Commit>>,
     repos: Vec<Repo>,
+    /// Directories inside checkouts, from [`FakeWorktrees::add_dir`]. A checkout itself always exists.
+    dirs: BTreeSet<PathBuf>,
     fail_next: Option<WorktreeError>,
 }
 
@@ -116,6 +118,12 @@ impl FakeWorktrees {
             head_known: true,
         });
         RepoRef::new(path)
+    }
+
+    /// Makes `path`, a directory inside a checkout, and its parents exist. Only [`Worktrees::repo_root`] asks: it
+    /// treats any other path below a checkout as missing.
+    pub fn add_dir(&self, path: impl Into<PathBuf>) {
+        self.lock().dirs.insert(path.into());
     }
 
     /// The next port call fails with `error` and changes nothing.
@@ -368,10 +376,15 @@ impl Repo {
 }
 
 impl Worktrees for FakeWorktrees {
-    /// Every fake repo has a main checkout, which names it.
+    /// Every fake repo has a main checkout, which names it. Below a checkout, only directories made with
+    /// [`FakeWorktrees::add_dir`] exist.
     fn repo_root(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
         let s = self.take_failure()?;
-        let r = s.repo_of(path).ok_or_else(|| State::not_a_repo(path))?;
+        let (r, top) = s.locate(path).ok_or_else(|| State::not_a_repo(path))?;
+        let exists = top == path || s.dirs.iter().any(|d| d.starts_with(path));
+        if !exists {
+            return Err(State::not_a_repo(path));
+        }
         Ok(s.repos[r].main.clone())
     }
 
@@ -539,7 +552,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::contracts::worktrees::{DEFAULT, REPO_NAME, WorktreesFixture};
+    use crate::contracts::worktrees::{DEFAULT, REPO_NAME, SUBDIR, WorktreesFixture};
 
     struct FakeFixture {
         fake: FakeWorktrees,
@@ -550,6 +563,7 @@ mod tests {
         fn new() -> Self {
             let fake = FakeWorktrees::new("/fake/root");
             let repo = fake.add_repo(Path::new("/fake").join(REPO_NAME), DEFAULT);
+            fake.add_dir(repo.as_path().join(SUBDIR));
             Self { fake, repo }
         }
     }

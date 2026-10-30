@@ -25,6 +25,7 @@ macro_rules! worktrees_contract {
     (fs: $fixture:expr) => {
         $crate::worktrees_contract!($fixture);
         $crate::worktrees_contract!(@cases $fixture;
+            repo_root_through_a_symlink_is_the_resolved_checkout,
             create_makes_a_checkout_on_disk,
             remove_deletes_the_directory,
             remove_refuses_a_symlink_to_a_worktree_outside_the_root,
@@ -37,6 +38,7 @@ macro_rules! worktrees_contract {
             repo_root_of_a_subdirectory_is_the_checkout,
             repo_root_of_a_linked_worktree_is_the_main_checkout,
             repo_root_of_a_non_repo_is_not_a_repo,
+            repo_root_of_a_missing_path_inside_the_repo_is_not_a_repo,
             default_branch_is_what_origin_head_points_at,
             default_branch_of_a_non_repo_is_not_a_repo,
             default_branch_repairs_a_missing_origin_head,
@@ -222,6 +224,19 @@ pub fn repo_root_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
     assert!(
         matches!(result, Err(WorktreeError::NotARepo(_))),
         "{result:?}"
+    );
+}
+
+pub fn repo_root_of_a_missing_path_inside_the_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let missing = f.repo().as_path().join("missing");
+    assert_eq!(
+        f.port().repo_root(&missing),
+        Err(WorktreeError::NotARepo(missing.clone()))
+    );
+    let deeper = f.repo().as_path().join(SUBDIR).join("missing");
+    assert_eq!(
+        f.port().repo_root(&deeper),
+        Err(WorktreeError::NotARepo(deeper.clone()))
     );
 }
 
@@ -668,6 +683,16 @@ pub fn remove_refuses_the_root_and_repo_dirs<F: WorktreesFixture>(f: &F) {
 }
 
 // ---------- filesystem ----------
+
+/// `<tmp>/alias -> <repo>`: the repo is named by where the link leads, not by the link.
+pub fn repo_root_through_a_symlink_is_the_resolved_checkout<F: FsWorktreesFixture>(f: &F) {
+    let alias = f.root().with_file_name("alias");
+    f.symlink(&alias, f.repo().as_path());
+    let resolved = f.resolved(f.repo().as_path());
+    assert_ne!(alias, resolved);
+    assert_eq!(f.port().repo_root(&alias), Ok(resolved.clone()));
+    assert_eq!(f.port().repo_root(&alias.join(SUBDIR)), Ok(resolved));
+}
 
 pub fn create_makes_a_checkout_on_disk<F: FsWorktreesFixture>(f: &F) {
     let path = create(f, "disk");

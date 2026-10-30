@@ -297,10 +297,11 @@ fn host_selections(h: &HostHarness) -> Vec<String> {
     selections(&h.log().read(LogId::Host, Seq::ZERO).expect("host log"))
 }
 
-/// `app/crates`, a real directory inside the fake repo `app`.
-fn subdir(d: &Dirs) -> PathBuf {
+/// `app/crates`, a real directory inside the fake repo `app`, which the fake knows exists.
+fn subdir(worktrees: &FakeWorktrees, d: &Dirs) -> PathBuf {
     let sub = d.app.join("crates");
     std::fs::create_dir(&sub).unwrap();
+    worktrees.add_dir(&sub);
     sub
 }
 
@@ -308,7 +309,7 @@ fn subdir(d: &Dirs) -> PathBuf {
 fn a_client_started_in_a_subdirectory_of_a_repo_selects_the_repo() {
     let worktrees = FakeWorktrees::new("/fake/worktrees");
     let d = dirs(&worktrees);
-    let sub = subdir(&d);
+    let sub = subdir(&worktrees, &d);
     let mut h = harness(&worktrees);
     let mut client = h.connect();
     hello(&mut client, Some(&sub));
@@ -320,7 +321,7 @@ fn a_client_started_in_a_subdirectory_of_a_repo_selects_the_repo() {
 fn selecting_a_subdirectory_of_the_workspace_is_the_same_workspace() {
     let worktrees = FakeWorktrees::new("/fake/worktrees");
     let d = dirs(&worktrees);
-    let sub = subdir(&d);
+    let sub = subdir(&worktrees, &d);
     let mut h = harness(&worktrees);
     let mut client = h.connect();
     select(&mut client, &d.app);
