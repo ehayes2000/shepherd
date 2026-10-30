@@ -12,7 +12,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | T24 auto-naming | fixing (CHANGES) | task/t24-auto-naming @ 9145fc7 | 1 | Blocking: control-char guarantee, 30-char boundary, stop-at-first-misfit, indented fences, multi-block join untested. PM: use unicode-segmentation words (decision 0017); keep CSI digits (recorded) |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | fixing (CHANGES) | task/f28-repo-root @ 15094a9 | 1 | Blocking: bare repo named .git (and --separate-git-dir) gives a root the port rejects → decide by bareness. Minors: fake missing-path, symlink case |
-| F31 real answers only | fixing (CHANGES) | task/f31-answer-input @ 4acc88f | 1 | Blocking: runtime kind forwarding untested → paste-answers-dialog scenario |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F31 | 2 | runtime kind forwarding untested (focus test passed via ESC rule) |
 | T23 | 2 | timeout contract flaky (?E stat), scenario hold race; setsid/stdin cases weak |
 | F25 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
 | T18b | 2 | append-failure hot loop; next_deadline wiring untested; spec defect: output-as-answer would clear untouched dialogs (amended) |
@@ -511,7 +511,7 @@ acceptance:
 scope: crates/tui
 
 ### F31: Only real answers count as answering a permission dialog
-status: in-progress
+status: done (2839492)
 depends: T18b
 touches: core::wire (input), core::host::quiet, tui::keys
 goal: T18b counts any client input after a permission request as an answer. Focus reports (`CSI I`/`CSI O`, forwarded when the
