@@ -115,24 +115,25 @@ const STOPWORDS: &[&str] = &[
 ///
 /// The prompt is NFC-normalized. Fenced code blocks are dropped: a line whose first non-blank characters are
 /// ```` ``` ```` or `~~~`, at any indentation, opens or closes one. So is every whitespace-separated token with a `/` or
-/// `\` in it (paths, URLs). Apostrophes are removed, so a contraction is one word. Words are the Unicode word segments
-/// (UAX #29), with segments that touch joined (UAX #29 splits unspaced ideographs one by one), lowercased. Inside a
-/// word only letters and digits are kept, each with at most [`MAX_MARKS`] combining marks after it, plus the in-word
-/// punctuation `.`, `:`, `,` and `_`, never at a word's ends. Everything else is dropped: controls, invisible format
+/// `\` in it (paths, URLs). Words are the Unicode word segments (UAX #29), with segments that touch joined (UAX #29
+/// splits unspaced ideographs one by one), lowercased. Inside a word only letters and digits are kept, each with at most
+/// [`MAX_MARKS`] combining marks after it, plus the in-word punctuation `.`, `:`, `,` and `_`, never at a word's ends
+/// and never followed by a combining mark. So a contraction is one word without its apostrophe. Everything else is dropped: controls, invisible format
 /// characters (bidi controls, joiners, soft hyphens, BOMs, tags), symbols. The printable remains of a terminal escape
 /// sequence (`31m` of `ESC [31m`) can be words. [`STOPWORDS`] are dropped.
 ///
 /// The name is the first words joined with `-`, up to [`AUTO_MAX_WORDS`] of them, [`AUTO_MAX_CHARS`] grapheme
 /// clusters and [`AUTO_MAX_BYTES`] bytes: it stops at the first word that doesn't fit, even if a later one would. A
 /// first word too long on its own is cut, never inside a grapheme cluster, and loses any in-word punctuation the cut
-/// left at its end.
+/// left at its end. A first word whose first grapheme cluster alone passes [`AUTO_MAX_BYTES`] is dropped, and the next
+/// word is the first.
 pub fn auto_name(prompt: &str) -> Option<String> {
     let prompt: String = prompt.nfc().collect();
     let mut name = String::new();
     let mut len = 0;
-    for (n, word) in prompt_words(&prompt).take(AUTO_MAX_WORDS).enumerate() {
+    for word in prompt_words(&prompt).take(AUTO_MAX_WORDS) {
         let word_len = word.graphemes(true).count();
-        if n == 0 {
+        if name.is_empty() {
             for grapheme in word.graphemes(true) {
                 if len == AUTO_MAX_CHARS || name.len() + grapheme.len() > AUTO_MAX_BYTES {
                     break;
@@ -170,7 +171,7 @@ fn prompt_words(prompt: &str) -> impl Iterator<Item = String> + '_ {
         })
         .flat_map(str::split_whitespace)
         .filter(|token| !token.contains(['/', '\\']))
-        .flat_map(|token| token_words(&token.replace(['\'', '\u{2019}'], "")))
+        .flat_map(token_words)
         .filter(|word| !STOPWORDS.contains(&word.as_str()))
 }
 

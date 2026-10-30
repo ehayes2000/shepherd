@@ -206,6 +206,51 @@ fn auto_names_are_bounded_in_bytes_and_combining_marks() {
 }
 
 #[test]
+fn a_first_word_with_no_cluster_that_fits_is_dropped_and_the_name_never_starts_with_a_dash() {
+    // Viramas join Devanagari consonants into one grapheme cluster (UAX #29 GB9c): 40 of them are 240 bytes, more
+    // than 120, so not even the first cluster of the first word fits.
+    let cluster = "\u{915}\u{94d}".repeat(40);
+    assert_eq!(cluster.len(), 240);
+    assert_eq!(
+        auto_name(&format!("{cluster} fix login bug")).as_deref(),
+        Some("fix-login-bug")
+    );
+    assert_eq!(auto_name(&cluster), None);
+}
+
+#[test]
+fn a_later_word_fits_at_exactly_120_bytes_and_not_at_121() {
+    // `𝐀́̂` is one 8-byte grapheme cluster (a 4-byte letter with no case and no precomposed accents).
+    let heavy = "\u{1D400}\u{301}\u{302}";
+    let first = heavy.repeat(7); // 56 bytes, 7 graphemes
+    let second = |ascii: usize| format!("{}{}", heavy.repeat(7), "b".repeat(ascii));
+    // 56 + 1 + 63 = 120 bytes in 22 graphemes: fits.
+    let exact = format!("{first}-{}", second(7));
+    assert_eq!(exact.len(), 120);
+    assert_eq!(
+        auto_name(&format!("{first} {}", second(7))).as_deref(),
+        Some(exact.as_str())
+    );
+    // One more byte (and grapheme, 23 still under 30) is 121: the second word goes.
+    assert_eq!(
+        auto_name(&format!("{first} {}", second(8))).as_deref(),
+        Some(first.as_str())
+    );
+}
+
+#[test]
+fn combining_marks_never_follow_in_word_punctuation() {
+    let cases: [(&str, &str); 3] = [
+        ("v3.\u{301}14 release", "v3.14-release"),
+        ("foo_\u{301}\u{302}bar", "foo_bar"),
+        ("a:\u{20DD}b", "a:b"),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
 fn in_word_punctuation_is_kept_inside_and_trimmed_after_a_cut() {
     let cut = format!("{}_bc", "a".repeat(29));
     let cases: [(&str, &str); 3] = [
