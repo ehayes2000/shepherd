@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T26 search and open | building | task/t26-search @ HEAD | 0 | – |
+| T26 search and open | building | task/t26-search @ 8558383 | 0 | – |
 | T36b host hot-swap by re-exec | in review | task/t36b-hotswap @ a52f5e0 (on 99e47e6) | 1 | PM-accepted: listener handed over before closing conns; 1-column resize nudge; adopt on fresh instance. Linux unverified until CI |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
