@@ -9,6 +9,10 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T28 spike iroh peering | building | task/t28-iroh-spike @ HEAD | 0 | docs only |
+| F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ HEAD | 0 | ZWJ item still awaits user |
+| F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ HEAD | 0 | – |
+| F41 T27/T25b test gaps | building | task/f41-test-gaps @ HEAD | 0 | – |
 | F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -709,7 +713,7 @@ notes: Not verified on Linux in the spike (`ETXTBSY`, `/proc/self/exe` "(deleted
 Linux too.
 
 ### F36: Close the display-safe gaps from F35's review
-status: todo
+status: in-progress
 depends: F35
 touches: core::display, tui (clippy.toml, check-arch), shepherd (stderr)
 goal: Small gaps left by F35.
@@ -744,7 +748,7 @@ acceptance:
 scope: crates/adapters, crates/shepherd (host shutdown)
 
 ### F38: PTY backpressure contract case fails under load
-status: todo
+status: in-progress
 depends: F14
 touches: testkit contracts::pty, adapters::pty (tests)
 goal: `pty::tests::unacked_output_stops_reading_until_acked` failed 12/12 under a 12-copy load round on main (99e47e6) with
@@ -770,7 +774,7 @@ acceptance:
 scope: crates/shepherd, crates/core
 
 ### F40: Launcher test stand-ins can leak
-status: todo
+status: in-progress
 depends: F18
 touches: adapters::launcher (tests)
 goal: Two launcher hygiene stand-ins (`/bin/sh -c … sleep 120 & wait` with a USR1 trap, report under a tempdir) were found
@@ -781,7 +785,7 @@ acceptance:
 scope: crates/adapters
 
 ### F41: T27 and T25b leftovers
-status: todo
+status: in-progress
 depends: T27
 touches: adapters::forge (tests), shepherd tests, core tests
 goal: Test gaps from the T27 and T25b final reviews.
@@ -1600,7 +1604,7 @@ machine name (`local · #123 ✓`); clicking it is out of scope.
 ## M4 Multi-machine
 
 ### T28: Spike: iroh peering
-status: todo
+status: in-progress
 depends: T10
 touches: docs only
 goal: Confirm iroh fits the `Link` port and decide the pairing and discovery design.
@@ -1610,6 +1614,11 @@ acceptance:
   peers on start, and trust (an allowlist of node IDs).
 - Report the latency of keystroke round-trips through a relay compared with a direct connection.
 out of scope: production code.
+notes: (binding) One machine only: two host processes on localhost, one run relay-only (direct paths disabled) to stand in
+for NAT; measure both. Use n0's default public relays (no self-hosted relay, no accounts). Prototype lives under the
+scratchpad, never in the repo or the user's home; identity keys in a tempdir. Deliverable: a "Spike T28" section in
+docs/architecture.md with evidence (iroh version, API used, numbers with how measured) and a recommended design, plus the
+proposed `Link` adaptation; the PM records the decision.
 
 ### T29: Machine identity and names
 status: todo
