@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T17 launch Claude sessions | building | task/t17-launch-claude @ a21abbc | 0 | Split: picker → T17b (after T34). PM does real-claude check |
-| T34 menus and dialogs | building | task/t34-menus-and-dialogs @ d946ee4 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -42,6 +41,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F18 | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
 | T33 | 2 | stale press and sidebar clamp untested (mutation survivors) |
 | T16 | 2 | reply-timeout bound untested (two mutations survived); refused/disconnect paths untested |
+| T34 | 2 | same-button release rule untested; long-name truncation untested |
 
 ## Milestones
 
@@ -265,6 +265,8 @@ acceptance:
 - The client runtime services `Screen::sync_hold()` deadlines (`expire_sync`), so a session stuck mid synchronized update
   doesn't freeze its displayed frame. Driven by runtime deadlines, no sleeps.
 - `ClientState::notice()` is cleared on the next user action or after a deadline. Core table test.
+- While a notice is showing it gets the whole footer width and the Detach/? buttons hide; they return when it clears
+  (T34 left notices at 13 columns because notices weren't transient yet). Snapshot both states.
 - The cursor shape and blink from the session's `Screen` are passed to the real terminal.
 scope: crates/core, crates/tui, crates/shepherd
 
@@ -333,6 +335,19 @@ goal: The T16 review thought the fake drops a conn's sink earlier than the real 
 after `Disconnected`, so they already agree. Outcome: no fake/adapter change; the misleading comment in
 `a_host_that_drops_the_connection_before_answering_is_a_disconnect` now explains the sink copy (it keeps the channel open so
 only the `Disconnected` event can end the test).
+### F21: Mouse targets in the collapsed sidebar
+status: todo
+depends: T34
+touches: tui::sidebar, tui::layout
+goal: In the narrow layout (sidebar collapsed to glyphs) Detach and help have no click target, and rows have no `×`
+(decision 0014: every action is clickable).
+acceptance:
+- The collapsed sidebar shows compact glyph buttons for help and Detach at the bottom; clicking them works like the full
+  footer. Close stays reachable via right-click → Close. Hit tests click rendered cells; narrow snapshot updated.
+- Popups that close a session also close when the host removes that session meanwhile (seen in T34; applies to keyboard and
+  mouse popups). Core table test.
+scope: crates/core (client), crates/tui
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
@@ -745,7 +760,7 @@ Press/release: act on `Up(Left)` when the `Down(Left)` hit the same target. Keep
 owned by the client runtime, or in `ClientState` if core needs it; the builder decides and says why in the report.
 
 ### T34: Context menu, dialogs with buttons, detach button
-status: in-progress
+status: done (83f196a)
 depends: T33
 touches: tui::popup, tui::sidebar, tui::keys (mouse), core::client
 goal: Rename, close and detach with the mouse; every popup can be answered by clicking.
