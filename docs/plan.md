@@ -9,9 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T33 clickable sidebar | in review | task/t33-clickable-sidebar @ 3479069 | 1 | PM-accepted: extra intent SidebarRows(usize); Pointer in tui state; header title → button |
 | T16 hook subcommand | fixing (CHANGES) | task/t16-hook-subcommand @ 22256a6 | 1 | Blocking: reply-timeout bound untested. Minors: Refused/Disconnected via deliver; docs narrowed to what's bounded (PM). Earlier accepts stand |
-| F14 pty backpressure | building | task/f14-pty-backpressure @ 9e868ad | 0 | – |
+| F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -40,6 +39,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
 | F11 | 2 | doc claimed WrongType for every special file; sockets and dirs got Io |
 | F18 | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
+| T33 | 2 | stale press and sidebar clamp untested (mutation survivors) |
 
 ## Milestones
 
@@ -704,7 +704,7 @@ notes: The status glyph shapes and colors are decided in this task and recorded 
 Decision 0014: every action is reachable with the mouse. The `ctrl-b` bindings from T13 stay as they are.
 
 ### T33: Clickable sidebar and terminal focus
-status: in-progress
+status: done (264bf12)
 depends: T13
 touches: tui::layout, tui::sidebar, tui::keys (mouse), core::client, shepherd::terminal
 goal: Click a session to switch to it, click a `+ New session` button to make one, click the terminal to type in it.
@@ -736,7 +736,7 @@ Press/release: act on `Up(Left)` when the `Down(Left)` hit the same target. Keep
 owned by the client runtime, or in `ClientState` if core needs it; the builder decides and says why in the report.
 
 ### T34: Context menu, dialogs with buttons, detach button
-status: todo
+status: ready
 depends: T33
 touches: tui::popup, tui::sidebar, tui::keys (mouse), core::client
 goal: Rename, close and detach with the mouse; every popup can be answered by clicking.
