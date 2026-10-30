@@ -998,6 +998,7 @@ fn line_with(buf: &Buffer, text: &str) -> (u16, String) {
 }
 
 /// How many columns `text` takes.
+#[allow(clippy::disallowed_methods)] // Measures text; never draws it.
 fn columns(text: &str) -> usize {
     ratatui::text::Span::raw(text).width()
 }
@@ -1067,10 +1068,11 @@ fn the_pickers_agent_column_lines_up_after_wide_names() {
     );
 }
 
-/// A name of family emoji, each one grapheme of several characters, cut to fit: no family is drawn in part.
+/// A name of skin-toned emoji, each one grapheme of two characters, cut to fit: no emoji is drawn in part. (Not a
+/// ZWJ family: display-safe text drops the joiners, F35.)
 #[test]
 fn a_cut_profile_name_never_splits_a_grapheme() {
-    let family = "👨‍👩‍👧";
+    let family = "👍🏽";
     let name = family.repeat(20);
     let mut c = ClientDriver::new();
     c.connect_with_profiles(
@@ -1083,13 +1085,11 @@ fn a_cut_profile_name_never_splits_a_grapheme() {
     c.user(Intent::BeginNewSession);
     let buf = buffer(c.client(), &Screens::new(), 60, 10);
     let (y, row) = line_with(&buf, "(default)");
-    assert!(row.contains("👧…  shell"), "{row:?}");
+    assert!(row.contains("🏽…  shell"), "{row:?}");
     assert!(row.contains("(default)│"), "{row:?}");
     for x in buf.area.left()..buf.area.right() {
         let symbol = buf[(x, y)].symbol();
-        let in_a_family = symbol
-            .chars()
-            .any(|c| matches!(c, '👨' | '👩' | '👧' | '\u{200d}'));
+        let in_a_family = symbol.chars().any(|c| matches!(c, '👍' | '🏽'));
         assert!(
             symbol == family || !in_a_family,
             "{symbol:?} is part of a family: {row:?}"

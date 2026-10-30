@@ -7,6 +7,10 @@ use shepherd_term::{self as term, Cell, Screen, Underline, Width};
 
 /// Draws the screen's cells into `area`, starting at its top-left corner and clipped to it. Cells of `buf` outside
 /// the screen's size are left alone. The cursor is not drawn; place it with the frame's cursor position.
+///
+/// A session's terminal is drawn cell by cell as its emulator left it, not through [`crate::draw`]: showing the
+/// program's own output faithfully is the point of the pane, and the emulator has already consumed its controls.
+#[allow(clippy::disallowed_methods)]
 pub fn render_screen(screen: &Screen, area: Rect, buf: &mut Buffer) {
     let area = area.intersection(buf.area);
     let (cols, rows) = screen.size();

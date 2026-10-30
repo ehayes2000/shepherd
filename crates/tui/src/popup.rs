@@ -9,12 +9,14 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Widget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Clear, Widget};
 use shepherd_core::client::{Cell, Client, CloseCheck, MenuEntry, MenuItem, Popup};
+use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
 
+use crate::draw::{self, shown};
 use crate::layout::Target;
 use crate::width::{columns, cut, cut_left, pad, tail};
 
@@ -75,7 +77,7 @@ const SWITCHER_TAIL: u16 = 4;
 pub(crate) struct Control {
     pub area: Rect,
     pub target: Target,
-    pub label: String,
+    pub label: DisplayText,
 }
 
 /// Where the open popup is in the window.
@@ -84,7 +86,7 @@ pub(crate) struct Placed {
     pub area: Rect,
     pub controls: Vec<Control>,
     /// Lines drawn dim that aren't controls: a menu's items that can't be chosen.
-    pub disabled: Vec<(Position, String)>,
+    pub disabled: Vec<(Position, DisplayText)>,
 }
 
 /// Where the open popup, if any, and its controls are in `window`.
@@ -140,7 +142,7 @@ fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
             controls.push(Control {
                 area: Rect::new(x, y, width, 1),
                 target: target.clone(),
-                label: (*label).to_owned(),
+                label: shown(label),
             });
             end = x.saturating_sub(2);
         }
@@ -154,23 +156,27 @@ fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
 }
 
 /// How a menu entry is drawn: its name, and why it can't be chosen if it can't.
-fn menu_label(entry: &MenuEntry) -> String {
+fn menu_label(entry: &MenuEntry) -> DisplayText {
     let name = match entry.item {
         MenuItem::Rename => "Rename",
         MenuItem::Close => "Close",
         MenuItem::Resume => "Resume",
     };
-    match entry.unavailable {
+    shown(&match entry.unavailable {
         None => format!(" {name}"),
         Some(why) => format!(" {name} ({why})"),
-    }
+    })
 }
 
 /// The menu, its top-left corner at `at` or as near as fits in `window`. Each item is a whole line of it.
 fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
-    let labels: Vec<String> = entries.iter().map(menu_label).collect();
+    let labels: Vec<DisplayText> = entries.iter().map(menu_label).collect();
     // A column after the longest label, and the border.
-    let longest = labels.iter().map(|l| columns(l)).max().unwrap_or(0);
+    let longest = labels
+        .iter()
+        .map(|l| columns(l.as_str()))
+        .max()
+        .unwrap_or(0);
     let wanted = u16::try_from(longest + 3).unwrap_or(u16::MAX);
     let width = wanted.max(MENU_WIDTH).min(window.width);
     let height = (entries.len() as u16 + 2).min(window.height);
@@ -210,14 +216,14 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
     );
     let inside = inner(placed.area);
     let widest = |width: fn(&ProfileInfo) -> usize| profiles.iter().map(width).max().unwrap_or(0);
-    let agent_width = widest(|p| columns(p.agent.as_str()));
+    let agent_width = widest(|p| columns(shown(p.agent.as_str()).as_str()));
     let mark_width = match client.default_profile() {
         Some(_) => columns(DEFAULT_MARK) + 2,
         None => 0,
     };
     // The leading blank, and two blanks after the name.
     let room = usize::from(inside.width).saturating_sub(3 + agent_width + mark_width);
-    let name_width = widest(|p| columns(&p.name)).min(room.max(1));
+    let name_width = widest(|p| columns(shown(&p.name).as_str())).min(room.max(1));
     let rows = (inside.y + 1)..inside.bottom().saturating_sub(1);
     let first = client
         .picker_scroll()
@@ -230,13 +236,13 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
         };
         let label = format!(
             " {}  {}  {mark}",
-            pad(&cut(&profile.name, name_width), name_width),
-            pad(profile.agent.as_str(), agent_width)
+            pad(&cut(shown(&profile.name).as_str(), name_width), name_width),
+            pad(shown(profile.agent.as_str()).as_str(), agent_width)
         );
         placed.controls.push(Control {
             area: Rect::new(inside.x, y, inside.width, 1),
             target: Target::Profile(profile.name.clone()),
-            label: label.trim_end().to_owned(),
+            label: shown(label.trim_end()),
         });
     }
     placed
@@ -283,12 +289,12 @@ fn switcher(client: &Client, window: Rect) -> Placed {
             "" => usize::from(inside.width).saturating_sub(1),
             mark => usize::from(inside.width).saturating_sub(3 + columns(mark)),
         };
-        let shown = cut_left(&path.display().to_string(), room.max(1));
-        let label = format!(" {shown}  {mark}");
+        let path_shown = cut_left(shown(&path.display().to_string()).as_str(), room.max(1));
+        let label = format!(" {path_shown}  {mark}");
         placed.controls.push(Control {
             area: Rect::new(inside.x, y, inside.width, 1),
             target: Target::WorkspaceRow(path.clone()),
-            label: label.trim_end().to_owned(),
+            label: shown(label.trim_end()),
         });
     }
     placed
@@ -316,27 +322,16 @@ fn switcher_body(
     let width = usize::from(body.width);
     let gray = Style::new().fg(Color::Gray);
     if !client.workspaces().is_empty() && body.height > SWITCHER_TAIL - 1 {
-        buf.set_stringn(body.x, body.y, USED_BEFORE, width, gray);
+        draw::set(buf, body.x, body.y, &shown(USED_BEFORE), width, gray);
     }
     let bottom = body.bottom();
-    buf.set_stringn(body.x, bottom - 3, OPEN_PROMPT, width, gray);
+    draw::set(buf, body.x, bottom - 3, &shown(OPEN_PROMPT), width, gray);
     let cursor = text_input(path, Rect::new(body.x, bottom - 2, body.width, 1), buf);
-    match error {
-        Some(error) => buf.set_stringn(
-            body.x,
-            bottom - 1,
-            error,
-            width,
-            Style::new().fg(Color::Red),
-        ),
-        None => buf.set_stringn(
-            body.x,
-            bottom - 1,
-            OPEN_HINT,
-            width,
-            gray.add_modifier(Modifier::DIM),
-        ),
+    let (below, style) = match error {
+        Some(error) => (shown(error), Style::new().fg(Color::Red)),
+        None => (shown(OPEN_HINT), gray.add_modifier(Modifier::DIM)),
     };
+    draw::set(buf, body.x, bottom - 1, &below, width, style);
     cursor
 }
 
@@ -361,7 +356,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
     };
     let cursor = match popup {
         Popup::Help => {
-            Paragraph::new(help_lines()).render(body, buf);
+            draw::paragraph(help_lines()).render(body, buf);
             None
         }
         Popup::Rename { name, .. } => rename(name, body, buf),
@@ -377,7 +372,8 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::PickProfile => {
             if body.height > 0 {
                 let style = Style::new().fg(Color::Gray);
-                buf.set_stringn(body.x, body.y, PICK_PROMPT, usize::from(body.width), style);
+                let width = usize::from(body.width);
+                draw::set(buf, body.x, body.y, &shown(PICK_PROMPT), width, style);
             }
             None
         }
@@ -395,33 +391,41 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             _ => button,
         };
         let at = control.area;
-        buf.set_stringn(at.x, at.y, &control.label, usize::from(at.width), style);
+        draw::set(
+            buf,
+            at.x,
+            at.y,
+            &control.label,
+            usize::from(at.width),
+            style,
+        );
     }
     let dim = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
     for (at, label) in &placed.disabled {
         let room = usize::from(inside.right().saturating_sub(at.x));
-        buf.set_stringn(at.x, at.y, label, room, dim);
+        draw::set(buf, at.x, at.y, label, room, dim);
     }
     cursor
 }
 
 fn help_lines() -> Vec<Line<'static>> {
     let key = Style::new().fg(Color::Cyan);
-    let mut lines: Vec<Line> = MOUSE.iter().map(|l| Line::raw(*l)).collect();
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Or use the keys:",
+    let plain = |text: &str| draw::line(shown(text), Style::new());
+    let mut lines: Vec<Line> = MOUSE.iter().map(|l| plain(l)).collect();
+    lines.push(plain(""));
+    lines.push(draw::line(
+        shown("Or use the keys:"),
         Style::new().fg(Color::Gray),
     ));
     lines.extend(BINDINGS.iter().map(|(keys, what)| {
         Line::from(vec![
-            Span::styled(format!("{keys:<14}"), key),
-            Span::raw(*what),
+            draw::span(shown(&format!("{keys:<14}")), key),
+            draw::span(shown(what), Style::new()),
         ])
     }));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Other keys go to the session. Any key closes this.",
+    lines.push(plain(""));
+    lines.push(draw::line(
+        shown("Other keys go to the session. Any key closes this."),
         Style::new().fg(Color::Gray).add_modifier(Modifier::DIM),
     ));
     lines
@@ -434,8 +438,8 @@ fn text_input(text: &str, line: Rect, buf: &mut Buffer) -> Option<Position> {
         return None;
     }
     let room = usize::from(line.width - 1);
-    let shown = tail(text, room);
-    let (end, _) = buf.set_stringn(line.x, line.y, &shown, room, Style::new());
+    let visible = shown(&tail(shown(text).as_str(), room));
+    let (end, _) = draw::set(buf, line.x, line.y, &visible, room, Style::new());
     Some(Position::new(end, line.y))
 }
 
@@ -446,10 +450,11 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
     }
     let cursor = text_input(name, Rect { height: 1, ..body }, buf);
     let hint = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
-    buf.set_stringn(
+    draw::set(
+        buf,
         body.x,
         body.y + 1,
-        "enter to rename · esc to cancel",
+        &shown("enter to rename · esc to cancel"),
         usize::from(body.width),
         hint,
     );
@@ -458,25 +463,26 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
 
 /// The close confirmation's lines above its buttons: what closing does, what happens to the session's worktree (`check`,
 /// if it has one), and a hint.
-fn close_lines<'a>(name: &'a str, check: Option<&CloseCheck>) -> Vec<Line<'a>> {
+fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<Line<'static>> {
     let gray = Style::new().fg(Color::Gray);
     let mut lines = vec![Line::from(vec![
-        Span::raw("Close "),
-        Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw("? Its agent is stopped."),
+        draw::span(shown("Close "), Style::new()),
+        draw::span(shown(name), Style::new().add_modifier(Modifier::BOLD)),
+        draw::span(shown("? Its agent is stopped."), Style::new()),
     ])];
-    let worktree = |text: String| Line::styled(text, gray);
+    let styled = |text: &str, style: Style| draw::line(shown(text), style);
+    let worktree = |text: &str| styled(text, gray);
     match check {
         None => {}
-        Some(CloseCheck::Checking) => lines.push(worktree("Checking its worktree…".into())),
+        Some(CloseCheck::Checking) => lines.push(worktree("Checking its worktree…")),
         Some(CloseCheck::Safe) => {
-            lines.push(worktree("Its worktree is removed: nothing is lost.".into()));
+            lines.push(worktree("Its worktree is removed: nothing is lost."));
         }
-        Some(CloseCheck::Gone) => lines.push(worktree("Its worktree is already gone.".into())),
+        Some(CloseCheck::Gone) => lines.push(worktree("Its worktree is already gone.")),
         Some(CloseCheck::Failed(why)) => {
             let red = Style::new().fg(Color::Red);
-            lines.push(Line::styled("Its worktree is kept:", red));
-            lines.push(Line::styled(why.clone(), red));
+            lines.push(styled("Its worktree is kept:", red));
+            lines.push(styled(why, red));
         }
         Some(CloseCheck::AtRisk(status)) => {
             // Only files are deleted: unpushed commits stay on the branch, which is kept. Removing anyway forces only
@@ -485,26 +491,26 @@ fn close_lines<'a>(name: &'a str, check: Option<&CloseCheck>) -> Vec<Line<'a>> {
             for lost in status.losses() {
                 match lost {
                     Loss::UncommittedChanges => {
-                        lines.push(Line::raw("Removing its worktree deletes:"));
-                        lines.push(Line::styled(DELETED_FILES, loss));
+                        lines.push(styled("Removing its worktree deletes:", Style::new()));
+                        lines.push(styled(DELETED_FILES, loss));
                     }
                     Loss::Unpushed { commits } => {
                         let commits = match commits {
                             1 => "1 commit".to_owned(),
                             n => format!("{n} commits"),
                         };
-                        lines.push(Line::styled(
-                            format!("{commits} not pushed — the branch is kept."),
+                        lines.push(styled(
+                            &format!("{commits} not pushed — the branch is kept."),
                             loss,
                         ));
                     }
                 }
             }
-            lines.push(Line::styled(AT_RISK_HINT, gray));
+            lines.push(styled(AT_RISK_HINT, gray));
             return lines;
         }
     }
-    lines.push(Line::styled(CLOSE_HINT, gray));
+    lines.push(styled(CLOSE_HINT, gray));
     lines
 }
 
@@ -515,14 +521,13 @@ fn close_height(check: &CloseCheck) -> u16 {
 }
 
 fn confirm_close(name: &str, check: Option<&CloseCheck>, body: Rect, buf: &mut Buffer) {
-    Paragraph::new(close_lines(name, check)).render(body, buf);
+    draw::paragraph(close_lines(name, check)).render(body, buf);
 }
 
 /// Clears `area` and draws a bordered box titled `title` on it.
 fn frame(area: Rect, title: &str, buf: &mut Buffer) {
     Clear.render(area, buf);
-    Block::bordered()
-        .title(title)
+    draw::titled(Block::bordered(), shown(title))
         .border_style(Style::new().fg(Color::Cyan))
         .render(area, buf);
 }

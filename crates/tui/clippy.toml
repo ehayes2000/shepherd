@@ -1,0 +1,24 @@
+# shepherd-tui draws text only through `crate::draw`, whose functions take a `DisplayText` (F35): text from agents,
+# hooks, git and other clients can't reach the screen without `display_safe`. See docs/architecture.md.
+# Clippy does not merge config files, so the root settings are repeated here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = false
+
+disallowed-methods = [
+  { path = "ratatui::buffer::Buffer::set_string", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::buffer::Buffer::set_stringn", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::buffer::Buffer::set_line", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::buffer::Buffer::set_span", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::buffer::Cell::set_symbol", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::buffer::Cell::set_char", reason = "draw text with crate::draw::set, which takes a DisplayText" },
+  { path = "ratatui::text::Span::raw", reason = "make spans with crate::draw::span, which takes a DisplayText" },
+  { path = "ratatui::text::Span::styled", reason = "make spans with crate::draw::span, which takes a DisplayText" },
+  { path = "ratatui::text::Line::raw", reason = "make lines with crate::draw::line, which takes a DisplayText" },
+  { path = "ratatui::text::Line::styled", reason = "make lines with crate::draw::line, which takes a DisplayText" },
+  { path = "ratatui::text::Text::raw", reason = "make lines with crate::draw::line, which takes a DisplayText" },
+  { path = "ratatui::text::Text::styled", reason = "make lines with crate::draw::line, which takes a DisplayText" },
+  { path = "ratatui::widgets::Paragraph::new", reason = "use crate::draw::paragraph, whose lines are DisplayText" },
+  { path = "ratatui::widgets::Block::title", reason = "use crate::draw::titled, which takes a DisplayText" },
+]
