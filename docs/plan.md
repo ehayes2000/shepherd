@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
 | F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
-| T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
+| T23 worktree hooks | fixing (CHANGES) | task/t23-worktree-hooks @ 95c8d7f | 1 | Blocking: timeout contract flaky (?E stat), scenario hold race. Minors: setsid fast-fail, stdin case, '.'/'..' keys. Follow-ups → F33 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -536,6 +536,21 @@ acceptance:
 - F25 review: the signal-kill path sends SIGKILL to the group after git was reaped (theoretical pid reuse). Learn how git
   died with `waitid(WNOWAIT)` (as `wait_unreaped` does), kill the group, then reap.
 scope: crates/adapters
+
+### F33: Hooks don't queue behind each other or outlive the host
+status: todo
+depends: T23
+touches: adapters::commands, shepherd::host
+goal: From the T23 review: one shared `hooks` worker means session B's post-create hooks wait behind session A's (up to the
+10 min timeout), closing A doesn't cancel its hook, a hook still running at host shutdown keeps running (it's `setsid`), and
+hook output goes to an unlinked temp file with no size cap.
+acceptance:
+- Hooks for different sessions run concurrently (a worker per running hook, or a small pool); a held hook for one session
+  doesn't delay another's (scenario with two held hooks, counted).
+- Closing a session kills its running hook's process group (and waits for it); host shutdown kills every running hook group.
+  No leaked processes (check pids you recorded).
+- Hook output is bounded on disk (cap the file, e.g. 1 MiB, then keep only the tail) — contract case with a chatty hook.
+scope: crates/adapters, crates/core, crates/testkit, crates/shepherd
 
 ## Out of scope for the initial feature set
 
