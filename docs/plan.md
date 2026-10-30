@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T27 PR status | in review | task/t27-pr-status @ dc0b09d (on 022d04f) | 1 | PM-accepted: gh pr list flags; display choices; Unavailable clears, errors keep; Worker<W,T> |
-| F33 hooks concurrent + bounded | fixing (CHANGES) | task/f33-hooks @ 1cb6c18 | 1 | Blocking: hooks started during shutdown never cancelled; real cancel test vacuous; tail cap untested. PM: close mid post-create hook goes through T25 inspection |
+| F33 hooks concurrent + bounded | re-review | task/f33-hooks @ a7a7808 (on 022d04f) | 2 | no hooks after shutdown; TimedOut vs Cancelled; tail cap test; EPERM-aware group wait; Commands::new_run; close mid-hook → T25 inspection |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -733,6 +733,10 @@ acceptance:
 - After a fetch that was killed (timeout/cancel) with `core.filesRefLockTimeout=0` pinned, remove only the remote-tracking ref
   locks that fetch could have held, and only if git died holding them (same rules as F32's branch lock). Test with a hook or
   a fake remote that hangs mid-fetch; a foreign lock is never removed.
+- From F33: `worktrees.rs`'s own `wait_group_gone` returns early on macOS EPERM (group members dying/zombie); wait through EPERM
+  until ESRCH as `process_group.rs` now does (or share that helper and drop the duplicate `kill_group`/`wait_unreaped`).
+- From F33: a create that finishes as shutdown cancels it, with no hooks, can still spawn a PTY during shutdown; don't spawn
+  once shutdown began.
 - From the T37 review: host shutdown cancels creates but doesn't wait for their cleanup; delay `finish` until no create is
   running (bounded) so a cancelled-at-shutdown create never leaves an unrecorded worktree/branch.
 scope: crates/adapters
