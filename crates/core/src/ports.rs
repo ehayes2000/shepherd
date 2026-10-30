@@ -15,7 +15,8 @@ pub use event_log::{EventLog, LogError, LogId};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};
 pub use link::{ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED};
 pub use pty::{
-    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
+    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize,
+    SpawnSpec,
 };
 pub use worktrees::{
     BaseSpec, BaseUsed, BranchName, Created, Loss, RepoRef, Worktree, WorktreeError, WorktreeName,

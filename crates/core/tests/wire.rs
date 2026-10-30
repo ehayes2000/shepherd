@@ -11,10 +11,10 @@ use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, DigestHasher,
     ExeDigest, Hello, HelloOk, HookFrame, HostMessage, HostNotification, HostResponse, HostResult,
-    InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request,
-    RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
-    SessionResize, SessionResume, Subscribe, SubscribeFrom, WireError, WorkspaceSelect, code,
-    decode_client_message, decode_host_message, encode_client_notification,
+    HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput,
+    Request, RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
+    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
+    WorkspaceSelect, code, decode_client_message, decode_host_message, encode_client_notification,
     encode_host_notification, encode_request, encode_response, negotiate,
 };
 
@@ -99,6 +99,8 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         ClientRequest::WorktreeStatus(shepherd_core::wire::WorktreeCheck {
             session: sid("s_1"),
         }),
+        ClientRequest::HostUpgrade(HostUpgrade { force: false }),
+        ClientRequest::HostUpgrade(HostUpgrade { force: true }),
     ]
 }
 
@@ -220,6 +222,8 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/workspace/select",
         "_shepherd/session/close",
         "_shepherd/worktree/status",
+        "_shepherd/host/upgrade",
+        "_shepherd/host/upgrade",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -804,6 +808,55 @@ fn successful_responses_round_trip_by_method() {
         };
         assert_eq!(response(&encode_response(&resp), method), resp);
     }
+}
+
+#[test]
+fn every_upgrade_answer_round_trips() {
+    let answers = [
+        UpgradeAnswer::NothingToDo,
+        UpgradeAnswer::Busy {
+            reason: "a worktree is being made".into(),
+        },
+        UpgradeAnswer::Unavailable {
+            reason: "reinstall it".into(),
+        },
+        UpgradeAnswer::Accepted,
+    ];
+    for answer in answers {
+        let resp = HostResponse {
+            id: "r".into(),
+            result: Ok(HostResult::Upgrade(answer)),
+        };
+        assert_eq!(response(&encode_response(&resp), Method::HostUpgrade), resp);
+    }
+}
+
+#[test]
+fn an_upgrade_answer_names_itself_and_says_why() {
+    let resp = HostResponse {
+        id: "r".into(),
+        result: Ok(HostResult::Upgrade(UpgradeAnswer::Busy {
+            reason: "a hook is running".into(),
+        })),
+    };
+    assert_eq!(
+        wire_json(&encode_response(&resp))["result"],
+        json!({ "answer": "busy", "reason": "a hook is running" })
+    );
+}
+
+#[test]
+fn an_upgrade_without_force_leaves_it_off_the_wire_and_parses_without_it() {
+    let line = encode_request(&Request {
+        id: "r".into(),
+        body: ClientRequest::HostUpgrade(HostUpgrade { force: false }),
+    });
+    assert_eq!(wire_json(&line)["params"], json!({}));
+    let parsed = request(&request_line("_shepherd/host/upgrade", json!({})));
+    assert_eq!(
+        parsed.body,
+        ClientRequest::HostUpgrade(HostUpgrade { force: false })
+    );
 }
 
 #[test]

@@ -5,13 +5,19 @@
 //! rules: it goes out in chunks of at most [`MAX_OUTPUT_CHUNK`], and once a session's unacknowledged output reaches
 //! [`OUTPUT_CREDIT`] the rest waits, like a child blocked on a full pty, until [`Pty::ack`] makes room. A program
 //! that exits with output still waiting exits once it's all sent. A kill drops what was waiting.
+//!
+//! As a [`PtyHandoff`], a session's token is the running program itself: an export moves every live session out (a
+//! copy stays behind for [`PtyHandoff::resume`]), and an adopting `FakePty` runs it on from where it was, credit
+//! reset. [`FakePtyToken::unadoptable`] makes a token that adopting refuses, standing in for a session whose process
+//! died during the handoff.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{
-    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
+    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize,
+    SpawnSpec,
 };
 
 /// What a scripted program is reacting to.
@@ -57,6 +63,7 @@ impl ScriptedProcess<'_> {
 
 pub type Program = Arc<dyn Fn(ProgramInput<'_>, &mut ScriptedProcess<'_>) + Send + Sync>;
 
+#[derive(Clone)]
 struct Running {
     spec: SpawnSpec,
     size: PtySize,
@@ -100,7 +107,41 @@ pub struct FakePty {
     sink: Arc<dyn PtyEventSink>,
     programs: HashMap<String, Program>,
     sessions: HashMap<SessionId, Running>,
+    /// What the last export took out, for `resume`.
+    exported: HashMap<SessionId, Running>,
     fail_next: Option<PtyError>,
+}
+
+/// One exported session of a [`FakePty`].
+#[derive(Clone)]
+pub struct FakePtyToken {
+    running: Running,
+    unadoptable: bool,
+}
+
+impl FakePtyToken {
+    /// This token, refused by `adopt` as if its process had died during the handoff.
+    pub fn unadoptable(self) -> Self {
+        Self {
+            unadoptable: true,
+            ..self
+        }
+    }
+
+    /// The size the session's terminal had when it was exported.
+    pub fn size(&self) -> PtySize {
+        self.running.size
+    }
+}
+
+impl std::fmt::Debug for FakePtyToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakePtyToken")
+            .field("command", &self.running.spec.command)
+            .field("size", &self.running.size)
+            .field("unadoptable", &self.unadoptable)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FakePty {
@@ -109,6 +150,7 @@ impl FakePty {
             sink,
             programs: HashMap::new(),
             sessions: HashMap::new(),
+            exported: HashMap::new(),
             fail_next: None,
         }
     }
@@ -265,6 +307,58 @@ impl Pty for FakePty {
     }
 }
 
+impl PtyHandoff for FakePty {
+    type Token = FakePtyToken;
+
+    /// Exports every session whose program hasn't exited. One that has, its last output waiting for credit, stays
+    /// to finish.
+    fn export(&mut self) -> Result<Vec<(SessionId, FakePtyToken)>, PtyError> {
+        self.injected()?;
+        let live: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, r)| r.exited.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut tokens = Vec::new();
+        for id in live {
+            if let Some(running) = self.sessions.remove(&id) {
+                self.exported.insert(id.clone(), running.clone());
+                let token = FakePtyToken {
+                    running,
+                    unadoptable: false,
+                };
+                tokens.push((id, token));
+            }
+        }
+        tokens.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(tokens)
+    }
+
+    fn resume(&mut self) {
+        let exported: Vec<(SessionId, Running)> = self.exported.drain().collect();
+        for (id, running) in exported {
+            self.sessions.insert(id.clone(), running);
+            self.deliver(&id);
+        }
+    }
+
+    fn adopt(&mut self, session: SessionId, token: FakePtyToken) -> Result<(), PtyError> {
+        self.injected()?;
+        if self.sessions.contains_key(&session) {
+            return Err(PtyError::AlreadyExists);
+        }
+        if token.unadoptable {
+            return Err(PtyError::Io("the session's process is gone".into()));
+        }
+        let mut running = token.running;
+        running.unacked = 0;
+        self.sessions.insert(session.clone(), running);
+        self.deliver(&session);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -307,6 +401,13 @@ mod tests {
                     "trap '' HUP; exec yes" => {
                         if input == ProgramInput::Start {
                             p.flood("y\r\n");
+                        }
+                    }
+                    "read _; exit 7" => {
+                        if let ProgramInput::Stdin(bytes) = input
+                            && bytes.contains(&b'\n')
+                        {
+                            p.exit(7);
                         }
                     }
                     "stty -opost; exec seq 1 400000" => {
@@ -368,6 +469,28 @@ mod tests {
         use super::contract_fake;
 
         crate::pty_contract!(contract_fake);
+    }
+
+    mod handoff_contract {
+        use super::contract_fake;
+
+        crate::pty_handoff_contract!(contract_fake);
+    }
+
+    #[test]
+    fn an_unadoptable_token_is_refused_and_the_session_stays_unknown() {
+        let (tx, _rx) = mpsc::channel();
+        let mut old = contract_fake(Arc::new(ChannelSink(tx.clone())));
+        let s = SessionId::new("s");
+        old.spawn(s.clone(), spec("cat", &[])).unwrap();
+        let (id, token) = old.export().unwrap().remove(0);
+
+        let mut new = contract_fake(Arc::new(ChannelSink(tx)));
+        assert!(matches!(
+            new.adopt(id, token.unadoptable()),
+            Err(PtyError::Io(_))
+        ));
+        assert!(!new.is_running(&s));
     }
 
     #[test]

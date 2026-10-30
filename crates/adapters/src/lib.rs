@@ -5,6 +5,7 @@
 pub mod commands;
 pub mod config;
 pub mod event_log;
+pub mod handoff;
 pub mod launcher;
 pub mod link;
 pub mod private_fs;
@@ -17,5 +18,5 @@ pub use config::TomlConfigSource;
 pub use event_log::{JsonlEventLog, TornTail};
 pub use launcher::ProcessHostLauncher;
 pub use link::{UnixConnectLink, UnixLinkError, UnixListenLink};
-pub use pty::PortablePty;
+pub use pty::{PortablePty, PtyToken};
 pub use worktrees::GitWorktrees;

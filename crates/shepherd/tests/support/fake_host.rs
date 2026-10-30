@@ -15,8 +15,8 @@ use shepherd_core::ports::{ConnId, Link, LinkEvent};
 use shepherd_core::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HelloOk,
     HostNotification, HostResponse, HostResult, LogEntry, Notify, ProfileInfo, PtyOutput, Request,
-    SessionNew, SessionResize, decode_client_message, encode_host_notification, encode_response,
-    negotiate,
+    SessionNew, SessionResize, UpgradeAnswer, decode_client_message, encode_host_notification,
+    encode_response, negotiate,
 };
 use shepherd_testkit::builders::{HostDriver, claude_resume_spec};
 use shepherd_testkit::contracts::link::ChannelSink;
@@ -45,6 +45,11 @@ pub struct FakeHost {
     /// host older than builds.
     build: Option<BuildId>,
     installed: Option<ExeDigest>,
+    /// How it answers `_shepherd/host/upgrade`, in order; once they run out, like a host older than updating in
+    /// place (method not found).
+    upgrade_answers: std::collections::VecDeque<UpgradeAnswer>,
+    /// How many upgrade requests it was sent.
+    upgrades: usize,
 }
 
 impl FakeHost {
@@ -69,7 +74,22 @@ impl FakeHost {
             session_news: Vec::new(),
             build: None,
             installed: None,
+            upgrade_answers: std::collections::VecDeque::new(),
+            upgrades: 0,
         }
+    }
+
+    /// One that answers its next upgrade requests with `answers`, in order.
+    pub fn with_upgrade_answers(self, answers: impl IntoIterator<Item = UpgradeAnswer>) -> Self {
+        Self {
+            upgrade_answers: answers.into_iter().collect(),
+            ..self
+        }
+    }
+
+    /// How many `_shepherd/host/upgrade` requests it was sent.
+    pub fn upgrades(&self) -> usize {
+        self.upgrades
     }
 
     /// One whose hello answer says it runs `build`, with `installed` at its path.
@@ -227,6 +247,15 @@ impl FakeHost {
             ClientRequest::WorktreeStatus(_) => Ok(HostResult::WorktreeStatus(
                 shepherd_core::wire::WorktreeStatusOk::default(),
             )),
+            ClientRequest::HostUpgrade(_) => {
+                self.upgrades += 1;
+                match self.upgrade_answers.pop_front() {
+                    Some(answer) => Ok(HostResult::Upgrade(answer)),
+                    None => Err(shepherd_core::wire::WireError::MethodNotFound(
+                        "_shepherd/host/upgrade".into(),
+                    )),
+                }
+            }
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

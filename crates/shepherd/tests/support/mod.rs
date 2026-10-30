@@ -13,10 +13,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use shepherd::build::InstalledExe;
-use shepherd::host::{Env, HostRuntime, RuntimeEvent, RuntimeSettings, runtime_channel};
+use shepherd::host::{
+    Env, HostRuntime, PreflightRunner, RuntimeEvent, RuntimeSettings, SwapPlan, adopt_sessions,
+    runtime_channel,
+};
 use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
 use shepherd_core::host::Host;
+use shepherd_core::host::upgrade::{HandoffCheck, Preflight};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink, PtyEventSink};
 use shepherd_core::wire::{
@@ -27,7 +31,7 @@ use shepherd_core::wire::{
 use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
-use shepherd_testkit::fakes::pty::{FakePty, ProgramInput, ScriptedProcess};
+use shepherd_testkit::fakes::pty::{FakePty, FakePtyToken, ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 
 /// The login shell the harness's config resolves the `shell` profile to.
@@ -178,9 +182,16 @@ pub struct HarnessBuilder {
     config: RawConfig,
     worktrees: FakeWorktrees,
     commands: FakeCommands,
+    preflight: Option<PreflightRunner>,
 }
 
 impl HarnessBuilder {
+    /// Runs `preflight` for upgrades instead of one that always passes.
+    pub fn preflight(mut self, preflight: PreflightRunner) -> Self {
+        self.preflight = Some(preflight);
+        self
+    }
+
     /// Registers `program` for `command` in the fake PTY. [`SHELL`] runs [`echo_shell`] unless replaced.
     pub fn program(mut self, command: &str, program: Program) -> Self {
         self.programs.push((command.to_owned(), program));
@@ -233,9 +244,13 @@ impl HarnessBuilder {
             worktrees,
             commands,
             build,
+            preflight,
         } = self;
         let dir = tempfile::tempdir().expect("tempdir for run files");
         let mut settings = settings(config, dir.path().join("run"));
+        if let Some(preflight) = preflight {
+            settings.preflight = preflight;
+        }
         if let Some((build, exe)) = build {
             settings.build = Some(build);
             settings.installed = InstalledExe::new(exe);
@@ -273,7 +288,21 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
         socket: SOCKET.into(),
         build: None,
         installed: InstalledExe::new(SHEPHERD_EXE),
+        preflight: passing_preflight(),
     }
+}
+
+/// A preflight that finds a binary able to take over: what `handoff-check` prints.
+pub fn passing_preflight() -> PreflightRunner {
+    PreflightRunner::new(|_| {
+        let build = BuildId {
+            version: "0.1.0".into(),
+            digest: shepherd_core::wire::ExeDigest::from_bytes([7; 32]),
+        };
+        let mut stdout = serde_json::to_vec(&HandoffCheck::of(build)).expect("serializes");
+        stdout.push(b'\n');
+        Preflight::Exited { code: 0, stdout }
+    })
 }
 
 fn build_runtime(
@@ -373,6 +402,7 @@ impl HostHarness {
             config: shell_default_config(),
             worktrees: FakeWorktrees::new(WORKTREE_ROOT),
             commands: FakeCommands::new(),
+            preflight: None,
         }
     }
 
@@ -438,6 +468,44 @@ impl HostHarness {
         let client = FakeClient::connect_with(&self.net, true);
         self.step();
         client
+    }
+
+    /// The harness's fake `Worktrees` (shared state), e.g. to hold its next call.
+    pub fn worktrees(&self) -> &FakeWorktrees {
+        &self.worktrees
+    }
+
+    /// Completes the swap an accepted upgrade made ready, as the exec would: `tamper` sees the plan first (e.g. to
+    /// spoil a token), then a new runtime adopts it on the same log and network, with a fresh fake PTY.
+    pub fn swap(&mut self, tamper: impl FnOnce(&mut SwapPlan<FakePtyToken>)) {
+        let mut old = self.runtime.take().expect("runtime");
+        let mut plan = old.take_swap().expect("a swap is ready");
+        old.close_conns();
+        tamper(&mut plan);
+        let log = old.into_log();
+        let (tx, rx) = runtime_channel();
+        let mut pty = FakePty::new(tx.pty_sink());
+        for (command, program) in &self.programs {
+            let program = program.clone();
+            pty = pty.with_program(command.clone(), move |input, p| program(input, p));
+        }
+        let adoption = adopt_sessions(&mut pty, plan);
+        let link = self.net.listen(tx.link_sink()).expect("fake host listens");
+        let runtime = HostRuntime::adopt(
+            pty,
+            self.worktrees.clone(),
+            self.commands.clone(),
+            link,
+            log,
+            self.env.clone(),
+            self.settings.clone(),
+            tx,
+            rx,
+            adoption,
+        )
+        .expect("host runtime adopts");
+        self.runtime = Some(runtime);
+        self.step();
     }
 
     /// Stops this host (dropping its link, so clients see it go) and starts a new one on the same log, as if the

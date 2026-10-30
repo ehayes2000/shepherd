@@ -33,11 +33,20 @@
 //!   `session/closed` is appended. A session waiting for its worktree or its hooks keeps its files until the last
 //!   result comes back (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
+//! - **Updating in place** (decision 0018). `_shepherd/host/upgrade` is decided by core
+//!   ([`shepherd_core::host::upgrade::decide`]); its preflight runs on a thread of its own and comes back as
+//!   [`RuntimeEvent::Preflighted`]. Once accepted, the runtime exports its PTYs (their pumps paused, everything read so
+//!   far queued), handles what is queued (screens fed, hook frames appended, other requests dropped), and hands a
+//!   [`SwapPlan`] (each session's token, size and `snapshot_ansi`, and the translators) out of [`HostRuntime::run`].
+//!   The caller stops accepting, closes every conn ([`HostRuntime::close_conns`]) and re-execs; if that fails, [`HostRuntime::swap_failed`] resumes the PTYs and
+//!   later upgrades are answered with why. The new image starts with [`HostRuntime::adopt`]: adopted sessions get no
+//!   exit and keep their run directory, their screens are fed their snapshots, the translators are restored, and each
+//!   is nudged to redraw.
 //! - **Quiet watch.** A [`QuietWatch`] (the quiet-output idle fallback) sees every entry appended, and the logs on
 //!   start. Output of, and client input to, the sessions it watches are fed to it stamped with `Env::now`; its
 //!   deadline is serviced like the others: when it is due, a tick stamped with `Env::now` returns the idles to append.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,10 +57,11 @@ use serde_json::Value;
 use shepherd_core::acpp::{
     Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp, Timestamp,
 };
-use shepherd_core::agents::Translators;
+use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
+use shepherd_core::host::upgrade::{Preflight, UpgradeFacts, UpgradeStep, Work, decide};
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, Inspection, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
     expand_home,
@@ -59,12 +69,13 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError,
+    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, WorktreeError,
     WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
-    self, BuildId, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
-    HostResponse, HostResult, LogEntry, PtyOutput, SessionNew, SubscribeFrom, WireError,
+    self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
+    HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SessionNew,
+    SubscribeFrom, UpgradeAnswer, WireError,
 };
 use shepherd_term::Screen;
 
@@ -103,6 +114,94 @@ pub enum RuntimeEvent {
     Commands(HostEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
+    /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
+    Preflighted(Preflight),
+}
+
+/// Runs the upgrade preflight: `<exe> handoff-check`, bounded. The runtime calls it on a thread of its own.
+#[derive(Clone)]
+pub struct PreflightRunner(Arc<dyn Fn(&Path) -> Preflight + Send + Sync>);
+
+impl PreflightRunner {
+    pub fn new(run: impl Fn(&Path) -> Preflight + Send + Sync + 'static) -> Self {
+        Self(Arc::new(run))
+    }
+
+    pub fn run(&self, exe: &Path) -> Preflight {
+        (self.0)(exe)
+    }
+}
+
+impl std::fmt::Debug for PreflightRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreflightRunner")
+    }
+}
+
+/// One session as a host hands it to its next image.
+#[derive(Debug)]
+pub struct CarriedSession<T> {
+    pub id: SessionId,
+    /// Its screen's size, which its terminal has too.
+    pub cols: u16,
+    pub rows: u16,
+    /// Its screen, as `Screen::snapshot_ansi` replays it.
+    pub snapshot: Vec<u8>,
+    /// What the `PtyHandoff` port needs to adopt it.
+    pub token: T,
+}
+
+/// What an accepted upgrade carries across the exec besides the log, its lock and the listener.
+#[derive(Debug)]
+pub struct SwapPlan<T> {
+    pub sessions: Vec<CarriedSession<T>>,
+    pub translators: CarriedTranslators,
+}
+
+/// A session the new image adopted: its PTY is in the `Pty` port already.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptedSession {
+    pub id: SessionId,
+    pub cols: u16,
+    pub rows: u16,
+    pub snapshot: Vec<u8>,
+}
+
+/// What [`HostRuntime::adopt`] starts from.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Adoption {
+    pub sessions: Vec<AdoptedSession>,
+    pub translators: CarriedTranslators,
+}
+
+/// Adopts every carried session into `pty`, before the logs are folded, so their output keeps draining. A session
+/// the port refuses is left out (the port has killed it), and so is recorded as exited at start.
+pub fn adopt_sessions<P: PtyHandoff>(pty: &mut P, plan: SwapPlan<P::Token>) -> Adoption {
+    let mut sessions = Vec::new();
+    for carried in plan.sessions {
+        let CarriedSession {
+            id,
+            cols,
+            rows,
+            snapshot,
+            token,
+        } = carried;
+        match pty.adopt(id.clone(), token) {
+            Ok(()) => sessions.push(AdoptedSession {
+                id,
+                cols,
+                rows,
+                snapshot,
+            }),
+            Err(error) => {
+                tracing::warn!(session = %id, %error, "cannot adopt session; it was killed")
+            }
+        }
+    }
+    Adoption {
+        sessions,
+        translators: plan.translators,
+    }
 }
 
 /// The sending side of the loop's channel. Unbounded, so a port's sink never blocks on the loop that owns the
@@ -193,6 +292,16 @@ pub struct RuntimeSettings {
     pub build: Option<BuildId>,
     /// What is installed at `shepherd` now, for the hello: what a restart would run.
     pub installed: InstalledExe,
+    /// Runs `<shepherd> handoff-check` before an upgrade.
+    pub preflight: PreflightRunner,
+}
+
+/// An upgrade request being decided.
+#[derive(Debug)]
+struct PendingUpgrade {
+    reply: ReplyTo,
+    force: bool,
+    preflight: Option<Preflight>,
 }
 
 #[derive(Debug, Default)]
@@ -256,7 +365,7 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P, W, C, L, E, V> {
+pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
@@ -294,10 +403,19 @@ pub struct HostRuntime<P, W, C, L, E, V> {
     quiet: QuietWatch,
     /// When the quiet watch's deadline is due on the monotonic clock.
     quiet_due: Option<Instant>,
+    upgrade: Option<PendingUpgrade>,
+    /// The preflight is running.
+    preflighting: bool,
+    /// An accepted upgrade has exported the PTYs: only hook frames are still taken.
+    swapping: bool,
+    /// A swap ready to exec, for [`HostRuntime::run`] to hand out.
+    swap: Option<SwapPlan<P::Token>>,
+    /// Why the last accepted swap failed, and what was installed then.
+    swap_failed: Option<(Option<ExeDigest>, String)>,
 }
 
 impl<
-    P: Pty,
+    P: PtyHandoff,
     W: Worktrees + Send + Sync + 'static,
     C: Commands + Send + Sync + 'static,
     L: Link,
@@ -319,6 +437,38 @@ impl<
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
+    ) -> Result<Self, StartError> {
+        let ports = (pty, worktrees, commands, link, log, env);
+        Self::start_with(ports, settings, tx, rx, Adoption::default())
+    }
+
+    /// Starts the new image after a swap, like [`HostRuntime::start`] but with `adoption`'s sessions running in `pty`
+    /// (see [`adopt_sessions`]): they get no exit and keep their run directories, their screens start from their
+    /// snapshots, the carried translators are restored (one that doesn't parse is dropped), and each session is
+    /// nudged to redraw.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt(
+        pty: P,
+        worktrees: W,
+        commands: C,
+        link: L,
+        log: E,
+        env: V,
+        settings: RuntimeSettings,
+        tx: RuntimeTx,
+        rx: RuntimeRx,
+        adoption: Adoption,
+    ) -> Result<Self, StartError> {
+        let ports = (pty, worktrees, commands, link, log, env);
+        Self::start_with(ports, settings, tx, rx, adoption)
+    }
+
+    fn start_with(
+        (pty, worktrees, commands, link, log, env): (P, W, C, L, E, V),
+        settings: RuntimeSettings,
+        tx: RuntimeTx,
+        rx: RuntimeRx,
+        adoption: Adoption,
     ) -> Result<Self, StartError> {
         let mut host = Host::new();
         let mut quiet = QuietWatch::new(&settings.config);
@@ -360,12 +510,18 @@ impl<
             finished: false,
             quiet,
             quiet_due: None,
+            upgrade: None,
+            preflighting: false,
+            swapping: false,
+            swap: None,
+            swap_failed: None,
         };
+        let adopted: BTreeSet<SessionId> = adoption.sessions.iter().map(|s| s.id.clone()).collect();
         let orphans: Vec<SessionId> = runtime
             .host
             .sessions()
             .into_iter()
-            .filter(|s| !s.exited)
+            .filter(|s| !s.exited && !adopted.contains(&s.id))
             .map(|s| s.id)
             .collect();
         for session in orphans {
@@ -376,9 +532,54 @@ impl<
         }
         // A session that was closing lost its worktree's inspection, hooks or removal with the old host.
         runtime.dispatch(HostEvent::Restarted);
-        // Every run directory is stale: the log lock is held and nothing has been spawned yet.
-        run_files::sweep(&runtime.settings.run_root);
+        // Every other run directory is stale: the log lock is held and nothing else has been spawned yet.
+        run_files::sweep_except(&runtime.settings.run_root, &adopted);
+        runtime.restore(adoption);
         Ok(runtime)
+    }
+
+    /// Restores what an earlier image carried: screens, translators, and a redraw of each adopted session.
+    fn restore(&mut self, adoption: Adoption) {
+        let (translators, dropped) = Translators::restore(adoption.translators);
+        for session in dropped {
+            tracing::warn!(%session, "dropped a carried hook translator this build can't read");
+        }
+        self.translators = translators;
+        for adopted in adoption.sessions {
+            let AdoptedSession {
+                id,
+                cols,
+                rows,
+                snapshot,
+            } = adopted;
+            let mut screen = Screen::new(cols, rows);
+            let fed = screen_guard::update(&mut screen, |s| s.feed(&snapshot));
+            log_screen_panic(&id, fed);
+            // Queries in a replayed screen were answered by the image that saw them first.
+            screen.take_replies();
+            self.screens.insert(id.clone(), screen);
+            self.after_feed(&id);
+            self.nudge(&id, PtySize { cols, rows });
+        }
+    }
+
+    /// Makes `session`'s program redraw: resizing to the same size doesn't signal it, so it is resized one column
+    /// narrower and back.
+    fn nudge(&mut self, session: &SessionId, size: PtySize) {
+        let other = PtySize {
+            cols: if size.cols > 1 {
+                size.cols - 1
+            } else {
+                size.cols + 1
+            },
+            ..size
+        };
+        for size in [other, size] {
+            if let Err(error) = self.pty.resize(session, size) {
+                tracing::warn!(%session, %error, "cannot nudge an adopted session to redraw");
+                return;
+            }
+        }
     }
 
     pub fn host(&self) -> &Host {
@@ -437,13 +638,17 @@ impl<
             .min()
     }
 
-    /// Runs until shutdown completes, sleeping in `recv_timeout` until the next event or deadline. A shutdown
-    /// request and due deadlines are serviced on every iteration, so a busy channel can't starve them.
-    pub fn run(&mut self) {
+    /// Runs until shutdown completes (`None`) or an accepted upgrade is ready to exec (its plan), sleeping in
+    /// `recv_timeout` until the next event or deadline. A shutdown request and due deadlines are serviced on every
+    /// iteration, so a busy channel can't starve them.
+    pub fn run(&mut self) -> Option<SwapPlan<P::Token>> {
         loop {
             self.service();
             if self.finished {
-                break;
+                return None;
+            }
+            if let Some(plan) = self.swap.take() {
+                return Some(plan);
             }
             let next = match self.next_deadline() {
                 None => self.rx.0.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -456,9 +661,49 @@ impl<
                 Ok(event) => self.handle(event),
                 Err(RecvTimeoutError::Timeout) => {}
                 // The runtime holds a sender, so this can't happen; stop rather than spin.
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => return None,
             }
         }
+    }
+
+    /// The swap an accepted upgrade has made ready, if any. [`HostRuntime::run`] returns it; for tests stepping the
+    /// loop themselves.
+    pub fn take_swap(&mut self) -> Option<SwapPlan<P::Token>> {
+        self.swap.take()
+    }
+
+    /// Closes every conn, for a swap: after the listener is handed over, so a client reconnecting at once waits in the
+    /// backlog for the new image instead of being accepted by this one and cut off by the exec. What was sent to each,
+    /// the upgrade's answer included, is flushed first.
+    pub fn close_conns(&mut self) {
+        let conns: Vec<ConnId> = self.conns.keys().copied().collect();
+        for conn in conns {
+            if let Err(error) = self.link.close(conn) {
+                tracing::debug!(%conn, %error, "close failed");
+            }
+        }
+        self.conns.clear();
+        self.replies.clear();
+    }
+
+    /// The exec of a swap failed with `why`: the PTYs are resumed and served as before, and the next upgrade
+    /// request is answered with why, until another build is installed. The conns closed for the swap stay closed;
+    /// clients reconnect.
+    pub fn swap_failed(&mut self, why: String) {
+        tracing::error!(%why, "updating in place failed; carrying on");
+        self.pty.resume();
+        self.swapping = false;
+        self.swap = None;
+        let installed = self.settings.installed.digest();
+        self.swap_failed = Some((installed, why));
+    }
+
+    pub fn link_mut(&mut self) -> &mut L {
+        &mut self.link
+    }
+
+    pub fn settings(&self) -> &RuntimeSettings {
+        &self.settings
     }
 
     /// Handles every event already queued and every deadline already due, until there is none. For tests, where
@@ -487,7 +732,7 @@ impl<
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
             self.run_until_idle();
-            if self.worktree_calls + self.hook_calls == 0 || self.finished {
+            if self.worktree_calls + self.hook_calls == 0 && !self.preflighting || self.finished {
                 return true;
             }
             match self.rx.0.recv_timeout(limit) {
@@ -567,6 +812,13 @@ impl<
                 }
             }
             RuntimeEvent::Shutdown => self.start_shutdown(),
+            RuntimeEvent::Preflighted(preflight) => {
+                self.preflighting = false;
+                if let Some(pending) = &mut self.upgrade {
+                    pending.preflight = Some(preflight);
+                    self.advance_upgrade();
+                }
+            }
         }
     }
 
@@ -1092,6 +1344,7 @@ impl<
                     self.respond(conn, &response);
                 }
             }
+            Ok(ClientMessage::Notification(_)) if self.swapping => {}
             Ok(ClientMessage::Notification(note)) => match note {
                 ClientNotification::SessionInput(input) => self.dispatch(HostEvent::Input {
                     session: input.session,
@@ -1106,6 +1359,12 @@ impl<
                     },
                 }),
             },
+            // Once the PTYs are exported only hook frames are taken, so nothing is started that the swap can't carry.
+            Ok(ClientMessage::Request(request))
+                if self.swapping && !matches!(request.body, ClientRequest::HookFrame(_)) =>
+            {
+                tracing::debug!(%conn, "dropped a request during the swap");
+            }
             Ok(ClientMessage::Request(request)) => {
                 self.client_request(conn, request.id, request.body)
             }
@@ -1207,6 +1466,22 @@ impl<
                     path: expand_home(Path::new(&select.path), &self.settings.home),
                 });
             }
+            ClientRequest::HostUpgrade(HostUpgrade { force }) => {
+                let reply = self.reply_to(conn, id);
+                if self.upgrade.is_some() {
+                    let reason = "an update is already being checked".to_owned();
+                    return self.reply(
+                        reply,
+                        Ok(HostResult::Upgrade(UpgradeAnswer::Busy { reason })),
+                    );
+                }
+                self.upgrade = Some(PendingUpgrade {
+                    reply,
+                    force,
+                    preflight: None,
+                });
+                self.advance_upgrade();
+            }
             ClientRequest::SessionResume(resume) => {
                 let reply = self.reply_to(conn, id);
                 let session = resume.session;
@@ -1226,6 +1501,106 @@ impl<
                 self.pending_run_files.remove(&session);
             }
         }
+    }
+
+    // ---------- updating in place ----------
+
+    /// Decides the pending upgrade request with what is known now: answers it, starts its preflight, or swaps.
+    fn advance_upgrade(&mut self) {
+        let Some(pending) = &self.upgrade else {
+            return;
+        };
+        let installed = self.settings.installed.digest();
+        let failed = self
+            .swap_failed
+            .as_ref()
+            .filter(|(at, _)| *at == installed)
+            .map(|(_, why)| why.clone());
+        let facts = UpgradeFacts {
+            running: self.settings.build.as_ref().map(|b| b.digest),
+            installed,
+            force: pending.force,
+            work: Work {
+                port_calls: self.worktree_calls + self.hook_calls,
+                run_files: self.pending_run_files(),
+            },
+            failed,
+            preflight: pending.preflight.clone(),
+        };
+        match decide(&facts) {
+            UpgradeStep::Preflight => self.start_preflight(),
+            UpgradeStep::Answer(UpgradeAnswer::Accepted) => self.begin_swap(),
+            UpgradeStep::Answer(answer) => self.answer_upgrade(answer),
+        }
+    }
+
+    fn answer_upgrade(&mut self, answer: UpgradeAnswer) {
+        if let Some(pending) = self.upgrade.take() {
+            self.reply(pending.reply, Ok(HostResult::Upgrade(answer)));
+        }
+    }
+
+    /// Runs the preflight on a thread of its own; its result comes back as [`RuntimeEvent::Preflighted`].
+    fn start_preflight(&mut self) {
+        let runner = self.settings.preflight.clone();
+        let exe = self.settings.shepherd.clone();
+        let tx = self.tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("preflight".into())
+            .spawn(move || tx.send(RuntimeEvent::Preflighted(runner.run(&exe))));
+        match spawned {
+            Ok(_) => self.preflighting = true,
+            Err(e) => {
+                let preflight = Preflight::Failed(format!("cannot start a thread: {e}"));
+                if let Some(pending) = &mut self.upgrade {
+                    pending.preflight = Some(preflight);
+                }
+                self.advance_upgrade();
+            }
+        }
+    }
+
+    /// The upgrade is accepted: hands the PTYs over, says so, takes in what is queued and readies the plan for
+    /// [`HostRuntime::run`] to hand out. The conns are closed by [`HostRuntime::close_conns`], once the caller has
+    /// stopped accepting new ones.
+    fn begin_swap(&mut self) {
+        let tokens = match self.pty.export() {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                let reason = format!("cannot hand the sessions over: {error}");
+                return self.answer_upgrade(UpgradeAnswer::Unavailable { reason });
+            }
+        };
+        self.answer_upgrade(UpgradeAnswer::Accepted);
+        self.swapping = true;
+        tracing::info!(sessions = tokens.len(), "updating in place");
+        // The pumps are paused, so this ends: what they read is queued, and only the screens and hook frames take it.
+        while let Ok(event) = self.rx.0.try_recv() {
+            self.handle(event);
+        }
+        let sessions = tokens
+            .into_iter()
+            .map(|(id, token)| {
+                let (cols, rows, snapshot) = match self.screens.get(&id) {
+                    Some(screen) => {
+                        let (cols, rows) = screen.size();
+                        (cols, rows, screen.snapshot_ansi())
+                    }
+                    None => (INITIAL_SIZE.cols, INITIAL_SIZE.rows, Vec::new()),
+                };
+                CarriedSession {
+                    id,
+                    cols,
+                    rows,
+                    snapshot,
+                    token,
+                }
+            })
+            .collect();
+        self.swap = Some(SwapPlan {
+            sessions,
+            translators: self.translators.carry(),
+        });
     }
 
     /// What a new session runs, and the run files to write before spawning it: the named profile, else

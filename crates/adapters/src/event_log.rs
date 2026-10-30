@@ -33,6 +33,8 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use shepherd_core::acpp::{Envelope, FrameDraft, Seq, Stamp};
@@ -141,11 +143,39 @@ impl JsonlEventLog {
         Self::open_with(root, open_append_file)
     }
 
+    /// Opens the logs under `root` with `lock`, a descriptor of `<root>/lock` that a previous image of this process
+    /// held locked and carried across its exec (decision 0018). The lock was never released, so no other host can
+    /// have taken the store meanwhile; locking it again is a no-op on the same file description. A descriptor of any
+    /// other file is refused with [`LogError::Io`].
+    pub fn adopt(root: impl AsRef<Path>, lock: OwnedFd) -> Result<Self, LogError> {
+        let root = root.as_ref().to_path_buf();
+        let lock = File::from(lock);
+        let carried = lock.metadata().map_err(io_err)?;
+        let path = root.join("lock");
+        let at_path = fs::symlink_metadata(&path).map_err(io_err)?;
+        if (carried.dev(), carried.ino()) != (at_path.dev(), at_path.ino()) {
+            return Err(LogError::Io(format!(
+                "the carried lock is not {}",
+                path.display()
+            )));
+        }
+        Self::with_lock(root, lock, open_append_file)
+    }
+
+    /// The descriptor holding the store's lock, for the host's exec to carry (see [`JsonlEventLog::adopt`]).
+    pub fn lock_fd(&self) -> RawFd {
+        self.lock.as_raw_fd()
+    }
+
     fn open_with(root: impl AsRef<Path>, open_append: OpenAppendFile) -> Result<Self, LogError> {
         let root = root.as_ref().to_path_buf();
         ensure_private_dir(&root)?;
         ensure_private_dir(&root.join("sessions"))?;
         let lock = open_private(&root.join("lock"), OpenOptions::new().write(true))?;
+        Self::with_lock(root, lock, open_append)
+    }
+
+    fn with_lock(root: PathBuf, lock: File, open_append: OpenAppendFile) -> Result<Self, LogError> {
         match lock.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(LogError::Locked),
@@ -406,6 +436,7 @@ fn io_err(e: io::Error) -> LogError {
 mod tests {
     use std::fs::{self, File};
     use std::io::{self, Write};
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Command;
@@ -751,6 +782,41 @@ mod tests {
         ));
         drop(first);
         JsonlEventLog::open(dir.path()).unwrap();
+    }
+
+    /// What the host's exec does with the store: its descriptor carries over, and nothing unlocks it.
+    fn carried_lock(log: JsonlEventLog) -> OwnedFd {
+        let fd = log.lock_fd();
+        std::mem::forget(log);
+        // SAFETY: the forgotten store owned it, and nothing else will close it.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    #[test]
+    fn an_adopted_lock_stays_held_and_the_adopter_reads_the_logs() {
+        let dir = private_tempdir();
+        let mut first = JsonlEventLog::open(dir.path()).unwrap();
+        push(&mut first, &session("s1"), 1);
+        let lock = carried_lock(first);
+
+        let adopted = JsonlEventLog::adopt(dir.path(), lock).unwrap();
+        assert!(matches!(
+            JsonlEventLog::open(dir.path()),
+            Err(LogError::Locked)
+        ));
+        assert_eq!(adopted.read(session("s1"), Seq::ZERO).unwrap().len(), 1);
+        drop(adopted);
+        JsonlEventLog::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn adopting_a_descriptor_that_is_not_the_lock_is_refused() {
+        let dir = private_tempdir();
+        let other = File::create(dir.path().join("not-the-lock")).unwrap();
+        let err = JsonlEventLog::adopt(dir.path(), OwnedFd::from(other))
+            .err()
+            .expect("refused");
+        assert!(matches!(err, LogError::Io(_)), "{err:?}");
     }
 
     /// A child forked while the store is open shares the lock's file description until it execs. Dropping the

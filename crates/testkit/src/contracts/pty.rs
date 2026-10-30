@@ -53,9 +53,9 @@ use shepherd_core::ports::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
 };
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to watch for stray events after an exit. Only used to assert that nothing else arrives.
-const QUIET: Duration = Duration::from_millis(300);
+pub(crate) const QUIET: Duration = Duration::from_millis(300);
 
 /// A port plus the receiving end of the sink it was built with.
 pub struct PtyHarness<P> {

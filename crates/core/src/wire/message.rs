@@ -49,10 +49,11 @@ pub enum Method {
     SessionResume,
     WorkspaceSelect,
     WorktreeStatus,
+    HostUpgrade,
 }
 
 impl Method {
-    pub const ALL: [Method; 9] = [
+    pub const ALL: [Method; 10] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -62,6 +63,7 @@ impl Method {
         Self::SessionResume,
         Self::WorkspaceSelect,
         Self::WorktreeStatus,
+        Self::HostUpgrade,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -75,6 +77,7 @@ impl Method {
             Self::SessionResume => "_shepherd/session/resume",
             Self::WorkspaceSelect => "_shepherd/workspace/select",
             Self::WorktreeStatus => "_shepherd/worktree/status",
+            Self::HostUpgrade => "_shepherd/host/upgrade",
         }
     }
 
@@ -101,6 +104,7 @@ pub enum ClientRequest {
     SessionResume(SessionResume),
     WorkspaceSelect(WorkspaceSelect),
     WorktreeStatus(WorktreeCheck),
+    HostUpgrade(HostUpgrade),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -245,6 +249,30 @@ pub struct WorkspaceSelect {
     pub path: String,
 }
 
+/// Ask the host to update itself in place to the build now installed at its path (spike T36, decision 0018).
+/// Answered with [`UpgradeAnswer`]. On [`UpgradeAnswer::Accepted`] the host closes every connection and re-execs;
+/// its sessions keep running, and a reconnect finds the new build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostUpgrade {
+    /// Swap even when the installed build is the running one (for tests). Left off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+/// The host's answer to `_shepherd/host/upgrade`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "kebab-case")]
+pub enum UpgradeAnswer {
+    /// It already runs the installed build.
+    NothingToDo,
+    /// It is in the middle of something it can't carry across the swap; ask again shortly.
+    Busy { reason: String },
+    /// It can't update itself in place, and why: restarting it (which stops its sessions) is the way left.
+    Unavailable { reason: String },
+    /// It is swapping now: the connection closes, and reconnecting reaches the new build.
+    Accepted,
+}
+
 /// Bytes typed into a session's PTY. `data` is base64 on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInput {
@@ -332,6 +360,7 @@ impl ClientRequest {
             Self::SessionResume(_) => Method::SessionResume,
             Self::WorkspaceSelect(_) => Method::WorkspaceSelect,
             Self::WorktreeStatus(_) => Method::WorktreeStatus,
+            Self::HostUpgrade(_) => Method::HostUpgrade,
         }
     }
 
@@ -346,6 +375,7 @@ impl ClientRequest {
             Self::SessionResume(p) => json(p),
             Self::WorkspaceSelect(p) => json(p),
             Self::WorktreeStatus(p) => json(p),
+            Self::HostUpgrade(p) => json(p),
         }
     }
 
@@ -362,6 +392,7 @@ impl ClientRequest {
             Method::SessionResume => Self::SessionResume(invalid_params(params)?),
             Method::WorkspaceSelect => Self::WorkspaceSelect(invalid_params(params)?),
             Method::WorktreeStatus => Self::WorktreeStatus(invalid_params(params)?),
+            Method::HostUpgrade => Self::HostUpgrade(invalid_params(params)?),
         })
     }
 }
@@ -460,6 +491,7 @@ pub enum HostResult {
     Hello(HelloOk),
     SessionNew(SessionNewOk),
     WorktreeStatus(WorktreeStatusOk),
+    Upgrade(UpgradeAnswer),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -470,6 +502,7 @@ impl HostResult {
             Self::Hello(r) => json(r),
             Self::SessionNew(r) => json(r),
             Self::WorktreeStatus(r) => json(r),
+            Self::Upgrade(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -479,6 +512,7 @@ impl HostResult {
             Method::Hello => Self::Hello(serde_json::from_value(result)?),
             Method::SessionNew => Self::SessionNew(serde_json::from_value(result)?),
             Method::WorktreeStatus => Self::WorktreeStatus(serde_json::from_value(result)?),
+            Method::HostUpgrade => Self::Upgrade(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

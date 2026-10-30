@@ -16,6 +16,7 @@ thiserror.workspace = true
 ulid = "1.2"
 signal-hook = "0.3"
 tracing = "0.1"
+serde.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]

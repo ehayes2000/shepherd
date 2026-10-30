@@ -1,6 +1,7 @@
 //! Each session's run files (`launch::RunFile`, e.g. Claude Code's generated settings), in `<run_root>/<session>/`
 //! under `~/.shepherd/run`. Created through `private_fs` (decision 0010): directories `0700`, files `0600`.
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -56,12 +57,13 @@ pub fn remove(run_root: &Path, session: &SessionId) -> io::Result<()> {
     }
 }
 
-/// Removes every session directory in `run_root`, logging what it can't. Only for host startup: the runtime calls it
+/// Removes every session directory in `run_root` but those of `keep` (sessions an earlier image of this host handed
+/// over, still running), logging what it can't. Only for host startup: the runtime calls it
 /// in `HostRuntime::start`, which runs with the root's log lock held (so no other host is using these) and before
 /// anything is spawned (so no session of this host is either). Never follows a symlink and never leaves `run_root`:
 /// a run root that isn't a real directory is left alone, an entry that isn't one (a symlink, a file) is skipped, and
 /// `remove_dir_all` removes links inside a directory without following them.
-pub fn sweep(run_root: &Path) {
+pub fn sweep_except(run_root: &Path, keep: &BTreeSet<SessionId>) {
     match std::fs::symlink_metadata(run_root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(error) => {
@@ -92,6 +94,9 @@ pub fn sweep(run_root: &Path) {
         let path = entry.path();
         // `DirEntry::file_type` doesn't follow a symlink.
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if keep.iter().any(|s| entry.file_name() == s.as_str()) {
             continue;
         }
         match std::fs::remove_dir_all(&path) {

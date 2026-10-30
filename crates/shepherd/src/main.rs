@@ -6,6 +6,7 @@ fn main() -> ExitCode {
     let result = match std::env::args().nth(1).as_deref() {
         None => client(),
         Some("host") => return shepherd::host::main(),
+        Some("handoff-check") => handoff_check(),
         Some("hook") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::hook::main(&args);
@@ -26,4 +27,15 @@ fn client() -> Result<(), String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let socket = PathBuf::from(home).join(".shepherd").join("host.sock");
     shepherd::client::run(&socket).map_err(|e| e.to_string())
+}
+
+/// `shepherd handoff-check`: one JSON line saying which build this is and which handoff formats it can take over
+/// from. The host runs it from its startup path before it re-execs that path to update in place (decision 0018); a
+/// binary without it answers "unknown command" and exits 1, which counts as "can't hand off".
+fn handoff_check() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let build = shepherd::build::build_id(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
+    let check = shepherd_core::host::upgrade::HandoffCheck::of(build);
+    let line = serde_json::to_string(&check).map_err(|e| e.to_string())?;
+    writeln!(std::io::stdout(), "{line}").map_err(|e| e.to_string())
 }
