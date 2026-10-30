@@ -542,6 +542,24 @@ fn the_cursor_is_hidden_after_the_prefix_and_under_a_popup() {
     );
 }
 
+#[test]
+fn the_collapsed_sidebar_keeps_its_buttons_while_a_notice_shows() {
+    let (c, screens) = with_notice();
+    let window = Rect::new(0, 0, 40, 12);
+    let buf = buffer(c.client(), &screens, 40, 12);
+    let detach = position_of(&buf, "⏏");
+    // `?` in the glyph column, on the last line.
+    let help = Position::new(detach.x, detach.y + 1);
+    assert_eq!(buf[help].symbol(), "?");
+    assert_eq!(
+        [detach, help].map(|at| shepherd_tui::hit(&layout(window), c.client(), at.x, at.y)),
+        [
+            Some(shepherd_tui::Target::Detach),
+            Some(shepherd_tui::Target::Help)
+        ]
+    );
+}
+
 /// `three_sessions` after the selected session sent `decscusr` (`CSI Ps SP q`).
 fn with_cursor_style(decscusr: &[u8]) -> (ClientDriver, Screens) {
     let (c, mut screens) = three_sessions();

@@ -1142,6 +1142,11 @@ fn a_notice_is_cleared_by_the_next_user_action() {
             at: Cell { col: 1, row: 2 },
         },
         Intent::BeginWorkspace,
+        Intent::PickProfile("shell".into()),
+        Intent::EditRename("x".into()),
+        Intent::MenuChoose(MenuItem::Rename),
+        Intent::EditWorkspacePath("/tmp/x".into()),
+        Intent::PickWorkspace(PathBuf::from("/tmp/x")),
         Intent::Confirm,
         Intent::Dismiss,
         Intent::Quit,
@@ -1197,17 +1202,25 @@ fn a_notice_clears_once_it_has_shown_for_its_timeout() {
 
 #[test]
 fn a_new_notice_gets_its_own_timeout() {
-    let mut c = with_notice();
+    let mut c = ClientDriver::with_sessions(&["s1"]);
     let timeout = NOTICE_TIMEOUT.as_millis() as i64;
-    c.handle(ClientEvent::Tick { at: at(0) });
+    // Two requests in flight, refused one after the other with no user action in between.
     c.user(Intent::BeginRename);
-    let sent = c.user(Intent::Confirm);
-    c.answer(&sent, Err(WireError::Internal("again".into())));
+    let first = c.user(Intent::Confirm);
+    c.user(Intent::BeginRename);
+    let second = c.user(Intent::Confirm);
+    c.answer(&first, Err(WireError::Internal("first".into())));
+    c.handle(ClientEvent::Tick { at: at(0) });
     c.handle(ClientEvent::Tick {
         at: at(timeout - 1),
     });
+    c.answer(&second, Err(WireError::Internal("second".into())));
     c.handle(ClientEvent::Tick { at: at(timeout) });
-    assert!(c.client().notice().is_some_and(|n| n.contains("again")));
+    assert!(
+        c.client().notice().is_some_and(|n| n.contains("second")),
+        "{:?}",
+        c.client().notice()
+    );
 }
 
 #[test]
