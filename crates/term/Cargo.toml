@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Test-only: `Screen::feed` panics on `PANIC_TRIGGER`, so callers can test that they survive a panic in the emulator.
+panic-trigger = []
+
 [dependencies]
 alacritty_terminal.workspace = true
 

@@ -131,6 +131,10 @@ pub fn with_terminal<R>(
 pub fn install_panic_hook(restorer: Restorer, on_panic: impl Fn() + Send + Sync + 'static) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A screen panic is caught and the screen replaced; the terminal and the client carry on.
+        if crate::screen_guard::guarding() {
+            return;
+        }
         restorer.restore();
         previous(info);
         on_panic();

@@ -47,6 +47,7 @@ use shepherd_term::Screen;
 
 use super::env::Env;
 use super::run_files;
+use crate::screen_guard;
 
 /// The machine id every entry is stamped with until machines get names (T29).
 pub const LOCAL_MACHINE: &str = "local";
@@ -544,7 +545,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 
     fn pty_output(&mut self, session: SessionId, bytes: Vec<u8>) {
         if let Some(screen) = self.screens.get_mut(&session) {
-            screen.feed(&bytes);
+            let fed = screen_guard::update(screen, |s| s.feed(&bytes));
+            log_screen_panic(&session, fed);
             self.after_feed(&session);
         }
         let line = notification_line(&HostNotification::PtyOutput(PtyOutput { session, bytes }));
@@ -619,7 +621,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         for (session, hold) in due {
             self.deadlines.remove(&session);
             if let Some(screen) = self.screens.get_mut(&session) {
-                screen.expire_sync(hold);
+                let expired = screen_guard::update(screen, |s| s.expire_sync(hold));
+                log_screen_panic(&session, expired);
                 self.after_feed(&session);
             }
         }
@@ -1016,6 +1019,13 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         self.conns.clear();
         self.replies.clear();
         self.finished = true;
+    }
+}
+
+/// A session's screen panicked and was replaced with a blank one ([`screen_guard`]).
+fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
+    if let Err(panic) = result {
+        tracing::error!(%session, %panic, "screen panicked; replaced it with a blank one");
     }
 }
 

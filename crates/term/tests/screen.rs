@@ -3,8 +3,8 @@
 mod support;
 
 use shepherd_term::{
-    Attrs, Color, CursorShape, MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, MouseEncoding, MouseMode,
-    MouseTracking, Screen, Underline, Width,
+    Attrs, Color, CursorShape, KITTY_STACK_CAP, MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS,
+    MouseEncoding, MouseMode, MouseTracking, Screen, Underline, Width,
 };
 use support::text;
 
@@ -358,4 +358,122 @@ fn colors_the_program_set_win_over_reported_colors() {
     screen.feed(b"\x1b]11;rgb:12/34/56\x07\x1b]11;?\x07");
     let replies = String::from_utf8(screen.take_replies()).unwrap();
     assert_eq!(replies, "\x1b]11;rgb:1212/3434/5656\x07");
+}
+
+// alacritty 0.26 panics when the kitty keyboard stack is full (F23): it removes from the title stack instead.
+
+/// More pushes than alacritty's stack limit (4096).
+const FLOOD: usize = 5000;
+
+fn repeated(seq: &[u8], times: usize) -> Vec<u8> {
+    seq.repeat(times)
+}
+
+#[test]
+fn kitty_push_flood_does_not_panic_and_still_reports_the_top() {
+    let mut screen = screen_with(10, 3, &repeated(b"\x1b[>1u", FLOOD));
+    assert_eq!(screen.modes().kitty_keyboard, 1);
+    screen.feed(b"\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn kitty_push_flood_split_into_byte_chunks_does_not_panic() {
+    let mut screen = Screen::new(10, 3);
+    for byte in repeated(b"\x1b[>1u", FLOOD) {
+        screen.feed(&[byte]);
+    }
+    screen.feed(b"\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn kitty_pushes_work_again_after_a_pop_from_a_full_stack() {
+    let mut screen = screen_with(10, 3, &repeated(b"\x1b[>1u", FLOOD));
+    screen.feed(b"\x1b[<u\x1b[>7u\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?7u");
+}
+
+#[test]
+fn kitty_stack_keeps_every_entry_up_to_the_cap_and_drops_pushes_past_it() {
+    let below = KITTY_STACK_CAP - 1;
+    let mut bytes = b"\x1b[>7u".to_vec();
+    bytes.extend(repeated(b"\x1b[>1u", below));
+    bytes.extend_from_slice(b"\x1b[>5u\x1b[?u");
+    bytes.extend_from_slice(format!("\x1b[<{below}u\x1b[?u").as_bytes());
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?1u\x1b[?7u");
+}
+
+#[test]
+fn kitty_push_flood_on_the_alt_screen_does_not_panic() {
+    let mut bytes = repeated(b"\x1b[>1u", FLOOD);
+    bytes.extend_from_slice(b"\x1b[?1049h");
+    bytes.extend(repeated(b"\x1b[>3u", FLOOD));
+    bytes.extend_from_slice(b"\x1b[?u\x1b[?1049l\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?3u\x1b[?1u");
+}
+
+#[test]
+fn kitty_pushes_work_again_after_a_reset_of_a_full_stack() {
+    let mut bytes = repeated(b"\x1b[>1u", FLOOD);
+    bytes.extend_from_slice(b"\x1bc\x1b[>7u\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?7u");
+}
+
+#[test]
+fn kitty_push_flood_inside_a_synchronized_update_does_not_panic() {
+    let mut bytes = b"\x1b[?2026h".to_vec();
+    bytes.extend(repeated(b"\x1b[>1u", FLOOD));
+    bytes.extend_from_slice(b"\x1b[?2026l\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn kitty_pop_past_the_bottom_does_not_panic() {
+    let mut screen = screen_with(10, 3, b"\x1b[>7u\x1b[<65535u\x1b[<u\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?0u");
+}
+
+#[test]
+fn title_push_flood_does_not_panic() {
+    let mut bytes = repeated(b"\x1b[22t", FLOOD);
+    bytes.extend(repeated(b"\x1b[23t", FLOOD + 1));
+    bytes.extend(repeated(b"\x1b[22;0t", FLOOD));
+    let mut screen = screen_with(10, 3, &bytes);
+    screen.feed(b"ok");
+    assert_eq!(text(&screen)[0], "ok");
+}
+
+#[test]
+fn kitty_push_flood_with_titles_on_their_stack_does_not_panic() {
+    let mut bytes = repeated(b"\x1b[22t", 10);
+    bytes.extend(repeated(b"\x1b[>1u", FLOOD));
+    bytes.extend_from_slice(b"\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn kitty_push_flood_released_by_the_sync_timeout_does_not_panic() {
+    let mut bytes = b"\x1b[?2026h".to_vec();
+    bytes.extend(repeated(b"\x1b[>1u", FLOOD));
+    let mut screen = screen_with(10, 3, &bytes);
+    let hold = screen.sync_hold().expect("an open synchronized update");
+    screen.expire_sync(hold.id);
+    screen.feed(b"\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn popping_many_kitty_entries_frees_as_many_slots() {
+    let cap = KITTY_STACK_CAP;
+    let mut bytes = repeated(b"\x1b[>1u", cap);
+    bytes.extend_from_slice(format!("\x1b[<{cap}u").as_bytes());
+    bytes.extend_from_slice(b"\x1b[>2u\x1b[>7u\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?7u");
 }

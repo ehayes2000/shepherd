@@ -34,6 +34,7 @@ use shepherd_core::wire::{
 };
 use shepherd_term::Screen;
 
+use crate::screen_guard;
 use crate::terminal::{CrosstermSetup, Restorer, TerminalSetup, install_panic_hook, with_terminal};
 
 /// How often [`ClientRuntime::run`] ticks the client.
@@ -443,7 +444,10 @@ where
                 .screens
                 .entry(out.session.clone())
                 .or_insert_with(|| Screen::new(cols, rows));
-            screen.feed(&out.bytes);
+            if let Err(panic) = screen_guard::update(screen, |s| s.feed(&out.bytes)) {
+                // The client has no log file unless a subscriber is set; the host logs its own copy's panic.
+                tracing::error!(session = %out.session, %panic, "screen panicked; replaced it with a blank one");
+            }
             // The host's own screen answers the program's queries (decision 0007).
             screen.take_replies();
         }
