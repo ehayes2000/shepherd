@@ -18,6 +18,7 @@ use shepherd_core::ports::{
 use shepherd_core::wire::{
     ClientRequest, CloseWorktree, Hello, PROTOCOL_VERSION, SessionClose, SessionNew, WireError,
 };
+use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::pty::ProgramInput;
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 use support::*;
@@ -255,4 +256,89 @@ fn every_spelling_of_a_worktree_in_use_is_the_same_worktree() {
         panic!("a second session in it was accepted");
     };
     assert!(why.contains("already in use"), "{why}");
+}
+
+/// Seals `frame` (a `_shepherd/*` notification's method and params) into `log`, as a host before resolved paths
+/// would have written it.
+fn record(
+    log: &mut FakeEventLog,
+    session: Option<&str>,
+    n: usize,
+    method: &str,
+    params: serde_json::Value,
+) {
+    use shepherd_core::acpp::{Dir, EntryId, FrameDraft, Source, SourceKind, Stamp, Timestamp};
+    let frame =
+        Frame::from_value(json!({ "jsonrpc": "2.0", "method": method, "params": params })).unwrap();
+    let draft = FrameDraft::new(
+        frame,
+        Source::new(SourceKind::Shepherd, None),
+        Dir::Internal,
+        session.map(SessionId::new),
+    );
+    let stamp = Stamp {
+        id: EntryId::new(format!("old-{n}")),
+        ts: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap(),
+        machine: MachineId::new("laptop"),
+    };
+    log.append(LogId::of(&draft), draft, stamp).unwrap();
+}
+
+#[test]
+fn a_session_recorded_under_a_symlinked_root_before_paths_were_resolved_is_still_no_orphan() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let app = base.join("app");
+    std::fs::create_dir(&app).unwrap();
+    let real = base.join("worktrees-real");
+    std::fs::create_dir(&real).unwrap();
+    let linked = base.join("worktrees");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let worktrees = FakeWorktrees::new(resolve_worktrees_root(&linked).unwrap());
+    let repo = worktrees.add_repo(&app, "main");
+    let made = worktrees
+        .create(
+            &repo,
+            &WorktreeName::new("old-idea").unwrap(),
+            BaseSpec::OriginDefault,
+        )
+        .unwrap();
+    std::fs::create_dir_all(made.path.as_path()).unwrap();
+    // An older host recorded the session's worktree through the symlink.
+    let spelled = linked.join("app").join("old-idea");
+    let (app_text, spelled_text) = (app.to_str().unwrap(), spelled.to_str().unwrap());
+    let mut log = FakeEventLog::default();
+    record(
+        &mut log,
+        None,
+        1,
+        "_shepherd/workspace/selected",
+        json!({ "repo": app_text }),
+    );
+    record(
+        &mut log,
+        Some("s_old"),
+        2,
+        "_shepherd/session/created",
+        json!({ "name": "old", "workspace": app_text, "branch": "old-idea", "agent": "shell", "profile": "shell" }),
+    );
+    record(
+        &mut log,
+        Some("s_old"),
+        3,
+        "_shepherd/worktree/created",
+        json!({ "path": spelled_text, "branch": "old-idea", "base": "origin/main" }),
+    );
+    let mut h = HostHarness::builder()
+        .program(SHELL, pwd_shell())
+        .worktrees(worktrees.clone())
+        .log(log)
+        .start();
+    let mut client = h.connect();
+    let asked = client.request(ClientRequest::WorktreeList(Default::default()));
+    h.step();
+    assert_eq!(
+        response(&client.take(), &asked),
+        Ok(json!({ "worktrees": [] }))
+    );
 }

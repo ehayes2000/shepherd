@@ -34,7 +34,8 @@
 //! session keeps a worktree another session still uses, saying so in its `session/closed` (checked again before the
 //! removal itself). Nothing may start in a worktree that is being removed. Paths are compared as given: the runtime
 //! resolves every explicit cwd, and the host resolves the worktrees' root once before building the `Worktrees` port on
-//! it, so every path the port makes, lists or inspects is resolved too and each directory has one spelling.
+//! it, so every path the port makes, lists or inspects is resolved too and each directory has one spelling. Paths
+//! recorded before that are resolved as the runtime replays the log into [`Host::apply`].
 //!
 //! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
 //! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a

@@ -30,6 +30,22 @@ fn the_root_is_created_private() {
 }
 
 #[test]
+fn the_worktrees_dir_is_created_private_and_an_existing_one_left_as_it_is() {
+    let tmp = tempdir();
+    let root = tmp.path().join("shepherd");
+    drop(open(&root).unwrap());
+    assert_eq!(mode(&root.join(host::WORKTREES_DIR)), 0o700);
+
+    let other = tmp.path().join("other");
+    fs::create_dir_all(other.join(host::WORKTREES_DIR)).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
+    let worktrees = other.join(host::WORKTREES_DIR);
+    fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(open(&other).is_ok());
+    assert_eq!(mode(&worktrees), 0o755);
+}
+
+#[test]
 fn a_root_others_can_read_is_refused_with_the_fix_and_left_alone() {
     let tmp = tempdir();
     let root = tmp.path().join("shepherd");

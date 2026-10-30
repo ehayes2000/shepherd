@@ -478,7 +478,7 @@ impl<
         let mut quiet = QuietWatch::new(&settings.config);
         for id in log.logs()? {
             for envelope in log.read(id, Seq::ZERO)? {
-                host.apply(&envelope);
+                host.apply(&resolved_paths(&envelope));
                 quiet.apply(&envelope);
             }
         }
@@ -2069,6 +2069,47 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 fn canonical(dir: &Path) -> Result<PathBuf, WireError> {
     std::fs::canonicalize(dir)
         .map_err(|e| WireError::InvalidParams(format!("cwd `{}`: {e}", dir.display())))
+}
+
+/// `envelope` as core folds it at start: a `session/created` or `worktree/created` recorded before paths were resolved
+/// (a worktrees root or cwd behind a symlink) with its paths resolved, as a new one would record them, so core
+/// compares one spelling. A path that no longer resolves is kept as recorded. The log itself is never rewritten.
+fn resolved_paths(envelope: &Envelope) -> Envelope {
+    let resolve = |path: &str| {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_owned))
+            .unwrap_or_else(|| path.to_owned())
+    };
+    let Frame::Shepherd(message) = envelope.frame() else {
+        return envelope.clone();
+    };
+    let frame = match message.body() {
+        ShepherdFrame::SessionCreated(created) => {
+            let mut created = created.clone();
+            created.worktree = created.worktree.as_deref().map(resolve);
+            created.cwd = created.cwd.as_deref().map(resolve);
+            ShepherdFrame::SessionCreated(created)
+        }
+        ShepherdFrame::WorktreeCreated(made) => {
+            let mut made = made.clone();
+            made.path = resolve(&made.path);
+            ShepherdFrame::WorktreeCreated(made)
+        }
+        _ => return envelope.clone(),
+    };
+    let draft = FrameDraft::new(
+        frame.to_frame(),
+        envelope.source().clone(),
+        envelope.dir().clone(),
+        envelope.session().cloned(),
+    );
+    let stamp = Stamp {
+        id: envelope.id().clone(),
+        ts: envelope.ts().clone(),
+        machine: envelope.machine().clone(),
+    };
+    draft.seal(envelope.seq(), stamp)
 }
 
 fn existing_dir(path: &Path) -> Result<PathBuf, WireError> {

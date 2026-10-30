@@ -16,6 +16,7 @@ pub mod swap;
 mod worker;
 
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -106,7 +107,8 @@ pub fn prepare_root(root: &Path) -> Result<(), HostStartError> {
     private_fs::ensure_private_dir(root).map_err(|e| root_error(root, e))
 }
 
-/// Makes the managed worktrees' root `dir` if it is missing, and resolves it (`..`, symlinks), once, before the
+/// Makes the managed worktrees' root `dir` if it is missing (0700, decision 0010; an existing one is left as it is),
+/// and resolves it (`..`, symlinks), once, before the
 /// `Worktrees` port is built on it: every path the port makes, lists or inspects then has one spelling, the same as
 /// the resolved cwds clients ask for, which is what core compares to tell which worktrees sessions use.
 pub fn resolve_worktrees_root(dir: &Path) -> Result<PathBuf, HostStartError> {
@@ -114,7 +116,13 @@ pub fn resolve_worktrees_root(dir: &Path) -> Result<PathBuf, HostStartError> {
         path: dir.to_path_buf(),
         reason: e.to_string(),
     };
-    std::fs::create_dir_all(dir).map_err(failed)?;
+    if !dir.exists() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(dir)
+            .map_err(failed)?;
+    }
     std::fs::canonicalize(dir).map_err(failed)
 }
 
