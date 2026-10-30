@@ -9,6 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T26 search and open | building | task/t26-search @ HEAD | 0 | – |
 | T36b host hot-swap by re-exec | in review | task/t36b-hotswap @ a52f5e0 (on 99e47e6) | 1 | PM-accepted: listener handed over before closing conns; 1-column resize nudge; adopt on fresh instance. Linux unverified until CI |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -1490,7 +1491,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### T26: Search and open
-status: todo
+status: in-progress
 depends: T13, T21
 touches: core::client (finder), tui::finder
 goal: Find and jump to any session or worktree quickly.
@@ -1499,7 +1500,14 @@ acceptance:
   session. Clicking or Enter selects a session. On an orphan worktree, it offers to start a new session in that worktree.
 - Matching and ranking are pure core functions with unit tests (prefix > word-boundary > subsequence).
 - Snapshots: empty query, a filtered list, and no results.
-scope: crates/core, crates/tui
+scope: crates/core, crates/tui, crates/shepherd (host: list worktrees), crates/testkit
+notes: (binding) Orphan worktrees come from the host: a new request `_shepherd/worktree/list` answered from
+`Worktrees::list_managed` for the current workspace's repo (through F27's worker), minus worktrees of sessions the host
+knows. The client asks when the finder opens and shows "loading…" until the answer arrives. "Start a session here" sends
+`session/new` with an explicit `cwd` of that worktree (T22: an explicit cwd gets no new worktree) and records its branch.
+All displayed text goes through `draw.rs` (F35). The finder is a popup (T33/T34/F24 patterns: core-owned scroll, saturating
+height, hit tests on rendered cells, every-popup tiny-window test). Typing filters; Esc/click outside closes. Matching is
+pure, Unicode-aware (graphemes, case-insensitive via `to_lowercase`), never hand-rolled tables.
 
 ### T27: PR status in the sidebar
 status: todo
