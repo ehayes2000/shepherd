@@ -19,8 +19,8 @@ use shepherd_core::host::Host;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink, PtyEventSink};
 use shepherd_core::wire::{
-    ClientNotification, ClientRequest, HostMessage, HostNotification, Request, SessionInput,
-    SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
+    ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
+    SessionInput, SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
     encode_client_notification, encode_request,
 };
 use shepherd_testkit::fakes::commands::FakeCommands;
@@ -552,10 +552,17 @@ impl FakeClient {
         self.subscribe(SubscribeFrom::default())
     }
 
+    /// Keys typed into `session`.
     pub fn input(&mut self, session: &SessionId, data: &[u8]) {
+        self.input_of(session, InputKind::Keys, data);
+    }
+
+    /// Input of `kind` for `session`.
+    pub fn input_of(&mut self, session: &SessionId, kind: InputKind, data: &[u8]) {
         self.notify(ClientNotification::SessionInput(SessionInput {
             session: session.clone(),
             data: data.to_vec(),
+            kind,
         }));
     }
 

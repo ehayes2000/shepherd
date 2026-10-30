@@ -10,6 +10,7 @@ use shepherd_core::host::HostCommand;
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::session::{Activity, SessionState};
+use shepherd_core::wire::InputKind;
 
 const SESSION: &str = "s_q";
 
@@ -134,11 +135,18 @@ impl Driver {
         assert_eq!(commands, vec![], "output never appends");
     }
 
-    /// A client's input written to the session's PTY at `ms`.
+    /// A client's Enter key written to the session's PTY at `ms`: an answer, if a dialog is open.
     fn input(&mut self, ms: i64) {
+        self.typed(ms, InputKind::Keys, b"\r");
+    }
+
+    /// A client's input of `kind` written to the session's PTY at `ms`.
+    fn typed(&mut self, ms: i64, kind: InputKind, bytes: &[u8]) {
         let commands = self.watch.handle(QuietEvent::Input {
             session: session(),
             at: t(ms),
+            kind,
+            bytes: bytes.to_vec(),
         });
         assert_eq!(commands, vec![], "input never appends");
     }
@@ -447,4 +455,96 @@ fn a_permission_dialog_answered_with_a_signal_goes_back_to_the_working_rules() {
     d.append(1000, tool_call("t1"));
     assert_eq!(d.tick(3999), vec![]);
     assert_eq!(d.tick(4000), vec![IdleInference::Quiet]);
+}
+
+/// Whether `kind` input `bytes` answers an open permission dialog: it does if, after it and a redraw, quiet makes the
+/// session idle.
+fn answers(kind: InputKind, bytes: &[u8]) -> bool {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(500, permission(2, "t1"));
+    d.output(600);
+    d.typed(900, kind, bytes);
+    d.output(1000);
+    d.tick(600_000) == vec![IdleInference::QuietAfterPermission]
+}
+
+#[test]
+fn only_enter_printable_keys_and_pastes_answer_a_permission_dialog() {
+    use InputKind::{Focus, Keys, Mouse, Other, Paste};
+    let cases: &[(InputKind, &[u8], bool)] = &[
+        // Enter picks the highlighted option.
+        (Keys, b"\r", true),
+        // A printable key picks an option by its number or letter.
+        (Keys, b"1", true),
+        (Keys, b"y", true),
+        (Keys, "é".as_bytes(), true),
+        // An old client may send several keys at once.
+        (Keys, b"no\r", true),
+        // Moving around the dialog doesn't answer it.
+        (Keys, b"\x1b[A", false),
+        (Keys, b"\x1bOB", false),
+        (Keys, b"\x1b[1;2C", false),
+        (Keys, b"\t", false),
+        (Keys, b"\x1b[Z", false),
+        (Keys, b"\x7f", false),
+        (Keys, b"\x1b[5~", false),
+        // Every other escape sequence (Esc, alt chords, kitty-encoded keys) isn't text either.
+        (Keys, b"\x1b", false),
+        (Keys, b"\x1b1", false),
+        (Keys, b"\x1b[27u", false),
+        (Keys, b"", false),
+        // A paste is text, bracketed or not.
+        (Paste, b"\x1b[200~yes\x1b[201~", true),
+        (Paste, b"yes\r", true),
+        // The terminal's reports never answer, whatever they contain.
+        (Focus, b"\x1b[I", false),
+        (Focus, b"\x1b[O", false),
+        (Mouse, b"\x1b[<0;4;3M", false),
+        (Mouse, b"\x1b[M !!", false),
+        // A kind from a newer client this host doesn't know.
+        (Other, b"\r", false),
+    ];
+    for (kind, bytes, expected) in cases {
+        assert_eq!(
+            answers(*kind, bytes),
+            *expected,
+            "{kind:?} {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
+#[test]
+fn navigating_a_permission_dialog_then_pressing_enter_answers_it() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(500, permission(2, "t1"));
+    d.typed(700, InputKind::Keys, b"\x1b[B");
+    d.output(800);
+    assert_eq!(
+        d.tick(600_000),
+        vec![],
+        "moving the highlight isn't an answer"
+    );
+    d.typed(600_100, InputKind::Keys, b"\r");
+    d.output(600_200);
+    assert_eq!(d.tick(603_200), vec![IdleInference::QuietAfterPermission]);
+}
+
+#[test]
+fn a_focus_report_and_its_redraw_leave_a_permission_dialog_put() {
+    // Switching back to the window: the app asked for focus reports and redraws on focus.
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(500, permission(2, "t1"));
+    d.output(600);
+    d.typed(5000, InputKind::Focus, b"\x1b[I");
+    d.output(5050);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+    assert!(matches!(
+        d.state().activity(),
+        Activity::NeedsPermission { .. }
+    ));
 }

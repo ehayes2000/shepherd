@@ -610,14 +610,20 @@ impl<
                         }
                     }
                 }
-                HostCommand::WritePty { session, bytes } => {
+                HostCommand::WritePty {
+                    session,
+                    bytes,
+                    kind,
+                } => {
                     self.write_pty(&session, &bytes);
-                    // A client's input: the quiet watch takes it as an answer to a permission dialog.
+                    // A client's input: the quiet watch decides whether it answers a permission dialog.
                     if self.quiet.watches(&session) {
                         let at = self.env.now();
                         self.quiet.handle(QuietEvent::Input {
                             session,
                             at: at.clone(),
+                            kind,
+                            bytes,
                         });
                         self.schedule_quiet(&at);
                     }
@@ -965,6 +971,7 @@ impl<
                 ClientNotification::SessionInput(input) => self.dispatch(HostEvent::Input {
                     session: input.session,
                     bytes: input.data,
+                    kind: input.kind,
                 }),
                 ClientNotification::SessionResize(resize) => self.dispatch(HostEvent::Resize {
                     session: resize.session,

@@ -13,7 +13,7 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
-use shepherd_core::wire::{HostResult, SessionNewOk, WireError};
+use shepherd_core::wire::{HostResult, InputKind, SessionNewOk, WireError};
 use shepherd_testkit::builders::{
     HostDriver, claude_resume_spec, claude_session_spec, shell_session_spec, shell_spawn,
 };
@@ -645,6 +645,7 @@ fn a_resumed_session_takes_input_and_records_its_next_exit() {
     let input = host.handle(HostEvent::Input {
         session: sid("s1"),
         bytes: b"x".to_vec(),
+        kind: InputKind::Keys,
     });
     assert_eq!(input.len(), 1, "{input:?}");
     assert_eq!(appends(&host.pty_exited("s1", Some(0))), 1);
@@ -718,6 +719,24 @@ fn resuming_with_a_profile_that_is_not_the_sessions_is_refused() {
 // ---------- input and resize ----------
 
 #[test]
+fn input_is_written_with_what_made_it() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    assert_eq!(
+        host.handle(HostEvent::Input {
+            session: sid("s1"),
+            bytes: b"\x1b[<0;4;3M".to_vec(),
+            kind: InputKind::Mouse,
+        }),
+        vec![HostCommand::WritePty {
+            session: sid("s1"),
+            bytes: b"\x1b[<0;4;3M".to_vec(),
+            kind: InputKind::Mouse,
+        }]
+    );
+}
+
+#[test]
 fn input_and_resize_go_to_a_live_sessions_pty() {
     let mut host = HostDriver::new();
     host.new_session("s1");
@@ -729,10 +748,12 @@ fn input_and_resize_go_to_a_live_sessions_pty() {
         host.handle(HostEvent::Input {
             session: sid("s1"),
             bytes: b"ls\r".to_vec(),
+            kind: InputKind::Keys,
         }),
         vec![HostCommand::WritePty {
             session: sid("s1"),
             bytes: b"ls\r".to_vec(),
+            kind: InputKind::Keys,
         }]
     );
     assert_eq!(
@@ -759,6 +780,7 @@ fn input_and_resize_for_unknown_closed_or_exited_sessions_are_dropped() {
             host.handle(HostEvent::Input {
                 session: sid(id),
                 bytes: b"x".to_vec(),
+                kind: InputKind::Keys,
             })
             .is_empty(),
             "{id}"
@@ -865,6 +887,7 @@ fn run(ops: Vec<Op>) -> HostDriver {
                 host.handle(HostEvent::Input {
                     session: sid(&id(i)),
                     bytes: vec![b'x'],
+                    kind: InputKind::Keys,
                 });
             }
             Op::Resize(i) => {

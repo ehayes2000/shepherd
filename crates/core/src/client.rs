@@ -29,8 +29,8 @@ use crate::ports::pty::PtySize;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
     ClientMessage, ClientNotification, ClientRequest, Hello, HostMessage, HostNotification,
-    HostResult, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request, SessionClose,
-    SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe,
+    HostResult, InputKind, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request,
+    SessionClose, SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe,
     SubscribeFrom, WireError, WorkspaceSelect,
 };
 
@@ -69,8 +69,8 @@ pub enum ClientEvent {
 pub enum Intent {
     NextSession,
     PrevSession,
-    /// Bytes typed into the terminal, already encoded for it.
-    Input(Vec<u8>),
+    /// Input for the terminal, already encoded for it, and what made it.
+    Input(InputKind, Vec<u8>),
     /// The terminal view's size changed.
     Resize(PtySize),
     SetFocus(Focus),
@@ -132,6 +132,13 @@ pub enum Intent {
     Dismiss,
     /// Detach. Sessions keep running on the host.
     Quit,
+}
+
+impl Intent {
+    /// Keys typed into the terminal, already encoded for it.
+    pub fn keys(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Input(InputKind::Keys, bytes.into())
+    }
 }
 
 /// Something for the runtime to do.
@@ -913,14 +920,18 @@ impl Client {
         match intent {
             Intent::NextSession => self.step(true),
             Intent::PrevSession => self.step(false),
-            Intent::Input(data) => {
+            Intent::Input(kind, data) => {
                 let Some(session) = self.selected.clone() else {
                     return Vec::new();
                 };
                 if self.focus != Focus::Terminal || self.popup.is_some() {
                     return Vec::new();
                 }
-                let note = ClientNotification::SessionInput(SessionInput { session, data });
+                let note = ClientNotification::SessionInput(SessionInput {
+                    session,
+                    data,
+                    kind,
+                });
                 self.notify(note).into_iter().collect()
             }
             Intent::Resize(size) => {

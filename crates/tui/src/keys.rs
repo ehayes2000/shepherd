@@ -18,6 +18,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 use shepherd_core::client::{Cell, Client, Focus, Intent, Popup};
+use shepherd_core::wire::InputKind;
 use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
@@ -46,7 +47,7 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
             intents
         }
         Focus::Terminal if is_prefix(key) => vec![Intent::SetFocus(Focus::Command)],
-        Focus::Terminal => input(encode::key(key, modes)),
+        Focus::Terminal => input(InputKind::Keys, encode::key(key, modes)),
     }
 }
 
@@ -84,15 +85,17 @@ pub fn map_event(
             (Some(_), _) => Vec::new(),
             (None, Focus::Command) => vec![
                 Intent::SetFocus(Focus::Terminal),
-                Intent::Input(encode::paste(text, modes)),
+                Intent::Input(InputKind::Paste, encode::paste(text, modes)),
             ],
-            (None, Focus::Terminal) => vec![Intent::Input(encode::paste(text, modes))],
+            (None, Focus::Terminal) => {
+                vec![Intent::Input(InputKind::Paste, encode::paste(text, modes))]
+            }
         },
         // The window's focus is reported to shepherd, and forwarded to the session too if it asked and keys go to it.
         Event::FocusGained | Event::FocusLost => {
             let gained = *event == Event::FocusGained;
             let mut intents = if to_terminal {
-                input(encode::focus(gained, modes))
+                input(InputKind::Focus, encode::focus(gained, modes))
             } else {
                 Vec::new()
             };
@@ -125,7 +128,7 @@ fn map_mouse(
     let tracked = modes.mouse.tracking != MouseTracking::Off;
     if target == Some(Target::Terminal) && tracked && client.focus() == Focus::Terminal {
         let (col, row) = (mouse.column - layout.pane.x, mouse.row - layout.pane.y);
-        return input(encode::mouse(mouse, col, row, modes));
+        return input(InputKind::Mouse, encode::mouse(mouse, col, row, modes));
     }
     let over_sidebar = client.popup().is_none()
         && layout
@@ -216,14 +219,19 @@ fn right_click(target: Target, at: Cell) -> Vec<Intent> {
     }
 }
 
-fn input(bytes: Option<Vec<u8>>) -> Vec<Intent> {
-    bytes.map(Intent::Input).into_iter().collect()
+/// Input for the session, tagged with what made it, so the host knows a mouse or focus report isn't the user
+/// answering a dialog.
+fn input(kind: InputKind, bytes: Option<Vec<u8>>) -> Vec<Intent> {
+    bytes
+        .map(|bytes| Intent::Input(kind, bytes))
+        .into_iter()
+        .collect()
 }
 
 /// The key after the prefix.
 fn command(key: &KeyEvent, modes: &Modes) -> Option<Intent> {
     if is_prefix(key) {
-        return encode::key(key, modes).map(Intent::Input);
+        return encode::key(key, modes).map(Intent::keys);
     }
     // Shift is how some keys (`?`) are typed at all.
     if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {

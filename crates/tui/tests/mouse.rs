@@ -9,6 +9,7 @@ use ratatui::layout::{Position, Rect};
 use shepherd_core::client::{Cell, Focus, Intent, MenuItem, Popup};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
+use shepherd_core::wire::InputKind;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
 use shepherd_tui::{Pointer, Screens, Target, hit, layout, map_event, render};
@@ -469,8 +470,8 @@ fn a_tracked_pane_gets_the_click_encoded() {
     assert_eq!(
         out,
         [
-            vec![Intent::Input(b"\x1b[<0;4;3M".to_vec())],
-            vec![Intent::Input(b"\x1b[<0;4;3m".to_vec())]
+            vec![Intent::Input(InputKind::Mouse, b"\x1b[<0;4;3M".to_vec())],
+            vec![Intent::Input(InputKind::Mouse, b"\x1b[<0;4;3m".to_vec())]
         ]
     );
 }

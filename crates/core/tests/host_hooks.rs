@@ -16,6 +16,7 @@ use shepherd_core::ports::{
     BaseUsed, BranchName, CommandError, CommandExit, CommandOutput, CommandSpec, Created,
     OUTPUT_TAIL, WorktreePath,
 };
+use shepherd_core::wire::InputKind;
 use shepherd_testkit::builders::{HostDriver, shell_session_spec, shell_spawn};
 
 const WORKTREE: &str = "/wt/app/shell-1";
@@ -193,6 +194,7 @@ fn a_session_running_its_hooks_is_starting_and_has_no_pty() {
     let input = host.handle(HostEvent::Input {
         session: sid("s1"),
         bytes: b"ls\n".to_vec(),
+        kind: InputKind::Keys,
     });
     assert_eq!(input, vec![]);
     let close = host.close("s1");

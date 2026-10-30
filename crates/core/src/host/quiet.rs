@@ -8,9 +8,11 @@
 //! - **Working**: quiet for the period since the last PTY output or log entry gives
 //!   [`IdleInference::Quiet`].
 //! - **NeedsPermission**: an untouched dialog is legitimately quiet, so quiet alone never clears it, and neither does
-//!   output alone (the dialog's own first draw and resize redraws come after the request too). Client input written to
-//!   the PTY after the request (someone answered), then output (it redrew), then the quiet period gives
-//!   [`IdleInference::QuietAfterPermission`].
+//!   output alone (the dialog's own first draw and resize redraws come after the request too). An answer written to
+//!   the PTY after the request, then output (it redrew), then the quiet period gives
+//!   [`IdleInference::QuietAfterPermission`]. An answer is client input that could pick an option: Enter, a printable
+//!   key or a paste. Moving around the dialog, focus and mouse reports, and the screen's own query replies (which the
+//!   runtime writes without telling the watch) are not answers.
 //! - Anything else, and shell sessions always, are left alone. Output never makes a session working again: only a
 //!   real turn signal does (`core::session`).
 //! - A tick that asks for an idle restarts that session's quiet period, so an idle the runtime failed to append is
@@ -31,14 +33,20 @@ use crate::acpp::{AgentIdle, Envelope, Frame, IdleInference, ShepherdFrame, Time
 use crate::config::{AgentKind, Config, DEFAULT_IDLE_AFTER_QUIET};
 use crate::ids::SessionId;
 use crate::session::{Activity, SessionState};
+use crate::wire::InputKind;
 
 /// Time passing, for a [`QuietWatch`]. The runtime stamps each with the clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuietEvent {
     /// `session`'s PTY printed something at `at`.
     Output { session: SessionId, at: Timestamp },
-    /// A client's input was written to `session`'s PTY at `at`.
-    Input { session: SessionId, at: Timestamp },
+    /// A client's input of `kind` was written to `session`'s PTY at `at`.
+    Input {
+        session: SessionId,
+        at: Timestamp,
+        kind: InputKind,
+        bytes: Vec<u8>,
+    },
     /// It is `at`: the deadline the runtime scheduled, or later.
     Tick { at: Timestamp },
 }
@@ -85,6 +93,22 @@ impl Watched {
         };
         let at = self.last?.checked_add(self.quiet).ok()?;
         Some((at, inference))
+    }
+}
+
+/// Whether client input of `kind` could answer a dialog: Enter or a printable key, or a paste. Moving around a
+/// dialog (cursor keys, Tab, Backspace) doesn't, and neither do the terminal's focus and mouse reports.
+///
+/// Keys starting with ESC are escape sequences, never text: cursor and function keys, alt chords, and every key the
+/// kitty keyboard protocol encodes as `CSI … u`. So Esc and Ctrl-C, which can dismiss a dialog, don't count, and
+/// with kitty's "report all keys" flag on no key does. The dialog then waits for a real signal.
+fn answers(kind: InputKind, bytes: &[u8]) -> bool {
+    match kind {
+        InputKind::Paste => true,
+        InputKind::Keys if bytes.first() != Some(&0x1b) => String::from_utf8_lossy(bytes)
+            .chars()
+            .any(|c| c == '\r' || !c.is_control()),
+        _ => false,
     }
 }
 
@@ -158,11 +182,16 @@ impl QuietWatch {
                 }
                 Vec::new()
             }
-            QuietEvent::Input { session, at } => {
+            QuietEvent::Input {
+                session,
+                at,
+                kind,
+                bytes,
+            } => {
                 if let Some(watched) = self.sessions.get_mut(&session) {
                     let asking =
                         matches!(watched.state.activity(), Activity::NeedsPermission { .. });
-                    if asking && watched.answer == Answer::Untouched {
+                    if asking && watched.answer == Answer::Untouched && answers(kind, &bytes) {
                         watched.answer = Answer::Typed;
                     }
                     watched.last = watched.last.max(Some(at.instant()));

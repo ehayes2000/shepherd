@@ -15,8 +15,9 @@ use shepherd_core::ports::WorktreeError;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
-    ClientMessage, ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput,
-    SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError, WorkspaceSelect,
+    ClientMessage, ClientNotification, ClientRequest, InputKind, PROTOCOL_VERSION, SessionClose,
+    SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError,
+    WorkspaceSelect,
 };
 use shepherd_testkit::builders::{
     ClientDriver, claude_session_spec, log_entry, notifications, requests, ts,
@@ -68,6 +69,7 @@ fn input(session: &str, data: &[u8]) -> ClientNotification {
     ClientNotification::SessionInput(SessionInput {
         session: sid(session),
         data: data.to_vec(),
+        kind: InputKind::Keys,
     })
 }
 
@@ -576,8 +578,20 @@ fn a_created_session_answered_before_its_log_entry_is_selected_when_it_arrives()
 fn keystrokes_in_terminal_focus_go_to_the_selected_session() {
     let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
     assert_eq!(c.client().focus(), Focus::Terminal);
-    let sent = c.user(Intent::Input(b"ls\r".to_vec()));
+    let sent = c.user(Intent::keys(b"ls\r".to_vec()));
     assert_eq!(notifications(&sent), [&input("s2", b"ls\r")]);
+}
+
+#[test]
+fn input_goes_to_the_session_tagged_with_what_made_it() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    let sent = c.user(Intent::Input(InputKind::Focus, b"\x1b[I".to_vec()));
+    let expected = ClientNotification::SessionInput(SessionInput {
+        session: sid("s1"),
+        data: b"\x1b[I".to_vec(),
+        kind: InputKind::Focus,
+    });
+    assert_eq!(notifications(&sent), [&expected]);
 }
 
 #[test]
@@ -585,27 +599,27 @@ fn keystrokes_in_command_focus_are_not_sent() {
     let mut c = ClientDriver::with_sessions(&["s1"]);
     c.user(Intent::SetFocus(Focus::Command));
     assert_eq!(c.client().focus(), Focus::Command);
-    assert_eq!(c.user(Intent::Input(b"x".to_vec())), []);
+    assert_eq!(c.user(Intent::keys(b"x".to_vec())), []);
 }
 
 #[test]
 fn keystrokes_with_no_session_are_dropped() {
     let mut c = ClientDriver::with_sessions(&[]);
-    assert_eq!(c.user(Intent::Input(b"x".to_vec())), []);
+    assert_eq!(c.user(Intent::keys(b"x".to_vec())), []);
 }
 
 #[test]
 fn keystrokes_while_a_popup_is_open_are_not_sent() {
     let mut c = ClientDriver::with_sessions(&["s1"]);
     c.user(Intent::ShowHelp);
-    assert_eq!(c.user(Intent::Input(b"x".to_vec())), []);
+    assert_eq!(c.user(Intent::keys(b"x".to_vec())), []);
 }
 
 #[test]
 fn keystrokes_before_connecting_are_dropped() {
     let mut c = ClientDriver::new();
     c.handle(ClientEvent::Start);
-    assert_eq!(c.user(Intent::Input(b"x".to_vec())), []);
+    assert_eq!(c.user(Intent::keys(b"x".to_vec())), []);
 }
 
 #[test]
@@ -1197,7 +1211,7 @@ fn a_notice_is_cleared_by_the_next_user_action() {
     let actions = [
         Intent::NextSession,
         Intent::PrevSession,
-        Intent::Input(b"x".to_vec()),
+        Intent::keys(b"x".to_vec()),
         Intent::SetFocus(Focus::Terminal),
         Intent::SelectSession(sid("s1")),
         Intent::ScrollSidebar(1),

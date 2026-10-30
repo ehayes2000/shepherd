@@ -14,7 +14,7 @@ use shepherd_core::ports::pty::{PtySize, SpawnSpec};
 use shepherd_core::ports::{
     BaseSpec, BaseUsed, BranchName, Created, RepoRef, WorktreeError, WorktreeName, WorktreePath,
 };
-use shepherd_core::wire::{HostResult, SessionNewOk};
+use shepherd_core::wire::{HostResult, InputKind, SessionNewOk};
 use shepherd_testkit::builders::{
     HostDriver, claude_session_spec, shell_session_spec, shell_spawn,
 };
@@ -202,6 +202,7 @@ fn a_session_waiting_for_its_worktree_is_listed_but_has_no_pty() {
     let input = host.handle(HostEvent::Input {
         session: sid("s1"),
         bytes: b"ls\n".to_vec(),
+        kind: InputKind::Keys,
     });
     let resize = host.handle(HostEvent::Resize {
         session: sid("s1"),
@@ -313,7 +314,8 @@ fn a_failed_worktree_fails_the_session_with_the_reason_and_spawns_nothing() {
         assert_eq!(
             host.handle(HostEvent::Input {
                 session: sid("s1"),
-                bytes: b"x".to_vec()
+                bytes: b"x".to_vec(),
+                kind: InputKind::Keys,
             }),
             vec![]
         );
