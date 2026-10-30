@@ -12,7 +12,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | T24 auto-naming | in review | task/t24-auto-naming @ 9145fc7 (on 9197e58) | 1 | PM-accepted: HookTranslated event; built-in stopwords; explicit-name sessions follow-up |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | in review | task/f28-repo-root @ 15094a9 (on 9197e58) | 1 | PM-accepted: hand-written expand_home; hello cwd not expanded; Worker doc softened |
-| F31 real answers only | in review | task/f31-answer-input @ 4acc88f (on ec8b1b5) | 1 | PM-accepted: Enter/printable/paste answer; ESC-prefixed etc don't; Esc/Ctrl-C dismissal → F34 |
+| F31 real answers only | fixing (CHANGES) | task/f31-answer-input @ 4acc88f | 1 | Blocking: runtime kind forwarding untested → paste-answers-dialog scenario |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
