@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
-| F07 palette in snapshots | fixing (CHANGES) | task/f07-palette-snapshots @ 694310a | 1 | Blocking: kitty_top refresh in expire_sync untested |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F21 | 1 | – |
 | T17 | 1 | 4 untested defensive lines in run_files (→ F22) |
 | F19 | PM spot check | – |
+| F07 | 2 | kitty_top refresh in expire_sync untested |
 
 ## Milestones
 
@@ -156,7 +156,7 @@ acceptance:
 scope: crates/term
 
 ### F07: Carry palette colours and the empty-stack kitty flags in snapshots
-status: in-progress
+status: done (6905cb5)
 depends: F06
 touches: term
 goal: A reattached client draws colours set by programs, and answers kitty queries, the same as the host.
