@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | F36 Close the display-safe gaps from F35's review | [display-safety](features/display-safety.md) | fixing | task/f36-display-gaps @ 3921826 | 2 | Blocking: Buffer::merge/filled, buffer::Cell::new/from, .content[ writes bypass draw. Minor: Block::border_set |
-| F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | merging | task/f37-worktree-leftovers @ b0867bd | 3 | approved r3; minors → F46 |
+| F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | fixing | task/f37-worktree-leftovers @ b0867bd | 3 | approved r3; merge broke on F42's SessionNew.size; rebasing + --no-deref + absent-ref test |
 
 ## Ready to start
 
