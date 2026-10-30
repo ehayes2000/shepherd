@@ -95,7 +95,12 @@ fn created(h: &HostHarness, id: &SessionId) -> (Option<String>, Option<String>) 
 #[test]
 fn a_client_started_in_a_repo_selects_it_and_new_sessions_start_in_a_worktree_of_it_and_record_it()
 {
-    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    // The fake only records worktrees; its directory is made here, as git would, so the shell can start in it.
+    let wt = tempfile::tempdir().unwrap();
+    let wt_root = std::fs::canonicalize(wt.path()).unwrap();
+    let shell_1 = wt_root.join("app").join("shell-1");
+    std::fs::create_dir_all(&shell_1).unwrap();
+    let worktrees = FakeWorktrees::new(&wt_root);
     let d = dirs(&worktrees);
     let mut h = harness(&worktrees);
     let mut client = h.connect();
@@ -114,7 +119,7 @@ fn a_client_started_in_a_repo_selects_it_and_new_sessions_start_in_a_worktree_of
     assert_eq!(created(&h, &id), (Some(app), None));
     assert_eq!(
         String::from_utf8_lossy(&output(&msgs, &id)),
-        "/fake/worktrees/app/shell-1"
+        shell_1.to_str().unwrap()
     );
 }
 

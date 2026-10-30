@@ -97,7 +97,7 @@ fn replay(driver: &HostDriver) -> Host {
 #[test]
 fn worktree_names_are_lowercase_ascii_slugs_of_the_session_name() {
     let long = "x".repeat(100);
-    let cases: [(&str, &str); 14] = [
+    let cases: [(&str, &str); 16] = [
         ("claude-3", "claude-3"),
         ("Claude-3", "claude-3"),
         ("fix login!", "fix-login"),
@@ -111,6 +111,9 @@ fn worktree_names_are_lowercase_ascii_slugs_of_the_session_name() {
         ("x.lock", "x-lock"),
         ("HEAD", "head"),
         ("_under_score_", "under_score"),
+        // Separators alone leave nothing.
+        ("___", "session"),
+        ("-_-", "session"),
         (&long, &long[..64]),
     ];
     for (session, expected) in cases {
@@ -447,6 +450,77 @@ fn resuming_a_worktree_session_starts_it_in_its_worktree() {
         .and_then(Result::ok)
         .unwrap_or_else(|| panic!("not resumable"));
     assert_eq!(target.cwd, PathBuf::from("/wt/app/claude-1"));
+}
+
+#[test]
+fn frames_that_arrive_in_the_wrong_phase_change_nothing() {
+    // What a session looks like: (exited, failed, creating_worktree, resume).
+    type Look = (bool, Option<String>, bool, Result<(), ResumeUnavailable>);
+    let starting: Look = (false, None, true, Err(ResumeUnavailable::Starting));
+    let running: Look = (false, None, false, Err(ResumeUnavailable::Running));
+    let failed: Look = (
+        true,
+        Some("boom".to_owned()),
+        false,
+        Err(ResumeUnavailable::Failed),
+    );
+    let worktree = json!({ "method": "_shepherd/worktree/created",
+        "params": { "path": "/wt/late", "branch": "late", "base": "origin/main" } });
+    let session_failed =
+        json!({ "method": "_shepherd/session/failed", "params": { "reason": "late" } });
+    let exited = json!({ "method": "_shepherd/agent/exited", "params": { "code": 1 } });
+    let started =
+        json!({ "method": "_shepherd/agent/started", "params": { "agent": "claude-code" } });
+    // Each row: how the session got into its phase, the stray frame (source `shepherd`), and how it must still look.
+    let cases: [(&str, Look, Value); 7] = [
+        (
+            "worktree/created on a session with no worktree",
+            running.clone(),
+            worktree.clone(),
+        ),
+        (
+            "session/failed on a running session",
+            running.clone(),
+            session_failed.clone(),
+        ),
+        (
+            "agent/exited while the worktree is made",
+            starting.clone(),
+            exited.clone(),
+        ),
+        (
+            "agent/started while the worktree is made",
+            starting.clone(),
+            started.clone(),
+        ),
+        (
+            "worktree/created on a failed session",
+            failed.clone(),
+            worktree,
+        ),
+        ("agent/exited on a failed session", failed.clone(), exited),
+        ("agent/started on a failed session", failed.clone(), started),
+    ];
+    let look = |host: &HostDriver| -> Look {
+        let s = &host.host().sessions()[0];
+        (s.exited, s.failed.clone(), s.creating_worktree, s.resume)
+    };
+    for (why, phase, stray) in cases {
+        let mut host = if phase == running {
+            HostDriver::new()
+        } else {
+            in_workspace()
+        };
+        host.new_session_with("s1", claude_session_spec());
+        if phase == failed {
+            host.worktree_result("s1", Err(WorktreeError::Other("boom".to_owned())));
+        }
+        assert_eq!(look(&host), phase, "{why}: setup");
+        let mut frame = stray;
+        frame["jsonrpc"] = json!("2.0");
+        host.append(Some("s1"), Source::new(SourceKind::Shepherd, None), frame);
+        assert_eq!(look(&host), phase, "{why}");
+    }
 }
 
 #[test]

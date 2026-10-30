@@ -348,9 +348,10 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         &self.translators
     }
 
-    /// How many sessions have run files waiting for their spawn. Zero between requests.
+    /// How many sessions have run files waiting for their spawn, those waiting for their worktree included. Zero
+    /// when no session is waiting.
     pub fn pending_run_files(&self) -> usize {
-        self.pending_run_files.len()
+        self.pending_run_files.len() + self.awaiting_worktree.len()
     }
 
     pub fn pty(&self) -> &P {
@@ -519,11 +520,15 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 }
                 HostCommand::SpawnPty { session, spec } => {
                     let size = spec.size;
-                    let spawned = self.write_run_files(&session).and_then(|()| {
-                        self.pty
-                            .spawn(session.clone(), spec)
-                            .map_err(|e| e.to_string())
-                    });
+                    // Every spawn's cwd is checked: the PTY would silently start in the home directory instead.
+                    let spawned = existing_dir(&spec.cwd)
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| self.write_run_files(&session))
+                        .and_then(|()| {
+                            self.pty
+                                .spawn(session.clone(), spec)
+                                .map_err(|e| e.to_string())
+                        });
                     match spawned {
                         Ok(()) => {
                             self.screens
@@ -599,6 +604,10 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         Ok(()) => self.worktree_calls += 1,
                         Err(unanswered) => {
                             tracing::error!("the worktrees thread is gone");
+                            // Nothing will spawn: its run files go with the failure.
+                            if let HostEvent::WorktreeCreated { session, .. } = &*unanswered {
+                                self.awaiting_worktree.remove(session);
+                            }
                             follow_up.push_back(*unanswered);
                         }
                     }
@@ -919,17 +928,14 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             WireError::InvalidParams(format!("unknown profile `{}`", name.unwrap_or_default()))
         })?;
         let cwd = match (new.cwd.as_deref(), self.host.workspace()) {
-            (Some(cwd), _) => existing_dir(cwd)?,
-            // Checked like a requested cwd: the PTY would silently start in the home directory instead.
-            (None, Some(workspace)) => workspace
-                .to_str()
-                .and_then(|w| existing_dir(w).ok())
-                .ok_or_else(|| {
-                    WireError::InvalidParams(format!(
-                        "the workspace {} no longer exists; choose another",
-                        workspace.display()
-                    ))
-                })?,
+            (Some(cwd), _) => existing_dir(Path::new(cwd))?,
+            // Checked here too, to say which workspace is gone; the spawn checks every cwd again.
+            (None, Some(workspace)) => existing_dir(workspace).map_err(|_| {
+                WireError::InvalidParams(format!(
+                    "the workspace {} no longer exists; choose another",
+                    workspace.display()
+                ))
+            })?,
             (None, None) => self.settings.home.clone(),
         };
         let ctx = LaunchContext {
@@ -979,18 +985,13 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                     target.profile
                 ))
             })?;
-        // Checked as for a new session: the PTY would silently start a missing directory's agent in the home
-        // directory instead.
-        let cwd = target
-            .cwd
-            .to_str()
-            .and_then(|cwd| existing_dir(cwd).ok())
-            .ok_or_else(|| {
-                WireError::InvalidParams(format!(
-                    "can't resume {session}: {} no longer exists",
-                    target.cwd.display()
-                ))
-            })?;
+        // Checked here too, so the client hears why it can't resume; the spawn checks every cwd again.
+        let cwd = existing_dir(&target.cwd).map_err(|_| {
+            WireError::InvalidParams(format!(
+                "can't resume {session}: {} no longer exists",
+                target.cwd.display()
+            ))
+        })?;
         let ctx = LaunchContext {
             session: session.clone(),
             cwd,
@@ -1308,15 +1309,15 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 
 /// `cwd` as a directory a session can start in: absolute, since a client can't know where the host started, and an
 /// existing directory.
-fn existing_dir(cwd: &str) -> Result<PathBuf, WireError> {
-    let path = PathBuf::from(cwd);
+fn existing_dir(path: &Path) -> Result<PathBuf, WireError> {
+    let cwd = path.display();
     if !path.is_absolute() {
         return Err(WireError::InvalidParams(format!(
             "cwd `{cwd}` is not an absolute path"
         )));
     }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_dir() => Ok(path),
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(path.to_path_buf()),
         Ok(_) => Err(WireError::InvalidParams(format!(
             "cwd `{cwd}` is not a directory"
         ))),
