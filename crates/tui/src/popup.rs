@@ -10,8 +10,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Clear, Widget};
+use ratatui::widgets::{Block, Clear};
 use shepherd_core::client::{
     Cell, Client, CloseCheck, HostOutdated, MenuEntry, MenuItem, Orphan, Popup,
 };
@@ -19,7 +18,7 @@ use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
 
-use crate::draw::{self, shown};
+use crate::draw::{self, ShownLine, shown};
 use crate::layout::Target;
 use crate::width::{columns, cut, cut_left, pad, tail};
 use crate::{cleanup, finder};
@@ -164,7 +163,7 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
 }
 
 /// The offer's lines above its buttons: the question, the worktree's branch, and its path, cut from the left to fit.
-fn start_lines(worktree: &Orphan) -> Vec<Line<'static>> {
+fn start_lines(worktree: &Orphan) -> Vec<ShownLine> {
     let branch = match &worktree.branch {
         Some(branch) => format!("{WORKTREE} {branch}"),
         None => format!("{WORKTREE} detached HEAD"),
@@ -183,7 +182,7 @@ const WORKTREE: &str = "⎇";
 
 /// The restart dialog's lines above its buttons: why the host should be restarted, and how many sessions that stops
 /// (`to_stop`, when the client knows).
-fn restart_lines(why: HostOutdated, to_stop: Option<usize>) -> Vec<Line<'static>> {
+fn restart_lines(why: HostOutdated, to_stop: Option<usize>) -> Vec<ShownLine> {
     let (first, second) = match why {
         HostOutdated::Older => (
             "The shepherd host is older than this window",
@@ -440,7 +439,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
     };
     let cursor = match popup {
         Popup::Help => {
-            draw::paragraph(help_lines()).render(body, buf);
+            draw::render(draw::paragraph(help_lines()), body, buf);
             None
         }
         Popup::Rename { name, .. } => rename(name, body, buf),
@@ -466,12 +465,16 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             switcher_body(client, path, error.as_deref(), body, buf)
         }
         Popup::RestartHost { why } => {
-            draw::paragraph(restart_lines(*why, client.sessions_to_stop())).render(body, buf);
+            draw::render(
+                draw::paragraph(restart_lines(*why, client.sessions_to_stop())),
+                body,
+                buf,
+            );
             None
         }
         Popup::Finder { query } => finder::render(client, query, &placed, buf),
         Popup::StartInWorktree { worktree } => {
-            draw::paragraph(start_lines(worktree)).render(body, buf);
+            draw::render(draw::paragraph(start_lines(worktree)), body, buf);
             None
         }
         Popup::Cleanup => {
@@ -510,10 +513,10 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
     cursor
 }
 
-fn help_lines() -> Vec<Line<'static>> {
+fn help_lines() -> Vec<ShownLine> {
     let key = Style::new().fg(Color::Cyan);
     let plain = |text: &str| draw::line(shown(text), Style::new());
-    let mut lines: Vec<Line> = MOUSE.iter().map(|l| plain(l)).collect();
+    let mut lines: Vec<ShownLine> = MOUSE.iter().map(|l| plain(l)).collect();
     lines.push(plain(""));
     lines.push(draw::line(
         shown("Or use the keys:"),
@@ -521,8 +524,8 @@ fn help_lines() -> Vec<Line<'static>> {
     ));
     lines.extend(BINDINGS.iter().map(|(keys, what)| {
         draw::spans(vec![
-            draw::span(shown(&format!("{keys:<14}")), key),
-            draw::span(shown(what), Style::new()),
+            (shown(&format!("{keys:<14}")), key),
+            (shown(what), Style::new()),
         ])
     }));
     lines.push(plain(""));
@@ -565,12 +568,12 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
 
 /// The close confirmation's lines above its buttons: what closing does, what happens to the session's worktree (`check`,
 /// if it has one), and a hint.
-fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<Line<'static>> {
+fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<ShownLine> {
     let gray = Style::new().fg(Color::Gray);
     let mut lines = vec![draw::spans(vec![
-        draw::span(shown("Close "), Style::new()),
-        draw::span(shown(name), Style::new().add_modifier(Modifier::BOLD)),
-        draw::span(shown("? Its agent is stopped."), Style::new()),
+        (shown("Close "), Style::new()),
+        (shown(name), Style::new().add_modifier(Modifier::BOLD)),
+        (shown("? Its agent is stopped."), Style::new()),
     ])];
     let styled = |text: &str, style: Style| draw::line(shown(text), style);
     let worktree = |text: &str| styled(text, gray);
@@ -628,15 +631,17 @@ fn close_height(check: &CloseCheck) -> u16 {
 }
 
 fn confirm_close(name: &str, check: Option<&CloseCheck>, body: Rect, buf: &mut Buffer) {
-    draw::paragraph(close_lines(name, check)).render(body, buf);
+    draw::render(draw::paragraph(close_lines(name, check)), body, buf);
 }
 
 /// Clears `area` and draws a bordered box titled `title` on it.
 fn frame(area: Rect, title: &str, buf: &mut Buffer) {
-    Clear.render(area, buf);
-    draw::titled(Block::bordered(), shown(title))
-        .border_style(Style::new().fg(Color::Cyan))
-        .render(area, buf);
+    draw::render(Clear, area, buf);
+    draw::render(
+        draw::titled(Block::bordered(), shown(title)).border_style(Style::new().fg(Color::Cyan)),
+        area,
+        buf,
+    );
 }
 
 pub(crate) fn inner(area: Rect) -> Rect {

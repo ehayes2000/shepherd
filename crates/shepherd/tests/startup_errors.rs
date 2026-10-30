@@ -261,3 +261,14 @@ fn stderr_text_keeps_its_own_line_breaks() {
         "bad config:\n  1 | x =\n    | ^[2J"
     );
 }
+
+#[test]
+fn each_stderr_line_is_capped() {
+    let long = "a".repeat(shepherd::STDERR_LINE_MAX + 1000);
+    let shown = shepherd::stderr_safe(&format!("{long}\n{long}"));
+    let lines: Vec<&str> = shown.split('\n').collect();
+    assert_eq!(lines.len(), 2);
+    for line in lines {
+        assert_eq!(line.chars().count(), shepherd::STDERR_LINE_MAX);
+    }
+}

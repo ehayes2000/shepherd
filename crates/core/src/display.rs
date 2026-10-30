@@ -98,11 +98,12 @@ struct Clusters {
 }
 
 impl Clusters {
-    /// Appends `c` unless that makes the last cluster too long. Returns whether it did.
+    /// Appends `c` unless that makes the last cluster too long, or fills it with a char that joins whatever follows it
+    /// (a Prepend), which would swallow the rest of the text. Returns whether it did.
     ///
     /// Appending only ever changes the last cluster (UAX #29 never looks ahead), and whether `c` joins it can be told
     /// from the last cluster alone (every rule that looks back stays inside one cluster, and regional indicators pair
-    /// from a cluster's start), so the work per char is bounded by the cap.
+    /// from a cluster's start), so each check segments only the last cluster, not the whole text.
     fn push(&mut self, c: char) -> bool {
         let at = self.text.len();
         self.text.push(c);
@@ -110,12 +111,25 @@ impl Clusters {
         let first = clusters.next().unwrap_or_default();
         if clusters.next().is_some() {
             self.last = at;
-        } else if first.chars().nth(CHARS_KEPT_PER_GRAPHEME).is_some() {
-            self.text.pop();
-            return false;
+            return true;
         }
-        true
+        let mut chars = first.chars();
+        let fits = match chars.nth(CHARS_KEPT_PER_GRAPHEME - 1) {
+            None => true,
+            Some(_) if chars.next().is_some() => false,
+            Some(_) => !joins_anything(first),
+        };
+        if !fits {
+            self.text.pop();
+        }
+        fits
     }
+}
+
+/// Whether any char appended to `cluster` would join it: a cluster ending in a Prepend.
+fn joins_anything(cluster: &str) -> bool {
+    let probe = format!("{cluster}a");
+    probe.graphemes(true).nth(1).is_none()
 }
 
 /// Whether `c` is a control (Cc), format (Cf), line separator (Zl) or paragraph separator (Zp) character.

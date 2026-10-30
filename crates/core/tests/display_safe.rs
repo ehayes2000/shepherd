@@ -209,6 +209,41 @@ fn the_review_counterexample_is_idempotent() {
 }
 
 #[test]
+fn an_unbounded_cluster_after_earlier_ones_is_capped_too() {
+    let voiced = format!("ab{}", "\u{FF9E}".repeat(200));
+    let shown = assert_clusters_capped_and_idempotent(&voiced, 10);
+    assert!(shown.starts_with("ab\u{FF9E}"), "{shown:?}");
+    let tones = format!("x🇯🇵👍{}", "🏽".repeat(200));
+    let shown = assert_clusters_capped_and_idempotent(&tones, 10);
+    assert!(shown.starts_with("x🇯🇵👍🏽"), "{shown:?}");
+}
+
+#[test]
+fn a_rejected_extender_does_not_make_room_for_more_marks() {
+    // A full cluster whose base has used its marks, an extender it can't take, then a mark that would otherwise start a
+    // cluster of its own (U+102B joins nothing before it).
+    let full = format!("a{}\u{301}\u{302}", "\u{FF9E}".repeat(13));
+    assert_eq!(full.chars().count(), CHARS_KEPT_PER_GRAPHEME);
+    let text = format!("{full}\u{FF9E}\u{102B}");
+    assert_eq!(assert_clusters_capped_and_idempotent(&text, 10), full);
+}
+
+#[test]
+fn a_full_cluster_never_ends_in_a_char_that_swallows_the_rest() {
+    // U+0D4E is a Prepend: it joins whatever follows it, so it may not take a cluster's last place.
+    let prepends = "\u{0D4E}".repeat(CHARS_KEPT_PER_GRAPHEME);
+    let text = format!("{prepends}hello world");
+    let shown = assert_clusters_capped_and_idempotent(&text, 50);
+    assert_eq!(
+        shown,
+        format!(
+            "{}hello world",
+            "\u{0D4E}".repeat(CHARS_KEPT_PER_GRAPHEME - 1)
+        )
+    );
+}
+
+#[test]
 fn a_full_cluster_is_followed_by_the_next_one() {
     let text = format!("ｶ{}b", "\u{FF9E}".repeat(200));
     let shown = assert_clusters_capped_and_idempotent(&text, 50);
@@ -264,7 +299,7 @@ proptest! {
 
     #[test]
     fn text_heavy_in_extenders_is_shown_capped_and_stays_put(
-        text in "[\u{1100}\u{1161}\u{11A8}\u{344}\u{301}\u{FF9E}ｶ👍🏽क्a\u{200D}\u{2028}\u{1F1EF}\u{1F1F5}]{0,300}",
+        text in "[\u{1100}\u{1161}\u{11A8}\u{344}\u{301}\u{FF9E}ｶ👍🏽क्a\u{200D}\u{2028}\u{1F1EF}\u{1F1F5}\u{102B}\u{0D4E}]{0,300}",
         max in 0usize..12,
     ) {
         let once = display_safe(&text, max);

@@ -8,7 +8,7 @@ pub mod screen_guard;
 pub mod terminal;
 
 /// The most grapheme clusters [`stderr_safe`] keeps of one line.
-const STDERR_LINE_MAX: usize = 4096;
+pub const STDERR_LINE_MAX: usize = 4096;
 
 /// `text` made display-safe for printing to a terminal, line by line: hostile text in an error (a path, an argument)
 /// can't drive the terminal, and the error's own line breaks stay.

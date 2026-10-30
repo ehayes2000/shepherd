@@ -31,7 +31,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Clear, Widget, Wrap};
+use ratatui::widgets::{Clear, Wrap};
 use shepherd_core::acpp::{PrChecks, PrState};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::display::DisplayText;
@@ -509,15 +509,15 @@ pub(crate) fn wide_notice(client: &Client, layout: &Layout, buf: &mut Buffer) {
         .wrap(Wrap { trim: true });
     // As many lines as the wrapped text takes: wrapped on a scratch buffer first, so word breaks count.
     let mut scratch = Buffer::empty(Rect::new(0, 0, width, MAX_NOTICE_LINES));
-    paragraph.clone().render(scratch.area, &mut scratch);
+    draw::render(paragraph.clone(), scratch.area, &mut scratch);
     let used = (0..MAX_NOTICE_LINES)
         .rev()
         .find(|&y| (0..width).any(|x| scratch[(x, y)].symbol() != " "))
         .map_or(1, |y| y + 1);
     let height = used.min(window.height);
     let area = Rect::new(window.x, window.bottom() - height, window.width, height);
-    Clear.render(area, buf);
-    paragraph.render(Rect::new(area.x + 1, area.y, width, height), buf);
+    draw::render(Clear, area, buf);
+    draw::render(paragraph, Rect::new(area.x + 1, area.y, width, height), buf);
 }
 
 fn footer(client: &Client, area: Rect, buf: &mut Buffer) {

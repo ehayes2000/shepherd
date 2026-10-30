@@ -64,14 +64,12 @@ for doc in CLAUDE.md docs/architecture.md docs/acpp.md docs/plan.md docs/pm.md; 
 done
 
 # shepherd-tui draws text only through crate::draw, which takes a DisplayText (F35). crates/tui/clippy.toml bans
-# ratatui's text methods; these are the trait methods clippy can't single out: `Line::from`, `Text::from`, `Span::from`,
-# and `.render` on a string (`&str` and `String` are widgets).
-tui_from='(^|[^A-Za-z0-9_])(Line|Text|Span)::from\('
-tui_render='("|to_string\(\)|to_owned\(\)|into_string\(\)|as_str\(\)|String::from\(.*\)|format!\(.*\))\.render\('
-if tui_text=$(grep -rnE --include='*.rs' "$tui_from|$tui_render" crates/tui 2>/dev/null |
+# ratatui's text methods and `Widget::render`; these are the `From` conversions clippy can't single out.
+tui_from='(^|[^A-Za-z0-9_])(Line|Text|Span|ListItem|Row|Cell)::from\('
+if tui_text=$(grep -rnE --include='*.rs' "$tui_from" crates/tui 2>/dev/null |
   grep -v '^crates/tui/src/draw\.rs:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
   printf '%s\n' "$tui_text" >&2
-  err "shepherd-tui: text must reach ratatui through crate::draw (a DisplayText), not Line/Text/Span::from or a string's .render"
+  err "shepherd-tui: text must reach ratatui through crate::draw (a DisplayText), not Line/Text/Span/ListItem/Row/Cell::from"
 fi
 
 if [[ -d crates/core && ! -f crates/core/clippy.toml ]]; then
