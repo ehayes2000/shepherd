@@ -315,11 +315,51 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
     let connect: Connector<UnixConnectLink> =
         Box::new(move |sink| UnixConnectLink::connect(&socket, sink).map_err(|e| e.to_string()));
     let machine = MachineId::new("local");
-    ClientRuntime::new(machine, connect, launcher, now).run()
+    let start = Instant::now();
+    let clock = monotonic(jiff::Timestamp::now(), move || start.elapsed());
+    ClientRuntime::new(machine, connect, launcher, clock).run()
 }
 
-/// The wall clock as a core timestamp.
-fn now() -> Timestamp {
-    Timestamp::parse(jiff::Timestamp::now().to_string())
-        .unwrap_or_else(|e| unreachable!("jiff formats RFC 3339: {e}"))
+/// A clock for core that never goes backwards: the wall time `anchor` read once, plus the monotonic time
+/// `elapsed` since then. The retry and hello deadlines core computes from it survive the wall clock being stepped.
+fn monotonic(
+    anchor: jiff::Timestamp,
+    mut elapsed: impl FnMut() -> Duration + Send + 'static,
+) -> impl FnMut() -> Timestamp + Send + 'static {
+    move || {
+        let since = jiff::SignedDuration::try_from(elapsed()).unwrap_or(jiff::SignedDuration::MAX);
+        let now = anchor.checked_add(since).unwrap_or(jiff::Timestamp::MAX);
+        Timestamp::parse(now.to_string())
+            .unwrap_or_else(|e| unreachable!("jiff formats RFC 3339: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn the_monotonic_clock_is_its_wall_anchor_plus_monotonic_elapsed_time() {
+        let anchor: jiff::Timestamp = "2026-10-29T12:00:00Z"
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let elapsed = Arc::new(Mutex::new(Duration::ZERO));
+        let source = elapsed.clone();
+        let mut clock = monotonic(anchor, move || {
+            *source.lock().unwrap_or_else(|e| e.into_inner())
+        });
+        let mut seen = Vec::new();
+        for ms in [0, 40, 40, 1500] {
+            *elapsed.lock().unwrap_or_else(|e| e.into_inner()) = Duration::from_millis(ms);
+            seen.push(clock().instant());
+        }
+        let expected: Vec<_> = [0, 40, 40, 1500]
+            .into_iter()
+            .map(|ms| anchor + jiff::SignedDuration::from_millis(ms))
+            .collect();
+        assert_eq!(seen, expected);
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]));
+    }
 }

@@ -234,11 +234,19 @@ wait
         /// because `sh` can lose a trapped signal that arrives while it forks (between `started` and `wait`).
         fn ask_alive(&mut self, pid: i32) -> Option<Report> {
             let deadline = std::time::Instant::now() + TIMEOUT;
+            let mut signalled = false;
             while std::time::Instant::now() < deadline {
                 // SAFETY: plain syscall.
                 if unsafe { libc::kill(pid, libc::SIGUSR1) } != 0 {
-                    return None;
+                    if !signalled {
+                        // Gone before it was ever asked: it can't have answered.
+                        return None;
+                    }
+                    // Gone after a signal got through: it may have answered and exited. Wait for that answer.
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    return self.reports.recv_timeout(left).ok();
                 }
+                signalled = true;
                 if let Ok(report) = self.reports.recv_timeout(Duration::from_millis(200)) {
                     return Some(report);
                 }
