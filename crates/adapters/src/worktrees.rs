@@ -7,7 +7,8 @@
 //! prompts that don't need a terminal: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential Manager) and
 //! `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
 //! ssh included. Output goes to temp files rather than pipes, so a background process left behind by a hook can't hold
-//! a call open.
+//! a call open. A `worktree add` killed this way is undone: its worktree and new branch are removed (see
+//! [`Worktrees::create`]).
 //!
 //! # The user's config
 //!
@@ -188,6 +189,63 @@ impl GitWorktrees {
                     .to_owned(),
             }),
         }
+    }
+
+    /// Undoes a `worktree add` of `path` on the new `branch` that was killed part way: removes the worktree's
+    /// directory, git's record of it and the branch, whichever of them exist. `create` checked that neither the path
+    /// nor the branch existed before, so everything here is ours.
+    fn undo_add(&self, common: &Path, path: &Path, branch: &BranchName) -> Result<(), String> {
+        // Double force also removes a worktree still locked as "initializing" by an add killed mid-checkout.
+        let remove: [&OsStr; 5] = [
+            "worktree".as_ref(),
+            "remove".as_ref(),
+            "--force".as_ref(),
+            "--force".as_ref(),
+            path.as_os_str(),
+        ];
+        let removed = self.git(common, &remove);
+        if path.symlink_metadata().is_ok() {
+            // git refused (e.g. the add was killed before it wrote the worktree's `.git` file): delete the directory
+            // ourselves, then let git drop its record, which it does for a missing directory.
+            std::fs::remove_dir_all(path)
+                .map_err(|e| format!("can't delete {}: {e}", path.display()))?;
+            let _ = self.git(common, &remove);
+        } else if let Err(failure) = removed
+            && self.registered(common, path)?
+        {
+            return Err(format!(
+                "git worktree remove: {}",
+                failure.describe(self.git_timeout)
+            ));
+        }
+        if self.registered(common, path)? {
+            return Err(format!("git still lists {} as a worktree", path.display()));
+        }
+        let full_ref = format!("refs/heads/{branch}");
+        if self
+            .ref_exists(common, &full_ref)
+            .map_err(|e| e.to_string())?
+        {
+            self.git(common, &["update-ref", "-d", &full_ref])
+                .map_err(|f| {
+                    format!(
+                        "can't delete branch {branch}: {}",
+                        f.describe(self.git_timeout)
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Whether git lists a worktree at `path`.
+    fn registered(&self, common: &Path, path: &Path) -> Result<bool, String> {
+        let out = self
+            .git(common, &["worktree", "list", "--porcelain", "-z"])
+            .map_err(|f| format!("git worktree list: {}", f.describe(self.git_timeout)))?;
+        Ok(out
+            .split('\0')
+            .filter_map(|field| field.strip_prefix("worktree "))
+            .any(|listed| resolved(Path::new(listed)) == resolved(path)))
     }
 
     /// The absolute common git dir of the checkout containing `dir`.
@@ -420,8 +478,20 @@ impl Worktrees for GitWorktrees {
             path.as_os_str(),
             start.as_ref(),
         ];
-        self.git(dir, &args)
-            .map_err(|f| f.into_error("worktree add"))?;
+        match self.git(dir, &args) {
+            Ok(_) => {}
+            Err(Failure::Timeout) => {
+                return Err(match self.undo_add(&common, &path, &branch) {
+                    Ok(()) => WorktreeError::Timeout("worktree add".to_owned()),
+                    Err(cleanup) => WorktreeError::Other(format!(
+                        "git worktree add timed out, and cleaning up failed: {cleanup}. \
+                         Remove {} and branch {branch} by hand",
+                        path.display()
+                    )),
+                });
+            }
+            Err(other) => return Err(other.into_error("worktree add")),
+        }
         Ok(Created {
             path: WorktreePath::new(path),
             branch,
@@ -512,6 +582,19 @@ impl Worktrees for GitWorktrees {
         self.git(&common, &args)
             .map_err(|f| f.into_error("worktree remove"))?;
         Ok(())
+    }
+}
+
+/// `path` with symlinks resolved, as far as it exists: a missing last component is kept as is.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|p| p.join(name))
+            .unwrap_or_else(|_| path.to_owned()),
+        _ => path.to_owned(),
     }
 }
 
@@ -970,6 +1053,64 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// Short enough that a test with a `sleep 900` hook finishes quickly, long enough that the other git calls of a
+    /// `create` (and its cleanup) fit under load.
+    const SLOW_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn branch_exists(f: &GitFixture, branch: &str) -> bool {
+        let reference = format!("refs/heads/{branch}");
+        f.git_output(&f.app(), &["show-ref", "--verify", "--quiet", &reference])
+            .status
+            .success()
+    }
+
+    /// `post-checkout` runs after git has registered the worktree and made its branch.
+    #[test]
+    fn a_timed_out_create_leaves_nothing_behind_and_can_be_retried() {
+        let f = GitFixture::new();
+        hook(&f, "post-checkout", "sleep 900");
+        let slow = port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(SLOW_HOOK_TIMEOUT);
+        let result = slow.create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
+        assert!(
+            matches!(result, Err(WorktreeError::Timeout(_))),
+            "{result:?}"
+        );
+
+        assert!(!f.root().join(REPO_NAME).join("slow").exists());
+        assert_eq!(f.port.list_managed(&f.repo()), Ok(Vec::new()));
+        let listed = f.git(&f.app(), &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains("slow"), "{listed}");
+        assert!(!branch_exists(&f, "slow"));
+
+        hook(&f, "post-checkout", "exit 0");
+        let created = f
+            .port
+            .create(&f.repo(), &name("slow"), BaseSpec::OriginDefault)
+            .unwrap();
+        assert!(created.path.as_path().is_dir());
+        assert!(branch_exists(&f, "slow"));
+    }
+
+    /// A ref lock left by the hook makes deleting the new branch fail.
+    #[test]
+    fn a_timed_out_create_whose_cleanup_fails_says_so() {
+        let f = GitFixture::new();
+        let lock = f.app().join(".git/refs/heads/stuck.lock");
+        hook(
+            &f,
+            "post-checkout",
+            &format!("touch '{}'\nsleep 900", lock.display()),
+        );
+        let slow = port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(SLOW_HOOK_TIMEOUT);
+        let result = slow.create(&f.repo(), &name("stuck"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("clean"), "{message}");
+        assert!(message.contains("stuck"), "{message}");
     }
 
     /// The background `sleep` keeps git's stdout and stderr open long after git exits.
