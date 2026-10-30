@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T26 search and open | re-review (round 3) | task/t26-search @ 36e2796 (on ce4e6f4) | 3 | re-check before remove; refuse into removing path; canonical paths |
+| T26 search and open | fixing (round 4) | task/t26-search @ 36e2796 | 3 | Blocking: host-made worktree paths unresolved under a symlinked root → PM: canonicalize the worktrees root once at host start |
 | T36b host hot-swap by re-exec | re-review | task/t36b-hotswap @ 298f42c (on 85202e0) | 2 | config validated in preflight + defaults fallback; adopt only our children/terminals; strict handoff path |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
