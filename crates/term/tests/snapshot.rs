@@ -477,6 +477,22 @@ fn sequences_found_by_the_fuzz_test_round_trip() {
                 "日",
             ],
         ),
+        // A tab over a whole wide char's spacer, before a broken wide char in the last column.
+        (
+            6,
+            0,
+            &[
+                "a",
+                "\x1b[4h",
+                "\x1b[2;4r",
+                "\t",
+                "日",
+                "日",
+                "\x1b[3D",
+                "\t",
+                "\r   ",
+            ],
+        ),
     ];
     for (i, (cols, rows, steps)) in cases.iter().enumerate() {
         let screen = run(*cols, *rows, steps);
