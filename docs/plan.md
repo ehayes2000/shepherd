@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| F27 worktrees off runtime thread | building | task/f27-worktrees-worker @ 1d2513a | 0 | – |
+| F27 worktrees off runtime thread | in review | task/f27-worktrees-worker @ c162770 (on d92af88) | 1 | PM-accepted: generic Worker<W> wrapper; StartError; session/new vs hello race; no join at shutdown. T22 must route create through the worker + add a stale-result row |
 | F15 client display polish | in review | task/f15-display-polish @ 8542e4c (on d92af88) | 1 | PM-accepted: steady block → user shape; notice cleared by intents except layout; 50 ms tick for holds |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
