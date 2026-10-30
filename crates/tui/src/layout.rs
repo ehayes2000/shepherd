@@ -64,6 +64,8 @@ pub enum Target {
     Help,
     /// An item of the open context menu.
     MenuItem(MenuItem),
+    /// A profile's row in the open profile picker.
+    Profile(String),
     /// The open dialog's button that answers yes: `[Close]` or `[Save]`.
     Confirm,
     /// The open dialog's button that cancels it: `[Cancel]`, or help's `[Close]`.

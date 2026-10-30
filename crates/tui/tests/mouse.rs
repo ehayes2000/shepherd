@@ -7,6 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use shepherd_core::client::{Cell, Focus, Intent, MenuItem, Popup};
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
@@ -261,22 +262,22 @@ fn the_collapsed_sidebar_is_hit_on_its_glyphs() {
 // ---------- clicks ----------
 
 #[test]
-fn clicking_new_session_creates_one_on_release() {
+fn clicking_new_session_begins_one_on_release() {
     let mut c = sessions(1, WIDE);
     let button = at(&buffer(&c, WIDE), "+ New session");
     assert_eq!(
         click(&mut c, WIDE, button),
-        [vec![], vec![Intent::NewSession]]
+        [vec![], vec![Intent::BeginNewSession]]
     );
 }
 
 #[test]
-fn clicking_new_session_in_the_collapsed_sidebar_creates_one() {
+fn clicking_new_session_in_the_collapsed_sidebar_begins_one() {
     let mut c = sessions(1, NARROW);
     let plus = at(&buffer(&c, NARROW), "+");
     assert_eq!(
         click(&mut c, NARROW, plus),
-        [vec![], vec![Intent::NewSession]]
+        [vec![], vec![Intent::BeginNewSession]]
     );
 }
 
@@ -500,7 +501,7 @@ fn a_press_in_a_tracked_pane_replaces_an_earlier_click_on_a_control() {
             mouse(UP, button),
         ],
     );
-    assert_eq!(out[1], [Intent::NewSession]);
+    assert_eq!(out[1], [Intent::BeginNewSession]);
     assert_eq!(out[3], [], "the release on the button wasn't pressed there");
 }
 
@@ -943,4 +944,107 @@ fn a_long_name_stops_a_blank_column_short_of_the_close_button() {
         " ",
         "the name fills up to it: {buf:?}"
     );
+}
+
+// ---------- the profile picker ----------
+
+/// A connected client with session `s1` (named `name-01`), whose host has the `claude`, `codex` and `shell` profiles,
+/// `codex` the default, told the size of `window`.
+fn with_profiles(window: Rect) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            ("claude", AgentKind::ClaudeCode),
+            ("codex", AgentKind::Codex),
+            ("shell", AgentKind::Shell),
+        ],
+        "codex",
+    );
+    c.host().new_session("s1");
+    c.host().rename("s1", "name-01");
+    c.sync();
+    c.user(Intent::SidebarRows(shepherd_tui::layout::sidebar_rows(
+        window,
+    )));
+    c
+}
+
+/// The picker open over `with_profiles`, opened by clicking `+ New session`.
+fn picker(window: Rect) -> ClientDriver {
+    let mut c = with_profiles(window);
+    let button = at(&buffer(&c, window), "+");
+    click(&mut c, window, button);
+    assert_eq!(c.client().popup(), Some(&Popup::PickProfile));
+    c
+}
+
+fn profile(name: &str) -> Option<Target> {
+    Some(Target::Profile(name.to_owned()))
+}
+
+#[test]
+fn clicking_new_session_with_several_profiles_opens_the_picker() {
+    for window in [WIDE, NARROW] {
+        let c = picker(window);
+        let buf = buffer(&c, window);
+        at(&buf, "codex");
+        at(&buf, "[Cancel]");
+    }
+}
+
+#[test]
+fn the_pickers_rows_are_the_profiles_default_first_and_marked() {
+    let c = picker(WIDE);
+    let buf = buffer(&c, WIDE);
+    let first = at(&buf, "codex");
+    assert_eq!(at(&buf, "claude"), below(first, 1));
+    assert_eq!(at(&buf, "shell"), below(first, 2));
+    let mark = at(&buf, "default");
+    assert_eq!(mark.y, first.y, "the default's row is marked: {buf:?}");
+}
+
+#[test]
+fn each_pickers_row_is_hit_across_the_dialog() {
+    let c = picker(WIDE);
+    let buf = buffer(&c, WIDE);
+    let claude = at(&buf, "claude");
+    assert_eq!(hit_at(&c, WIDE, claude), profile("claude"));
+    assert_eq!(hit_at(&c, WIDE, right(claude, 20)), profile("claude"));
+    assert_eq!(hit_at(&c, WIDE, below(claude, 1)), profile("shell"));
+    assert_eq!(
+        hit_at(&c, WIDE, Position::new(claude.x - 2, claude.y)),
+        Some(Target::Popup),
+        "the border"
+    );
+}
+
+#[test]
+fn clicking_a_profile_creates_a_session_with_it() {
+    for (window, name) in [(WIDE, "shell"), (WIDE, "codex"), (NARROW, "claude")] {
+        let mut c = picker(window);
+        let row = at(&buffer(&c, window), name);
+        assert_eq!(
+            click(&mut c, window, row),
+            [vec![], vec![Intent::PickProfile(name.to_owned())]],
+            "{name}"
+        );
+        assert_eq!(c.client().popup(), None, "{name}");
+    }
+}
+
+#[test]
+fn the_picker_cancels_by_its_button() {
+    let mut c = picker(WIDE);
+    let cancel = at(&buffer(&c, WIDE), "[Cancel]");
+    assert_eq!(click(&mut c, WIDE, cancel), [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn clicking_outside_the_picker_dismisses_it() {
+    let mut c = picker(WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    assert_eq!(hit_at(&c, WIDE, row), Some(Target::Backdrop));
+    assert_eq!(click(&mut c, WIDE, row), [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
 }

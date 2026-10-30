@@ -668,7 +668,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         };
         match body {
             ClientRequest::Hello(hello) => {
-                let result = wire::negotiate(&hello, &self.machine).map(HostResult::Hello);
+                let result = wire::negotiate(&hello, &self.machine)
+                    .map(|ok| HostResult::Hello(ok.with_profiles(&self.settings.config)));
                 self.respond(conn, &respond_now(result));
             }
             ClientRequest::Subscribe(subscribe) => self.subscribe(conn, id, &subscribe.from),

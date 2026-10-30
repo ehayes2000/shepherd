@@ -6,14 +6,14 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{
     Dir, EntryId, Frame, FrameDraft, RequestId, Seq, Source, SourceKind, Stamp, Timestamp,
 };
-use shepherd_core::config::AgentKind;
+use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
     HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method,
-    PROTOCOL_VERSION, PtyOutput, Request, RequestError, SessionClose, SessionInput, SessionNew,
-    SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError, code,
-    decode_client_message, decode_host_message, encode_client_notification,
+    PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose, SessionInput,
+    SessionNew, SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
+    code, decode_client_message, decode_host_message, encode_client_notification,
     encode_host_notification, encode_request, encode_response, negotiate,
 };
 
@@ -479,8 +479,90 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
         Ok(HelloOk {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_host"),
+            profiles: Vec::new(),
+            default_profile: None,
         })
     );
+}
+
+fn config(value: Value) -> Config {
+    let raw = serde_json::from_value(value).unwrap_or_else(|e| panic!("bad RawConfig: {e}"));
+    Config::resolve(Some(raw), None).unwrap_or_else(|e| panic!("{e}"))
+}
+
+#[test]
+fn hello_ok_lists_the_hosts_profiles_and_names_the_default() {
+    let config = config(json!({
+        "defaults": { "agent": "codex" },
+        "agents": { "review": { "kind": "claude-code", "command": "claude" } }
+    }));
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_profiles(&config);
+    assert_eq!(ok.default_profile.as_deref(), Some("codex"));
+    assert_eq!(
+        ok.profiles,
+        [
+            ProfileInfo {
+                name: "claude".into(),
+                agent: AgentKind::ClaudeCode
+            },
+            ProfileInfo {
+                name: "codex".into(),
+                agent: AgentKind::Codex
+            },
+            ProfileInfo {
+                name: "review".into(),
+                agent: AgentKind::ClaudeCode
+            },
+            ProfileInfo {
+                name: "shell".into(),
+                agent: AgentKind::Shell
+            },
+        ]
+    );
+}
+
+#[test]
+fn hello_ok_profiles_are_name_and_agent_on_the_wire() {
+    let config = config(json!({}));
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_profiles(&config);
+    let line = encode_response(&HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    });
+    let result = &wire_json(&line)["result"];
+    assert_eq!(result["default_profile"], "claude");
+    assert_eq!(
+        result["profiles"][0],
+        json!({ "name": "claude", "agent": "claude-code" })
+    );
+}
+
+#[test]
+fn a_hello_ok_from_an_older_host_has_no_profiles() {
+    let line = json!({ "jsonrpc": "2.0", "id": 1,
+                       "result": { "version": PROTOCOL_VERSION, "machine": "m_host" } })
+    .to_string();
+    let resp = response(line.as_bytes(), Method::Hello);
+    assert_eq!(
+        resp.result,
+        Ok(HostResult::Hello(HelloOk {
+            version: PROTOCOL_VERSION,
+            machine: MachineId::new("m_host"),
+            profiles: Vec::new(),
+            default_profile: None,
+        }))
+    );
+}
+
+fn hello() -> Hello {
+    Hello {
+        version: PROTOCOL_VERSION,
+        machine: MachineId::new("m_client"),
+    }
 }
 
 #[test]
@@ -519,6 +601,11 @@ fn successful_responses_round_trip_by_method() {
             HostResult::Hello(HelloOk {
                 version: 1,
                 machine: MachineId::new("m_1"),
+                profiles: vec![ProfileInfo {
+                    name: "codex".into(),
+                    agent: AgentKind::Codex,
+                }],
+                default_profile: Some("codex".into()),
             }),
         ),
         (

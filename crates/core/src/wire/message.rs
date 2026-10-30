@@ -29,7 +29,7 @@ use super::WireError;
 use super::base64::serde_bytes;
 use super::codec::frame;
 use crate::acpp::{Envelope, RequestId, Seq};
-use crate::config::AgentKind;
+use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
@@ -252,6 +252,36 @@ impl ClientRequest {
 pub struct HelloOk {
     pub version: u32,
     pub machine: MachineId,
+    /// The agent profiles new sessions can run, from the host's config. Empty from a host older than profiles.
+    #[serde(default)]
+    pub profiles: Vec<ProfileInfo>,
+    /// The profile a session without one runs. `None` from a host older than profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+}
+
+impl HelloOk {
+    /// This answer, listing `config`'s profiles by name and naming its default.
+    pub fn with_profiles(self, config: &Config) -> Self {
+        Self {
+            profiles: config
+                .profiles()
+                .map(|p| ProfileInfo {
+                    name: p.name.clone(),
+                    agent: p.kind,
+                })
+                .collect(),
+            default_profile: Some(config.default_agent().name.clone()),
+            ..self
+        }
+    }
+}
+
+/// An agent profile as a client sees it: what to call it, and which agent it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub agent: AgentKind,
 }
 
 /// The host's answer to `_shepherd/session/new`.
@@ -400,7 +430,8 @@ pub enum DecodeError {
     InvalidResult { method: Method, reason: String },
 }
 
-/// Answers a `_shepherd/hello`: the host's version and machine, or a version mismatch.
+/// Answers a `_shepherd/hello`: the host's version and machine, or a version mismatch. The host adds its profiles
+/// with [`HelloOk::with_profiles`].
 pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, WireError> {
     if hello.version != PROTOCOL_VERSION {
         return Err(WireError::VersionMismatch {
@@ -411,6 +442,8 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
     Ok(HelloOk {
         version: PROTOCOL_VERSION,
         machine: host_machine.clone(),
+        profiles: Vec::new(),
+        default_profile: None,
     })
 }
 

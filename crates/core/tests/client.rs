@@ -6,12 +6,13 @@ use shepherd_core::client::{
     Cell, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
     MAX_CONNECT_ATTEMPTS, MenuItem, Popup,
 };
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
-    ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput, SessionRename,
-    SessionResize, Subscribe, WireError,
+    ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput, SessionNew,
+    SessionRename, SessionResize, Subscribe, WireError,
 };
 use shepherd_testkit::builders::{ClientDriver, log_entry, notifications, requests, ts};
 
@@ -1097,4 +1098,108 @@ fn answers_pending_when_the_link_dropped_are_forgotten() {
     c.handle(connected());
     assert_eq!(c.answer(&sent, Err(WireError::Internal("x".into()))), []);
     assert_eq!(c.client().notice(), None);
+}
+
+// ---------- profiles ----------
+
+/// A connected client with session `s1`, whose host has the `claude`, `codex` and `shell` profiles, `codex` the
+/// default.
+fn with_profiles() -> ClientDriver {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            ("claude", AgentKind::ClaudeCode),
+            ("codex", AgentKind::Codex),
+            ("shell", AgentKind::Shell),
+        ],
+        "codex",
+    );
+    c.host().new_session("s1");
+    c.sync();
+    c
+}
+
+fn new_session(profile: Option<&str>) -> ClientRequest {
+    ClientRequest::SessionNew(SessionNew {
+        profile: profile.map(str::to_owned),
+        cwd: None,
+    })
+}
+
+#[test]
+fn the_client_keeps_the_hosts_profiles_default_first() {
+    let c = with_profiles();
+    let names: Vec<&str> = c
+        .client()
+        .profiles()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["codex", "claude", "shell"]);
+    assert_eq!(c.client().default_profile(), Some("codex"));
+}
+
+#[test]
+fn new_session_with_several_profiles_opens_the_picker() {
+    let mut c = with_profiles();
+    assert_eq!(c.user(Intent::BeginNewSession), []);
+    assert_eq!(c.client().popup(), Some(&Popup::PickProfile));
+}
+
+#[test]
+fn picking_a_profile_creates_a_session_with_it() {
+    let mut c = with_profiles();
+    c.user(Intent::BeginNewSession);
+    let sent = c.user(Intent::PickProfile("shell".into()));
+    assert_eq!(bodies(&sent), [new_session(Some("shell"))]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn picking_a_profile_without_the_picker_open_does_nothing() {
+    let mut c = with_profiles();
+    assert_eq!(c.user(Intent::PickProfile("shell".into())), []);
+    c.user(Intent::ShowHelp);
+    assert_eq!(c.user(Intent::PickProfile("shell".into())), []);
+    assert_eq!(c.client().popup(), Some(&Popup::Help));
+}
+
+#[test]
+fn dismissing_the_picker_creates_nothing() {
+    let mut c = with_profiles();
+    c.user(Intent::BeginNewSession);
+    assert_eq!(c.user(Intent::Dismiss), []);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn confirm_on_the_picker_creates_nothing() {
+    let mut c = with_profiles();
+    c.user(Intent::BeginNewSession);
+    assert_eq!(c.user(Intent::Confirm), []);
+}
+
+#[test]
+fn new_session_with_one_profile_creates_it_directly() {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(&[("claude", AgentKind::ClaudeCode)], "claude");
+    let sent = c.user(Intent::BeginNewSession);
+    assert_eq!(bodies(&sent), [new_session(Some("claude"))]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn new_session_from_a_host_without_profiles_creates_the_default_directly() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    let sent = c.user(Intent::BeginNewSession);
+    assert_eq!(bodies(&sent), [new_session(None)]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn the_new_session_key_creates_the_default_profile_without_the_picker() {
+    let mut c = with_profiles();
+    let sent = c.user(Intent::NewSession);
+    assert_eq!(bodies(&sent), [new_session(None)]);
+    assert_eq!(c.client().popup(), None);
 }

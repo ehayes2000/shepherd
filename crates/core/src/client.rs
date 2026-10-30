@@ -15,8 +15,8 @@ use crate::ports::pty::PtySize;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
     ClientMessage, ClientNotification, ClientRequest, Hello, HostMessage, HostNotification,
-    HostResult, Method, PROTOCOL_VERSION, RawResponse, Request, SessionClose, SessionInput,
-    SessionNew, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
+    HostResult, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request, SessionClose,
+    SessionInput, SessionNew, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -64,7 +64,12 @@ pub enum Intent {
     ScrollSidebar(i32),
     /// How many sessions the sidebar shows at once, from the TUI's layout. The list scrolls to fit.
     SidebarRows(usize),
+    /// Start a session with the default profile.
     NewSession,
+    /// The `+ New session` button: open the profile picker, or, with at most one profile, start a session at once.
+    BeginNewSession,
+    /// Start a session with this profile, from the open profile picker. Ignored when the picker isn't open.
+    PickProfile(String),
     ShowHelp,
     /// Open the rename popup for the selected session, starting from its current name.
     BeginRename,
@@ -144,6 +149,8 @@ pub enum Popup {
         session: SessionId,
         at: Cell,
     },
+    /// Which profile a new session runs, listing [`Client::profiles`].
+    PickProfile,
 }
 
 /// Where the client is with its host.
@@ -217,6 +224,9 @@ pub struct Client {
     /// How many sessions the sidebar shows at once, once the TUI has said.
     sidebar_rows: Option<usize>,
     notice: Option<String>,
+    /// The host's agent profiles, the default first, from its hello answer.
+    profiles: Vec<ProfileInfo>,
+    default_profile: Option<String>,
 }
 
 impl Client {
@@ -242,6 +252,8 @@ impl Client {
             scroll: 0,
             sidebar_rows: None,
             notice: None,
+            profiles: Vec::new(),
+            default_profile: None,
         }
     }
 
@@ -274,6 +286,17 @@ impl Client {
     /// The terminal view's size, once the runtime has reported it.
     pub fn size(&self) -> Option<PtySize> {
         self.size
+    }
+
+    /// The agent profiles the host offers for new sessions, the default first. Empty until the host has said, or from
+    /// a host older than profiles.
+    pub fn profiles(&self) -> &[ProfileInfo] {
+        &self.profiles
+    }
+
+    /// The profile a session runs when none is picked, once the host has said.
+    pub fn default_profile(&self) -> Option<&str> {
+        self.default_profile.as_deref()
     }
 
     /// The latest thing the host refused, for the user.
@@ -422,7 +445,8 @@ impl Client {
             Err(e) => Err(WireError::Internal(e.to_string())),
         };
         match (method, result) {
-            (Method::Hello, Ok(_)) => {
+            (Method::Hello, Ok(HostResult::Hello(ok))) => {
+                self.set_profiles(ok.profiles, ok.default_profile);
                 self.connection = Connection::Ready;
                 self.launched = false;
                 let subscribe = Subscribe {
@@ -448,6 +472,19 @@ impl Client {
                 Vec::new()
             }
         }
+    }
+
+    /// Keeps the host's profiles, `default` moved to the front.
+    fn set_profiles(&mut self, mut profiles: Vec<ProfileInfo>, default: Option<String>) {
+        if let Some(i) = profiles
+            .iter()
+            .position(|p| Some(&p.name) == default.as_ref())
+        {
+            let first = profiles.remove(i);
+            profiles.insert(0, first);
+        }
+        self.profiles = profiles;
+        self.default_profile = default;
     }
 
     /// Where each log resumes after a reconnect: the last entry folded of each.
@@ -685,8 +722,24 @@ impl Client {
                 self.scroll_to_selected();
                 Vec::new()
             }
-            Intent::NewSession => {
-                self.user_request(ClientRequest::SessionNew(SessionNew::default()))
+            Intent::NewSession => self.new_session(None),
+            Intent::BeginNewSession => match &self.profiles[..] {
+                [] => self.new_session(None),
+                [only] => {
+                    let name = only.name.clone();
+                    self.new_session(Some(name))
+                }
+                _ => {
+                    self.popup = Some(Popup::PickProfile);
+                    Vec::new()
+                }
+            },
+            Intent::PickProfile(name) => {
+                if self.popup != Some(Popup::PickProfile) {
+                    return Vec::new();
+                }
+                self.popup = None;
+                self.new_session(Some(name))
             }
             Intent::ShowHelp => {
                 self.popup = Some(Popup::Help);
@@ -742,7 +795,7 @@ impl Client {
                 Some(Popup::ConfirmClose { session }) => {
                     self.user_request(ClientRequest::SessionClose(SessionClose { session }))
                 }
-                Some(Popup::Help | Popup::Menu { .. }) | None => Vec::new(),
+                Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
             Intent::Dismiss => {
                 self.popup = None;
@@ -765,6 +818,11 @@ impl Client {
         if self.listed(&session) {
             self.popup = Some(Popup::ConfirmClose { session });
         }
+    }
+
+    /// Starts a session running `profile`, or the host's default.
+    fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
+        self.user_request(ClientRequest::SessionNew(SessionNew { profile, cwd: None }))
     }
 
     /// A request the user asked for. Dropped, with a notice, while not connected.

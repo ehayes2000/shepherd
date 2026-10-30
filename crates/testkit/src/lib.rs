@@ -15,6 +15,7 @@ pub mod builders {
         Dir, EntryId, Envelope, Frame, FrameDraft, Seq, Source, SourceKind, Stamp, Timestamp,
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
+    use shepherd_core::config::AgentKind;
     use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
     use shepherd_core::ids::{MachineId, SessionId};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
@@ -292,12 +293,36 @@ pub mod builders {
         /// Starts the client, connects it, and answers its hello. Returns the commands the answer produced (the
         /// subscribe). Panics if the client doesn't follow that script.
         pub fn connect(&mut self) -> Vec<ClientCommand> {
+            let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test" });
+            self.connect_answering(answer)
+        }
+
+        /// Like [`ClientDriver::connect`], with a host whose config has `profiles` (name, agent), `default` the
+        /// default one.
+        pub fn connect_with_profiles(
+            &mut self,
+            profiles: &[(&str, AgentKind)],
+            default: &str,
+        ) -> Vec<ClientCommand> {
+            let profiles: Vec<Value> = profiles
+                .iter()
+                .map(|(name, agent)| json!({ "name": name, "agent": agent }))
+                .collect();
+            let answer = json!({
+                "version": PROTOCOL_VERSION,
+                "machine": "m_test",
+                "profiles": profiles,
+                "default_profile": default,
+            });
+            self.connect_answering(answer)
+        }
+
+        fn connect_answering(&mut self, answer: Value) -> Vec<ClientCommand> {
             let started = self.handle(ClientEvent::Start);
             assert_eq!(started, vec![ClientCommand::Connect], "ClientDriver: start");
             let hello = self.handle(ClientEvent::Connected {
                 at: ts("2026-10-29T12:00:00.000Z"),
             });
-            let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test" });
             self.answer(&hello, Ok(answer))
         }
 

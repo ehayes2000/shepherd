@@ -9,6 +9,7 @@ use ratatui::style::Color;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Source, SourceKind};
 use shepherd_core::client::{Cell, Client, Focus, Intent};
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_core::wire::WireError;
 use shepherd_term::Modes;
@@ -139,6 +140,26 @@ fn context_menu_open() {
         session: SessionId::new("s2"),
         at: Cell { col: 5, row: 4 },
     });
+    insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
+/// Clicked `+ New session` with three profiles, `codex` the default.
+#[test]
+fn profile_picker() {
+    let (_, screens) = three_sessions();
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            ("claude", AgentKind::ClaudeCode),
+            ("codex", AgentKind::Codex),
+            ("shell", AgentKind::Shell),
+        ],
+        "codex",
+    );
+    c.host().new_session("s3");
+    c.host().rename("s3", "refactor");
+    c.sync();
+    c.user(Intent::BeginNewSession);
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
