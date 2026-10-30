@@ -7,8 +7,10 @@
 //!   back to the PTY, so agents get them with no client attached (decision 0007). A synchronized update's hold is
 //!   serviced as a deadline.
 //! - **Subscriptions.** Per connection, paced by the link's backpressure (decision 0013). A subscribe starts a
-//!   cursor per log; entries are read from the log and sent while the conn's queue is below [`LOW_WATER`], resuming
-//!   every [`CATCH_UP_TICK`] while any catch-up is pending. A log whose cursor hasn't reached its end gets no live
+//!   cursor per log; entries are read from the log and sent while the conn's queue is below [`LOW_WATER`]. A
+//!   blocked catch-up retries after [`CATCH_UP_TICK`], doubling up to [`MAX_CATCH_UP_TICK`] while its queue doesn't
+//!   shrink, and holds no entries in memory meanwhile. A conn whose queue hasn't shrunk for [`STALL_TIMEOUT`] is
+//!   closed: a client that stopped reading. A log whose cursor hasn't reached its end gets no live
 //!   entries (the cursor reads them); once it reaches the end, in that same iteration, the log goes live. When
 //!   every cursor is done the conn gets a `snapshot_ansi()` of every live screen, then the ack, and from then on
 //!   live PTY output too. Appends only happen on this thread, so there is no gap and no duplicate.
@@ -47,8 +49,12 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// A subscription's catch-up only sends while the conn has fewer bytes than this queued, far below the
 /// [`MAX_QUEUED`] bound past which the link drops it.
 pub const LOW_WATER: usize = MAX_QUEUED / 4;
-/// How often a pending catch-up checks whether its conn has drained.
+/// How soon a blocked catch-up first checks whether its conn has drained.
 pub const CATCH_UP_TICK: Duration = Duration::from_millis(5);
+/// The longest wait between checks of a catch-up whose conn isn't draining.
+pub const MAX_CATCH_UP_TICK: Duration = Duration::from_millis(500);
+/// A catching-up conn whose queue hasn't shrunk for this long is closed.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Everything the loop reacts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +142,21 @@ struct Subscription {
     ack: RequestId,
     /// Every cursor is done and the snapshots are sent: everything is live, PTY output included.
     complete: bool,
+    /// Set while the catch-up is blocked on a full queue.
+    blocked: Option<Blocked>,
+}
+
+/// A catch-up waiting for its conn to drain.
+#[derive(Debug, Clone, Copy)]
+struct Blocked {
+    /// The queue at the last check. A smaller one at the next check is progress, even if live traffic grew it in
+    /// between.
+    queued: usize,
+    /// The last progress, or when it blocked.
+    since: Instant,
+    /// When to check again, and how long the wait before that was.
+    retry_at: Instant,
+    wait: Duration,
 }
 
 #[derive(Debug)]
@@ -183,8 +204,6 @@ pub struct HostRuntime<P, L, E, V> {
     conns: BTreeMap<ConnId, ConnState>,
     replies: HashMap<ReplyTo, (ConnId, RequestId)>,
     next_reply: u64,
-    /// Set while a catch-up is waiting for its conn to drain: when to try again.
-    catch_up_at: Option<Instant>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -223,7 +242,6 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             conns: BTreeMap::new(),
             replies: HashMap::new(),
             next_reply: 0,
-            catch_up_at: None,
             shutdown_by: None,
             finished: false,
         };
@@ -279,7 +297,11 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         self.deadlines
             .values()
             .map(|d| d.due)
-            .chain(self.catch_up_at)
+            .chain(
+                self.conns
+                    .values()
+                    .filter_map(|c| c.sub.as_ref().and_then(|s| s.blocked).map(|b| b.retry_at)),
+            )
             .chain(self.shutdown_by)
             .min()
     }
@@ -502,17 +524,19 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
     /// shutdown that ran out of time.
     fn fire_due(&mut self) {
         let now = self.env.instant();
-        if self.catch_up_at.is_some_and(|at| at <= now) {
-            self.catch_up_at = None;
-            let pending: Vec<ConnId> = self
-                .conns
-                .iter()
-                .filter(|(_, c)| c.sub.as_ref().is_some_and(|s| !s.complete))
-                .map(|(&conn, _)| conn)
-                .collect();
-            for conn in pending {
-                self.pump(conn);
-            }
+        let retry: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| {
+                c.sub
+                    .as_ref()
+                    .and_then(|s| s.blocked)
+                    .is_some_and(|b| b.retry_at <= now)
+            })
+            .map(|(&conn, _)| conn)
+            .collect();
+        for conn in retry {
+            self.pump(conn);
         }
         let due: Vec<(SessionId, u64)> = self
             .deadlines
@@ -670,6 +694,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             cursors,
             ack: id,
             complete: false,
+            blocked: None,
         };
         let replaced = self.conns.entry(conn).or_default().sub.replace(sub);
         if let Some(old) = replaced.filter(|old| !old.complete) {
@@ -703,13 +728,12 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 // Gone: its `Disconnected` is on the way.
                 None => return,
                 Some(queued) if queued >= LOW_WATER => {
-                    if self.catch_up_at.is_none() {
-                        self.catch_up_at = Some(self.env.instant() + CATCH_UP_TICK);
-                    }
+                    self.block(conn, queued);
                     return;
                 }
                 Some(_) => {}
             }
+            sub.blocked = None;
             let log = entry.key().clone();
             let cursor = entry.get_mut();
             if cursor.batch.is_empty() {
@@ -743,6 +767,46 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 self.send(conn, &log_entry_line(envelope));
             }
         }
+    }
+
+    /// `conn`'s catch-up found `queued` bytes waiting. Schedules the next check, backing off while the queue
+    /// doesn't shrink, and closes the conn once it hasn't shrunk for [`STALL_TIMEOUT`]. Drops the entries read
+    /// ahead, so a stalled conn holds no copy of the log; they are read again from the cursor.
+    fn block(&mut self, conn: ConnId, queued: usize) {
+        let now = self.env.instant();
+        let Some(sub) = self.conns.get_mut(&conn).and_then(|c| c.sub.as_mut()) else {
+            return;
+        };
+        for cursor in sub.cursors.values_mut() {
+            cursor.batch = VecDeque::new();
+        }
+        let blocked = match sub.blocked {
+            Some(b) if queued >= b.queued => {
+                if now.saturating_duration_since(b.since) >= STALL_TIMEOUT {
+                    tracing::warn!(%conn, queued, "client stopped reading during catch-up; closing it");
+                    self.forget(conn);
+                    if let Err(error) = self.link.close(conn) {
+                        tracing::debug!(%conn, %error, "close failed");
+                    }
+                    return;
+                }
+                let wait = (b.wait * 2).min(MAX_CATCH_UP_TICK);
+                Blocked {
+                    queued,
+                    retry_at: now + wait,
+                    wait,
+                    ..b
+                }
+            }
+            // Newly blocked, or the queue shrank since the last check: progress.
+            _ => Blocked {
+                queued,
+                since: now,
+                retry_at: now + CATCH_UP_TICK,
+                wait: CATCH_UP_TICK,
+            },
+        };
+        sub.blocked = Some(blocked);
     }
 
     /// The log catch-up is done: send every live screen, then the ack, and go fully live.

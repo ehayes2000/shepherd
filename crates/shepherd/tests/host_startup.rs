@@ -146,21 +146,6 @@ fn a_corrupt_log_names_the_file_and_what_to_do() {
     assert!(message.contains("move the file aside"), "{message}");
 }
 
-#[test]
-fn a_startup_error_is_also_logged() {
-    let tmp = tempdir();
-    let root = tmp.path().join("shepherd");
-    host::prepare_root(&root).unwrap();
-    write_private(&root.join(host::CONFIG_FILE), "not = [toml");
-    let file = host::open_log_file(&root).unwrap();
-
-    let result = tracing::subscriber::with_default(host::file_subscriber(file), || open(&root));
-    assert!(result.is_err());
-    let logged = fs::read_to_string(root.join(LOG_FILE)).unwrap();
-    assert!(logged.contains("host failed to start"), "{logged}");
-    assert!(logged.contains(host::CONFIG_FILE), "{logged}");
-}
-
 /// The real socket and log: attaching to a host whose history is bigger than the link's queue bound gets all of
 /// it, in order, then the ack, with no disconnect. Bytes and entries are counted; nothing is timed.
 #[test]

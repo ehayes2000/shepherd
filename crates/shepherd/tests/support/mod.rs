@@ -58,7 +58,7 @@ impl Clock {
         *self.offset.lock().unwrap_or_else(PoisonError::into_inner) += by;
     }
 
-    fn now(&self) -> Instant {
+    pub fn now(&self) -> Instant {
         self.base + *self.offset.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
