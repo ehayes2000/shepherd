@@ -6,6 +6,8 @@
 //! 2. The event log is opened, which takes the root's exclusive lock. A second host fails here, cleanly, before it
 //!    could mistake the first host's socket for a stale one and replace it.
 //! 3. Only then is the socket bound.
+//! 4. Once serving, `shepherd host` releases its stderr (`shepherd_adapters::launcher::release_stderr`), which tells
+//!    a client that launched it that it started. A startup error before that is printed there, for that client.
 
 mod env;
 mod runtime;
@@ -173,7 +175,8 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// The one place the host prints: a startup error happens before (or instead of) its log file.
+/// The one place the host prints: a startup error happens before (or instead of) its log file. A client that
+/// launched the host reads it from the host's stderr and shows it (see `shepherd_adapters::launcher`).
 #[allow(clippy::print_stderr)]
 fn report(e: &HostStartError) {
     eprintln!("shepherd host: {e}");
@@ -198,6 +201,10 @@ fn run_default() -> Result<(), HostStartError> {
     let mut host = open(&root, home, shell)?;
     forward_signals(host.sender());
     tracing::info!(root = %root.display(), "host started");
+    // Serving, with the log open: tell a launching client so, by closing the stderr it reads.
+    if let Err(error) = shepherd_adapters::launcher::release_stderr() {
+        tracing::warn!(%error, "cannot release stderr");
+    }
     host.run();
     tracing::info!("host stopped");
     Ok(())

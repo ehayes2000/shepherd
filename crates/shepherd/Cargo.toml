@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 shepherd-testkit.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+portable-pty.workspace = true
 
 [lints]
 workspace = true

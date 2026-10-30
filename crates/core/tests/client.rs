@@ -618,6 +618,38 @@ fn a_failed_launch_is_a_clear_fatal_error() {
     assert!(fatal.contains("no such file"), "{fatal}");
 }
 
+/// Whatever the launcher reports, from a missing executable to the host's own startup error, reaches the user
+/// whole, and the client gives up at once: retrying can't fix it.
+#[test]
+fn a_failed_launch_shows_its_message_quits_and_ignores_what_follows() {
+    let cases = [
+        "could not start the host process: /usr/bin/shepherd: no such file",
+        "shepherd host: /home/me/.shepherd has mode 755, but it holds your agents' logs and the host socket, \
+         so only you may access it. Fix it with: chmod 700 /home/me/.shepherd",
+        "shepherd host: first line\nsecond line",
+    ];
+    for error in cases {
+        let mut c = ClientDriver::new();
+        c.handle(ClientEvent::Start);
+        let launch = c.handle(ClientEvent::ConnectFailed {
+            at: at(0),
+            error: "connection refused".into(),
+        });
+        assert_eq!(launch, [ClientCommand::LaunchHost], "{error}");
+        let cmds = c.handle(ClientEvent::LaunchFailed {
+            error: error.into(),
+        });
+        assert_eq!(cmds, [ClientCommand::Quit], "{error}");
+        let fatal = c.client().fatal().unwrap_or_default().to_owned();
+        assert!(fatal.contains(error), "{fatal}");
+        assert!(matches!(c.client().connection(), Connection::Failed(_)));
+        assert!(
+            c.handle(ClientEvent::Tick { at: at(10_000) }).is_empty(),
+            "{error}: no retry after giving up"
+        );
+    }
+}
+
 #[test]
 fn losing_the_host_reconnects_and_resumes_each_log_where_it_left_off() {
     let mut c = ClientDriver::with_sessions(&["s1"]);

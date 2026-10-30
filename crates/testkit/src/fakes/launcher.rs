@@ -89,6 +89,10 @@ impl LauncherFixture for FakeLauncherFixture {
         FakeHostLauncher::new().failing(LaunchError::SpawnFailed("no such file".into()))
     }
 
+    fn failing_host(&mut self, message: &str) -> FakeHostLauncher {
+        FakeHostLauncher::new().failing(LaunchError::HostFailed(message.to_owned()))
+    }
+
     fn wait_started(&mut self, n: usize, _timeout: Duration) {
         self.seen += n;
         assert_eq!(self.launcher.launches(), self.seen, "hosts started");

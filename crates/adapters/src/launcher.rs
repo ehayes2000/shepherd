@@ -4,26 +4,39 @@
 //! The host must not belong to the client. It is double-forked: the child std spawns forks the host and exits at
 //! once, and `launch` reaps it, so the host is reparented to init straight away and the client never has a zombie
 //! to collect, whenever either of them exits. The host calls `setsid`, so it has no controlling terminal: closing
-//! the client's terminal doesn't hang it up, and nothing it runs can prompt on that terminal. Its stdio is
-//! `/dev/null` (the client's terminal belongs to the TUI) and its working directory is `/`. It inherits no
+//! the client's terminal doesn't hang it up, and nothing it runs can prompt on that terminal. Its stdin and stdout
+//! are `/dev/null` (the client's terminal belongs to the TUI) and its working directory is `/`. It inherits no
 //! descriptor the client leaked without close-on-exec, and starts with common signals (`RESET_SIGNALS`) at their
 //! default action even if the client ignored them.
 //!
 //! Errors still reach `launch`: std reports a failed `exec` through a close-on-exec pipe that the host inherits,
-//! and that pipe only closes once the host has called `exec` or reported why it couldn't.
+//! and that pipe only closes once the host has called `exec` or reported why it couldn't. The host's stderr is a
+//! pipe too, which `launch` reads until it closes. A host that can't start prints why there and exits, and `launch`
+//! returns that as [`LaunchError::HostFailed`]. A host that starts calls [`release_stderr`] once it is serving,
+//! which closes the pipe with nothing written. A host that does neither within [`STARTUP_TIMEOUT`] is left to the
+//! client's connect retries.
 
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{ChildStderr, Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use shepherd_core::ports::{HostLauncher, LaunchError};
 
 pub struct ProcessHostLauncher {
     program: PathBuf,
     args: Vec<OsString>,
+    startup_timeout: Duration,
 }
+
+/// How long `launch` waits for the host to report or hand off its stderr. A liveness bound, not a measurement:
+/// a host still starting after it is left to the client's connect retries.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most of a host's startup error `launch` keeps.
+pub const MAX_ERROR_BYTES: usize = 4096;
 
 impl ProcessHostLauncher {
     /// Launches `program` with `args`.
@@ -34,7 +47,14 @@ impl ProcessHostLauncher {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            startup_timeout: STARTUP_TIMEOUT,
         }
+    }
+
+    /// Replaces [`STARTUP_TIMEOUT`].
+    pub fn startup_timeout(mut self, timeout: Duration) -> Self {
+        self.startup_timeout = timeout;
+        self
     }
 
     /// Launches this executable's `host` subcommand.
@@ -53,7 +73,7 @@ impl HostLauncher for ProcessHostLauncher {
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let max_fd = fd_limit();
         // SAFETY: `fork`, `setsid`, `fcntl`, `close`, `signal` and `_exit` are async-signal-safe, and the closure
         // touches nothing else (`max_fd` is computed before the fork).
@@ -84,6 +104,7 @@ impl HostLauncher for ProcessHostLauncher {
             });
         }
         let mut intermediate = command.spawn().map_err(failed)?;
+        let stderr = intermediate.stderr.take();
         let status = intermediate.wait().map_err(failed)?;
         if !status.success() {
             return Err(LaunchError::SpawnFailed(format!(
@@ -91,8 +112,63 @@ impl HostLauncher for ProcessHostLauncher {
                 self.program.display()
             )));
         }
-        Ok(())
+        match stderr {
+            Some(stderr) => startup_report(stderr, self.startup_timeout),
+            None => Ok(()),
+        }
     }
+}
+
+/// Reads the host's stderr until it closes: with nothing written the host started, otherwise what it wrote is why
+/// it couldn't. A host that does neither within `timeout` counts as started; the reading thread is left to finish
+/// whenever the host closes its stderr or exits.
+fn startup_report(mut stderr: ChildStderr, timeout: Duration) -> Result<(), LaunchError> {
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("host-launch-stderr".into())
+        .spawn(move || {
+            let mut kept = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = MAX_ERROR_BYTES.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(kept);
+        });
+    if spawned.is_err() {
+        // Can't watch it: the connect retries decide.
+        return Ok(());
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(kept) => {
+            let text = String::from_utf8_lossy(&kept);
+            let text = text.trim();
+            if text.is_empty() {
+                Ok(())
+            } else {
+                Err(LaunchError::HostFailed(text.to_owned()))
+            }
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+/// The host's half of the startup handshake: once it is serving, it points its stderr at `/dev/null`, which closes
+/// the pipe `launch` is reading and tells it the host started. Nothing the host prints after that reaches anyone.
+pub fn release_stderr() -> io::Result<()> {
+    let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    // SAFETY: plain syscall on a descriptor this function owns and the process's stderr.
+    if unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&null), libc::STDERR_FILENO) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Signals the host starts with at their default action, whatever the client had.
@@ -147,13 +223,14 @@ echo "hygiene $f $t" > "$1"
     /// Generous: under parallel load a shell and `ps` can take seconds to start.
     const TIMEOUT: Duration = Duration::from_secs(60);
 
-    /// Reports `started <pid> <tty|none>` to the fifo in `$1`, writes to stdout and stderr (which must go nowhere),
-    /// then runs until killed (at most 2 minutes, in case a failed test leaks it). On `SIGUSR1` it reports
-    /// `alive <pid> <ppid>` and exits.
+    /// Reports `started <pid> <tty|none>` to the fifo in `$1`, writes to stdout and, once it has handed its stderr
+    /// off as a host that started does, to stderr (neither may reach a terminal), then runs until killed (at most 2
+    /// minutes, in case a failed test leaks it). On `SIGUSR1` it reports `alive <pid> <ppid>` and exits.
     const STAND_IN: &str = r#"
 trap 'echo "alive $$ $(ps -o ppid= -p $$)" > "$1"; kill $! 2>/dev/null; exit 0' USR1
 if (exec 3</dev/tty) 2>/dev/null; then t=tty; else t=none; fi
 echo LEAKED-STDOUT
+exec 2>/dev/null
 echo LEAKED-STDERR >&2
 echo "started $$ $t" > "$1"
 sleep 120 &
@@ -300,6 +377,10 @@ wait
             ProcessHostLauncher::new(self.dir.path().join("no-such-host"), ["host"])
         }
 
+        fn failing_host(&mut self, message: &str) -> ProcessHostLauncher {
+            script(r#"printf '%s\n' "$1" >&2; exit 1"#, &[message])
+        }
+
         fn wait_started(&mut self, n: usize, timeout: Duration) {
             for _ in 0..n {
                 assert!(matches!(self.next_within(timeout), Report::Started { .. }));
@@ -315,6 +396,23 @@ wait
         });
         let launched = rx.recv_timeout(TIMEOUT);
         assert!(matches!(launched, Ok(Ok(()))), "{launched:?}");
+    }
+
+    /// Launches `sh -c body` with `args` as `$1`...
+    fn script(body: &str, args: &[&str]) -> ProcessHostLauncher {
+        let mut argv = vec!["-c", body, "script"];
+        argv.extend_from_slice(args);
+        ProcessHostLauncher::new("/bin/sh", argv)
+    }
+
+    /// Launches on another thread and returns what `launch` did. Fails the test if it blocks.
+    fn launch_result(launcher: ProcessHostLauncher) -> Result<(), LaunchError> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(launcher.launch());
+        });
+        rx.recv_timeout(TIMEOUT)
+            .unwrap_or_else(|_| panic!("launch blocked"))
     }
 
     fn mkfifo(path: &Path) {
@@ -409,7 +507,9 @@ wait
         let err = ProcessHostLauncher::new(&script, ["host"])
             .launch()
             .unwrap_err();
-        let LaunchError::SpawnFailed(why) = err;
+        let LaunchError::SpawnFailed(why) = err else {
+            panic!("expected SpawnFailed, got {err:?}");
+        };
         assert!(why.contains(script.to_str().unwrap()), "{why}");
     }
 
@@ -485,5 +585,59 @@ wait
             matches!(f.ask_alive(pid), Some(Report::Alive { pid: p, .. }) if p == pid),
             "the host died with its launcher's terminal"
         );
+    }
+
+    #[test]
+    fn a_host_that_prints_an_error_and_exits_is_host_failed_with_its_text() {
+        let launcher = script(
+            r#"printf '\nshepherd host: line one\nline two\n\n' >&2; exit 1"#,
+            &[],
+        );
+        assert_eq!(
+            launch_result(launcher),
+            Err(LaunchError::HostFailed(
+                "shepherd host: line one\nline two".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_host_failure_message_is_capped() {
+        let launcher = script(
+            r#"i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxx\n' >&2; i=$((i+1)); done; exit 1"#,
+            &[],
+        );
+        let Err(LaunchError::HostFailed(why)) = launch_result(launcher) else {
+            panic!("expected HostFailed");
+        };
+        assert!(why.starts_with("xxxxxxxxx\n"), "{why}");
+        assert!(why.len() <= MAX_ERROR_BYTES, "{} bytes", why.len());
+    }
+
+    #[test]
+    fn a_host_that_closes_stderr_and_keeps_running_started() {
+        let mut f = StandInFixture::new();
+        let fifo = f.fifo();
+        let launcher = script(
+            r#"exec 2>&-; echo "started $$ none" > "$1"; exec sleep 120"#,
+            &[fifo.to_str().unwrap()],
+        );
+        assert_eq!(launch_result(launcher), Ok(()));
+        assert!(matches!(f.next(), Report::Started { .. }));
+    }
+
+    /// A host that neither reports nor hands its stderr off within the bound is left to the connect retries.
+    #[test]
+    fn a_host_that_never_writes_or_closes_stderr_is_started_after_the_bound() {
+        let mut f = StandInFixture::new();
+        let fifo = f.fifo();
+        let launcher = script(
+            r#"echo "started $$ none" > "$1"; exec sleep 120"#,
+            &[fifo.to_str().unwrap()],
+        )
+        .startup_timeout(Duration::from_millis(500));
+        assert_eq!(launch_result(launcher), Ok(()));
+        // Recorded, so the fixture kills it.
+        assert!(matches!(f.next(), Report::Started { .. }));
     }
 }

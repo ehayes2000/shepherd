@@ -207,6 +207,25 @@ fn a_host_that_cannot_be_started_is_a_clear_error() {
 }
 
 #[test]
+fn a_host_that_reports_why_it_cannot_start_is_given_up_on_with_its_message() {
+    let message =
+        "shepherd host: /home/me/.shepherd has mode 755. Fix it with: chmod 700 /home/me/.shepherd";
+    let mut h = Harness::with_launcher(|_, _| {
+        FakeHostLauncher::new().failing(LaunchError::HostFailed(message.into()))
+    });
+    let terminal = FakeTerminal::enhanced();
+    let mut view = test_view(&terminal);
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
+    let Ok(Err(ClientError::Fatal(why))) = result else {
+        panic!("run should fail: {result:?}");
+    };
+    assert!(why.contains(message), "{why}");
+    assert_eq!(terminal.calls(), RESTORED);
+    assert_eq!(h.launcher.launches(), 0);
+}
+
+#[test]
 fn a_host_that_never_listens_is_given_up_on_after_the_last_attempt() {
     // The launch "succeeds" but no host ever listens.
     let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
