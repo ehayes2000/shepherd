@@ -552,7 +552,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::contracts::worktrees::{DEFAULT, REPO_NAME, SUBDIR, WorktreesFixture};
+    use crate::contracts::worktrees::{DEFAULT, NESTED, REPO_NAME, SUBDIR, WorktreesFixture};
 
     struct FakeFixture {
         fake: FakeWorktrees,
@@ -563,7 +563,8 @@ mod tests {
         fn new() -> Self {
             let fake = FakeWorktrees::new("/fake/root");
             let repo = fake.add_repo(Path::new("/fake").join(REPO_NAME), DEFAULT);
-            fake.add_dir(repo.as_path().join(SUBDIR));
+            // Only the deepest directory: its parent exists through it.
+            fake.add_dir(repo.as_path().join(SUBDIR).join(NESTED));
             Self { fake, repo }
         }
     }
