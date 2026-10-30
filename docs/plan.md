@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
 | F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
-| T23 worktree hooks | fixing (CHANGES) | task/t23-worktree-hooks @ 95c8d7f | 1 | Blocking: timeout contract flaky (?E stat), scenario hold race. Minors: setsid fast-fail, stdin case, '.'/'..' keys. Follow-ups → F33 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T23 | 2 | timeout contract flaky (?E stat), scenario hold race; setsid/stdin cases weak |
 | F25 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
 | T18b | 2 | append-failure hot loop; next_deadline wiring untested; spec defect: output-as-answer would clear untouched dialogs (amended) |
 | F14 | 3 (+1 hung) | post-kill drop, shutdown ack, excess-ack banking untested; first reviewer hung 4 h |
@@ -538,7 +538,7 @@ acceptance:
 scope: crates/adapters
 
 ### F33: Hooks don't queue behind each other or outlive the host
-status: todo
+status: ready
 depends: T23
 touches: adapters::commands, shepherd::host
 goal: From the T23 review: one shared `hooks` worker means session B's post-create hooks wait behind session A's (up to the
@@ -1236,7 +1236,7 @@ knows about; `create` refusing an existing branch is a `session/failed`, not a r
 pure core with table tests (unicode, punctuation, collisions).
 
 ### T23: Worktree hooks
-status: in-progress
+status: done (1c18b85)
 depends: T22
 touches: ports::commands, core::host, adapters::commands
 goal: Run user-defined setup in new worktrees (copy `.envrc`, install deps, ...).
@@ -1259,7 +1259,7 @@ Contract cases: exit code, output tail cap, timeout kills the group (no leaked c
 `sleep`), env and cwd, a missing cwd is an error.
 
 ### T24: Auto-naming
-status: todo
+status: ready
 depends: T05, T22
 touches: core::host (naming)
 goal: Sessions get useful names without effort. Manual rename always wins.
@@ -1274,7 +1274,7 @@ scope: crates/core
 notes: LLM-generated names are a possible follow-up, behind a port, not in this task.
 
 ### T25: Close and cleanup
-status: todo
+status: ready
 depends: T22
 touches: core::host (close), core::client, tui::cleanup
 goal: Worktrees go away when they should. No more pile of abandoned worktrees.
