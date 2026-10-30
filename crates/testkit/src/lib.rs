@@ -468,6 +468,7 @@ pub mod builders {
             name: None,
             profile: "shell".to_owned(),
             agent: AgentKind::Shell,
+            explicit_cwd: false,
             spawn: shell_spawn(),
         }
     }
@@ -478,6 +479,7 @@ pub mod builders {
             name: None,
             profile: "claude".to_owned(),
             agent: AgentKind::ClaudeCode,
+            explicit_cwd: false,
             spawn: SpawnSpec {
                 command: "claude".to_owned(),
                 ..shell_spawn()
