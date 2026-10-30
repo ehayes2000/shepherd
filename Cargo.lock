@@ -1896,12 +1896,14 @@ name = "shepherd"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "ratatui",
  "serde_json",
  "shepherd-adapters",
  "shepherd-core",
  "shepherd-term",
  "shepherd-testkit",
  "shepherd-tui",
+ "signal-hook 0.3.18",
 ]
 
 [[package]]
@@ -1955,6 +1957,7 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "ratatui",
+ "serde_json",
  "shepherd-core",
  "shepherd-term",
  "shepherd-testkit",
