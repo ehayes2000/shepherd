@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
-| F35 display-safe text | building | task/f35-display-safe @ b9df22b | 0 | T24 follow-ups done; PM: unicode-properties allowed (0017 amended) for display_safe |
+| F35 display-safe text | in review | task/f35-display-safe @ b040224 (on 97ff773) | 1 | PM-accepted: core::display module; DisplayText newtype + tui clippy ban (draw.rs only); ZWJ dropped (families split) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
