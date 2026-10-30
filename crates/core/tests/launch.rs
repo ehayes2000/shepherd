@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use shepherd_core::agents::codex;
 use shepherd_core::config::{AgentKind, AgentProfile, Config, RawConfig};
 use shepherd_core::host::launch::{
     self, Launch, LaunchContext, LaunchError, SESSION_VAR, SETTINGS_FILE, SOCKET_VAR,
@@ -122,6 +123,167 @@ fn the_generated_settings_set_nothing_but_hooks() {
     assert_eq!(keys, ["hooks"]);
 }
 
+// ---------- codex ----------
+
+/// The hook command for [`EXE`]: shell-quoted, as Codex runs it with `$SHELL -lc`.
+const CODEX_HOOK: &str = "'/opt/shepherd/bin/shepherd' hook codex";
+
+/// The value of the one `-c hooks=...` override, parsed the way Codex parses `-c` values
+/// (`codex-rs/utils/cli/src/config_override.rs` `parse_toml_value`: the text after `=` as the TOML value of `_x_`).
+fn codex_hooks(launch: &Launch) -> toml::Table {
+    let [flag, setting, ..] = &launch.spawn.args[..] else {
+        panic!("no -c override in {:?}", launch.spawn.args);
+    };
+    assert_eq!(flag, "-c");
+    let value = setting
+        .strip_prefix("hooks=")
+        .unwrap_or_else(|| panic!("not a hooks override: {setting}"));
+    let parsed: toml::Table = toml::from_str(&format!("_x_ = {value}"))
+        .unwrap_or_else(|e| panic!("{value} is not a TOML value: {e}"));
+    match parsed.get("_x_") {
+        Some(toml::Value::Table(t)) => t.clone(),
+        other => panic!("expected an inline table, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_codex_session_gets_shepherds_hooks_as_a_config_override_before_the_profiles_own_args() {
+    let launch = plan(&profile(AgentKind::Codex, "codex", &["--model", "o3"], &[]));
+    assert_eq!(launch.spawn.command, "codex");
+    let args = &launch.spawn.args;
+    assert_eq!(args.len(), 4, "{args:?}");
+    assert_eq!(args[0], "-c");
+    assert!(args[1].starts_with("hooks="), "{args:?}");
+    assert_eq!(args[2..], ["--model", "o3"]);
+    // Nothing is written: the override is the whole configuration, and `~/.codex` is never touched.
+    assert!(launch.files.is_empty());
+}
+
+#[test]
+fn the_codex_override_runs_this_shepherd_on_every_hook_the_translator_reads() {
+    let hooks = codex_hooks(&plan(&profile(AgentKind::Codex, "codex", &[], &[])));
+    let expected: toml::Value = toml::from_str::<toml::Table>(&format!(
+        "x = [{{ hooks = [{{ type = \"command\", command = {CODEX_HOOK:?}, timeout = 3, async = false }}] }}]"
+    ))
+    .unwrap()["x"]
+        .clone();
+    let events: Vec<&str> = hooks
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "state")
+        .collect();
+    let mut want = codex::HOOK_EVENTS.to_vec();
+    want.sort_unstable();
+    assert_eq!(events, want);
+    for event in codex::HOOK_EVENTS {
+        assert_eq!(hooks.get(event), Some(&expected), "{event}");
+    }
+    assert_eq!(
+        codex::HOOK_EVENTS,
+        [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "Stop",
+            "Interrupt",
+            "PreCompact",
+            "PostCompact",
+            "SessionEnd",
+        ]
+    );
+}
+
+#[test]
+fn the_codex_override_trusts_exactly_shepherds_own_hooks() {
+    let launch = plan(&profile(AgentKind::Codex, "codex", &[], &[]));
+    let hooks = codex_hooks(&launch);
+    let Some(toml::Value::Table(state)) = hooks.get("state") else {
+        panic!("no hooks.state in {hooks:?}");
+    };
+    assert_eq!(state.len(), codex::HOOK_EVENTS.len(), "{state:?}");
+    for event in codex::HOOK_EVENTS {
+        let key = codex::hook_trust_key(event).unwrap();
+        let hash = codex::hook_trust_hash(event, CODEX_HOOK).unwrap();
+        let mut entry = toml::Table::new();
+        entry.insert("trusted_hash".to_owned(), toml::Value::String(hash));
+        assert_eq!(state.get(&key), Some(&toml::Value::Table(entry)), "{event}");
+    }
+    // Trust comes only from our own state entries, never from bypassing Codex's hook review.
+    assert!(
+        !launch
+            .spawn
+            .args
+            .iter()
+            .any(|a| a.contains("bypass-hook-trust")),
+        "{:?}",
+        launch.spawn.args
+    );
+}
+
+/// Pinned against Codex rust-v0.166.0. The key is `hook_key` in `codex-rs/hooks/src/lib.rs`
+/// (`{key_source}:{hook_event_key_label}:{group_index}:{handler_index}`), with the session-flags layer's
+/// `key_source` from `config_toml_source_path` in `codex-rs/hooks/src/engine/discovery.rs`
+/// (`synthetic_layer_path("<session-flags>/config.toml")`, resolved against `/`). The hash is `hook_hash` in that
+/// file over the normalized handler (explicit `timeout`, no `commandWindows`, no matcher for these events), through
+/// `version_for_toml` in `codex-rs/config/src/fingerprint.rs`: sha256 of the key-sorted compact JSON
+/// `{"event_name":"stop","hooks":[{"async":false,"command":"'/opt/shepherd/bin/shepherd' hook codex","timeout":3,"type":"command"}]}`,
+/// computed independently with Python's `hashlib` and `json.dumps(sort_keys=True, separators=(",", ":"))`.
+#[test]
+fn the_codex_trust_key_and_hash_match_codexs_own_format() {
+    assert_eq!(
+        codex::hook_trust_key("Stop").as_deref(),
+        Some("/<session-flags>/config.toml:stop:0:0")
+    );
+    assert_eq!(
+        codex::hook_trust_key("PreToolUse").as_deref(),
+        Some("/<session-flags>/config.toml:pre_tool_use:0:0")
+    );
+    assert_eq!(
+        codex::hook_trust_hash("Stop", CODEX_HOOK).as_deref(),
+        Some("sha256:bff6ae6bbbb80079d110899cbcb15227c5eab592a5a4ab8038a0025144d5a820")
+    );
+    assert_eq!(
+        codex::hook_trust_hash("PreToolUse", CODEX_HOOK).as_deref(),
+        Some("sha256:f6f0e825a6371da868a37d1036b1d90b2ced11259a1a5a3405c57c6c1699fdc0")
+    );
+    assert_eq!(
+        codex::hook_trust_hash("SessionStart", CODEX_HOOK).as_deref(),
+        Some("sha256:c58aeb12532c4e64a0dd97d01f1ec3d5543ee3b60d392db3260d65b38261a824")
+    );
+    assert_eq!(codex::hook_trust_key("NotAHook"), None);
+    assert_eq!(codex::hook_trust_hash("NotAHook", CODEX_HOOK), None);
+}
+
+#[test]
+fn a_shepherd_path_with_spaces_is_quoted_for_the_shell() {
+    let mut ctx = ctx();
+    ctx.shepherd = PathBuf::from("/Users/me/Library/Application Support/shepherd");
+    let launch = launch::plan(&profile(AgentKind::Codex, "codex", &[], &[]), &ctx).unwrap();
+    let hooks = codex_hooks(&launch);
+    let command = &hooks["Stop"][0]["hooks"][0]["command"];
+    assert_eq!(
+        command.as_str(),
+        Some("'/Users/me/Library/Application Support/shepherd' hook codex")
+    );
+    let key = codex::hook_trust_key("Stop").unwrap();
+    assert_eq!(
+        hooks["state"][&key]["trusted_hash"].as_str(),
+        Some("sha256:118f56800bd65b9fa3a351f6f202fea1743c6d7899c66a2164156e24afe35c44")
+    );
+}
+
+#[test]
+fn a_shepherd_path_the_shell_cannot_take_quoted_is_refused() {
+    for path in ["/opt/it's/shepherd", "/opt/back\\slash/shepherd"] {
+        let mut ctx = ctx();
+        ctx.shepherd = PathBuf::from(path);
+        let result = launch::plan(&profile(AgentKind::Codex, "codex", &[], &[]), &ctx);
+        assert_eq!(result, Err(LaunchError::NotShellSafe(PathBuf::from(path))));
+    }
+}
+
 // ---------- every kind ----------
 
 #[test]
@@ -163,13 +325,11 @@ fn shepherds_variables_win_over_a_profile_setting_the_same_name() {
 }
 
 #[test]
-fn shell_and_codex_sessions_run_the_profile_as_written_with_no_run_files() {
-    for kind in [AgentKind::Codex, AgentKind::Shell] {
-        let launch = plan(&profile(kind, "agent", &["-x"], &[]));
-        assert_eq!(launch.spawn.command, "agent");
-        assert_eq!(launch.spawn.args, ["-x"], "{kind:?}");
-        assert!(launch.files.is_empty(), "{kind:?}");
-    }
+fn shell_sessions_run_the_profile_as_written_with_no_run_files() {
+    let launch = plan(&profile(AgentKind::Shell, "agent", &["-x"], &[]));
+    assert_eq!(launch.spawn.command, "agent");
+    assert_eq!(launch.spawn.args, ["-x"]);
+    assert!(launch.files.is_empty());
 }
 
 #[test]

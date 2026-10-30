@@ -1954,6 +1954,7 @@ dependencies = [
  "signal-hook 0.3.18",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "ulid",
@@ -1984,8 +1985,10 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "shepherd-testkit",
  "thiserror 2.0.21",
+ "toml",
 ]
 
 [[package]]
