@@ -22,7 +22,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::Event;
 use ratatui::layout::Rect;
 use shepherd_term::MouseTracking;
-use shepherd_tui::{Screens, map_event};
+use shepherd_tui::{Screens, from_legacy_terminal, map_event};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
@@ -40,7 +40,7 @@ use crate::terminal::{CrosstermSetup, TerminalSetup, install_panic_hook, with_te
 /// How often [`ClientRuntime::run`] ticks the client.
 pub const TICK: Duration = Duration::from_millis(50);
 /// The most queued inputs [`ClientRuntime::run_with`] handles before it draws, so a flood still shows progress.
-const MAX_BATCH: usize = 1024;
+pub const MAX_BATCH: usize = 1024;
 /// The screen size before the TUI reports the view's.
 const DEFAULT_SIZE: (u16, u16) = (80, 24);
 
@@ -201,6 +201,8 @@ pub struct ClientRuntime<L, C, H> {
     window: (u16, u16),
     /// Why the terminal stopped working, if it did.
     terminal_failed: Option<String>,
+    /// The outer terminal reports keys unambiguously (kitty keyboard protocol).
+    keyboard_enhanced: bool,
     done: bool,
 }
 
@@ -230,6 +232,7 @@ where
             screens: Screens::new(),
             window: DEFAULT_SIZE,
             terminal_failed: None,
+            keyboard_enhanced: false,
             done: false,
         }
     }
@@ -307,12 +310,23 @@ where
         Ok(handled > 0)
     }
 
+    /// Whether the outer terminal reports keys unambiguously. Until it does, keys are read as a legacy terminal
+    /// sends them (see [`from_legacy_terminal`]).
+    pub fn set_keyboard_enhanced(&mut self, on: bool) {
+        self.keyboard_enhanced = on;
+    }
+
     /// A terminal event: what it means is decided by the TUI from the client's state and the selected session's
     /// input modes.
     pub fn terminal_event(&mut self, event: Event) {
-        if let Event::Resize(cols, rows) = event {
-            self.window = (cols, rows);
-        }
+        let event = match event {
+            Event::Key(key) if !self.keyboard_enhanced => Event::Key(from_legacy_terminal(key)),
+            Event::Resize(cols, rows) => {
+                self.window = (cols, rows);
+                event
+            }
+            event => event,
+        };
         let modes = selected_screen(&self.client, &self.screens)
             .map(Screen::modes)
             .unwrap_or_default();
@@ -518,7 +532,11 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
         ratatui::Terminal::new(CrosstermBackend::new(io::stdout())).map_err(terminal_error)?;
     let setup: Arc<dyn TerminalSetup> = Arc::new(CrosstermSetup);
     with_terminal(setup.clone(), |restorer| {
-        install_panic_hook(restorer.clone());
+        let on_panic = events.clone();
+        install_panic_hook(restorer.clone(), move || {
+            on_panic.shutdown();
+        });
+        runtime.set_keyboard_enhanced(restorer.keyboard_enhanced());
         read_terminal_events(events)?;
         runtime.run_with(&mut TerminalView::new(backend, setup))
     })

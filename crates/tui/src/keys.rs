@@ -126,3 +126,26 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
         },
     }
 }
+
+/// Undoes how crossterm names control bytes 0x1C to 0x1F from a terminal that doesn't report keys unambiguously: it
+/// reports them as ctrl plus `4` to `7` (`event/sys/unix/parse.rs`). They become the keys usually pressed for them,
+/// `ctrl-\`, `ctrl-]`, `ctrl-^` and `ctrl-/`, so a session in kitty keyboard mode gets those keys' codes. Use it only
+/// when the outer terminal isn't reporting keys unambiguously; there, ctrl plus a digit is really that.
+pub fn from_legacy_terminal(key: KeyEvent) -> KeyEvent {
+    let KeyCode::Char(c @ '4'..='7') = key.code else {
+        return key;
+    };
+    if key.modifiers != KeyModifiers::CONTROL {
+        return key;
+    }
+    let pressed = match c {
+        '4' => '\\',
+        '5' => ']',
+        '6' => '^',
+        _ => '/',
+    };
+    KeyEvent {
+        code: KeyCode::Char(pressed),
+        ..key
+    }
+}

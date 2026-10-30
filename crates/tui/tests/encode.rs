@@ -5,7 +5,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
-use shepherd_tui::encode;
+use shepherd_tui::{encode, from_legacy_terminal};
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
 const SHIFT: KeyModifiers = KeyModifiers::SHIFT;
@@ -81,6 +81,18 @@ fn legacy_keys_encode_as_a_vt_terminal_sends_them() {
             (Char('c'), CTRL | ALT, Some("\x1b\x03")),
             (Enter, NONE, Some("\r")),
             (Enter, ALT, Some("\x1b\r")),
+            // Shift+Enter has no legacy code of its own. It is sent as alt+Enter, which line editors and agent TUIs
+            // take as "insert a newline", rather than as a plain Enter that submits.
+            (Enter, SHIFT, Some("\x1b\r")),
+            // A terminal that reports keys unambiguously sends ctrl plus a digit as such; VT terminals map them.
+            (Char('2'), CTRL, Some("\x00")),
+            (Char('3'), CTRL, Some("\x1b")),
+            (Char('4'), CTRL, Some("\x1c")),
+            (Char('5'), CTRL, Some("\x1d")),
+            (Char('6'), CTRL, Some("\x1e")),
+            (Char('7'), CTRL, Some("\x1f")),
+            (Char('8'), CTRL, Some("\x7f")),
+            (Char('/'), CTRL, Some("\x1f")),
             (Tab, NONE, Some("\t")),
             (BackTab, SHIFT, Some("\x1b[Z")),
             (Backspace, NONE, Some("\x7f")),
@@ -341,10 +353,58 @@ fn bracketed_paste_wraps_the_text_and_strips_an_embedded_end_marker() {
         bracketed_paste: true,
         ..Modes::default()
     };
+    // Every ESC goes, as xterm does, so no end marker can survive or be put back together.
     assert_eq!(
         encode::paste("a\nb\x1b[201~c", &modes),
-        b"\x1b[200~a\nbc\x1b[201~".to_vec()
+        b"\x1b[200~a\nb[201~c\x1b[201~".to_vec()
     );
+    assert_eq!(
+        encode::paste("\x1b[20\x1b[201~1~", &modes),
+        b"\x1b[200~[20[201~1~\x1b[201~".to_vec()
+    );
+}
+
+/// What crossterm reports for bytes 0x1C to 0x1F from a terminal that doesn't report keys unambiguously
+/// (`event/sys/unix/parse.rs`): ctrl plus the digits 4 to 7. `from_legacy_terminal` turns them back into the
+/// keys usually pressed for them.
+fn crossterm_legacy(byte: u8) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char((byte - 0x1c + b'4') as char), CTRL)
+}
+
+#[test]
+fn control_bytes_1c_to_1f_from_a_legacy_terminal_reach_the_session_as_those_control_keys() {
+    let table = [
+        // byte, legacy, kitty
+        (0x1c, "\x1c", "\x1b[92;5u"), // ctrl-\
+        (0x1d, "\x1d", "\x1b[93;5u"), // ctrl-]
+        (0x1e, "\x1e", "\x1b[94;5u"), // ctrl-^
+        (0x1f, "\x1f", "\x1b[47;5u"), // ctrl-/
+    ];
+    for (byte, legacy_bytes, kitty_bytes) in table {
+        let key = from_legacy_terminal(crossterm_legacy(byte));
+        assert_eq!(
+            show(encode::key(&key, &legacy())),
+            Some(legacy_bytes.escape_debug().to_string()),
+            "{byte:#x} legacy"
+        );
+        assert_eq!(
+            show(encode::key(&key, &kitty(1))),
+            Some(kitty_bytes.escape_debug().to_string()),
+            "{byte:#x} kitty"
+        );
+    }
+}
+
+#[test]
+fn other_keys_from_a_legacy_terminal_are_left_alone() {
+    for key in [
+        KeyEvent::new(KeyCode::Char('4'), NONE),
+        KeyEvent::new(KeyCode::Char('a'), CTRL),
+        KeyEvent::new(KeyCode::Char('4'), CTRL | ALT),
+        KeyEvent::new(KeyCode::Enter, SHIFT),
+    ] {
+        assert_eq!(from_legacy_terminal(key), key, "{key:?}");
+    }
 }
 
 #[test]

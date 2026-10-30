@@ -1,5 +1,6 @@
-//! The panic hook restores the terminal before the panic message is printed. Its own test binary, because a panic
-//! hook is process-wide.
+//! The panic hook restores the terminal before the panic message is printed, and stops the client loop, so a panic on
+//! another thread doesn't leave the loop drawing on a terminal that is no longer set up. Its own test binary, because
+//! a panic hook is process-wide.
 
 mod support {
     pub mod fake_terminal;
@@ -7,13 +8,18 @@ mod support {
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use shepherd::client::{ClientRuntime, Connector};
 use shepherd::terminal::{TerminalSetup, install_panic_hook, with_terminal};
+use shepherd_core::acpp::Timestamp;
+use shepherd_core::ids::MachineId;
+use shepherd_testkit::fakes::launcher::FakeHostLauncher;
+use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use support::fake_terminal::FakeTerminal;
 
 #[test]
-fn a_panic_restores_the_terminal_before_the_previous_hook_reports_it() {
+fn a_panic_on_another_thread_restores_the_terminal_first_and_stops_the_client() {
     let order: Arc<Mutex<Vec<String>>> = Arc::default();
-    let terminal = FakeTerminal::new();
+    let terminal = FakeTerminal::enhanced();
     {
         let order = order.clone();
         let terminal = terminal.clone();
@@ -25,19 +31,39 @@ fn a_panic_restores_the_terminal_before_the_previous_hook_reports_it() {
                 .push(format!("previous hook saw [{calls}]"));
         }));
     }
+    // A client that never reaches a host, so only the panic can stop it.
+    let net = FakeNetwork::new();
+    let connect: Connector<FakeLink> =
+        Box::new(move |sink| net.connect(sink).map_err(|e| e.to_string()));
+    let clock = || Timestamp::parse("2026-10-29T12:00:00Z").unwrap_or_else(|e| panic!("{e}"));
+    let mut runtime = ClientRuntime::new(
+        MachineId::new("m_client"),
+        connect,
+        FakeHostLauncher::new(),
+        clock,
+    );
     let setup: Arc<dyn TerminalSetup> = terminal.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        with_terminal(setup, |restorer| {
-            install_panic_hook(restorer.clone());
-            panic!("boom");
-        })
-    }));
+
+    let result = with_terminal(setup, |restorer| {
+        let events = runtime.events();
+        install_panic_hook(restorer.clone(), move || {
+            events.shutdown();
+        });
+        let worker = std::thread::spawn(|| panic!("boom"));
+        assert!(worker.join().is_err());
+        runtime.pump();
+        runtime.done()
+    });
     let _ = std::panic::take_hook();
-    assert!(result.is_err());
+
+    assert_eq!(result.ok(), Some(true), "the client stopped");
     assert_eq!(
         *order.lock().unwrap_or_else(PoisonError::into_inner),
-        ["previous hook saw [enter,leave]"]
+        ["previous hook saw [enter,push keyboard,pop keyboard,leave]"]
     );
-    // Unwinding past the guard doesn't leave a second time.
-    assert_eq!(terminal.calls(), ["enter", "leave"]);
+    // Returning through the guard doesn't restore a second time.
+    assert_eq!(
+        terminal.calls(),
+        ["enter", "push keyboard", "pop keyboard", "leave"]
+    );
 }

@@ -5,6 +5,7 @@
 
 use ratatui::layout::Rect;
 use shepherd_core::ports::pty::PtySize;
+use shepherd_term::{MIN_COLS, MIN_ROWS};
 
 /// The sidebar's width, its right border included.
 pub const SIDEBAR_WIDTH: u16 = 24;
@@ -21,7 +22,8 @@ pub struct Layout {
     pub collapsed: bool,
 }
 
-/// Splits `area`. The pane always keeps at least one column: a window too narrow for the sidebar has none.
+/// Splits `area`. The pane always keeps [`MIN_COLS`] (the narrowest screen the emulator holds): a window too narrow
+/// for the sidebar and that has none.
 pub fn layout(area: Rect) -> Layout {
     let collapsed = area.width < COLLAPSE_BELOW;
     let wanted = if collapsed {
@@ -29,7 +31,11 @@ pub fn layout(area: Rect) -> Layout {
     } else {
         SIDEBAR_WIDTH
     };
-    let side = if area.width > wanted { wanted } else { 0 };
+    let side = if area.width >= wanted + MIN_COLS {
+        wanted
+    } else {
+        0
+    };
     Layout {
         sidebar: Rect::new(area.x, area.y, side, area.height),
         pane: Rect::new(area.x + side, area.y, area.width - side, area.height),
@@ -37,12 +43,12 @@ pub fn layout(area: Rect) -> Layout {
     }
 }
 
-/// The size of the pane in a `cols` x `rows` window: what the selected session is resized to. Never smaller than
-/// 1 x 1, which only matters for an empty window.
+/// The size of the pane in a `cols` x `rows` window: what the selected session is resized to. Never smaller than the
+/// emulator's smallest screen ([`MIN_COLS`] x [`MIN_ROWS`]), which only matters for a window smaller than that.
 pub fn pane_size(cols: u16, rows: u16) -> PtySize {
     let pane = layout(Rect::new(0, 0, cols, rows)).pane;
     PtySize {
-        cols: pane.width.max(1),
-        rows: pane.height.max(1),
+        cols: pane.width.max(MIN_COLS),
+        rows: pane.height.max(MIN_ROWS),
     }
 }

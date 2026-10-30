@@ -1,15 +1,17 @@
 //! Input encoding: turns keys, mouse events, pastes and focus changes into the bytes the program in a session
 //! expects, following the input modes its terminal has on ([`shepherd_term::Screen::modes`]).
 //!
-//! - Keys use the VT/xterm legacy encoding, with `SS3` cursor keys in application cursor mode (DECCKM). When the
+//! - Keys use the VT/xterm legacy encoding, with `SS3` cursor keys in application cursor mode (DECCKM). Shift+Enter,
+//!   which has no legacy code, is sent as alt+Enter (`ESC CR`), which line editors and agent TUIs take as "insert a
+//!   newline", rather than as a plain Enter that would submit. When the
 //!   program has turned on the kitty keyboard protocol, flag 1 (disambiguate) sends `Esc` and keys with ctrl, alt or
 //!   super as `CSI code;mods u`, flag 8 (report all keys) does that for every key, and flag 4 (alternate keys) adds the
 //!   shifted key. Flag 2 (event types) changes nothing for presses, the only kind of key event the outer terminal
 //!   reports to us. Flag 16 (associated text) is not encoded.
 //! - Mouse events are dropped unless the program asked for them, and are then filtered by its tracking level
 //!   (click, drag, motion) and encoded as X10, UTF-8 or SGR.
-//! - Pastes are wrapped in `CSI 200~ … CSI 201~` in bracketed paste mode, with any end marker inside the text removed.
-//!   Otherwise newlines are sent as carriage returns, as a terminal does.
+//! - Pastes are wrapped in `CSI 200~ … CSI 201~` in bracketed paste mode, with every ESC in the text removed (as xterm
+//!   does), so the text can't end the paste early. Otherwise newlines are sent as carriage returns, as a terminal does.
 //! - Focus changes are reported (`CSI I` / `CSI O`) only when the program asked for them.
 
 use ratatui::crossterm::event::{
@@ -34,6 +36,7 @@ pub fn key(key: &KeyEvent, modes: &Modes) -> Option<Vec<u8>> {
     match key.code {
         KeyCode::Char(c) if kitty => Some(kitty_char(c, mods, modes.kitty_keyboard)),
         KeyCode::Char(c) => Some(legacy_char(c, mods)),
+        KeyCode::Enter if !kitty && mods.contains(KeyModifiers::SHIFT) => Some(b"\x1b\r".to_vec()),
         KeyCode::Enter => Some(text_key(13, b"\r", mods, modes)),
         KeyCode::Tab => Some(text_key(9, b"\t", mods, modes)),
         KeyCode::Backspace if !kitty && mods.contains(KeyModifiers::CONTROL) => {
@@ -123,7 +126,7 @@ pub fn mouse(event: &MouseEvent, col: u16, row: u16, modes: &Modes) -> Option<Ve
 /// The bytes for pasting `text`.
 pub fn paste(text: &str, modes: &Modes) -> Vec<u8> {
     if modes.bracketed_paste {
-        let inner = text.replace(PASTE_END, "");
+        let inner = text.replace('\x1b', "");
         format!("{PASTE_START}{inner}{PASTE_END}").into_bytes()
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
@@ -203,13 +206,13 @@ fn legacy_char(c: char, mods: KeyModifiers) -> Vec<u8> {
 fn ctrl_byte(c: char) -> Option<u8> {
     match c {
         'a'..='z' | 'A'..='Z' => Some(c.to_ascii_lowercase() as u8 & 0x1f),
-        ' ' | '@' => Some(0),
-        '[' => Some(0x1b),
-        '\\' => Some(0x1c),
-        ']' => Some(0x1d),
-        '^' => Some(0x1e),
-        '_' => Some(0x1f),
-        '?' => Some(0x7f),
+        ' ' | '@' | '2' => Some(0),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '/' | '7' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
         _ => None,
     }
 }

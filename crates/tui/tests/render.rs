@@ -146,7 +146,18 @@ fn full_screen(cols: u16, rows: u16) -> Screen {
 #[test]
 fn the_pane_size_sent_to_the_session_is_exactly_the_area_it_is_drawn_in() {
     let c = ClientDriver::with_sessions(&["s1"]);
-    for (cols, rows) in [(120, 40), (80, 24), (60, 20), (59, 20), (40, 12), (6, 3)] {
+    let sizes = [
+        (120, 40),
+        (80, 24),
+        (60, 20),
+        (59, 20),
+        (40, 12),
+        (6, 3),
+        (5, 1),
+        (4, 1),
+        (2, 1),
+    ];
+    for (cols, rows) in sizes {
         let size = pane_size(cols, rows);
         let pane = layout(Rect::new(0, 0, cols, rows)).pane;
         assert_eq!((size.cols, size.rows), (pane.width, pane.height));
@@ -176,6 +187,56 @@ fn the_sidebar_collapses_below_60_columns() {
     let narrow = layout(Rect::new(0, 0, 59, 20));
     assert!(!wide.collapsed && narrow.collapsed);
     assert!(narrow.sidebar.width < wide.sidebar.width);
+}
+
+#[test]
+fn the_pane_keeps_the_smallest_screen_width_and_the_sidebar_goes_first() {
+    use shepherd_term::MIN_COLS;
+    for cols in 0..=30 {
+        let l = layout(Rect::new(0, 0, cols, 5));
+        assert!(
+            l.pane.width >= cols.min(MIN_COLS),
+            "{cols}: pane {}",
+            l.pane.width
+        );
+        assert_eq!(l.sidebar.width + l.pane.width, cols, "{cols}");
+        if l.sidebar.width > 0 {
+            assert!(l.pane.width >= MIN_COLS, "{cols}");
+        }
+    }
+    // Tiny windows still get a screen the emulator can hold.
+    assert_eq!(
+        (pane_size(0, 0).cols, pane_size(0, 0).rows),
+        (shepherd_term::MIN_COLS, shepherd_term::MIN_ROWS)
+    );
+}
+
+#[test]
+fn the_sidebar_scrolls_to_keep_the_selected_session_visible() {
+    let ids: Vec<String> = (1..=15).map(|i| format!("s{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut c = ClientDriver::with_sessions(&ids);
+    // The newest is selected at the top; going back once wraps to the oldest, at the bottom of the list.
+    c.user(Intent::PrevSession);
+    let selected = c
+        .client()
+        .sessions()
+        .iter()
+        .find(|s| Some(&s.id) == c.client().selected())
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let buf = buffer(c.client(), &Screens::new(), 80, 12);
+    let side = layout(buf.area).sidebar;
+    let row_of = |y: u16| -> String {
+        (side.x..side.right() - 1)
+            .map(|x| buf[(x, y)].symbol().to_owned())
+            .collect()
+    };
+    let shown = (0..buf.area.height).find(|&y| row_of(y).trim_end().ends_with(&selected));
+    let Some(y) = shown else {
+        panic!("{selected} not shown: {buf:?}");
+    };
+    assert_ne!(buf[(side.x + 2, y)].bg, Color::Reset, "and highlighted");
 }
 
 #[test]

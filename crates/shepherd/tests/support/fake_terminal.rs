@@ -9,23 +9,35 @@ use shepherd::terminal::TerminalSetup;
 pub struct FakeTerminal {
     calls: Mutex<Vec<&'static str>>,
     fail_enter: bool,
+    /// The outer terminal supports the kitty keyboard protocol.
+    enhanced: bool,
 }
 
+// Not every test binary uses every constructor.
+#[allow(dead_code)]
 impl FakeTerminal {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// One whose `enter` fails after recording itself, as a setup that fails partway would.
-    #[allow(dead_code)] // Not every test binary uses it.
-    pub fn failing_enter() -> Arc<Self> {
+    /// One that supports reporting keys unambiguously, so the setup pushes keyboard flags.
+    pub fn enhanced() -> Arc<Self> {
         Arc::new(Self {
-            fail_enter: true,
+            enhanced: true,
             ..Self::default()
         })
     }
 
-    /// `enter`, `leave`, `mouse on` and `mouse off`, in the order they happened.
+    /// One whose `enter` fails after recording itself, as a setup that fails partway would.
+    pub fn failing_enter() -> Arc<Self> {
+        Arc::new(Self {
+            fail_enter: true,
+            enhanced: true,
+            ..Self::default()
+        })
+    }
+
+    /// `enter`, `push keyboard`, `pop keyboard`, `leave`, `mouse on` and `mouse off`, in the order they happened.
     pub fn calls(&self) -> Vec<&'static str> {
         self.calls
             .lock()
@@ -47,6 +59,18 @@ impl TerminalSetup for FakeTerminal {
         if self.fail_enter {
             return Err(io::Error::other("no tty"));
         }
+        Ok(())
+    }
+
+    fn push_keyboard(&self) -> io::Result<bool> {
+        if self.enhanced {
+            self.record("push keyboard");
+        }
+        Ok(self.enhanced)
+    }
+
+    fn pop_keyboard(&self) -> io::Result<()> {
+        self.record("pop keyboard");
         Ok(())
     }
 

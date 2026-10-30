@@ -38,7 +38,7 @@ use shepherd_core::ids::SessionId;
 use shepherd_term::Screen;
 
 pub use help::BINDINGS;
-pub use keys::{PREFIX, map_event, map_key};
+pub use keys::{PREFIX, from_legacy_terminal, map_event, map_key};
 pub use layout::{Layout, layout, pane_size};
 pub use screen::render_screen;
 

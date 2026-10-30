@@ -95,6 +95,43 @@ fn the_literal_prefix_follows_the_sessions_keyboard_mode() {
 }
 
 #[test]
+fn a_binding_with_ctrl_or_alt_after_the_prefix_is_not_that_binding() {
+    for key in [
+        ctrl('n'),
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+    ] {
+        assert_eq!(
+            keys(&prefixed(), key),
+            [Intent::SetFocus(Focus::Terminal)],
+            "{key:?}"
+        );
+    }
+    // Shift is how `?` is typed, so it doesn't count.
+    let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+    assert_eq!(
+        keys(&prefixed(), question),
+        back_to_terminal_then(Intent::ShowHelp)
+    );
+}
+
+#[test]
+fn only_ctrl_b_alone_is_the_prefix() {
+    let ctrl_alt_b = KeyEvent::new(
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    assert_eq!(
+        keys(&client(), ctrl_alt_b),
+        [Intent::Input(b"\x1b\x02".to_vec())]
+    );
+    let ctrl_shift_b = KeyEvent::new(
+        KeyCode::Char('B'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    assert_eq!(keys(&client(), ctrl_shift_b), [Intent::Input(vec![0x02])]);
+}
+
+#[test]
 fn an_unbound_key_after_the_prefix_cancels_it_and_is_dropped() {
     for key in [ch('z'), press(KeyCode::Esc)] {
         assert_eq!(
