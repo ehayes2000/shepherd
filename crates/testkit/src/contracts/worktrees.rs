@@ -36,6 +36,7 @@ macro_rules! worktrees_contract {
         $crate::worktrees_contract!(@cases $fixture;
             repo_root_of_the_main_checkout_is_itself,
             repo_root_of_a_subdirectory_is_the_checkout,
+            repo_root_of_a_nested_subdirectory_and_its_parent_is_the_checkout,
             repo_root_of_a_linked_worktree_is_the_main_checkout,
             repo_root_of_a_non_repo_is_not_a_repo,
             repo_root_of_a_missing_path_inside_the_repo_is_not_a_repo,
@@ -98,6 +99,8 @@ pub const DEFAULT: &str = "trunk";
 pub const REPO_NAME: &str = "app";
 /// A directory inside the clone.
 pub const SUBDIR: &str = "src";
+/// A directory inside [`SUBDIR`].
+pub const NESTED: &str = "deep";
 
 /// One repo (a clone of an origin) plus a port managing worktrees for it.
 pub trait WorktreesFixture {
@@ -107,7 +110,7 @@ pub trait WorktreesFixture {
     /// The managed root the port was built with.
     fn root(&self) -> PathBuf;
     /// The clone's main checkout: a directory named [`REPO_NAME`], a sibling of [`WorktreesFixture::root`]. It has a
-    /// tracked subdirectory [`SUBDIR`].
+    /// tracked subdirectory [`SUBDIR`], which has a tracked subdirectory [`NESTED`].
     fn repo(&self) -> RepoRef;
     /// A directory that is not inside any repo.
     fn not_a_repo(&self) -> RepoRef;
@@ -204,6 +207,15 @@ pub fn repo_root_of_the_main_checkout_is_itself<F: WorktreesFixture>(f: &F) {
 
 pub fn repo_root_of_a_subdirectory_is_the_checkout<F: WorktreesFixture>(f: &F) {
     let sub = f.repo().as_path().join(SUBDIR);
+    assert_eq!(f.port().repo_root(&sub), main_checkout(f));
+}
+
+/// A directory exists when a directory below it does.
+pub fn repo_root_of_a_nested_subdirectory_and_its_parent_is_the_checkout<F: WorktreesFixture>(
+    f: &F,
+) {
+    let sub = f.repo().as_path().join(SUBDIR);
+    assert_eq!(f.port().repo_root(&sub.join(NESTED)), main_checkout(f));
     assert_eq!(f.port().repo_root(&sub), main_checkout(f));
 }
 
