@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | T22 new session creates worktree | building | task/t22-session-worktree @ 36fb0da | 0 | – |
-| F26 attention follows window focus | in review | task/f26-window-focus @ ba86286 | 1 | PM-accepted: focused at startup; focus change doesn't clear notices |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F26 | 1 | – |
 | F15 | 2 | hold-deadline restart guard untested; notice table incomplete. Unknown-glyph snapshot deferred until a frame produces Unknown |
 | F27 | 1 | – (2 minors → F28) |
 | T21 | 2 | relative-path refusal passed for the wrong reason; refused-hello cwd and is_dir untested |
@@ -429,7 +429,7 @@ acceptance:
 scope: crates/adapters
 
 ### F26: Attention follows window focus
-status: in-progress
+status: done (9be58f9)
 depends: T18
 touches: core::client (attention), tui::keys (focus events)
 goal: T18 treats "selected" as "seen". If the shepherd window is in the background, the selected session going idle
