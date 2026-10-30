@@ -17,8 +17,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | building | task/t38-archive-blobs @ 17c8d64 | 0 |  |
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | building | task/f45-standin-load @ 33fd53a | 0 |  |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
-| F43 Tab next to wide chars stored as a '\t' spacer | [terminal](features/terminal.md) | building | task/f43-tab-spacer @ 33fd53a | 0 |  |
-| F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | merging | task/f37-worktree-leftovers @ e8ae243 | 3 | approved r3; rebased over F42; --no-deref + absent-ref test (PM spot check) |
+| F43 Tab next to wide chars stored as a '\t' spacer | [terminal](features/terminal.md) | merging | task/f43-tab-spacer @ 4aa1cf8 | 0 | PM spot check: snapshot last_column re-marks a tabbed spacer |
 
 ## Ready to start
 
@@ -48,7 +47,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 9 | 2 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
-| [Workspaces and worktrees](features/worktrees.md) | M3 | 14 | 3 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
+| [Workspaces and worktrees](features/worktrees.md) | M3 | 15 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 
 <!-- tasks:end -->
 

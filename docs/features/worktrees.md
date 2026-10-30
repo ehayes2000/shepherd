@@ -24,7 +24,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F28 | Workspace from a subdirectory, and `~` in typed paths | done | 6f1c62b | 2 | .git-named bare repo gave a root the port rejects |
 | F32 | Create the worktree branch atomically | done | d93bb15 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
 | F33 | Hooks don't queue behind each other or outlive the host | done | 5cf8a10 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
-| F37 | A killed fetch can leave a stale remote-ref lock | merging | task/f37-worktree-leftovers @ e8ae243 | 3 | approved r3; rebased over F42; --no-deref + absent-ref test (PM spot check) |
+| F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
 
 ## Specs
