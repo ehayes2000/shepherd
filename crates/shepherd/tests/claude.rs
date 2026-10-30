@@ -641,6 +641,8 @@ fn a_claude_permission_dialog_answered_without_a_hook_goes_idle_once_its_pty_is_
 #[test]
 fn a_permission_dialog_stays_put_through_screen_query_replies_and_focus_reports() {
     // Neither is the user answering, though both are written to the PTY after the request and the dialog redraws.
+    // (A focus report starts with ESC, so this doesn't show the client's kind reaching the quiet watch: see
+    // `a_paste_answers_a_permission_dialog`.)
     let mut c = Claude::start();
     let mut client = c.h.connect();
     let session = c.new_session(&mut client, Some("claude")).unwrap();
@@ -669,6 +671,39 @@ fn a_permission_dialog_stays_put_through_screen_query_replies_and_focus_reports(
     c.h.step();
     assert_eq!(status(c.activity(&session).activity()), "NeedsPermission");
     assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 0);
+}
+
+#[test]
+fn a_paste_answers_a_permission_dialog() {
+    // A bracketed paste starts with ESC like a cursor key: only its kind, as the client sent it, makes it an answer.
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    for hook in [
+        "UserPromptSubmit",
+        "PreToolUse.Bash",
+        "PermissionRequest.Bash",
+    ] {
+        c.hook(&mut client, &session, hook);
+    }
+
+    client.input_of(&session, InputKind::Paste, b"\x1b[200~1\x1b[201~");
+    c.h.step();
+    // A redraw that isn't typed: the resize redraws the dialog.
+    client.resize(&session, 100, 30);
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "Idle");
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 1);
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(log.last().unwrap().frame()).unwrap()["params"],
+        json!({ "inferred": "quiet-after-permission" })
+    );
 }
 
 #[test]
