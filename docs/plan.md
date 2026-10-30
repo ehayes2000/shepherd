@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T26 search and open | re-review (round 4) | task/t26-search @ 081ca46 | 4 | worktrees root resolved once at host start |
+| T26 search and open | fixing (round 5) | task/t26-search @ 081ca46 | 4 | Blocking: host::open root-resolution line untested (real-host test). PM: 0700 worktrees dir; resolve recorded paths on replay |
 | T36b host hot-swap by re-exec | fixing (round 3) | task/t36b-hotswap @ 298f42c | 2 | Blocking: not-our-child test can't fail (stand-in not yet a group leader). Minors: log wording; sticky config warning (PM) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
