@@ -12,6 +12,7 @@
 mod env;
 mod run_files;
 mod runtime;
+mod worker;
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ pub use env::{Env, RealEnv};
 pub use runtime::{
     CATCH_UP_BATCH, CATCH_UP_TICK, HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER,
     MAX_CATCH_UP_TICK, RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE,
-    STALL_TIMEOUT, runtime_channel,
+    STALL_TIMEOUT, StartError, runtime_channel,
 };
 
 /// The host runtime on the real adapters.
@@ -75,6 +76,8 @@ pub enum HostStartError {
     LogFile { path: PathBuf, reason: String },
     #[error("cannot find the running shepherd executable: {0}")]
     Executable(String),
+    #[error("cannot start a host thread: {0}")]
+    Thread(String),
 }
 
 fn root_error(root: &Path, e: PrivateFsError) -> HostStartError {
@@ -154,8 +157,10 @@ fn open_inner(
         shepherd,
         socket: root.join(SOCKET_FILE),
     };
-    HostRuntime::start(pty, worktrees, link, log, RealEnv, settings, tx, rx)
-        .map_err(|e| log_error(root, e))
+    HostRuntime::start(pty, worktrees, link, log, RealEnv, settings, tx, rx).map_err(|e| match e {
+        StartError::Log(e) => log_error(root, e),
+        StartError::Worker(e) => HostStartError::Thread(e.to_string()),
+    })
 }
 
 fn log_error(root: &Path, error: LogError) -> HostStartError {
