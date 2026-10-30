@@ -9,7 +9,9 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T16 hook subcommand | fixing (CHANGES) | task/t16-hook-subcommand @ 22256a6 | 1 | Blocking: reply-timeout bound untested. Minors: Refused/Disconnected via deliver; docs narrowed to what's bounded (PM). Earlier accepts stand |
+| T17 launch Claude sessions | building | task/t17-launch-claude @ HEAD | 0 | Split: picker → T17b (after T34). PM does real-claude check |
+| F20 fake link sink lifetime | building | task/f20-fake-link-sink @ HEAD | 0 | – |
+| T34 menus and dialogs | building | task/t34-menus-and-dialogs @ d946ee4 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -40,6 +42,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F11 | 2 | doc claimed WrongType for every special file; sockets and dirs got Io |
 | F18 | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
 | T33 | 2 | stale press and sidebar clamp untested (mutation survivors) |
+| T16 | 2 | reply-timeout bound untested (two mutations survived); refused/disconnect paths untested |
 
 ## Milestones
 
@@ -315,7 +318,7 @@ notes: `LaunchError` gains `HostFailed(String)` (additive). The fake launcher ca
 contract case for it if the contract suite covers error variants.
 
 ### F19: Drop hook translator state when a session closes
-status: todo
+status: ready
 depends: T16
 touches: core::agents (Translators), shepherd::host
 goal: `Translators` keeps one translator per session for the life of the host run, even after the session closes.
@@ -323,6 +326,21 @@ acceptance:
 - Closing a session (or its exit followed by close) removes its translator. A host test counts live translators after
   open/close cycles (counted, not measured).
 scope: crates/core, crates/shepherd
+
+### F20: FakeNetwork keeps a connection's sink as long as the real link does
+status: in-progress
+depends: T10, T16
+touches: testkit link fake, contracts::link
+goal: The fake drops a client connection's event sink together with the connection; the real unix-socket link keeps it until
+the link itself is dropped (found in the T16 review). Fakes and adapters must agree.
+acceptance:
+- A link contract case pins the real behavior: after the peer drops the connection, the client still receives
+  `LinkEvent::Disconnected` through its sink, and the sink stays alive until the client drops its link. Runs against both
+  the fake and the real adapter.
+- `FakeNetwork` matches it. Remove the workaround in `crates/shepherd/tests/hooks.rs`
+  (`a_host_that_drops_the_connection_before_answering_is_a_disconnect` keeps its own sink copy) and the test still passes and
+  still fails if `deliver` ignores `Disconnected`.
+scope: crates/testkit, crates/adapters (contract wiring only), crates/shepherd (that one test)
 
 ## Out of scope for the initial feature set
 
@@ -479,7 +497,7 @@ goal: Client↔host messages as JSON-RPC, with encode and decode as pure functio
 acceptance:
 - Requests: `_shepherd/hello` (version, machine), `_shepherd/session/new`, `/rename`, `/close`, `/input`
   (bytes as base64), `/resize`, `/subscribe { from: {session|host → seq} }`, and `_shepherd/hook/frame`
-  (a FrameDraft from `shepherd hook`).
+  (`{ session, agent, payload }`: the raw hook payload from `shepherd hook`, translated by the host; changed in T16).
 - Host→client notifications: `_shepherd/log/entry { envelope }` and `_shepherd/pty/output { session, bytes }`.
 - Newline-delimited framing codec: `Decoder` takes arbitrary byte chunks and yields whole messages. Tests split
   messages at every byte boundary.
@@ -736,7 +754,7 @@ Press/release: act on `Up(Left)` when the `Down(Left)` hit the same target. Keep
 owned by the client runtime, or in `ClientState` if core needs it; the builder decides and says why in the report.
 
 ### T34: Context menu, dialogs with buttons, detach button
-status: ready
+status: in-progress
 depends: T33
 touches: tui::popup, tui::sidebar, tui::keys (mouse), core::client
 goal: Rename, close and detach with the mouse; every popup can be answered by clicking.
@@ -806,7 +824,7 @@ scope: crates/core
 out of scope: launching claude (T17).
 
 ### T16: `shepherd hook` subcommand
-status: in-progress
+status: done (01acabc)
 depends: T07, T10, T11
 touches: shepherd::hook, core::host (hook frames)
 goal: Agents' hooks call `shepherd hook <agent>`, which delivers frames to the host.
@@ -821,7 +839,7 @@ acceptance:
 scope: crates/shepherd, crates/core
 
 ### T17: Launch Claude Code sessions
-status: todo
+status: in-progress
 depends: T14, T15, T16
 touches: core::host (spawn spec), shepherd::host
 goal: A new session with profile `claude` runs Claude Code with shepherd's hooks injected and shows live status.
@@ -829,12 +847,27 @@ acceptance:
 - The host builds the spawn spec from the profile: hooks are injected without touching the user's settings files
   (`--settings` with a generated file under `~/.shepherd/run/<session>/`; verify the mechanism in the current
   Claude Code docs). `SHEPHERD_SESSION` and `SHEPHERD_SOCK` are set.
-- The new-session flow takes a profile name, defaulting to `[defaults] agent`. Clicking `+ New session` opens a popup listing
-  profiles as clickable rows (decision 0014); clicking one creates the session.
+- The new-session request takes an optional profile name, defaulting to `[defaults] agent`. (The clickable profile picker is
+  T17b, after T34; this task doesn't touch tui.)
+- The hook command written into the generated settings is the absolute path of the running `shepherd` executable plus
+  `hook claude-code`, so it works without `shepherd` on PATH. Files under `~/.shepherd/run/` are created with the private_fs
+  helpers (dirs 0700, files 0600) and removed when the session closes.
 - Scenario with a fake `claude` that emits recorded hook calls: the sidebar status follows Working → NeedsPermission →
   Working → Idle.
-- A manual check against real `claude` is documented in the report (not a CI test).
-scope: crates/core, crates/shepherd, crates/tui (profile picker)
+- Builders never run the real `claude` (it writes to the user's ~/.claude state). The PM does the manual check after merge.
+scope: crates/core, crates/shepherd
+
+### T17b: Profile picker
+status: todo
+depends: T17, T34
+touches: tui::popup, core::client
+goal: Clicking `+ New session` lets you pick which agent to run (decision 0014).
+acceptance:
+- With more than one profile configured, clicking `+ New session` opens a popup listing profiles as clickable rows (the default
+  first and marked); clicking one creates the session with that profile. With exactly one profile it creates it directly.
+- `ctrl-b n` keeps creating the default profile without a popup.
+- Clicking outside or `[Cancel]` dismisses. Hit tests click rendered cells (T33/T34 pattern). Snapshot of the picker.
+scope: crates/core (client), crates/tui
 
 ### T18: Attention and notifications
 status: todo

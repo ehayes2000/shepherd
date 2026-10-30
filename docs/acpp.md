@@ -97,8 +97,9 @@ Extension frames are usually notifications. Use a request/response pair only for
 4. **Additive evolution.** Adding a field or method needs no version bump. Changing a method's meaning needs a new
    method name (`.../v2`). Old logs are replayed forever, so fold code keeps supporting old methods.
 5. **`_meta` keys are namespaced** (`shepherd.*`, `<vendor>.*`).
-6. **Single writer per log.** Only the host appends. Other producers, like `shepherd hook`, send frames to the
-   host, which assigns `seq`, `id`, `ts`, and `machine`.
+6. **Single writer per log.** Only the host appends. Other producers send the host what they have: `shepherd hook` sends
+   the agent's raw hook payload (`_shepherd/hook/frame { session, agent, payload }`), which the host translates into frames.
+   The host assigns `seq`, `id`, `ts`, and `machine`.
 7. **Log what changes state. Don't log streams.** Raw PTY bytes are not logged. They flow over the live
    connection only.
 
