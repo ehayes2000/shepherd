@@ -19,7 +19,8 @@ use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogId, PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
 use shepherd_core::wire::{
-    ClientRequest, HookFrame, InputKind, SessionClose, SessionNew, SessionResume, WireError,
+    BuildId, ClientRequest, DigestHasher, HookFrame, HostUpgrade, InputKind, SessionClose,
+    SessionNew, SessionResume, UpgradeAnswer, WireError,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
@@ -899,6 +900,49 @@ fn a_session_resized_while_exited_after_a_restart_resumes_at_that_size() {
         PtySize {
             cols: 101,
             rows: 31
+        }
+    );
+}
+
+#[test]
+fn an_adopted_session_resumes_at_the_size_it_was_carried_with() {
+    // A host started as one build, with another installed since: it can update in place.
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("shepherd");
+    std::fs::write(&exe, b"a newer build").unwrap();
+    let mut hasher = DigestHasher::new();
+    hasher.update(b"the build the host started as");
+    let running = BuildId {
+        version: "0.1.0".into(),
+        digest: hasher.finish(),
+    };
+    let mut c = Claude::with(|b| b.build(running, &exe));
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    client.resize(&session, 150, 50);
+    c.h.step();
+    let asked = client.request(ClientRequest::HostUpgrade(HostUpgrade::default()));
+    c.h.step();
+    let answer: UpgradeAnswer =
+        serde_json::from_value(response(&client.take(), &asked).unwrap()).unwrap();
+    assert_eq!(answer, UpgradeAnswer::Accepted);
+    c.h.swap(|_| {});
+
+    // The new image never saw a resize: only the carried size says 150x50.
+    let mut client = c.h.connect();
+    client.input(&session, b"/exit\r");
+    c.h.step();
+    assert!(c.h.host().sessions()[0].exited);
+    assert_eq!(c.resume(&mut client, &session), Ok(json!({})));
+
+    let spawned = c.all_spawned();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+    assert_eq!(
+        spawned[1].size,
+        PtySize {
+            cols: 150,
+            rows: 50
         }
     );
 }

@@ -91,7 +91,7 @@ use shepherd_core::wire::{
     HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SessionNew,
     SubscribeFrom, UpgradeAnswer, WireError,
 };
-use shepherd_term::Screen;
+use shepherd_term::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Screen};
 
 use super::env::Env;
 use super::run_files;
@@ -928,7 +928,7 @@ impl<
 
     /// Runs `event` through core and executes what it returns, then any events that execution produced.
     fn dispatch(&mut self, event: HostEvent) {
-        let commands = self.sizes.handle(&self.host, event);
+        let commands = self.decide(event);
         self.run_commands(commands);
     }
 
@@ -937,9 +937,14 @@ impl<
         let mut queue = VecDeque::new();
         self.execute(commands, &mut queue);
         while let Some(event) = queue.pop_front() {
-            let commands = self.sizes.handle(&self.host, event);
+            let commands = self.decide(event);
             self.execute(commands, &mut queue);
         }
+    }
+
+    /// What core decides about `event`. Every event goes through [`Sizes`], so a spawn gets its session's latest size.
+    fn decide(&mut self, event: HostEvent) -> Vec<HostCommand> {
+        self.sizes.handle(&self.host, event)
     }
 
     /// Executes `commands` in order. Events they produce (a failed spawn, a translated hook) are pushed to `follow_up`.
@@ -1602,10 +1607,7 @@ impl<
                 }),
                 ClientNotification::SessionResize(resize) => self.dispatch(HostEvent::Resize {
                     session: resize.session,
-                    size: PtySize {
-                        cols: resize.cols,
-                        rows: resize.rows,
-                    },
+                    size: screen_size(resize.cols, resize.rows),
                 }),
             },
             // Once the PTYs are exported only hook frames are taken, so nothing is started that the swap can't carry.
@@ -1901,10 +1903,9 @@ impl<
             })?,
             (None, None) => self.settings.home.clone(),
         };
-        let size = new.size.map_or(INITIAL_SIZE, |s| PtySize {
-            cols: s.cols,
-            rows: s.rows,
-        });
+        let size = new
+            .size
+            .map_or(INITIAL_SIZE, |s| screen_size(s.cols, s.rows));
         let ctx = LaunchContext {
             session: session.clone(),
             cwd,
@@ -2353,6 +2354,14 @@ fn canonical(dir: &Path) -> Result<PathBuf, WireError> {
 /// How long from `at` until `deadline`: zero if it has passed.
 fn until(at: &Timestamp, deadline: jiff::Timestamp) -> Duration {
     Duration::try_from(deadline.duration_since(at.instant())).unwrap_or(Duration::ZERO)
+}
+
+/// A size a client sent, clamped to what a [`Screen`] holds, so the host's screen and the PTY always agree.
+fn screen_size(cols: u16, rows: u16) -> PtySize {
+    PtySize {
+        cols: cols.clamp(MIN_COLS, MAX_COLS),
+        rows: rows.clamp(MIN_ROWS, MAX_ROWS),
+    }
 }
 
 /// `envelope` as core folds it at start: a `session/created` or `worktree/created` recorded before paths were resolved

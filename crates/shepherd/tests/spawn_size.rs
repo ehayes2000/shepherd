@@ -16,6 +16,8 @@ use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{Connection, Intent};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::{ClientRequest, SessionNew, ViewSize};
+use shepherd_term::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::FakeLink;
 use shepherd_testkit::fakes::pty::ProgramInput;
@@ -184,4 +186,60 @@ fn a_window_resized_while_the_worktree_is_made_spawns_the_session_at_the_new_siz
     let seen = s.seen.lock().unwrap();
     assert_eq!(seen.started, [pane_size(WINDOW.0 - 20, WINDOW.1 - 8)]);
     assert_eq!(seen.resized, []);
+}
+
+// ---------- sizes from the wire ----------
+
+/// A plain session asked for at `cols`x`rows` on a host with no workspace, and its id.
+fn sized_session(h: &mut HostHarness, client: &mut FakeClient, cols: u16, rows: u16) -> SessionId {
+    let req = client.request(ClientRequest::SessionNew(SessionNew {
+        size: Some(ViewSize { cols, rows }),
+        ..SessionNew::default()
+    }));
+    h.step();
+    new_session_id(&client.take(), &req)
+}
+
+#[test]
+fn a_requested_size_the_screen_cannot_hold_is_clamped_to_its_bounds() {
+    let mut h = HostHarness::new();
+    let mut client = h.connect();
+
+    let tiny = sized_session(&mut h, &mut client, 0, 0);
+    let huge = sized_session(&mut h, &mut client, u16::MAX, u16::MAX);
+
+    let pty = h.runtime().pty();
+    let min = PtySize {
+        cols: MIN_COLS,
+        rows: MIN_ROWS,
+    };
+    let max = PtySize {
+        cols: MAX_COLS,
+        rows: MAX_ROWS,
+    };
+    assert_eq!((pty.size(&tiny), pty.size(&huge)), (Some(min), Some(max)));
+}
+
+#[test]
+fn a_resize_the_screen_cannot_hold_is_clamped_to_its_bounds() {
+    let mut h = HostHarness::new();
+    let mut client = h.connect();
+    let session = sized_session(&mut h, &mut client, 100, 30);
+
+    client.resize(&session, 0, 0);
+    h.step();
+    let tiny = h.runtime().pty().size(&session);
+    client.resize(&session, u16::MAX, u16::MAX);
+    h.step();
+    let huge = h.runtime().pty().size(&session);
+
+    let min = PtySize {
+        cols: MIN_COLS,
+        rows: MIN_ROWS,
+    };
+    let max = PtySize {
+        cols: MAX_COLS,
+        rows: MAX_ROWS,
+    };
+    assert_eq!((tiny, huge), (Some(min), Some(max)));
 }

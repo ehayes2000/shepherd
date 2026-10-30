@@ -199,7 +199,8 @@ pub struct SessionNew {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The size of the client's terminal view, which the session's PTY spawns at (unless the client resizes it before
-    /// it spawns). Absent from older clients: the host spawns it at its default size.
+    /// it spawns), clamped to what the host's screens hold. Absent from older clients: the host spawns it at its default
+    /// size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ViewSize>,
 }
