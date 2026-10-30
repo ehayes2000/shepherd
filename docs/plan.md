@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T25b cleanup view | building | task/t25b-cleanup @ 7b15652 | 0 | – |
-| F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ 7b15652 | 0 | – |
+| F37 worktree lock/shutdown leftovers | in review | task/f37-worktree-leftovers @ 15e96c9 (on 292908d) | 1 | PM-accepted: 30 s create grace at shutdown; shared process_group helpers. Reviewer judges the foreign-lock-during-killed-fetch gap |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
