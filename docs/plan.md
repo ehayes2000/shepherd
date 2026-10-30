@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | F30 truncation by display width | in review | task/f30-display-width @ 0adec4c | 1 | PM-accepted: width.rs helpers on Span::width; no new dep |
-| F14 pty backpressure | rebasing (builder) | task/f14-pty-backpressure @ 1abe0c8 (on 03c6d2f, stale) | 1 | First reviewer hung 4 h in one tool call and was stopped with no verdict. Rebase onto main, then fresh review with time-bounded load. Earlier accepts stand |
+| F14 pty backpressure | in review (fresh reviewer) | task/f14-pty-backpressure @ 2c48b2e (on e396325) | 1 | Rebased; builder load 24/24 adapters + host_pacing. Earlier accepts stand |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
