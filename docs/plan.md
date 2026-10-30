@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F34 client marks answer keys | building | task/f34-answer-keys @ bce95a9 | 0 | – |
-| T24 auto-naming | fixing (CHANGES) | task/t24-auto-naming @ 9145fc7 | 1 | Blocking: control-char guarantee, 30-char boundary, stop-at-first-misfit, indented fences, multi-block join untested. PM: use unicode-segmentation words (decision 0017); keep CSI digits (recorded) |
+| T24 auto-naming | re-review | task/t24-auto-naming @ a9e2375 (on a53123f) | 2 | slug rules pinned; unicode-segmentation words with adjacent rejoin; id guard dropped |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | fixing (CHANGES) | task/f28-repo-root @ 15094a9 | 1 | Blocking: bare repo named .git (and --separate-git-dir) gives a root the port rejects → decide by bareness. Minors: fake missing-path, symlink case |
 
