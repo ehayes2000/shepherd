@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F08 worktree create timeout cleanup | fixing (round 3) | task/f08-worktree-timeout @ 5698676 | 2 | Blocking: T20 typed-timeout test flakes 1/24 (packed-refs.lock) → rewrite with blocking hook. Accepted untested: cleanup timeout, group wait |
 | T19b resume | in review | task/t19b-resume @ db3d015 (on d0e6d04) | 1 | PM-accepted: session/created gains profile+cwd; shepherd agent/started on resume; session/resume request; builder edited acpp.md table |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F08 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
 | T19 | 2 | translator matching/resets/kind replacement untested; seed reuse across replaced translators |
 | T18 | 2 | C1 strip untested; session name could form a ConEmu OSC 9 subcommand |
 | F22 | 2 | hook-sourced agent/exited could delete a live session's run files (untested guard) |
@@ -174,7 +174,7 @@ acceptance:
 scope: crates/term
 
 ### F08: Clean up after a timed-out worktree create
-status: in-progress
+status: done (da443a6)
 depends: T20
 touches: adapters::worktrees, ports::worktrees (docs)
 goal: A `create` that times out (e.g. a slow post-checkout hook) leaves no half-made branch or worktree behind.
