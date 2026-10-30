@@ -38,8 +38,8 @@ use shepherd_core::ids::SessionId;
 use shepherd_term::Screen;
 
 pub use help::BINDINGS;
-pub use keys::{PREFIX, from_legacy_terminal, map_event, map_key};
-pub use layout::{Layout, layout, pane_size};
+pub use keys::{PREFIX, Pointer, from_legacy_terminal, map_event, map_key};
+pub use layout::{Layout, Target, hit, layout, pane_size};
 pub use screen::render_screen;
 
 /// Each session's terminal, as the client runtime keeps them.
@@ -86,8 +86,11 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
         Connection::Ready => vec![
             Line::raw("No sessions yet."),
             Line::raw(""),
-            Line::styled(format!("Press ctrl-{PREFIX} then n to start one,"), gray),
-            Line::styled(format!("or ctrl-{PREFIX} then ? for help."), gray),
+            Line::styled("Click + New session to start one.", gray),
+            Line::styled(
+                format!("Or press ctrl-{PREFIX} then n; ctrl-{PREFIX} then ? for help."),
+                gray,
+            ),
         ],
         Connection::Failed(why) => vec![Line::styled(why.clone(), Style::new().fg(Color::Red))],
         _ => vec![Line::styled("Connecting to the shepherd host…", gray)],

@@ -39,17 +39,28 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
     }
 }
 
+/// How to use shepherd with the mouse, which the help says first.
+const MOUSE: [&str; 4] = [
+    "Click + New session to start a session, a session to",
+    "switch to it, and the terminal to type in it.",
+    "Select text with shift-drag (option-drag in iTerm2",
+    "and Terminal.app).",
+];
+
 fn help(area: Rect, buf: &mut Buffer) {
     let key = Style::new().fg(Color::Cyan);
-    let mut lines: Vec<Line> = BINDINGS
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::styled(format!("{keys:<14}"), key),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
+    let mut lines: Vec<Line> = MOUSE.iter().map(|l| Line::raw(*l)).collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Or use the keys:",
+        Style::new().fg(Color::Gray),
+    ));
+    lines.extend(BINDINGS.iter().map(|(keys, what)| {
+        Line::from(vec![
+            Span::styled(format!("{keys:<14}"), key),
+            Span::raw(*what),
+        ])
+    }));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Other keys go to the session. Any key closes this.",

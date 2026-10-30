@@ -1,9 +1,11 @@
 //! Setting up the user's terminal for the TUI, and putting it back however the TUI ends.
 //!
 //! [`TerminalSetup`] is the seam: [`CrosstermSetup`] does it for real (raw mode, the alternate screen, bracketed paste,
-//! focus reports, kitty keyboard flags where the terminal supports them, and mouse capture while the selected session
-//! wants the mouse), and tests record calls instead. [`TerminalGuard`] restores the terminal when dropped, so a normal
-//! return, an error and a panic that unwinds all restore it, keyboard flags included. [`install_panic_hook`] restores
+//! focus reports, kitty keyboard flags where the terminal supports them, and mouse capture), and tests record calls
+//! instead. Mouse capture is on for the client's whole life, so the sidebar and the pane can be clicked (decision 0014);
+//! the user selects text with the outer terminal's bypass (shift-drag, or option-drag in iTerm2 and Terminal.app).
+//! [`TerminalGuard`] restores the terminal when dropped, so a normal return, an error and a panic that unwinds all
+//! restore it, keyboard flags and mouse capture included. [`install_panic_hook`] restores
 //! it before the panic message is printed, so the message lands on the normal screen where the user can read it, and
 //! stops the client loop with an error, so a panic on another thread doesn't leave it drawing and `shepherd` exits
 //! non-zero. Signals (SIGTERM, SIGHUP, SIGINT) quit the client loop, which then returns through the guard (see
@@ -38,8 +40,8 @@ pub trait TerminalSetup: Send + Sync {
     /// Puts everything [`TerminalSetup::enter`] and [`TerminalSetup::set_mouse_capture`] changed back. Must be safe
     /// to call after a partial `enter`.
     fn leave(&self) -> io::Result<()>;
-    /// Whether mouse events come to us (and so to the selected session) or stay with the outer terminal, for
-    /// selecting text.
+    /// Whether mouse events come to us or stay with the outer terminal. Turned on after `push_keyboard` and off
+    /// before `pop_keyboard`.
     fn set_mouse_capture(&self, on: bool) -> io::Result<()>;
 }
 
@@ -50,12 +52,17 @@ pub struct Restorer {
     active: Arc<AtomicBool>,
     /// Keyboard flags were pushed and not yet popped.
     keyboard: Arc<AtomicBool>,
+    /// Mouse capture was turned on and not yet off.
+    mouse: Arc<AtomicBool>,
 }
 
 impl Restorer {
     pub fn restore(&self) {
         if self.active.swap(false, Ordering::SeqCst) {
             // Nothing better to do if the terminal is gone (e.g. after SIGHUP).
+            if self.mouse.swap(false, Ordering::SeqCst) {
+                let _ = self.setup.set_mouse_capture(false);
+            }
             if self.keyboard.swap(false, Ordering::SeqCst) {
                 let _ = self.setup.pop_keyboard();
             }
@@ -75,21 +82,25 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    /// Takes the terminal over. If that fails or panics partway, what was done is undone before returning the error
-    /// or unwinding: the guard exists first, so its drop restores. A terminal that can't be asked for unambiguous keys
-    /// is still used, with legacy keys.
+    /// Takes the terminal over, mouse capture included. If that fails or panics partway, what was done is undone
+    /// before returning the error or unwinding: the guard exists first, so its drop restores. A terminal that can't be
+    /// asked for unambiguous keys is still used, with legacy keys.
     pub fn enter(setup: Arc<dyn TerminalSetup>) -> io::Result<Self> {
         let guard = Self {
             restorer: Restorer {
                 setup,
                 active: Arc::new(AtomicBool::new(true)),
                 keyboard: Arc::new(AtomicBool::new(false)),
+                mouse: Arc::new(AtomicBool::new(false)),
             },
         };
         let restorer = &guard.restorer;
         restorer.setup.enter()?;
         let pushed = restorer.setup.push_keyboard().unwrap_or(false);
         restorer.keyboard.store(pushed, Ordering::SeqCst);
+        // A capture that fails partway is undone by `leave`.
+        restorer.setup.set_mouse_capture(true)?;
+        restorer.mouse.store(true, Ordering::SeqCst);
         Ok(guard)
     }
 

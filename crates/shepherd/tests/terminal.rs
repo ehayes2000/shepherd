@@ -1,6 +1,6 @@
 //! The terminal is restored on every way out of the TUI, checked through the `TerminalSetup` seam. An outer terminal
 //! that supports the kitty keyboard protocol has its keyboard flags pushed after setup and popped before the rest is
-//! undone, on every path.
+//! undone, on every path. Mouse capture is on for the whole time the TUI has the terminal, and off again on every path.
 
 mod support {
     pub mod fake_terminal;
@@ -12,7 +12,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use shepherd::terminal::{TerminalGuard, TerminalSetup, with_terminal};
 use support::fake_terminal::FakeTerminal;
 
-const RESTORED: [&str; 4] = ["enter", "push keyboard", "pop keyboard", "leave"];
+const RESTORED: [&str; 6] = [
+    "enter",
+    "push keyboard",
+    "mouse on",
+    "mouse off",
+    "pop keyboard",
+    "leave",
+];
 
 fn setup(terminal: &Arc<FakeTerminal>) -> Arc<dyn TerminalSetup> {
     terminal.clone()
@@ -53,7 +60,7 @@ fn a_setup_that_fails_partway_is_undone() {
     assert_eq!(terminal.calls(), ["enter", "leave"]);
 }
 
-/// A terminal whose `enter` or `push_keyboard` panics after recording itself, as one that fails partway would.
+/// A terminal whose `enter`, `push_keyboard` or `set_mouse_capture(true)` panics after recording itself, as one that fails partway would.
 struct PanickingTerminal {
     calls: Mutex<Vec<&'static str>>,
     panic_in: &'static str,
@@ -104,7 +111,8 @@ impl TerminalSetup for PanickingTerminal {
         Ok(())
     }
 
-    fn set_mouse_capture(&self, _: bool) -> io::Result<()> {
+    fn set_mouse_capture(&self, on: bool) -> io::Result<()> {
+        self.record(if on { "mouse on" } else { "mouse off" });
         Ok(())
     }
 }
@@ -134,6 +142,38 @@ fn a_keyboard_push_that_panics_is_undone_without_a_pop() {
 }
 
 #[test]
+fn a_mouse_capture_that_panics_is_undone_by_leaving() {
+    let terminal = PanickingTerminal::new("mouse on");
+    assert_eq!(
+        enter_panicking(&terminal),
+        [
+            "enter",
+            "push keyboard",
+            "mouse on",
+            "pop keyboard",
+            "leave"
+        ]
+    );
+}
+
+#[test]
+fn a_mouse_capture_that_fails_is_an_error_and_is_undone() {
+    let terminal = FakeTerminal::failing_mouse();
+    let result = TerminalGuard::enter(setup(&terminal));
+    assert!(result.is_err());
+    assert_eq!(
+        terminal.calls(),
+        [
+            "enter",
+            "push keyboard",
+            "mouse on",
+            "pop keyboard",
+            "leave"
+        ]
+    );
+}
+
+#[test]
 fn restoring_early_leaves_only_once() {
     let terminal = FakeTerminal::enhanced();
     with_terminal(setup(&terminal), |restorer| {
@@ -150,7 +190,10 @@ fn keyboard_flags_are_pushed_and_popped_only_where_supported() {
     let enhanced = with_terminal(setup(&terminal), |r| r.keyboard_enhanced())
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!enhanced);
-    assert_eq!(terminal.calls(), ["enter", "leave"]);
+    assert_eq!(
+        terminal.calls(),
+        ["enter", "mouse on", "mouse off", "leave"]
+    );
 
     let terminal = FakeTerminal::enhanced();
     let enhanced = with_terminal(setup(&terminal), |r| r.keyboard_enhanced())

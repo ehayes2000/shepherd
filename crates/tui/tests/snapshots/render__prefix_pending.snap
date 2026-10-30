@@ -5,7 +5,7 @@ expression: "buffer(c.client(), &screens, 80, 24)"
 Buffer {
     area: Rect { x: 0, y: 0, width: 80, height: 24 },
     content: [
-        " shepherd              │$ cargo build                                           ",
+        " + New session         │$ cargo build                                           ",
         "▌▲ refactor            │   Compiling shepherd                                   ",
         "▌  local · —           │Allow rm -rf build? (y/n)                               ",
         "▌○ docs                │                                                        ",
@@ -32,8 +32,8 @@ Buffer {
     ],
     styles: [
         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
-        x: 1, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
-        x: 9, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 1, y: 0, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 14, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 23, y: 0, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
         x: 24, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 0, y: 1, fg: Yellow, bg: DarkGray, underline: Reset, modifier: NONE,

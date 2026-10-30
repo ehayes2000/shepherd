@@ -9,6 +9,8 @@ use shepherd::terminal::TerminalSetup;
 pub struct FakeTerminal {
     calls: Mutex<Vec<&'static str>>,
     fail_enter: bool,
+    /// Turning mouse capture on fails, after recording itself.
+    fail_mouse: bool,
     /// The outer terminal supports the kitty keyboard protocol.
     enhanced: bool,
 }
@@ -32,6 +34,15 @@ impl FakeTerminal {
     pub fn failing_enter() -> Arc<Self> {
         Arc::new(Self {
             fail_enter: true,
+            enhanced: true,
+            ..Self::default()
+        })
+    }
+
+    /// One whose `set_mouse_capture(true)` fails after recording itself.
+    pub fn failing_mouse() -> Arc<Self> {
+        Arc::new(Self {
+            fail_mouse: true,
             enhanced: true,
             ..Self::default()
         })
@@ -81,6 +92,9 @@ impl TerminalSetup for FakeTerminal {
 
     fn set_mouse_capture(&self, on: bool) -> io::Result<()> {
         self.record(if on { "mouse on" } else { "mouse off" });
+        if on && self.fail_mouse {
+            return Err(io::Error::other("no mouse"));
+        }
         Ok(())
     }
 }

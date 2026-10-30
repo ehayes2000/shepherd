@@ -4,16 +4,22 @@
 //! one key is a shepherd command (see [`crate::help::BINDINGS`]) and keys go back to the session; an unbound key
 //! cancels the prefix and is dropped, and the prefix again sends a literal `ctrl-b`. An open popup takes every key.
 //!
+//! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a left press that went down
+//! on the same control ([`Pointer`] remembers it), and the wheel scrolls the sidebar. Only a session that tracks the
+//! mouse gets mouse events in its pane.
+//!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
 //! be handled in order.
 
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Position, Rect};
 use shepherd_core::client::{Client, Focus, Intent, Popup};
-use shepherd_term::Modes;
+use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
-use crate::layout::{layout, pane_size};
+use crate::layout::{Target, hit, layout, pane_size, sidebar_rows};
 
 /// The prefix key. Configurable later.
 pub const PREFIX: char = 'b';
@@ -41,12 +47,27 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
     }
 }
 
+/// What the mouse is doing between events: the control a left press went down on.
+#[derive(Debug, Clone, Default)]
+pub struct Pointer {
+    pressed: Option<Target>,
+}
+
 /// What a terminal event means. `window` is the whole window, for placing mouse events.
-pub fn map_event(event: &Event, client: &Client, modes: &Modes, window: Rect) -> Vec<Intent> {
+pub fn map_event(
+    event: &Event,
+    client: &Client,
+    modes: &Modes,
+    window: Rect,
+    pointer: &mut Pointer,
+) -> Vec<Intent> {
     let to_terminal = client.popup().is_none() && client.focus() == Focus::Terminal;
     match event {
         Event::Key(key) => map_key(key, client, modes),
-        Event::Resize(cols, rows) => vec![Intent::Resize(pane_size(*cols, *rows))],
+        Event::Resize(cols, rows) => vec![
+            Intent::Resize(pane_size(*cols, *rows)),
+            Intent::SidebarRows(sidebar_rows(Rect::new(0, 0, *cols, *rows))),
+        ],
         Event::Paste(text) => match (client.popup(), client.focus()) {
             (Some(Popup::Rename { name, .. }), _) => {
                 let line = text.split(['\r', '\n']).next().unwrap_or_default();
@@ -62,15 +83,66 @@ pub fn map_event(event: &Event, client: &Client, modes: &Modes, window: Rect) ->
         Event::FocusGained | Event::FocusLost if to_terminal => {
             input(encode::focus(*event == Event::FocusGained, modes))
         }
-        Event::Mouse(mouse) if to_terminal => {
-            let pane = layout(window).pane;
-            if !pane.contains(Position::new(mouse.column, mouse.row)) {
-                return Vec::new();
-            }
-            let (col, row) = (mouse.column - pane.x, mouse.row - pane.y);
-            input(encode::mouse(mouse, col, row, modes))
+        Event::Mouse(mouse) => map_mouse(mouse, client, modes, window, pointer),
+        Event::FocusGained | Event::FocusLost => Vec::new(),
+    }
+}
+
+/// A mouse event. In the pane of a session that tracks the mouse (with keys going to it), it goes to the session.
+/// Otherwise a left press and release on the same control clicks it, and the wheel scrolls the sidebar. Under a popup
+/// the mouse does nothing.
+fn map_mouse(
+    mouse: &MouseEvent,
+    client: &Client,
+    modes: &Modes,
+    window: Rect,
+    pointer: &mut Pointer,
+) -> Vec<Intent> {
+    // Every left press or release ends the earlier press, whatever it lands on (a popup, a tracked pane, nothing), so
+    // only a press below can arm the next release.
+    let pressed = match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+            pointer.pressed.take()
         }
-        Event::FocusGained | Event::FocusLost | Event::Mouse(_) => Vec::new(),
+        _ => None,
+    };
+    if client.popup().is_some() {
+        return Vec::new();
+    }
+    let layout = layout(window);
+    let target = hit(&layout, client, mouse.column, mouse.row);
+    let tracked = modes.mouse.tracking != MouseTracking::Off;
+    if target == Some(Target::Terminal) && tracked && client.focus() == Focus::Terminal {
+        let (col, row) = (mouse.column - layout.pane.x, mouse.row - layout.pane.y);
+        return input(encode::mouse(mouse, col, row, modes));
+    }
+    let over_sidebar = layout
+        .sidebar
+        .contains(Position::new(mouse.column, mouse.row));
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            pointer.pressed = target;
+            Vec::new()
+        }
+        MouseEventKind::Up(MouseButton::Left) => match target {
+            Some(target) if pressed.as_ref() == Some(&target) => click(target, client),
+            _ => Vec::new(),
+        },
+        MouseEventKind::ScrollDown if over_sidebar => vec![Intent::ScrollSidebar(1)],
+        MouseEventKind::ScrollUp if over_sidebar => vec![Intent::ScrollSidebar(-1)],
+        _ => Vec::new(),
+    }
+}
+
+/// A left click on `target`.
+fn click(target: Target, client: &Client) -> Vec<Intent> {
+    match target {
+        Target::NewSession => vec![Intent::NewSession],
+        Target::Session(id) if client.selected() == Some(&id) => {
+            vec![Intent::SetFocus(Focus::Terminal)]
+        }
+        Target::Session(id) => vec![Intent::SelectSession(id), Intent::SetFocus(Focus::Terminal)],
+        Target::Terminal => vec![Intent::SetFocus(Focus::Terminal)],
     }
 }
 

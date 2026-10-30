@@ -214,7 +214,7 @@ fn a_host_that_reports_why_it_cannot_start_is_given_up_on_with_its_message() {
         FakeHostLauncher::new().failing(LaunchError::HostFailed(message.into()))
     });
     let terminal = FakeTerminal::enhanced();
-    let mut view = test_view(&terminal);
+    let mut view = test_view();
     let setup: Arc<dyn TerminalSetup> = terminal.clone();
     let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
     let Ok(Err(ClientError::Fatal(why))) = result else {
@@ -280,11 +280,10 @@ fn ch(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
 
-fn test_view(terminal: &Arc<FakeTerminal>) -> TerminalView<TestBackend> {
+fn test_view() -> TerminalView<TestBackend> {
     let backend =
         ratatui::Terminal::new(TestBackend::new(WINDOW.0, WINDOW.1)).unwrap_or_else(|e| match e {});
-    let setup: Arc<dyn TerminalSetup> = terminal.clone();
-    TerminalView::new(backend, setup)
+    TerminalView::new(backend)
 }
 
 /// The text of columns `x` of row `y` in the view's last frame, trailing blanks trimmed.
@@ -349,8 +348,7 @@ impl Harness {
 #[test]
 fn keys_create_and_switch_sessions_and_the_screen_shows_the_selected_one() {
     let mut h = Harness::ready();
-    let terminal = FakeTerminal::new();
-    let mut view = test_view(&terminal);
+    let mut view = test_view();
     let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
     let side = 0..pane.x - 1;
     let screen = pane.x..pane.right();
@@ -469,16 +467,10 @@ impl View for CountingView {
 #[test]
 fn mouse_goes_to_a_session_that_turned_mouse_mode_on() {
     let mut h = Harness::ready();
-    let terminal = FakeTerminal::new();
-    let mut view = test_view(&terminal);
     h.keys(&[ctrl('b'), ch('n')]);
-    h.draw(&mut view);
-    assert!(terminal.calls().is_empty(), "no capture until asked");
 
     // The fake host echoes input, so this turns on SGR mouse reporting in the session's terminal.
     h.user(Intent::Input(b"\x1b[?1000h\x1b[?1006h".to_vec()));
-    h.draw(&mut view);
-    assert_eq!(terminal.calls(), ["mouse on"]);
 
     let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
     h.term(Event::Mouse(MouseEvent {
@@ -489,11 +481,6 @@ fn mouse_goes_to_a_session_that_turned_mouse_mode_on() {
     }));
     let last = h.inputs().last().cloned();
     assert_eq!(last, Some(("s1".into(), "\x1b[<64;3;2M".into())));
-
-    // Selecting a session without mouse mode gives the mouse back to the outer terminal.
-    h.keys(&[ctrl('b'), ch('n')]);
-    h.draw(&mut view);
-    assert_eq!(terminal.calls(), ["mouse on", "mouse off"]);
 }
 
 #[test]
@@ -509,6 +496,61 @@ fn q_detaches_and_starting_again_reattaches_to_the_running_sessions() {
     again.settle();
     assert_eq!(again.runtime.client().connection(), &Connection::Ready);
     assert_eq!(again.runtime.client().sessions().len(), 2);
+}
+
+/// Where `label` is drawn in the view's last frame.
+fn find(view: &TerminalView<TestBackend>, label: &str) -> (u16, u16) {
+    let buf = view.terminal().backend().buffer();
+    let chars: Vec<String> = label.chars().map(String::from).collect();
+    let found = buf.area.positions().find(|p| {
+        chars.iter().enumerate().all(|(i, c)| {
+            let x = p.x + i as u16;
+            x < buf.area.right() && buf[(x, p.y)].symbol() == c
+        })
+    });
+    let p = found.unwrap_or_else(|| panic!("{label:?} not drawn: {buf:?}"));
+    (p.x, p.y)
+}
+
+impl Harness {
+    /// A left press and release at `(col, row)`.
+    fn click(&mut self, (column, row): (u16, u16)) {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            self.term(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+    }
+}
+
+#[test]
+fn clicks_create_sessions_and_pick_the_one_that_gets_typing() {
+    let mut h = Harness::ready();
+    let mut view = test_view();
+    h.draw(&mut view);
+    let button = find(&view, "+ New session");
+    h.click(button);
+    h.click(button);
+    h.draw(&mut view);
+    assert_eq!(h.host(FakeHost::sessions).len(), 2);
+
+    // Newest first: shell-2 (s2) is the first row, shell-1 (s1) the second.
+    let first = find(&view, "shell-2");
+    let second = find(&view, "shell-1");
+    h.click(second);
+    h.typed("one");
+    h.click(first);
+    h.typed("two");
+    assert_eq!(
+        (h.typed_into("s1"), h.typed_into("s2")),
+        ("one".into(), "two".into())
+    );
 }
 
 #[test]
@@ -696,13 +738,20 @@ fn a_flood_longer_than_a_batch_is_drawn_part_way() {
 // ---------- restoring the terminal ----------
 
 /// What a terminal that supports the kitty keyboard protocol goes through, start to finish.
-const RESTORED: [&str; 4] = ["enter", "push keyboard", "pop keyboard", "leave"];
+const RESTORED: [&str; 6] = [
+    "enter",
+    "push keyboard",
+    "mouse on",
+    "mouse off",
+    "pop keyboard",
+    "leave",
+];
 
 #[test]
 fn quitting_restores_the_terminal() {
     let mut h = Harness::new();
     let terminal = FakeTerminal::enhanced();
-    let mut view = test_view(&terminal);
+    let mut view = test_view();
     let events = h.runtime.events();
     events.terminal(Event::Key(ctrl('b')));
     events.terminal(Event::Key(ch('q')));
@@ -718,7 +767,7 @@ fn a_fatal_error_restores_the_terminal() {
         FakeHostLauncher::new().failing(LaunchError::SpawnFailed("no such file".into()))
     });
     let terminal = FakeTerminal::enhanced();
-    let mut view = test_view(&terminal);
+    let mut view = test_view();
     let setup: Arc<dyn TerminalSetup> = terminal.clone();
     let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
     assert!(
@@ -753,7 +802,7 @@ fn a_panic_while_drawing_restores_the_terminal() {
 fn a_terminal_that_cannot_be_read_stops_the_client_with_an_error_and_restores_it() {
     let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
     let terminal = FakeTerminal::enhanced();
-    let mut view = test_view(&terminal);
+    let mut view = test_view();
     h.runtime.events().terminal_failed("stdin closed".into());
     let setup: Arc<dyn TerminalSetup> = terminal.clone();
     let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
@@ -772,7 +821,7 @@ fn sighup_sigterm_and_sigint_each_quit_the_client_so_the_terminal_is_restored() 
         // No host ever answers, so only the signal can end the run.
         let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
         let terminal = FakeTerminal::enhanced();
-        let mut view = test_view(&terminal);
+        let mut view = test_view();
         forward_signals(h.runtime.events()).unwrap_or_else(|e| panic!("{e}"));
         signal_hook::low_level::raise(signal).unwrap_or_else(|e| panic!("{e}"));
         let setup: Arc<dyn TerminalSetup> = terminal.clone();
