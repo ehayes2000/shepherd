@@ -10,8 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
-| F35 display-safe text | building | task/f35-display-safe @ HEAD | 0 | – |
-| T36 spike host hot-swap | building (spike) | task/t36-hotswap-spike @ HEAD | 0 | docs only; read herdr's live handoff |
+| F35 display-safe text | building | task/f35-display-safe @ 0e68fe1 | 0 | – |
+| T36 spike host hot-swap | building (spike) | task/t36-hotswap-spike @ 0e68fe1 | 0 | docs only; read herdr's live handoff |
 | F32 atomic branch create | fixing (CHANGES) | task/f32-atomic-branch @ 740967d | 1 | Blocking: core.filesRefLockTimeout lets cleanup delete another process's lock → pin =0 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
