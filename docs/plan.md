@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | fixing | task/t38-archive-blobs @ 1e554e2 | 1 | Blocking: decompression bound untested; put must heal a corrupt existing blob. PM: cap 256 MiB |
+| T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | review | task/t38-archive-blobs @ 5c3d534 (on f1a6eba) | 2 | put heals; inflation counted; 256 MiB cap; umask test |
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | review | task/f45-standin-load @ 552c61f (on 3649a78) | 1 | cause: syspolicyd scans each new executable on first exec; fixtures symlink to one committed script |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
