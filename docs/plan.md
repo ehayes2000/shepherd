@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | builder fixing round-3 findings | `task/T11-host-runtime` @ 15ad661 | 3 | Fix: add `EventLog::read_batch(log, from, max)` (port, adapter, fake, contract) and batch the catch-up cursor (no quadratic re-reads); forget the conn when `queued_bytes` is None. PM-accepted: F14 for the `yes` backlog; the stall metric is per-line coarse (noted on T31) |
+| (none) | M1 merged; PM smoke run of the real binary in progress | – | – | – |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
@@ -32,6 +32,7 @@ Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the P
 | F09 | 1 | – |
 | F10 | 2 | symlinked log truncated an outside file |
 | T13 | 2 | ctrl-symbol keys typed digits, Shift+Enter submitted, paste end-marker, 7 surviving mutations |
+| T11 | 4 | 8 MB attach limit, stalled clients never dropped, quadratic re-reads, deadline starvation |
 | T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
 
 ## Milestones
@@ -270,6 +271,17 @@ acceptance:
 - `from_legacy_terminal` remaps whenever CONTROL is present (so ctrl+alt+\ reaches a kitty session as `CSI 92;7u`). Update the
   CONTROL|ALT row.
 scope: crates/shepherd, crates/tui
+
+### F17: Worktrees contract flake under heavy load
+status: todo
+depends: T20
+touches: adapters::worktrees (tests)
+goal: `worktrees::tests::remove_deletes_the_directory` failed once in 24 parallel runs (the `create` step at
+contracts/worktrees.rs:162 errored during a 215 s run at load average ~70).
+acceptance:
+- Reproduce and find the cause: a git timeout, or a real race. If it's a timeout under extreme load, make the fixture's bounds and
+  error reporting robust (print the actual error). If it's a race, fix it. Then 0 failures in 5 rounds of 24 parallel copies.
+scope: crates/adapters, crates/testkit
 
 ## Out of scope for the initial feature set
 
@@ -519,7 +531,7 @@ a stale socket file, and a live socket that is already bound (`AddrInUse`, never
 the same semantics. Copy the Pty contract template (macro, one test per case).
 
 ### T11: Host runtime
-status: in-progress
+status: done (e3b135e)
 depends: T04, T06, T08, T09, T10, F06, F09, F10
 touches: shepherd::host
 goal: The `shepherd host` daemon loop. Events come in, `Host::handle` runs, and commands execute through the ports.
