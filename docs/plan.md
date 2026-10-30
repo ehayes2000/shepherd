@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | T22 new session creates worktree | building | task/t22-session-worktree @ 36fb0da | 0 | – |
-| F15 client display polish | fixing (CHANGES) | task/f15-display-polish @ 8542e4c | 1 | Blocking: hold-deadline restart guard untested. Minors: retain, notice table, own-timeout test, collapsed notice, Unknown snapshot |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F15 | 2 | hold-deadline restart guard untested; notice table incomplete. Unknown-glyph snapshot deferred until a frame produces Unknown |
 | F27 | 1 | – (2 minors → F28) |
 | T21 | 2 | relative-path refusal passed for the wrong reason; refused-hello cwd and is_dir untested |
 | T19b | 2 | resume ignored a deleted cwd (portable-pty falls back to $HOME); exited guard untested |
@@ -272,7 +272,7 @@ acceptance:
 scope: crates/core (port), crates/adapters, crates/testkit, crates/shepherd
 
 ### F15: Client display polish from T13
-status: in-progress
+status: done (065f873)
 depends: T13
 touches: shepherd::client, core::client, tui
 goal: Small display gaps found while building the TUI.
