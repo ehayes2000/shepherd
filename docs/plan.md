@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F28 workspace repo root + ~ | building | task/f28-repo-root @ HEAD | 0 | – |
-| F31 real answers only | building | task/f31-answer-input @ HEAD | 0 | – |
+| F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
+| F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
 | T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
