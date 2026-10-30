@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T24 auto-naming | building | task/t24-auto-naming @ HEAD | 0 | – |
+| T25 close removes worktree | building | task/t25-close-cleanup @ HEAD | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
 | F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
 
@@ -1259,34 +1261,50 @@ Contract cases: exit code, output tail cap, timeout kills the group (no leaked c
 `sleep`), env and cwd, a missing cwd is an error.
 
 ### T24: Auto-naming
-status: ready
+status: in-progress
 depends: T05, T22
 touches: core::host (naming)
 goal: Sessions get useful names without effort. Manual rename always wins.
 acceptance:
-- New sessions get a placeholder name (`<workspace>-<n>`).
+- New sessions keep F22's placeholder name (`<profile>-<n>`).
 - After the first user prompt in the fold, if the session has never been manually renamed, append
   `_shepherd/session/renamed { auto: true }` with a deterministic slug built from the prompt's first meaningful words
   (stopwords dropped, max 4 words or 30 chars).
 - A manual rename sets `auto: false`, and auto-naming never overrides it afterwards.
 - Only the display name changes. The branch name is not renamed.
-scope: crates/core
-notes: LLM-generated names are a possible follow-up, behind a port, not in this task.
+scope: crates/core, crates/shepherd (only if the runtime must feed anything)
+notes: LLM-generated names are a possible follow-up, behind a port, not in this task. (binding) Pure core: the slug function
+is table-tested (unicode, punctuation, code blocks/paths in prompts, empty or all-stopword prompts → no rename). The rename is
+appended by the host when the fold sees the first user prompt (Claude `UserPromptSubmit` / Codex equivalent via the
+translators); exactly once per session; a host restart must not re-name (decide from the log). Display-name uniqueness is not
+required. Resume and replay keep the name.
 
-### T25: Close and cleanup
-status: ready
-depends: T22
-touches: core::host (close), core::client, tui::cleanup
+### T25: Close removes the worktree when it's safe
+status: in-progress
+depends: T22, T23
+touches: core::host (close), core::client, tui::popup
 goal: Worktrees go away when they should. No more pile of abandoned worktrees.
 acceptance:
-- Closing a session checks `Worktrees::status`. If the worktree is clean and merged or pushed, it is removed
-  automatically. If it is dirty or unpushed, a confirmation lists what would be lost (`remove anyway` / `keep worktree`).
-  The outcome is recorded in `session/closed.worktree_removed`.
-- `pre_remove` hooks run before removal.
-- A cleanup view (opened from a `Cleanup` button in the sidebar footer, decision 0014) lists managed worktrees with no open session and stale sessions (exited, and merged
-  for more than N days) with status columns, and supports bulk removal of the safe ones.
-- Removal never touches worktrees outside `~/.shepherd/worktrees`. This is tested with a path that tries to escape.
-scope: crates/core, crates/tui
+- Closing a session with a worktree checks `Worktrees::status` (through F27's Worker). If the worktree is clean and merged or
+  pushed, it is removed automatically after its `pre_remove` hooks (T23's config, run through the Commands port/worker like
+  post_create). If it is dirty or unpushed, the close confirmation lists what would be lost and offers `[Remove anyway]` /
+  `[Keep worktree]` / `[Cancel]` (clickable, decision 0014). The outcome is recorded in `session/closed.worktree_removed`.
+- A failing pre_remove hook keeps the worktree and says why (notice). A worktree status/remove error keeps it and says why.
+- Removal never touches anything outside `<root>/worktrees`; tested with a recorded path that tries to escape (`..`, symlink).
+scope: crates/core, crates/tui, crates/shepherd, crates/testkit
+notes: The session closes immediately (PTY killed) and shows "removing worktree…" on line 2 until the removal finishes;
+the close is recorded once the outcome is known. A session whose worktree is already gone closes normally.
+
+### T25b: Cleanup view
+status: todo
+depends: T25
+touches: core::client, tui::popup, core::host
+goal: Find and remove abandoned worktrees in bulk.
+acceptance:
+- A cleanup view (opened from a `Cleanup` button in the sidebar footer, decision 0014) lists managed worktrees with no open
+  session and stale sessions (exited, and merged for more than N days) with status columns, and supports bulk removal of the
+  safe ones (same safety rules and pre_remove hooks as T25). Hit tests click rendered cells; snapshot.
+scope: crates/core, crates/tui, crates/shepherd
 
 ### T26: Search and open
 status: todo
