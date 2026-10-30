@@ -392,6 +392,59 @@ impl GitWorktrees {
         })
     }
 
+    /// Where `path` is: its checkout's top level, git dir and common git dir, all with symlinks resolved.
+    fn checkout_of(&self, path: &Path) -> Result<Placement, WorktreeError> {
+        let args = [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ];
+        let out = self
+            .git(path, &args)
+            .map_err(|f| f.or_not_a_repo(path, "rev-parse"))?;
+        // Git prints resolved paths already; resolving again keeps the comparisons in `repo_root` from relying on it.
+        let canonical = |line: &str| {
+            std::fs::canonicalize(line).map_err(|e| WorktreeError::Other(format!("{line}: {e}")))
+        };
+        let mut lines = out.lines();
+        let (Some(top), Some(git_dir), Some(common)) = (lines.next(), lines.next(), lines.next())
+        else {
+            return Err(WorktreeError::Other(format!(
+                "unexpected rev-parse output {out:?}"
+            )));
+        };
+        Ok(Placement {
+            top: canonical(top)?,
+            git_dir: canonical(git_dir)?,
+            common: canonical(common)?,
+        })
+    }
+
+    /// The main checkout of the repo the linked worktree `place` belongs to, if it has one: see
+    /// [`Worktrees::repo_root`].
+    fn main_checkout(&self, place: &Placement) -> Result<Option<PathBuf>, WorktreeError> {
+        let out = self
+            .git(&place.top, &["worktree", "list", "--porcelain", "-z"])
+            .map_err(|f| f.into_error("worktree list"))?;
+        // NUL-terminated fields; an empty field ends an entry.
+        let first: Vec<&str> = out.split('\0').take_while(|f| !f.is_empty()).collect();
+        if first.contains(&"bare") {
+            return Ok(None);
+        }
+        let Some(listed) = first.iter().find_map(|f| f.strip_prefix("worktree ")) else {
+            return Ok(None);
+        };
+        let Ok(main) = self.checkout_of(Path::new(listed)) else {
+            return Ok(None);
+        };
+        let is_main = main.git_dir == main.common
+            && main.common == place.common
+            && std::fs::canonicalize(listed).is_ok_and(|p| p == main.top);
+        Ok(is_main.then_some(main.top))
+    }
+
     fn ref_exists(&self, dir: &Path, full_ref: &str) -> Result<bool, WorktreeError> {
         match self.git(dir, &["show-ref", "--verify", "--quiet", full_ref]) {
             Ok(_) => Ok(true),
@@ -456,6 +509,23 @@ impl GitWorktrees {
 }
 
 impl Worktrees for GitWorktrees {
+    /// A checkout whose git dir is the common dir is a main checkout (a submodule's is, too). A linked worktree's main
+    /// checkout is the first entry of `git worktree list`, unless that entry says the repo is bare, or it isn't a main
+    /// checkout of the same repo (e.g. it was deleted); then the worktree names itself.
+    ///
+    /// Known gap: git derives that entry from the common dir's location. For a linked worktree of a repo whose git dir
+    /// lives apart from its main checkout (`git init --separate-git-dir <store>/.git`), git can't know where the main
+    /// checkout is and lists `<store>`, which looks like a checkout of the repo, so `<store>` is returned.
+    fn repo_root(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        let place = self.checkout_of(path)?;
+        if place.git_dir != place.common
+            && let Some(main) = self.main_checkout(&place)?
+        {
+            return Ok(main);
+        }
+        Ok(place.top)
+    }
+
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError> {
         self.common_dir(repo.as_path())?;
         self.default_of(repo.as_path()).map(BranchName::new)
@@ -737,6 +807,14 @@ struct Leftovers {
     worktree: bool,
     /// The new branch's ref lock.
     branch_lock: bool,
+}
+
+/// A checkout as [`GitWorktrees::checkout_of`] finds it.
+#[derive(Debug)]
+struct Placement {
+    top: PathBuf,
+    git_dir: PathBuf,
+    common: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -1034,6 +1112,10 @@ mod tests {
             );
             RepoRef::new(tmp.join("other").join(REPO_NAME))
         }
+
+        fn resolved(&self, path: &Path) -> PathBuf {
+            std::fs::canonicalize(path).unwrap()
+        }
     }
 
     impl FsWorktreesFixture for GitFixture {
@@ -1107,6 +1189,80 @@ mod tests {
         vars.extend(env(tmp));
         vars.push((CHILD_VAR.into(), "1".into()));
         vars
+    }
+
+    /// A bare repo has no main checkout, so each of its worktrees names itself; the bare repo is not a checkout.
+    #[test]
+    fn repo_root_of_a_bare_repos_worktree_is_that_worktree() {
+        let f = GitFixture::new();
+        let origin = f.tmp().join("origin.git");
+        let wt = f.tmp().join("bare-wt");
+        f.git(
+            &origin,
+            &["worktree", "add", "--quiet", wt.to_str().unwrap(), DEFAULT],
+        );
+        let canonical = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(f.port.repo_root(&wt.join(SUBDIR)), Ok(canonical));
+        assert_eq!(
+            f.port.repo_root(&origin),
+            Err(WorktreeError::NotARepo(origin.clone()))
+        );
+    }
+
+    /// The bare-repo-plus-worktrees layout: a bare clone in `proj/.git`. `proj` is not a checkout, so it can't name
+    /// the repo, although its git dir is called `.git`.
+    #[test]
+    fn repo_root_of_a_worktree_of_a_bare_repo_named_dot_git_is_that_worktree() {
+        let f = GitFixture::new();
+        let proj = f.tmp().join("proj");
+        std::fs::create_dir(&proj).unwrap();
+        let origin = f.tmp().join("origin.git");
+        f.git(
+            &proj,
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                origin.to_str().unwrap(),
+                ".git",
+            ],
+        );
+        f.git(
+            &proj.join(".git"),
+            &["worktree", "add", "--quiet", "../wt", DEFAULT],
+        );
+        let wt = proj.join("wt");
+        let canonical = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(f.port.repo_root(&wt.join(SUBDIR)), Ok(canonical.clone()));
+        assert_eq!(f.port.repo_root(&canonical), Ok(canonical));
+        assert_eq!(
+            f.port.repo_root(&proj),
+            Err(WorktreeError::NotARepo(proj.clone()))
+        );
+    }
+
+    /// `git init --separate-git-dir <store>/.git <checkout>`: the checkout is the repo, not the git dir's parent.
+    #[test]
+    fn repo_root_of_a_checkout_with_a_separate_git_dir_is_the_checkout() {
+        let f = GitFixture::new();
+        let store = f.tmp().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let git_dir = store.join(".git");
+        f.git(
+            &f.tmp(),
+            &[
+                "clone",
+                "--quiet",
+                "--separate-git-dir",
+                git_dir.to_str().unwrap(),
+                "origin.git",
+                "sep",
+            ],
+        );
+        let sep = f.tmp().join("sep");
+        let canonical = std::fs::canonicalize(&sep).unwrap();
+        assert_eq!(f.port.repo_root(&sep.join(SUBDIR)), Ok(canonical.clone()));
+        assert_eq!(f.port.repo_root(&sep), Ok(canonical));
     }
 
     /// `status.showUntrackedFiles=no` would make untracked files invisible, and `git worktree remove` would then

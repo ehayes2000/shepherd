@@ -53,8 +53,9 @@ impl<W: Send + 'static> Worker<W> {
     }
 
     /// Queues `call`. Never blocks. Its result arrives wrapped as [`Worker::spawn`] was told; if it panics,
-    /// `panicked` does instead, so every call is answered. Hands `panicked` back if the thread is gone and the call
-    /// can't run.
+    /// `panicked` does instead. Hands `panicked` back if the thread is already gone and the call can't run. Not
+    /// guaranteed: if the thread dies after accepting a call (outside the call's own panic, which is caught), that call
+    /// and any queued behind it are dropped unanswered.
     pub fn submit(
         &self,
         call: impl FnOnce(&W) -> HostEvent + Send + 'static,
