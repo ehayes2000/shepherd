@@ -1,19 +1,21 @@
 //! The client's view state and decisions, through the public `shepherd_core::client` API.
 
+use std::path::{Path, PathBuf};
+
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind, Timestamp};
 use shepherd_core::client::{
-    Cell, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
+    Cell, Client, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
     MAX_CONNECT_ATTEMPTS, MenuEntry, MenuItem, Popup,
 };
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::ResumeUnavailable;
-use shepherd_core::ids::SessionId;
+use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, PROTOCOL_VERSION, SessionClose, SessionInput,
-    SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError,
+    SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError, WorkspaceSelect,
 };
 use shepherd_testkit::builders::{
     ClientDriver, claude_session_spec, log_entry, notifications, requests, ts,
@@ -1143,6 +1145,7 @@ fn connecting_says_hello_with_this_version_and_machine() {
         [ClientRequest::Hello(shepherd_core::wire::Hello {
             version: PROTOCOL_VERSION,
             machine: shepherd_core::ids::MachineId::new("m_client"),
+            cwd: None,
         })]
     );
 }
@@ -1546,5 +1549,163 @@ fn the_new_session_key_creates_the_default_profile_without_the_picker() {
     let mut c = with_profiles();
     let sent = c.user(Intent::NewSession);
     assert_eq!(bodies(&sent), [new_session(None)]);
+    assert_eq!(c.client().popup(), None);
+}
+
+// ---------- workspaces ----------
+
+fn workspace_popup(path: &str, error: Option<&str>) -> Popup {
+    Popup::Workspace {
+        path: path.to_owned(),
+        error: error.map(str::to_owned),
+    }
+}
+
+fn select_workspace(path: &str) -> ClientRequest {
+    ClientRequest::WorkspaceSelect(WorkspaceSelect {
+        path: path.to_owned(),
+    })
+}
+
+#[test]
+fn the_hello_carries_the_directory_the_client_started_in() {
+    let mut c = ClientDriver::from_client(
+        Client::new(MachineId::new("m_client")).with_cwd("/src/app/crates"),
+    );
+    c.handle(ClientEvent::Start);
+    let sent = c.handle(connected());
+    match &bodies(&sent)[..] {
+        [ClientRequest::Hello(hello)] => assert_eq!(hello.cwd.as_deref(), Some("/src/app/crates")),
+        other => panic!("expected a hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_client_knows_the_hosts_workspace_and_the_ones_used_before() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    assert_eq!(c.client().workspace(), None);
+    c.host().select_workspace("/src/a");
+    c.host().select_workspace("/src/b");
+    c.sync();
+    assert_eq!(c.client().workspace(), Some(Path::new("/src/b")));
+    assert_eq!(
+        c.client().workspaces(),
+        [PathBuf::from("/src/b"), PathBuf::from("/src/a")]
+    );
+}
+
+#[test]
+fn sessions_from_another_workspace_are_listed_and_marked() {
+    let mut c = ClientDriver::with_sessions(&["s0"]);
+    c.host().select_workspace("/src/a");
+    c.host().new_session("s1");
+    c.host().select_workspace("/src/b");
+    c.host().new_session("s2");
+    c.sync();
+    let marks: Vec<(String, bool)> = c
+        .client()
+        .sessions()
+        .iter()
+        .map(|s| (s.id.to_string(), s.elsewhere))
+        .collect();
+    // s0 predates any workspace, so it isn't from another one.
+    assert_eq!(
+        marks,
+        [
+            ("s2".to_owned(), false),
+            ("s1".to_owned(), true),
+            ("s0".to_owned(), false)
+        ]
+    );
+    assert_eq!(
+        c.client().sessions()[1].workspace.as_deref(),
+        Some(Path::new("/src/a"))
+    );
+}
+
+#[test]
+fn switching_back_unmarks_that_workspaces_sessions() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/a");
+    c.host().new_session("s1");
+    c.host().select_workspace("/src/b");
+    c.sync();
+    assert!(c.client().sessions()[0].elsewhere);
+    c.host().select_workspace("/src/a");
+    c.sync();
+    assert!(!c.client().sessions()[0].elsewhere);
+}
+
+#[test]
+fn clicking_the_workspace_opens_the_switcher_with_an_empty_path() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    assert_eq!(c.user(Intent::BeginWorkspace), []);
+    assert_eq!(c.client().popup(), Some(&workspace_popup("", None)));
+}
+
+#[test]
+fn opening_a_typed_path_asks_the_host_to_select_it_and_waits_for_the_answer() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/src/app".into()));
+    let sent = c.user(Intent::Confirm);
+    assert_eq!(bodies(&sent), [select_workspace("/src/app")]);
+    assert_eq!(c.client().popup(), Some(&workspace_popup("/src/app", None)));
+    c.answer(&sent, Ok(json!({})));
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn opening_an_empty_path_says_so_and_sends_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("  ".into()));
+    assert_eq!(c.user(Intent::Confirm), []);
+    assert_eq!(
+        c.client().popup(),
+        Some(&workspace_popup("  ", Some("type the path of a repo")))
+    );
+}
+
+#[test]
+fn a_path_the_host_refuses_shows_why_in_the_switcher() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/tmp/x".into()));
+    let sent = c.user(Intent::Confirm);
+    let why = "/tmp/x is not a repo";
+    c.answer(&sent, Err(WireError::InvalidParams(why.into())));
+    assert_eq!(
+        c.client().popup(),
+        Some(&workspace_popup("/tmp/x", Some(why)))
+    );
+    assert_eq!(c.client().notice(), None);
+    c.user(Intent::EditWorkspacePath("/tmp/y".into()));
+    assert_eq!(c.client().popup(), Some(&workspace_popup("/tmp/y", None)));
+}
+
+#[test]
+fn a_refusal_after_the_switcher_closed_is_a_notice() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/tmp/x".into()));
+    let sent = c.user(Intent::Confirm);
+    c.user(Intent::Dismiss);
+    c.answer(&sent, Err(WireError::InvalidParams("nope".into())));
+    assert_eq!(c.client().popup(), None);
+    assert!(c.client().notice().is_some_and(|n| n.contains("nope")));
+}
+
+#[test]
+fn picking_a_workspace_used_before_asks_the_host_to_select_it() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.host().select_workspace("/src/a");
+    c.host().select_workspace("/src/b");
+    c.sync();
+    assert_eq!(c.user(Intent::PickWorkspace("/src/a".into())), []);
+    c.user(Intent::BeginWorkspace);
+    let sent = c.user(Intent::PickWorkspace("/src/a".into()));
+    assert_eq!(bodies(&sent), [select_workspace("/src/a")]);
+    c.answer(&sent, Ok(json!({})));
     assert_eq!(c.client().popup(), None);
 }

@@ -13,7 +13,7 @@ use shepherd_core::wire::{
     HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
     PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose, SessionInput,
     SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
-    SubscribeFrom, WireError, code, decode_client_message, decode_host_message,
+    SubscribeFrom, WireError, WorkspaceSelect, code, decode_client_message, decode_host_message,
     encode_client_notification, encode_host_notification, encode_request, encode_response,
     negotiate,
 };
@@ -49,6 +49,12 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         ClientRequest::Hello(Hello {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_1"),
+            cwd: None,
+        }),
+        ClientRequest::Hello(Hello {
+            version: PROTOCOL_VERSION,
+            machine: MachineId::new("m_1"),
+            cwd: Some("/src/shepherd/crates".into()),
         }),
         ClientRequest::SessionNew(SessionNew {
             profile: Some("claude".into()),
@@ -72,6 +78,9 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         ClientRequest::HookFrame(Box::new(hook_frame())),
         ClientRequest::SessionResume(SessionResume {
             session: sid("s_1"),
+        }),
+        ClientRequest::WorkspaceSelect(WorkspaceSelect {
+            path: "/src/shepherd".into(),
         }),
     ]
 }
@@ -181,6 +190,7 @@ fn every_client_request_round_trips_through_encode_and_decode() {
 fn requests_are_jsonrpc_with_shepherd_method_names() {
     let expected = [
         "_shepherd/hello",
+        "_shepherd/hello",
         "_shepherd/session/new",
         "_shepherd/session/new",
         "_shepherd/session/rename",
@@ -189,6 +199,7 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/subscribe",
         "_shepherd/hook/frame",
         "_shepherd/session/resume",
+        "_shepherd/workspace/select",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -209,11 +220,47 @@ fn hello_params_are_version_and_machine() {
         body: ClientRequest::Hello(Hello {
             version: 1,
             machine: MachineId::new("m_7f"),
+            cwd: None,
         }),
     });
     assert_eq!(
         wire_json(&line)["params"],
         json!({ "version": 1, "machine": "m_7f" })
+    );
+}
+
+#[test]
+fn hello_carries_the_clients_cwd_and_a_hello_without_one_still_parses() {
+    let line = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::Hello(Hello {
+            version: 1,
+            machine: MachineId::new("m_7f"),
+            cwd: Some("/src/app".into()),
+        }),
+    });
+    assert_eq!(
+        wire_json(&line)["params"],
+        json!({ "version": 1, "machine": "m_7f", "cwd": "/src/app" })
+    );
+    let older = request_line(
+        "_shepherd/hello",
+        json!({ "version": 1, "machine": "m_7f" }),
+    );
+    let ClientRequest::Hello(hello) = request(&older).body else {
+        panic!("not a hello");
+    };
+    assert_eq!(hello.cwd, None);
+}
+
+#[test]
+fn workspace_select_params_are_the_path() {
+    let line = request_line("_shepherd/workspace/select", json!({ "path": "/src/app" }));
+    assert_eq!(
+        request(&line).body,
+        ClientRequest::WorkspaceSelect(WorkspaceSelect {
+            path: "/src/app".into()
+        })
     );
 }
 
@@ -478,6 +525,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("m_client"),
+        cwd: None,
     };
     assert_eq!(
         negotiate(&hello, &MachineId::new("m_host")),
@@ -598,6 +646,7 @@ fn hello() -> Hello {
     Hello {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("m_client"),
+        cwd: None,
     }
 }
 
@@ -606,6 +655,7 @@ fn hello_with_other_version_gets_a_typed_version_mismatch_response() {
     let hello = Hello {
         version: PROTOCOL_VERSION + 1,
         machine: MachineId::new("m_client"),
+        cwd: None,
     };
     let result = negotiate(&hello, &MachineId::new("m_host")).map(HostResult::Hello);
     let mismatch = WireError::VersionMismatch {

@@ -132,7 +132,7 @@ fn help_popup() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
-/// Right-clicked on the second line of `docs`, which isn't the selected session.
+/// Right-clicked on the first line of `docs` (under the two header lines), which isn't the selected session.
 #[test]
 fn context_menu_open() {
     let (mut c, screens) = three_sessions();
@@ -422,7 +422,7 @@ fn a_taller_window_than_the_client_was_told_still_fills_the_list_to_its_end() {
     let ids: Vec<String> = (1..=15).map(|i| format!("s{i}")).collect();
     let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     let mut c = ClientDriver::with_sessions(&ids);
-    // Told 5 rows fit, scrolled to the end (rows 10..15); drawn where 11 fit, before the resize arrives.
+    // Told 4 rows fit, scrolled to the end (rows 11..15); drawn where 10 fit, before the resize arrives.
     resized(&mut c, 80, 12);
     c.user(Intent::ScrollSidebar(100));
     let buf = buffer(c.client(), &Screens::new(), 80, 24);
@@ -435,9 +435,10 @@ fn a_taller_window_than_the_client_was_told_still_fills_the_list_to_its_end() {
             .trim_end()
             .to_owned()
     };
-    // The last 11 sessions, newest first: shell-11 at the top, down to shell-1 on the last row above the footer.
-    assert!(row_of(1).ends_with("shell-11"), "{buf:?}");
-    assert!(row_of(21).ends_with("shell-1"), "{buf:?}");
+    // The last 10 sessions, newest first: shell-10 under the two header lines, down to shell-1 on the last row that
+    // fits above the footer.
+    assert!(row_of(2).ends_with("shell-10"), "{buf:?}");
+    assert!(row_of(20).ends_with("shell-1"), "{buf:?}");
 }
 
 #[test]
@@ -446,8 +447,8 @@ fn the_selected_row_is_highlighted_across_both_lines() {
     let buf = buffer(c.client(), &screens, 80, 24);
     let side = layout(buf.area).sidebar;
     let highlighted = |y: u16| buf[(side.x + 2, y)].bg != Color::Reset;
-    // The newest session is at the top and selected.
-    let rows: Vec<bool> = (1..7).map(highlighted).collect();
+    // The newest session is at the top, under the two header lines, and selected.
+    let rows: Vec<bool> = (2..8).map(highlighted).collect();
     assert_eq!(rows, [true, true, false, false, false, false]);
 }
 
@@ -525,6 +526,8 @@ fn status_glyphs_follow_the_documented_table() {
         activity,
         attention: false,
         resume: Ok(()),
+        workspace: None,
+        elsewhere: false,
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),
@@ -548,4 +551,66 @@ fn status_glyphs_follow_the_documented_table() {
             "{activity:?}"
         );
     }
+}
+
+// ---------- workspaces ----------
+
+/// `login` was started in `/src/api`; then `/src/shepherd` was selected and `docs` and `refactor` (newest, selected)
+/// started there.
+fn two_workspaces() -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/api");
+    c.host().new_session("s1");
+    c.host().rename("s1", "login");
+    c.host().select_workspace("/src/shepherd");
+    c.host().new_session("s2");
+    c.host().rename("s2", "docs");
+    c.host().new_session("s3");
+    c.host().rename("s3", "refactor");
+    c.sync();
+    c
+}
+
+#[test]
+fn the_workspace_heads_the_sidebar_and_other_workspaces_sessions_are_dimmed() {
+    let c = two_workspaces();
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 12));
+}
+
+#[test]
+fn workspace_switcher() {
+    let mut c = two_workspaces();
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/src/new".into()));
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 24));
+}
+
+#[test]
+fn workspace_switcher_with_a_refused_path() {
+    let mut c = two_workspaces();
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/tmp/x".into()));
+    let sent = c.user(Intent::Confirm);
+    c.answer(
+        &sent,
+        Err(WireError::InvalidParams("/tmp/x is not a repo".into())),
+    );
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 24));
+}
+
+#[test]
+fn the_workspace_switcher_puts_the_cursor_after_the_path() {
+    let mut c = two_workspaces();
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/src".into()));
+    let terminal = draw(c.client(), &Screens::new(), 80, 24);
+    assert!(terminal.backend().cursor_visible());
+    let buf = terminal.backend().buffer().clone();
+    // The listed workspaces go on past `/src`; the typed path doesn't.
+    let typed = position_of(&buf, "/src ");
+    assert_eq!(
+        terminal.backend().cursor_position(),
+        Position::new(typed.x + 4, typed.y),
+        "{buf:?}"
+    );
 }

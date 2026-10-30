@@ -312,6 +312,7 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
     let req = client.request(ClientRequest::Hello(Hello {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("laptop"),
+        cwd: None,
     }));
     h.step();
     assert_eq!(
@@ -340,6 +341,7 @@ fn hello_tells_the_client_to_ring_the_bell_when_the_config_says_so() {
     let req = client.request(ClientRequest::Hello(Hello {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("laptop"),
+        cwd: None,
     }));
     h.step();
     let result = response(&client.take(), &req).expect("hello ok");
@@ -353,6 +355,7 @@ fn hello_with_another_version_is_a_version_mismatch() {
     let req = client.request(ClientRequest::Hello(Hello {
         version: 99,
         machine: MachineId::new("laptop"),
+        cwd: None,
     }));
     h.step();
     assert_eq!(

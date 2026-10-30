@@ -273,8 +273,8 @@ fn a_resize_reports_the_sessions_pane_size_and_how_many_sessions_the_sidebar_sho
                 cols: pane.width,
                 rows: pane.height
             }),
-            // 40 lines: the header, the footer, and 19 sessions of two lines.
-            Intent::SidebarRows(19),
+            // 40 lines: the two header lines, the footer, and 18 sessions of two lines.
+            Intent::SidebarRows(18),
         ]
     );
 }
@@ -366,4 +366,50 @@ fn mouse_is_dropped_under_a_popup_or_after_the_prefix() {
     let mut c = client();
     c.user(Intent::ShowHelp);
     assert_eq!(events(&c, click(pane.x, 0), sgr_mouse()), []);
+}
+
+// ---------- the workspace switcher ----------
+
+/// The workspace switcher open with `path` typed.
+fn switching(path: &str) -> ClientDriver {
+    let mut c = client();
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath(path.to_owned()));
+    c
+}
+
+#[test]
+fn typing_in_the_workspace_switcher_edits_the_path() {
+    let c = switching("/src/ap");
+    assert_eq!(
+        keys(&c, ch('p')),
+        [Intent::EditWorkspacePath("/src/app".into())]
+    );
+    assert_eq!(
+        keys(&c, press(KeyCode::Backspace)),
+        [Intent::EditWorkspacePath("/src/a".into())]
+    );
+    assert_eq!(
+        keys(&c, ctrl('u')),
+        [Intent::EditWorkspacePath(String::new())]
+    );
+}
+
+#[test]
+fn enter_opens_the_typed_workspace_and_esc_dismisses_the_switcher() {
+    let c = switching("/src/app");
+    assert_eq!(keys(&c, press(KeyCode::Enter)), [Intent::Confirm]);
+    assert_eq!(keys(&c, press(KeyCode::Esc)), [Intent::Dismiss]);
+}
+
+#[test]
+fn a_paste_into_the_workspace_switcher_appends_its_first_line() {
+    assert_eq!(
+        events(
+            &switching("/src/"),
+            Event::Paste("app\nrest".into()),
+            Modes::default()
+        ),
+        [Intent::EditWorkspacePath("/src/app".into())]
+    );
 }

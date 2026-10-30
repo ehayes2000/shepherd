@@ -20,7 +20,7 @@ use std::sync::Mutex;
 
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    JsonlEventLog, PortablePty, TomlConfigSource, UnixLinkError, UnixListenLink,
+    GitWorktrees, JsonlEventLog, PortablePty, TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
 use shepherd_core::ports::{ConfigSource, LogError, LogId};
@@ -33,7 +33,7 @@ pub use runtime::{
 };
 
 /// The host runtime on the real adapters.
-pub type RealHost = HostRuntime<PortablePty, UnixListenLink, JsonlEventLog, RealEnv>;
+pub type RealHost = HostRuntime<PortablePty, GitWorktrees, UnixListenLink, JsonlEventLog, RealEnv>;
 
 /// Files under the root.
 pub const SOCKET_FILE: &str = "host.sock";
@@ -41,6 +41,8 @@ pub const LOG_FILE: &str = "host.log";
 pub const CONFIG_FILE: &str = "config.toml";
 /// Each session's run files (e.g. Claude Code's generated settings) go in `<root>/run/<session>/`.
 pub const RUN_DIR: &str = "run";
+/// Managed worktrees go in `<root>/worktrees/<repo>/<name>`.
+pub const WORKTREES_DIR: &str = "worktrees";
 
 /// Why the host couldn't start. Each message says what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,6 +146,7 @@ fn open_inner(
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
     let pty = PortablePty::new(tx.pty_sink());
+    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
     let settings = RuntimeSettings {
         config,
         home,
@@ -151,7 +154,8 @@ fn open_inner(
         shepherd,
         socket: root.join(SOCKET_FILE),
     };
-    HostRuntime::start(pty, link, log, RealEnv, settings, tx, rx).map_err(|e| log_error(root, e))
+    HostRuntime::start(pty, worktrees, link, log, RealEnv, settings, tx, rx)
+        .map_err(|e| log_error(root, e))
 }
 
 fn log_error(root: &Path, error: LogError) -> HostStartError {

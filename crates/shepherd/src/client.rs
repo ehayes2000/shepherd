@@ -248,6 +248,11 @@ where
         &self.client
     }
 
+    /// Tells the host, in each hello, that the client started in `cwd`. Call before [`ClientRuntime::start`].
+    pub fn set_cwd(&mut self, cwd: impl Into<String>) {
+        self.client = self.client.clone().with_cwd(cwd);
+    }
+
     /// The terminal of `session`, once it has printed anything.
     pub fn screen(&self, session: &SessionId) -> Option<&Screen> {
         self.screens.get(session)
@@ -555,6 +560,13 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
     let start = Instant::now();
     let clock = monotonic(jiff::Timestamp::now(), move || start.elapsed());
     let mut runtime = ClientRuntime::new(machine, connect, launcher, clock);
+    // A cwd that can't be read or isn't UTF-8 just isn't sent: the host then selects no workspace from it.
+    if let Some(cwd) = std::env::current_dir()
+        .ok()
+        .and_then(|d| d.into_os_string().into_string().ok())
+    {
+        runtime.set_cwd(cwd);
+    }
     let events = runtime.events();
     forward_signals(events.clone()).map_err(terminal_error)?;
     let backend =

@@ -1,6 +1,7 @@
 //! The host session registry, through the public `shepherd_core::host` API.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -8,7 +9,7 @@ use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, 
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo, ResumeSpec, ResumeTarget,
-    ResumeUnavailable,
+    ResumeUnavailable, WorkspaceAsk,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -429,6 +430,7 @@ fn pty_exit_appends_agent_exited() {
             created: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
             exited: true,
             resume: Err(ResumeUnavailable::NotAnAgent),
+            workspace: None,
         }]
     );
 }
@@ -823,6 +825,7 @@ enum Op {
     Exit(u8, Option<i32>),
     Input(u8),
     Resize(u8),
+    SelectWorkspace(u8),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -833,7 +836,8 @@ fn op() -> impl Strategy<Value = Op> {
         id.clone().prop_map(Op::Close),
         (id.clone(), proptest::option::of(-1i32..3)).prop_map(|(i, c)| Op::Exit(i, c)),
         id.clone().prop_map(Op::Input),
-        id.prop_map(Op::Resize),
+        id.clone().prop_map(Op::Resize),
+        id.prop_map(Op::SelectWorkspace),
     ]
 }
 
@@ -865,6 +869,9 @@ fn run(ops: Vec<Op>) -> HostDriver {
                     session: sid(&id(i)),
                     size: PtySize { cols: 10, rows: 5 },
                 });
+            }
+            Op::SelectWorkspace(i) => {
+                select(&mut host, &format!("/src/w{i}"));
             }
         }
     }
@@ -1017,4 +1024,209 @@ proptest! {
             prop_assert!(host.host().sessions().iter().all(|s| Some(&s.id) != id.as_ref()));
         }
     }
+}
+
+// ---------- workspaces ----------
+
+fn path(p: &str) -> PathBuf {
+    PathBuf::from(p)
+}
+
+/// The draft the host appends to its own log for a `_shepherd/*` frame.
+fn host_append(method: &str, params: Value) -> HostCommand {
+    let frame = Frame::from_value(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+        .unwrap_or_else(|e| panic!("bad frame: {e}"));
+    HostCommand::Append(Box::new(FrameDraft::new(
+        frame,
+        Source::new(SourceKind::Shepherd, None),
+        Dir::Internal,
+        None,
+    )))
+}
+
+/// A user's select of `p`, its probe found to be the repo `p`. Returns the commands of the probe's result.
+fn select(host: &mut HostDriver, p: &str) -> (ReplyTo, Vec<HostCommand>) {
+    let reply = host.reply_to();
+    let ask = WorkspaceAsk::Select(reply);
+    let probe = host.handle(HostEvent::SelectWorkspace { ask, path: path(p) });
+    assert_eq!(
+        probe,
+        vec![HostCommand::ProbeWorkspace { ask, path: path(p) }]
+    );
+    let cmds = host.handle(HostEvent::WorkspaceProbed {
+        ask,
+        repo: Ok(path(p)),
+    });
+    (reply, cmds)
+}
+
+#[test]
+fn selecting_a_workspace_probes_it_then_appends_selected_to_the_host_log_and_acks() {
+    let mut host = HostDriver::new();
+    let (reply, cmds) = select(&mut host, "/src/app");
+    assert_eq!(
+        cmds,
+        vec![
+            host_append(
+                "_shepherd/workspace/selected",
+                json!({ "repo": "/src/app" })
+            ),
+            HostCommand::Reply {
+                to: reply,
+                result: Ok(HostResult::Ack),
+            },
+        ]
+    );
+    assert_eq!(host.host().workspace(), Some(path("/src/app").as_path()));
+}
+
+#[test]
+fn a_select_whose_probe_fails_replies_why_and_selects_nothing() {
+    let mut host = HostDriver::new();
+    select(&mut host, "/src/app");
+    let reply = host.reply_to();
+    let cmds = host.handle(HostEvent::WorkspaceProbed {
+        ask: WorkspaceAsk::Select(reply),
+        repo: Err("/tmp/x is not a repo".to_owned()),
+    });
+    assert_eq!(
+        cmds,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Err(WireError::InvalidParams("/tmp/x is not a repo".to_owned())),
+        }]
+    );
+    assert_eq!(host.host().workspace(), Some(path("/src/app").as_path()));
+}
+
+#[test]
+fn selecting_the_current_workspace_again_acks_without_appending() {
+    let mut host = HostDriver::new();
+    select(&mut host, "/src/app");
+    // The same path, spelled with a trailing slash: paths compare as paths.
+    let (reply, cmds) = select(&mut host, "/src/app/");
+    assert_eq!(
+        cmds,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Ok(HostResult::Ack),
+        }]
+    );
+}
+
+#[test]
+fn workspaces_lists_each_one_used_once_most_recent_first_and_survives_replay() {
+    let mut host = HostDriver::new();
+    select(&mut host, "/src/a");
+    select(&mut host, "/src/b");
+    select(&mut host, "/src/a");
+    select(&mut host, "/src/c");
+    assert_eq!(
+        host.host().workspaces(),
+        [path("/src/c"), path("/src/a"), path("/src/b")]
+    );
+    assert_eq!(host.host().workspace(), Some(path("/src/c").as_path()));
+    assert_eq!(replay(&host), *host.host());
+}
+
+#[test]
+fn a_clients_cwd_is_probed_only_while_no_workspace_is_selected() {
+    let mut host = HostDriver::new();
+    let cwd = |host: &mut HostDriver| {
+        host.handle(HostEvent::SelectWorkspace {
+            ask: WorkspaceAsk::ClientCwd,
+            path: path("/src/app/crates"),
+        })
+    };
+    assert_eq!(
+        cwd(&mut host),
+        vec![HostCommand::ProbeWorkspace {
+            ask: WorkspaceAsk::ClientCwd,
+            path: path("/src/app/crates"),
+        }]
+    );
+    select(&mut host, "/src/other");
+    assert_eq!(cwd(&mut host), vec![]);
+}
+
+#[test]
+fn a_clients_cwd_in_a_repo_is_selected_without_a_reply() {
+    let mut host = HostDriver::new();
+    let cmds = host.handle(HostEvent::WorkspaceProbed {
+        ask: WorkspaceAsk::ClientCwd,
+        repo: Ok(path("/src/app")),
+    });
+    assert_eq!(
+        cmds,
+        vec![host_append(
+            "_shepherd/workspace/selected",
+            json!({ "repo": "/src/app" })
+        )]
+    );
+    assert_eq!(host.host().workspace(), Some(path("/src/app").as_path()));
+}
+
+#[test]
+fn a_clients_cwd_never_replaces_a_selection_and_a_failed_probe_is_silent() {
+    let mut host = HostDriver::new();
+    let failed = host.handle(HostEvent::WorkspaceProbed {
+        ask: WorkspaceAsk::ClientCwd,
+        repo: Err("/home/me is not a repo".to_owned()),
+    });
+    assert_eq!(failed, vec![]);
+    assert_eq!(host.host().workspace(), None);
+    select(&mut host, "/src/app");
+    let late = host.handle(HostEvent::WorkspaceProbed {
+        ask: WorkspaceAsk::ClientCwd,
+        repo: Ok(path("/src/other")),
+    });
+    assert_eq!(late, vec![]);
+    assert_eq!(host.host().workspace(), Some(path("/src/app").as_path()));
+}
+
+#[test]
+fn new_sessions_record_the_current_workspace() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    select(&mut host, "/src/app");
+    let cmds = host.new_session("s2");
+    assert_eq!(
+        cmds[0],
+        append(
+            "s2",
+            "_shepherd/session/created",
+            json!({ "name": "shell-2", "workspace": "/src/app", "agent": "shell", "profile": "shell", "cwd": "/home/test" })
+        )
+    );
+    let workspaces: Vec<Option<PathBuf>> = host
+        .host()
+        .sessions()
+        .into_iter()
+        .map(|s| s.workspace)
+        .collect();
+    assert_eq!(workspaces, [Some(path("/src/app")), None]);
+}
+
+#[test]
+fn a_probed_repo_whose_path_is_not_utf8_is_refused_and_selects_nothing() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut host = HostDriver::new();
+    let reply = host.reply_to();
+    let repo = PathBuf::from(std::ffi::OsStr::from_bytes(b"/src/\xff"));
+    let cmds = host.handle(HostEvent::WorkspaceProbed {
+        ask: WorkspaceAsk::Select(reply),
+        repo: Ok(repo),
+    });
+    assert_eq!(appends(&cmds), 0);
+    assert!(
+        matches!(
+            cmds.as_slice(),
+            [HostCommand::Reply {
+                result: Err(WireError::InvalidParams(_)),
+                ..
+            }]
+        ),
+        "{cmds:?}"
+    );
+    assert_eq!(host.host().workspace(), None);
 }

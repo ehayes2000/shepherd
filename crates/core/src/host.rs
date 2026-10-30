@@ -6,6 +6,13 @@
 //! `agent/started` (the latest one wins: `/clear` starts a new agent session in the same process). Resuming appends
 //! the host's own `agent/started` and spawns the agent again in the same session, so its log continues.
 //!
+//! Workspace: the repo new sessions belong to, one per host. Selecting one appends `workspace/selected` to the host
+//! log, so the last selection is the workspace on the next start, and every repo selected before is listed by
+//! [`Host::workspaces`]. Whether a path is a repo is asked of the world: a select is first a
+//! [`HostCommand::ProbeWorkspace`], whose answer comes back as [`HostEvent::WorkspaceProbed`]. A client's own cwd (from
+//! its hello) is probed only while no workspace is selected, and selected only if there still is none. Workspaces are
+//! paths as the probe resolved them, compared as paths. Each `session/created` records the workspace it was created in.
+//!
 //! Host state is only a fold over `_shepherd/*` frames (`docs/acpp.md`, "State is a fold"). [`Host::handle`] reads
 //! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
 //! seals, appends, and hands back to [`Host::apply`].
@@ -13,13 +20,13 @@
 pub mod launch;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
-    SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp,
+    SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
 };
 use crate::agents::Translators;
 use crate::config::AgentKind;
@@ -95,6 +102,15 @@ pub enum ResumeUnavailable {
     NoAgentSession,
 }
 
+/// Who asked for a workspace to be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceAsk {
+    /// A client's `_shepherd/workspace/select`: always selects a repo, and is answered.
+    Select(ReplyTo),
+    /// A client's cwd, from its hello: selected only while no workspace is, and never answered.
+    ClientCwd,
+}
+
 /// Something that happened, for the host to decide on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
@@ -143,6 +159,17 @@ pub enum HostEvent {
         session: SessionId,
         spec: ResumeSpec,
     },
+    /// `path` should be the workspace, see [`WorkspaceAsk`].
+    SelectWorkspace {
+        ask: WorkspaceAsk,
+        path: PathBuf,
+    },
+    /// The answer to a [`HostCommand::ProbeWorkspace`]: the repo the path resolved to, or why it isn't one, for the
+    /// user.
+    WorkspaceProbed {
+        ask: WorkspaceAsk,
+        repo: Result<PathBuf, String>,
+    },
 }
 
 /// Something for the runtime to do.
@@ -177,6 +204,12 @@ pub enum HostCommand {
         to: ReplyTo,
         result: Result<HostResult, WireError>,
     },
+    /// Find out whether `path` is in a git repo, resolving `..` and symlinks, and feed the answer back as
+    /// [`HostEvent::WorkspaceProbed`] with the same `ask`.
+    ProbeWorkspace {
+        ask: WorkspaceAsk,
+        path: PathBuf,
+    },
 }
 
 /// A session as [`Host::sessions`] lists it.
@@ -190,6 +223,8 @@ pub struct HostSession {
     pub exited: bool,
     /// Whether it can be resumed, see [`Host::resume_target`].
     pub resume: Result<(), ResumeUnavailable>,
+    /// The workspace it was created in. `None` if there was none, or it predates workspaces.
+    pub workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +240,7 @@ struct Entry {
     cwd: Option<PathBuf>,
     /// The agent's own session id, from the latest `agent/started` that had one.
     agent_session_id: Option<String>,
+    workspace: Option<PathBuf>,
 }
 
 impl Entry {
@@ -252,6 +288,8 @@ pub struct Host {
     /// Every session ever created, closed ones included, so a closed id stays unknown to requests and still counts
     /// towards placeholder names.
     sessions: BTreeMap<SessionId, Entry>,
+    /// Every workspace ever selected, the current one (the latest selected) first.
+    workspaces: Vec<PathBuf>,
 }
 
 impl Host {
@@ -270,8 +308,19 @@ impl Host {
                 created: e.created.clone(),
                 exited: e.exited,
                 resume: e.resume_target().map(|_| ()),
+                workspace: e.workspace.clone(),
             })
             .collect()
+    }
+
+    /// The selected workspace, if any.
+    pub fn workspace(&self) -> Option<&Path> {
+        self.workspaces.first().map(PathBuf::as_path)
+    }
+
+    /// Every workspace selected on this host, each once, the current one first and then by when it was last selected.
+    pub fn workspaces(&self) -> &[PathBuf] {
+        &self.workspaces
     }
 
     /// What resuming open session `id` runs, or why it can't be resumed. `None` for a session that isn't open.
@@ -298,7 +347,7 @@ impl Host {
                     .unwrap_or_else(|| format!("{}-{}", spec.profile, self.sessions.len() + 1));
                 let created = ShepherdFrame::SessionCreated(SessionCreated {
                     name,
-                    workspace: None,
+                    workspace: self.workspace().and_then(Path::to_str).map(str::to_owned),
                     worktree: None,
                     branch: None,
                     agent: Some(spec.agent.as_str().to_owned()),
@@ -426,7 +475,47 @@ impl Host {
                     ack(reply),
                 ]
             }
+            HostEvent::SelectWorkspace {
+                ask: WorkspaceAsk::ClientCwd,
+                ..
+            } if self.workspace().is_some() => Vec::new(),
+            HostEvent::SelectWorkspace { ask, path } => {
+                vec![HostCommand::ProbeWorkspace { ask, path }]
+            }
+            HostEvent::WorkspaceProbed { ask, repo } => self.workspace_probed(ask, repo),
         }
+    }
+
+    fn workspace_probed(
+        &self,
+        ask: WorkspaceAsk,
+        repo: Result<PathBuf, String>,
+    ) -> Vec<HostCommand> {
+        let reply = match ask {
+            WorkspaceAsk::Select(reply) => Some(reply),
+            WorkspaceAsk::ClientCwd if self.workspace().is_some() => return Vec::new(),
+            WorkspaceAsk::ClientCwd => None,
+        };
+        let repo = repo.and_then(|repo| match repo.to_str() {
+            Some(text) => Ok((text.to_owned(), repo)),
+            None => Err(format!("{} is not a UTF-8 path", repo.display())),
+        });
+        let mut commands = Vec::new();
+        match repo {
+            Ok((_, repo)) if self.workspace() == Some(repo.as_path()) => {}
+            Ok((text, _)) => {
+                let selected = ShepherdFrame::WorkspaceSelected(WorkspaceSelected { repo: text });
+                commands.push(append_host(selected));
+            }
+            Err(why) => {
+                if let Some(reply) = reply {
+                    commands.push(reply_err(reply, WireError::InvalidParams(why)));
+                }
+                return commands;
+            }
+        }
+        commands.extend(reply.map(ack));
+        commands
     }
 
     /// Folds one log entry into the state. Entries the registry doesn't read change nothing, and no entry panics.
@@ -435,7 +524,15 @@ impl Host {
     /// the shell ran, and the shell is still running. Likewise only the host's own `agent/started` (a resume) marks
     /// it running again. An `agent/started` from any source records its agent session id.
     pub fn apply(&mut self, env: &Envelope) {
-        let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
+        let Frame::Shepherd(message) = env.frame() else {
+            return;
+        };
+        let Some(id) = env.session() else {
+            if let ShepherdFrame::WorkspaceSelected(selected) = message.body() {
+                let repo = PathBuf::from(&selected.repo);
+                self.workspaces.retain(|w| *w != repo);
+                self.workspaces.insert(0, repo);
+            }
             return;
         };
         match message.body() {
@@ -452,6 +549,7 @@ impl Host {
                     profile: created.profile.clone(),
                     cwd: created.cwd.as_ref().map(PathBuf::from),
                     agent_session_id: None,
+                    workspace: created.workspace.as_ref().map(PathBuf::from),
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -502,6 +600,16 @@ fn append(id: &SessionId, frame: ShepherdFrame) -> HostCommand {
         Source::new(SourceKind::Shepherd, None),
         Dir::Internal,
         Some(id.clone()),
+    )))
+}
+
+/// An `Append` of a frame the host produces about itself, to the host log.
+fn append_host(frame: ShepherdFrame) -> HostCommand {
+    HostCommand::Append(Box::new(FrameDraft::new(
+        frame.to_frame(),
+        Source::new(SourceKind::Shepherd, None),
+        Dir::Internal,
+        None,
     )))
 }
 

@@ -1,5 +1,5 @@
-//! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, and the
-//! profile picker for a new session.
+//! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, the
+//! profile picker for a new session, and the workspace switcher.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
@@ -50,6 +50,16 @@ const PICK_PROMPT: &str = "Which agent should the session run?";
 /// How the default profile's row is marked.
 const DEFAULT_MARK: &str = "(default)";
 
+/// The workspace switcher's lines: above its rows of workspaces used before, then above its path input.
+const USED_BEFORE: &str = "Used before:";
+const OPEN_PROMPT: &str = "Open a repo by path:";
+const OPEN_HINT: &str = "enter to open · esc to cancel";
+/// How the current workspace's row is marked.
+const CURRENT_MARK: &str = "(current)";
+const SWITCHER_WIDTH: u16 = 56;
+/// The switcher's lines below its rows: the prompt, the input, the error or hint, and the buttons.
+const SWITCHER_TAIL: u16 = 4;
+
 /// A clickable part of a popup.
 pub(crate) struct Control {
     pub area: Rect,
@@ -86,6 +96,7 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
         ),
         Popup::Menu { at, .. } => menu(&client.menu(), *at, window),
         Popup::PickProfile => pick_profile(client, window),
+        Popup::Workspace { .. } => switcher(client, window),
     })
 }
 
@@ -197,6 +208,77 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
     placed
 }
 
+/// The workspace switcher: the workspaces used before under a line saying so, each a whole line of the dialog with
+/// the current one marked; then the path prompt, the input, its error or a hint, and `[Open]` `[Cancel]`.
+fn switcher(client: &Client, window: Rect) -> Placed {
+    let used = client.workspaces();
+    let list = if used.is_empty() {
+        0
+    } else {
+        used.len() as u16 + 1
+    };
+    let height = list + SWITCHER_TAIL + 2;
+    let mut placed = dialog(
+        centered(window, SWITCHER_WIDTH, height),
+        &[("[Open]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
+    );
+    let inside = inner(placed.area);
+    let rows = (inside.y + 1)..inside.bottom().saturating_sub(SWITCHER_TAIL);
+    for (path, y) in used.iter().zip(rows) {
+        let mark = if client.workspace() == Some(path.as_path()) {
+            CURRENT_MARK
+        } else {
+            ""
+        };
+        let label = format!(" {}  {mark}", path.display());
+        placed.controls.push(Control {
+            area: Rect::new(inside.x, y, inside.width, 1),
+            target: Target::WorkspaceRow(path.clone()),
+            label: label.trim_end().to_owned(),
+        });
+    }
+    placed
+}
+
+/// Draws the switcher's text in `body`, the dialog above its buttons: the line above the rows, the prompt, the typed
+/// `path`, and `error` or a hint. Returns where the cursor goes.
+fn switcher_body(
+    client: &Client,
+    path: &str,
+    error: Option<&str>,
+    body: Rect,
+    buf: &mut Buffer,
+) -> Option<Position> {
+    if body.width < 2 || body.height < SWITCHER_TAIL - 1 {
+        return None;
+    }
+    let width = usize::from(body.width);
+    let gray = Style::new().fg(Color::Gray);
+    if !client.workspaces().is_empty() && body.height > SWITCHER_TAIL - 1 {
+        buf.set_stringn(body.x, body.y, USED_BEFORE, width, gray);
+    }
+    let bottom = body.bottom();
+    buf.set_stringn(body.x, bottom - 3, OPEN_PROMPT, width, gray);
+    let cursor = text_input(path, Rect::new(body.x, bottom - 2, body.width, 1), buf);
+    match error {
+        Some(error) => buf.set_stringn(
+            body.x,
+            bottom - 1,
+            error,
+            width,
+            Style::new().fg(Color::Red),
+        ),
+        None => buf.set_stringn(
+            body.x,
+            bottom - 1,
+            OPEN_HINT,
+            width,
+            gray.add_modifier(Modifier::DIM),
+        ),
+    };
+    cursor
+}
+
 /// Draws the open popup, if any, over `area`. Returns where the cursor goes, for a popup with an input.
 pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Position> {
     let popup = client.popup()?;
@@ -207,6 +289,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::ConfirmClose { .. } => " close session ",
         Popup::Menu { .. } => "",
         Popup::PickProfile => " new session ",
+        Popup::Workspace { .. } => " workspace ",
     };
     frame(placed.area, title, buf);
     let inside = inner(placed.area);
@@ -236,11 +319,16 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             None
         }
         Popup::Menu { .. } => None,
+        Popup::Workspace { path, error } => {
+            switcher_body(client, path, error.as_deref(), body, buf)
+        }
     };
     let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     for control in &placed.controls {
         let style = match (popup, &control.target) {
-            (Popup::Menu { .. }, _) | (_, Target::Profile(_)) => Style::new(),
+            (Popup::Menu { .. }, _) | (_, Target::Profile(_) | Target::WorkspaceRow(_)) => {
+                Style::new()
+            }
             _ => button,
         };
         let at = control.area;
@@ -276,16 +364,25 @@ fn help_lines() -> Vec<Line<'static>> {
     lines
 }
 
+/// A one-line text input showing `text` in `line`, keeping its end in view with a column for the cursor. Returns
+/// where the cursor goes.
+fn text_input(text: &str, line: Rect, buf: &mut Buffer) -> Option<Position> {
+    if line.width < 2 {
+        return None;
+    }
+    let room = usize::from(line.width - 1);
+    let chars: Vec<char> = text.chars().collect();
+    let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
+    let (end, _) = buf.set_stringn(line.x, line.y, &shown, room, Style::new());
+    Some(Position::new(end, line.y))
+}
+
 /// The input and its hint, in `body`.
 fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
     if body.width < 2 || body.height < 2 {
         return None;
     }
-    // Keep the end of a long name in view, with a column for the cursor.
-    let room = usize::from(body.width - 1);
-    let chars: Vec<char> = name.chars().collect();
-    let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
-    let (end, _) = buf.set_stringn(body.x, body.y, &shown, room, Style::new());
+    let cursor = text_input(name, Rect { height: 1, ..body }, buf);
     let hint = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
     buf.set_stringn(
         body.x,
@@ -294,7 +391,7 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
         usize::from(body.width),
         hint,
     );
-    Some(Position::new(end, body.y))
+    cursor
 }
 
 fn confirm_close(name: &str, body: Rect, buf: &mut Buffer) {

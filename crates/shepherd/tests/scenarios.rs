@@ -365,12 +365,12 @@ fn keys_create_and_switch_sessions_and_the_screen_shows_the_selected_one() {
         ("hello".into(), "world".into())
     );
     assert_eq!(text(&view, screen.clone(), 0), "world");
-    // Newest first: s2 (`shell-2`) on top, s1 below it and selected.
+    // Newest first, under the two header lines: s2 (`shell-2`) on top, s1 below it and selected.
     let buf = view.terminal().backend().buffer().clone();
-    assert!(text(&view, side.clone(), 1).ends_with("shell-2"), "{buf:?}");
-    assert!(text(&view, side.clone(), 3).ends_with("shell-1"), "{buf:?}");
+    assert!(text(&view, side.clone(), 2).ends_with("shell-2"), "{buf:?}");
+    assert!(text(&view, side.clone(), 4).ends_with("shell-1"), "{buf:?}");
     let highlighted = |y: u16| buf[(2, y)].bg != ratatui::style::Color::Reset;
-    assert_eq!((highlighted(1), highlighted(3)), (false, true));
+    assert_eq!((highlighted(2), highlighted(4)), (false, true));
 
     h.keys(&[ctrl('b'), ch('k')]);
     h.draw(&mut view);
@@ -937,4 +937,45 @@ fn a_session_that_goes_idle_while_unselected_rings_the_terminal_and_is_marked_un
     assert!(s1(&h), "marked while unselected");
     h.user(Intent::SelectSession(SessionId::new("s1")));
     assert!(!s1(&h), "cleared once selected");
+}
+
+// ---------- workspaces ----------
+
+#[test]
+fn the_client_tells_the_host_the_directory_it_started_in() {
+    let mut h = Harness::new();
+    h.runtime.set_cwd("/src/app");
+    h.runtime.start();
+    h.settle();
+    h.wait_retry();
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+    assert_eq!(
+        h.host(|host| host.hello_cwds().to_vec()),
+        [Some("/src/app".to_owned())]
+    );
+}
+
+#[test]
+fn clicking_the_workspace_and_opening_a_typed_path_switches_to_it() {
+    let mut h = Harness::ready();
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "⌂ choose a workspace"));
+    h.typed("/src/app");
+    h.draw(&mut view);
+    h.click(find(&view, "[Open]"));
+    h.draw(&mut view);
+    assert_eq!(h.runtime.client().popup(), None);
+    find(&view, "⌂ app");
+
+    // Back to the switcher: the workspace used is listed, and clicking it keeps it.
+    h.click(find(&view, "⌂ app"));
+    h.draw(&mut view);
+    h.click(find(&view, "/src/app"));
+    h.draw(&mut view);
+    assert_eq!(h.runtime.client().popup(), None);
+    assert_eq!(
+        h.runtime.client().workspace(),
+        Some(std::path::Path::new("/src/app"))
+    );
 }

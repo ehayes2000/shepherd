@@ -3,6 +3,8 @@
 //! The pane is the whole height of the window, so the size a session is resized to ([`pane_size`]) is exactly the
 //! area [`crate::render`] draws its screen in.
 
+use std::path::PathBuf;
+
 use ratatui::layout::{Position, Rect};
 use shepherd_core::client::{Client, MenuItem};
 use shepherd_core::ids::SessionId;
@@ -50,6 +52,8 @@ pub fn layout(area: Rect) -> Layout {
 /// A control the mouse can click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
+    /// The sidebar's workspace, on its first line (`⌂` when collapsed): opens the switcher.
+    Workspace,
     /// The sidebar's `+ New session` button (`+` when collapsed).
     NewSession,
     /// A session's row in the sidebar, either of its lines.
@@ -66,7 +70,9 @@ pub enum Target {
     MenuItem(MenuItem),
     /// A profile's row in the open profile picker.
     Profile(String),
-    /// The open dialog's button that answers yes: `[Close]` or `[Save]`.
+    /// A workspace's row in the open workspace switcher.
+    WorkspaceRow(PathBuf),
+    /// The open dialog's button that answers yes: `[Close]`, `[Save]` or `[Open]`.
     Confirm,
     /// The open dialog's button that cancels it: `[Cancel]`, or help's `[Close]`.
     Dismiss,
@@ -90,6 +96,9 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     }
     if layout.pane.contains(at) {
         return Some(Target::Terminal);
+    }
+    if sidebar::workspace_button(client, layout).contains(at) {
+        return Some(Target::Workspace);
     }
     if sidebar::new_session_button(layout).contains(at) {
         return Some(Target::NewSession);
