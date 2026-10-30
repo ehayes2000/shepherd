@@ -43,8 +43,8 @@ pub(crate) fn killed_by_signal(code: libc::c_int) -> bool {
     code == libc::CLD_KILLED || code == libc::CLD_DUMPED
 }
 
-/// Blocks until process group `pgid` has no members left, or [`GROUP_EXIT_WAIT`] has passed. Its id can't be reused
-/// by a new process while the group has members.
+/// Blocks until process group `pgid` has no members left, killing any still alive, or [`GROUP_EXIT_WAIT`] has passed.
+/// Its id can't be reused by a new process while the group has members.
 pub(crate) fn wait_group_gone(pgid: u32) {
     let Ok(pgid) = libc::pid_t::try_from(pgid) else {
         return;
@@ -55,10 +55,16 @@ pub(crate) fn wait_group_gone(pgid: u32) {
     }
 }
 
-/// Whether process group `pgid` has any member. macOS answers EPERM, not ESRCH, while the only members left are dying
-/// or zombies not yet reaped (by launchd, once their parent is gone): they still hold the group id, so they count.
+/// Whether process group `pgid` has any member, killing every live one. macOS answers EPERM, not ESRCH, while the only
+/// members left are dying or zombies not yet reaped (by launchd, once their parent is gone): they still hold the group
+/// id, so they count.
+///
+/// The probe is SIGKILL, not signal 0: a member forked while an earlier kill was being delivered (a hook's shell in the
+/// middle of starting a command) missed it and would live on, and the wait run out with it still there. While the
+/// group has members its id can't be reused, and the wait stops at the first probe that finds it gone, so each probe
+/// reaches only our group, short of the id being freed and handed to a new group within one poll interval.
 fn group_exists(pgid: libc::pid_t) -> bool {
-    // SAFETY: plain syscall; signal 0 only checks that the group exists.
-    let rc = unsafe { libc::killpg(pgid, 0) };
+    // SAFETY: plain syscall, on a group that is ours while it has members (see above).
+    let rc = unsafe { libc::killpg(pgid, libc::SIGKILL) };
     rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

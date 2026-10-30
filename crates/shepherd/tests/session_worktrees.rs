@@ -304,6 +304,27 @@ fn shutting_the_host_down_waits_for_a_cancelled_create_to_answer() {
     );
 }
 
+/// A create's cleanup gets longer than the PTYs' grace: once that has passed the host still takes the create's answer
+/// and records it, rather than stopping first (deadlines are serviced ahead of queued events).
+#[test]
+fn shutting_the_host_down_waits_for_a_create_past_the_ptys_grace() {
+    let mut s = setup(|b| b);
+    let hold = s.worktrees.hold_next();
+    let req = s.client.new_session();
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "create never reached the port");
+    let id = new_session_id(&s.client.take(), &req);
+    s.h.runtime_mut()
+        .handle(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.clock().advance(shepherd::host::SHUTDOWN_GRACE);
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        methods(&frames(&s.h, &id)),
+        ["_shepherd/session/created", "_shepherd/session/failed"]
+    );
+}
+
 /// The wait for creates is bounded: once it runs out the host stops, before it takes the create's answer (deadlines
 /// are serviced ahead of queued events), so nothing follows from that answer.
 #[test]
