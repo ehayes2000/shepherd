@@ -1365,6 +1365,140 @@ fn a_refused_path_is_shown_in_the_switcher() {
     at(&buffer(&c, WIDE), "/tmp/x is not a repo");
 }
 
+/// `sessions(1, window)` on a host that has used `paths` in order, the last the current workspace, with the switcher
+/// open by clicking the workspace in the sidebar.
+fn switcher_with(paths: &[String], window: Rect) -> ClientDriver {
+    let mut c = sessions(1, window);
+    for path in paths {
+        c.host().select_workspace(path);
+    }
+    c.sync();
+    let button = at(&buffer(&c, window), "⌂");
+    assert_eq!(
+        click(&mut c, window, button),
+        [vec![], vec![Intent::BeginWorkspace]]
+    );
+    c
+}
+
+/// The switcher over `n` workspaces used before, `/src/w001` (the oldest) to `/src/w<n>` (current), so the list
+/// starts at `/src/w<n>` and ends at `/src/w001`.
+fn switcher_of(n: usize, window: Rect) -> ClientDriver {
+    let paths: Vec<String> = (1..=n).map(|i| format!("/src/w{i:03}")).collect();
+    switcher_with(&paths, window)
+}
+
+#[test]
+fn a_long_workspace_list_fits_the_window_and_shows_its_first_rows() {
+    let c = switcher_of(30, SHORT);
+    let buf = buffer(&c, SHORT);
+    // 12 rows: the border, `Used before:`, the prompt, the input, the hint, the buttons and the border leave 5.
+    let first = at(&buf, "/src/w030");
+    assert_eq!(at(&buf, "/src/w026"), below(first, 4));
+    assert_eq!(find(&buf, "/src/w025"), None, "{buf:?}");
+    at(&buf, "Used before:");
+    at(&buf, "Open a repo by path:");
+    at(&buf, "[Open]");
+}
+
+#[test]
+fn the_wheel_over_the_switcher_scrolls_it() {
+    let mut c = switcher_of(30, SHORT);
+    let buf = buffer(&c, SHORT);
+    let (top, row) = (at(&buf, "/src/w030"), at(&buf, "/src/w028"));
+    let prompt = at(&buf, "Open a repo");
+    let open = at(&buf, "[Open]");
+    assert_eq!(hit_at(&c, SHORT, prompt), Some(Target::Popup));
+    let down = |p| mouse(MouseEventKind::ScrollDown, p);
+    assert_eq!(
+        events(
+            &mut c,
+            SHORT,
+            &[
+                down(row),
+                down(prompt),
+                down(open),
+                mouse(MouseEventKind::ScrollUp, row),
+            ]
+        ),
+        [
+            vec![Intent::ScrollSwitcher { by: 1, shown: 5 }],
+            vec![Intent::ScrollSwitcher { by: 1, shown: 5 }],
+            vec![Intent::ScrollSwitcher { by: 1, shown: 5 }],
+            vec![Intent::ScrollSwitcher { by: -1, shown: 5 }],
+        ]
+    );
+    let buf = buffer(&c, SHORT);
+    assert_eq!(
+        at(&buf, "/src/w028"),
+        top,
+        "scrolled down two rows: {buf:?}"
+    );
+    assert_eq!(find(&buf, "/src/w029"), None, "{buf:?}");
+}
+
+#[test]
+fn a_workspace_below_the_fold_is_reached_by_wheel_then_click() {
+    let mut c = switcher_of(30, SHORT);
+    let over = at(&buffer(&c, SHORT), "/src/w030");
+    let wheel: Vec<Event> = (0..100)
+        .map(|_| mouse(MouseEventKind::ScrollDown, over))
+        .collect();
+    events(&mut c, SHORT, &wheel);
+    let buf = buffer(&c, SHORT);
+    assert_eq!(find(&buf, "/src/w030"), None, "{buf:?}");
+    let last = at(&buf, "/src/w001");
+    assert_eq!(at(&buf, "/src/w005"), Position::new(last.x, last.y - 4));
+    assert_eq!(
+        click(&mut c, SHORT, last),
+        [vec![], vec![Intent::PickWorkspace("/src/w001".into())]]
+    );
+}
+
+#[test]
+fn the_wheel_outside_the_switcher_does_not_scroll_it() {
+    let mut c = switcher_of(30, SHORT);
+    let outside = Position::new(1, SHORT.bottom() - 1);
+    assert_eq!(hit_at(&c, SHORT, outside), Some(Target::Backdrop));
+    assert_eq!(
+        events(&mut c, SHORT, &[mouse(MouseEventKind::ScrollDown, outside)]),
+        [vec![]]
+    );
+}
+
+#[test]
+fn a_huge_workspace_list_is_capped_to_the_window() {
+    // Far more than any window shows. Not enough to wrap a u16 count, as the picker's test does: the host folds a
+    // select in time linear in the workspaces, so tens of thousands take minutes.
+    let n = 2_000;
+    let c = switcher_of(n, SHORT);
+    let buf = buffer(&c, SHORT);
+    let first = at(&buf, &format!("/src/w{n:03}"));
+    assert_eq!(
+        at(&buf, &format!("/src/w{:03}", n - 4)),
+        below(first, 4),
+        "{buf:?}"
+    );
+    at(&buf, "[Open]");
+}
+
+#[test]
+fn a_long_path_is_cut_from_the_left_so_the_repo_name_and_mark_stay_visible() {
+    let long = "/Users/someone/a/deeply/nested/directory/full/of/projects/shepherd";
+    for window in [WIDE, NARROW] {
+        let mut c = switcher_with(&["/src/api".to_owned(), long.to_owned()], window);
+        let buf = buffer(&c, window);
+        assert_eq!(find(&buf, long), None, "{buf:?}");
+        let end = at(&buf, "/shepherd  (current)");
+        let start = Position::new(at(&buf, "/src/api").x, end.y);
+        assert_eq!(buf[start].symbol(), "…", "{buf:?}");
+        assert_eq!(
+            click(&mut c, window, start),
+            [vec![], vec![Intent::PickWorkspace(long.into())]]
+        );
+    }
+}
+
 #[test]
 fn sessions_from_another_workspace_are_dimmed_and_say_which() {
     let mut c = sessions(1, WIDE);

@@ -235,29 +235,53 @@ fn cut(text: &str, width: usize) -> String {
     cut
 }
 
+/// `text` cut to its last `width` characters, its first one `…` if any were cut.
+fn cut_left(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_owned();
+    }
+    let mut cut = String::from('…');
+    cut.extend(text.chars().skip(count - width.saturating_sub(1)));
+    cut
+}
+
 /// The workspace switcher: the workspaces used before under a line saying so, each a whole line of the dialog with
-/// the current one marked; then the path prompt, the input, its error or a hint, and `[Open]` `[Cancel]`.
+/// the current one marked; then the path prompt, the input, its error or a hint, and `[Open]` `[Cancel]`. It is as
+/// tall as its workspaces and fits the window; the rows shown start at the client's scroll, moved up as far as the
+/// last rows fill it. A long path is cut from the left with `…` so the repo's name and the mark stay visible.
 fn switcher(client: &Client, window: Rect) -> Placed {
     let used = client.workspaces();
     let list = if used.is_empty() {
         0
     } else {
-        used.len() as u16 + 1
+        u16::try_from(used.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1)
     };
-    let height = list + SWITCHER_TAIL + 2;
+    let height = list.saturating_add(SWITCHER_TAIL + 2);
     let mut placed = dialog(
         centered(window, SWITCHER_WIDTH, height),
         &[("[Open]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
     );
     let inside = inner(placed.area);
     let rows = (inside.y + 1)..inside.bottom().saturating_sub(SWITCHER_TAIL);
-    for (path, y) in used.iter().zip(rows) {
+    let first = client
+        .switcher_scroll()
+        .min(used.len().saturating_sub(rows.len()));
+    for (path, y) in used[first..].iter().zip(rows) {
         let mark = if client.workspace() == Some(path.as_path()) {
             CURRENT_MARK
         } else {
             ""
         };
-        let label = format!(" {}  {mark}", path.display());
+        // The leading blank, and the mark after two blanks.
+        let room = match mark {
+            "" => usize::from(inside.width).saturating_sub(1),
+            mark => usize::from(inside.width).saturating_sub(3 + mark.chars().count()),
+        };
+        let shown = cut_left(&path.display().to_string(), room.max(1));
+        let label = format!(" {shown}  {mark}");
         placed.controls.push(Control {
             area: Rect::new(inside.x, y, inside.width, 1),
             target: Target::WorkspaceRow(path.clone()),
@@ -265,6 +289,13 @@ fn switcher(client: &Client, window: Rect) -> Placed {
         });
     }
     placed
+}
+
+/// How many workspaces the open switcher shows at once in `window`.
+pub(crate) fn switcher_rows(client: &Client, window: Rect) -> usize {
+    let placed = switcher(client, window);
+    // Its border, the line above the rows, and the lines below them.
+    usize::from(placed.area.height.saturating_sub(3 + SWITCHER_TAIL))
 }
 
 /// Draws the switcher's text in `body`, the dialog above its buttons: the line above the rows, the prompt, the typed

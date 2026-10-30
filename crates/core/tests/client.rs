@@ -1202,6 +1202,7 @@ fn a_notice_is_cleared_by_the_next_user_action() {
         Intent::SelectSession(sid("s1")),
         Intent::ScrollSidebar(1),
         Intent::ScrollPicker { by: 1, shown: 2 },
+        Intent::ScrollSwitcher { by: 1, shown: 2 },
         Intent::NewSession,
         Intent::BeginNewSession,
         Intent::ShowHelp,
@@ -1963,6 +1964,76 @@ fn picking_a_workspace_used_before_asks_the_host_to_select_it() {
     assert_eq!(bodies(&sent), [select_workspace("/src/a")]);
     c.answer(&sent, Ok(json!({})));
     assert_eq!(c.client().popup(), None);
+}
+
+/// A connected client whose host has used `n` workspaces, `/src/w01` (the oldest) to `/src/w<n>` (current), with the
+/// switcher open.
+fn switcher_of(n: usize) -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&[]);
+    for i in 1..=n {
+        c.host().select_workspace(&format!("/src/w{i:02}"));
+    }
+    c.sync();
+    c.user(Intent::BeginWorkspace);
+    c
+}
+
+#[test]
+fn the_switcher_scrolls_within_its_list() {
+    let mut c = switcher_of(10);
+    assert_eq!(c.client().switcher_scroll(), 0);
+    assert_eq!(c.user(Intent::ScrollSwitcher { by: 3, shown: 4 }), []);
+    assert_eq!(c.client().switcher_scroll(), 3);
+    // The last rows fill the switcher: 10 workspaces, 4 shown.
+    c.user(Intent::ScrollSwitcher { by: 100, shown: 4 });
+    assert_eq!(c.client().switcher_scroll(), 6);
+    c.user(Intent::ScrollSwitcher { by: -2, shown: 4 });
+    assert_eq!(c.client().switcher_scroll(), 4);
+    c.user(Intent::ScrollSwitcher { by: -100, shown: 4 });
+    assert_eq!(c.client().switcher_scroll(), 0);
+}
+
+#[test]
+fn scrolling_up_a_switcher_that_grew_starts_from_its_new_end() {
+    let mut c = switcher_of(10);
+    c.user(Intent::ScrollSwitcher { by: 100, shown: 4 });
+    // Taller now, showing 8, so its end is 2 rows down; up one from there.
+    c.user(Intent::ScrollSwitcher { by: -1, shown: 8 });
+    assert_eq!(c.client().switcher_scroll(), 1);
+}
+
+#[test]
+fn a_switcher_that_shows_every_workspace_does_not_scroll() {
+    let mut c = switcher_of(3);
+    c.user(Intent::ScrollSwitcher { by: 1, shown: 3 });
+    assert_eq!(c.client().switcher_scroll(), 0);
+}
+
+#[test]
+fn the_switcher_opens_scrolled_to_the_top() {
+    let mut c = switcher_of(10);
+    c.user(Intent::ScrollSwitcher { by: 5, shown: 4 });
+    c.user(Intent::Dismiss);
+    c.user(Intent::BeginWorkspace);
+    assert_eq!(c.client().switcher_scroll(), 0);
+}
+
+#[test]
+fn scrolling_the_switcher_while_it_is_closed_does_nothing() {
+    let mut c = switcher_of(10);
+    c.user(Intent::Dismiss);
+    assert_eq!(c.user(Intent::ScrollSwitcher { by: 5, shown: 4 }), []);
+    assert_eq!(c.client().switcher_scroll(), 0);
+}
+
+#[test]
+fn a_refused_path_keeps_the_switcher_scrolled() {
+    let mut c = switcher_of(10);
+    c.user(Intent::ScrollSwitcher { by: 5, shown: 4 });
+    c.user(Intent::EditWorkspacePath("/tmp/x".into()));
+    let sent = c.user(Intent::Confirm);
+    c.answer(&sent, Err(WireError::InvalidParams("nope".into())));
+    assert_eq!(c.client().switcher_scroll(), 5);
 }
 
 // ---------- worktrees ----------
