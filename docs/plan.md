@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F34 client marks answer keys | in review | task/f34-answer-keys @ 7af3269 (on 1a8ada4) | 1 | PM-accepted: Keys still byte-judged for old clients; prefix keys stay Keys |
-| T24 auto-naming | fixing (round 3) | task/t24-auto-naming @ a9e2375 | 2 | Blocking: format chars (bidi/ZWJ/BOM) survive UAX#29 words; stacked marks unbound. PM: NFC + keep alnum + ≤2 marks/base (decision 0017 amended, unicode-normalization allowed) + byte cap |
+| T24 auto-naming | re-review (round 3) | task/t24-auto-naming @ 1c3386d (on a2a41a6) | 3 | NFC + alnum/≤2 marks + byte cap |
 | T25 close removes worktree | in review | task/t25-close-cleanup @ 808391d | 1 | PM-accepted: worktree/removing frame; worktree_kept; SessionClose.worktree mode; worktree/status request; Restarted event; force=false default |
 | F28 workspace repo root + ~ | re-review | task/f28-repo-root @ ee7104c (on 6cbdf73) | 2 | bareness-based main checkout; fake add_dir; symlink case; separate-git-dir worktree gap documented |
 
