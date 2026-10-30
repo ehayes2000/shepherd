@@ -1085,13 +1085,15 @@ fn the_wheel_over_the_picker_scrolls_it() {
     let mut c = picker_of(30, SHORT);
     let buf = buffer(&c, SHORT);
     let (top, row) = (at(&buf, "p001"), at(&buf, "p003"));
+    let prompt = at(&buf, "Which agent");
+    assert_eq!(hit_at(&c, SHORT, prompt), Some(Target::Popup));
     assert_eq!(
         events(
             &mut c,
             SHORT,
             &[
                 mouse(MouseEventKind::ScrollDown, row),
-                mouse(MouseEventKind::ScrollDown, row),
+                mouse(MouseEventKind::ScrollDown, prompt),
                 mouse(MouseEventKind::ScrollUp, row),
             ]
         ),

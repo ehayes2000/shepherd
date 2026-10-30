@@ -1771,6 +1771,16 @@ fn the_picker_scrolls_within_its_list() {
 }
 
 #[test]
+fn scrolling_up_a_picker_that_grew_starts_from_its_new_end() {
+    let mut c = picker_of(10);
+    c.user(Intent::ScrollPicker { by: 100, shown: 4 });
+    assert_eq!(c.client().picker_scroll(), 6);
+    // Taller now, showing 8, so its end is 2 rows down; up one from there.
+    c.user(Intent::ScrollPicker { by: -1, shown: 8 });
+    assert_eq!(c.client().picker_scroll(), 1);
+}
+
+#[test]
 fn a_picker_that_shows_every_profile_does_not_scroll() {
     let mut c = picker_of(3);
     c.user(Intent::ScrollPicker { by: 1, shown: 3 });
@@ -1791,6 +1801,7 @@ fn scrolling_the_picker_while_it_is_closed_does_nothing() {
     let mut c = picker_of(10);
     c.user(Intent::Dismiss);
     assert_eq!(c.user(Intent::ScrollPicker { by: 5, shown: 4 }), []);
+    assert_eq!(c.client().picker_scroll(), 0);
     c.user(Intent::BeginNewSession);
     assert_eq!(c.client().picker_scroll(), 0);
 }

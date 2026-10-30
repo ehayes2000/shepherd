@@ -224,6 +224,104 @@ fn profile_picker_with_a_long_name() {
     insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 10));
 }
 
+/// The picker scrolled to its end in a short window, then drawn in a taller one: it shows more rows, and the last
+/// profile still fills the bottom row.
+#[test]
+fn a_picker_scrolled_to_its_end_fills_a_taller_window_to_its_last_row() {
+    let names: Vec<String> = (1..=30).map(|i| format!("profile-{i:02}")).collect();
+    let profiles: Vec<(&str, AgentKind)> = names
+        .iter()
+        .map(|n| (n.as_str(), AgentKind::Shell))
+        .collect();
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(&profiles, "profile-01");
+    c.user(Intent::BeginNewSession);
+    // A 10-row window shows 6 profiles; the end is 24 rows down.
+    c.user(Intent::ScrollPicker { by: 100, shown: 6 });
+    // A 24-row window shows 20: profile-11 to profile-30.
+    let buf = buffer(c.client(), &Screens::new(), 80, 24);
+    let last = position_of(&buf, "profile-30");
+    let cancel = position_of(&buf, "[Cancel]");
+    assert_eq!(
+        last.y + 1,
+        cancel.y,
+        "no blank rows below the last: {buf:?}"
+    );
+    assert_eq!(position_of(&buf, "profile-11").y, last.y - 19, "{buf:?}");
+}
+
+/// Every kind of popup, each opened on a client of its own.
+fn every_popup() -> Vec<(&'static str, ClientDriver)> {
+    let mut popups = Vec::new();
+    let opened = |intents: &[Intent]| {
+        let (mut c, _) = three_sessions();
+        for intent in intents {
+            c.user(intent.clone());
+        }
+        c
+    };
+    popups.push(("help", opened(&[Intent::ShowHelp])));
+    popups.push((
+        "rename",
+        opened(&[Intent::BeginRename, Intent::EditRename("api".into())]),
+    ));
+    popups.push(("close", opened(&[Intent::BeginClose])));
+    popups.push((
+        "menu",
+        opened(&[Intent::OpenMenu {
+            session: SessionId::new("s2"),
+            at: Cell { col: 5, row: 4 },
+        }]),
+    ));
+    popups.push(("menu with resume", exited_claude_menu(Some("abc123"))));
+    popups.push(("menu with resume unavailable", exited_claude_menu(None)));
+    let names: Vec<String> = (1..=12).map(|i| format!("profile-{i:02}")).collect();
+    let profiles: Vec<(&str, AgentKind)> = names
+        .iter()
+        .map(|n| (n.as_str(), AgentKind::ClaudeCode))
+        .collect();
+    let mut picker = ClientDriver::new();
+    picker.connect_with_profiles(&profiles, "profile-01");
+    picker.user(Intent::BeginNewSession);
+    popups.push(("profile picker", picker));
+    let mut switcher = two_workspaces();
+    switcher.user(Intent::BeginWorkspace);
+    switcher.user(Intent::EditWorkspacePath("/src/new".into()));
+    popups.push(("workspace switcher", switcher));
+    let mut refused = two_workspaces();
+    refused.user(Intent::BeginWorkspace);
+    refused.user(Intent::Confirm);
+    popups.push(("workspace switcher with an error", refused));
+    popups
+}
+
+#[test]
+fn every_popup_draws_in_any_window_however_small() {
+    let mut sizes: Vec<(u16, u16)> = (0..=6).flat_map(|w| (0..=6).map(move |h| (w, h))).collect();
+    sizes.extend([
+        (80, 0),
+        (80, 1),
+        (3, 24),
+        (10, 1),
+        (13, 7),
+        (41, 5),
+        (57, 3),
+    ]);
+    let mut panicked = Vec::new();
+    for (name, c) in every_popup() {
+        assert!(c.client().popup().is_some(), "{name}");
+        for &(cols, rows) in &sizes {
+            let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                buffer(c.client(), &Screens::new(), cols, rows)
+            }));
+            if drawn.is_err() {
+                panicked.push(format!("{name} at {cols}x{rows}"));
+            }
+        }
+    }
+    assert_eq!(panicked, Vec::<String>::new());
+}
+
 /// `three_sessions` showing a notice: a refused rename.
 fn with_notice() -> (ClientDriver, Screens) {
     let (mut c, screens) = three_sessions();

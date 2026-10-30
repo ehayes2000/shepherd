@@ -341,8 +341,10 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             None
         }
         Popup::PickProfile => {
-            let style = Style::new().fg(Color::Gray);
-            buf.set_stringn(body.x, body.y, PICK_PROMPT, usize::from(body.width), style);
+            if body.height > 0 {
+                let style = Style::new().fg(Color::Gray);
+                buf.set_stringn(body.x, body.y, PICK_PROMPT, usize::from(body.width), style);
+            }
             None
         }
         Popup::Menu { .. } => None,
