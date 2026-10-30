@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T25b cleanup view | building | task/t25b-cleanup @ HEAD | 0 | – |
+| F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ HEAD | 0 | – |
 | T27 PR status | in review | task/t27-pr-status @ dc0b09d (on 022d04f) | 1 | PM-accepted: gh pr list flags; display choices; Unavailable clears, errors keep; Worker<W,T> |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -724,7 +726,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd, scripts
 
 ### F37: A killed fetch can leave a stale remote-ref lock
-status: todo
+status: in-progress
 depends: T37
 touches: adapters::worktrees
 goal: From the T37 review: a fetch killed by a cancel or its timeout can leave `refs/remotes/origin/<default>.lock`; every
@@ -739,7 +741,7 @@ acceptance:
   once shutdown began.
 - From the T37 review: host shutdown cancels creates but doesn't wait for their cleanup; delay `finish` until no create is
   running (bounded) so a cancelled-at-shutdown create never leaves an unrecorded worktree/branch.
-scope: crates/adapters
+scope: crates/adapters, crates/shepherd (host shutdown)
 
 ### F38: PTY backpressure contract case fails under load
 status: todo
@@ -1520,7 +1522,7 @@ notes: The session closes immediately (PTY killed) and shows "removing worktree�
 the close is recorded once the outcome is known. A session whose worktree is already gone closes normally.
 
 ### T25b: Cleanup view
-status: ready
+status: in-progress
 depends: T25
 touches: core::client, tui::popup, core::host
 goal: Find and remove abandoned worktrees in bulk.
@@ -1531,7 +1533,14 @@ acceptance:
 - From the T25 final review: a runtime test that a listed worktree with status NotARepo whose directory still exists is kept
   (the `exists` computation in runtime.rs is untested); force only when `confirmed.dirty && status.dirty`; the safe and
   unpushed-only dialogs mention that ignored files are removed.
-scope: crates/core, crates/tui, crates/shepherd
+scope: crates/core, crates/tui, crates/shepherd, crates/testkit
+notes: (binding) Reuse T26's `_shepherd/worktree/list` (orphans) and T25's per-worktree inspect/remove path for every
+removal, so every guarantee holds per item (list_managed membership under the resolved root, still-used re-check, pre_remove
+hooks, force only with confirmed dirty). "Safe" = clean and merged/pushed (T25's rule); unsafe rows are shown with what would
+be lost and are never in a bulk removal. Stale sessions: exited and their branch merged; N days defaults to 7 (config
+`cleanup_after_days`), time from Tick, never a clock in core. Bulk removal runs items one at a time through the worker and
+reports per-row outcomes; closing the view doesn't cancel removals already started. Popup patterns as T26/F29 (core-owned
+scroll, hit tests on rendered cells, tiny-window test, draw.rs).
 
 ### T26: Search and open
 status: done (103ca34)
