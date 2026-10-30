@@ -38,3 +38,7 @@ dbg_macro = "deny"
 todo = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+# The build id hashes the whole executable at startup (T36a); unoptimized sha2 makes debug builds slow to start.
+[profile.dev.package.sha2]
+opt-level = 3

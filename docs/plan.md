@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | fixing (CHANGES) | task/t37-worktree-nocap @ 8934970 | 1 | Blocking: F32 test item not done; 2-reader FIFO gate hang; inherited GIT_ASKPASS/core.askPass can hang uncapped create. PM: cancel creates on shutdown |
-| T36a build id + mismatch UX | re-review | task/t36a-build-id @ cd20f9e (on 1a972e4) | 2 | dialog cleared on drop/hello; terminate validates dir/socket/peer uid; ChildGuard; footer Restart host |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T36a | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | F35 | 1 | idempotence claim false (unbounded clusters), clippy ban gaps (title_top, List, &str Widget) → F36 |
 | F32 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
 | T25 | 2 | Remove-anyway could force-delete unconfirmed new changes; escape test passed via an error |
@@ -640,7 +640,7 @@ acceptance:
 scope: crates/adapters, crates/core, crates/shepherd, crates/testkit
 
 ### T36a: Build identity in the hello, and a clear mismatch UX
-status: in-progress
+status: done (44dac96)
 depends: –
 touches: core::wire, core::client, ports::launcher, adapters::launcher, shepherd (build id, host hello), tui::popup
 goal: When the client and host are different builds, the user finds out at hello and is told what to do, instead of a
@@ -666,7 +666,7 @@ scope: crates/core, crates/tui, crates/adapters, crates/testkit, crates/shepherd
 notes: This ships before T36b. Its stale-host row is replaced by the swap in T36b.
 
 ### T36b: Hot-swap the host by re-exec, keeping sessions running
-status: todo
+status: ready
 depends: T36a
 touches: ports::pty (new `PtyHandoff` port, needs PM approval: new-port skill), adapters::{pty, event_log, link},
 shepherd::host (swap, `host --adopt`, `handoff-check`), core::wire (`_shepherd/host/upgrade`), core::client
