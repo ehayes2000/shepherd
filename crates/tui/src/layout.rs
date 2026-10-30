@@ -58,7 +58,7 @@ pub enum Target {
     CloseSession(SessionId),
     /// The pane: the selected session's terminal.
     Terminal,
-    /// The sidebar footer's `Detach` button.
+    /// The sidebar footer's `Detach` button (`⏏` when collapsed).
     Detach,
     /// The sidebar footer's `?` button.
     Help,

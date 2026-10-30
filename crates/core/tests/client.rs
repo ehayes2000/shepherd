@@ -676,6 +676,73 @@ fn closing_a_session_that_is_not_listed_does_nothing() {
     assert_eq!(c.client().popup(), None);
 }
 
+/// Every popup about session `s1`, opened from the keyboard (with `s1` selected) or the mouse, as the intents that
+/// open it.
+fn session_popups() -> Vec<(&'static str, Vec<Intent>)> {
+    let menu = Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    };
+    vec![
+        ("close from the keyboard", vec![Intent::BeginClose]),
+        (
+            "close from the row's button",
+            vec![Intent::BeginCloseSession(sid("s1"))],
+        ),
+        ("context menu", vec![menu.clone()]),
+        (
+            "close from the context menu",
+            vec![menu.clone(), Intent::MenuChoose(MenuItem::Close)],
+        ),
+        ("rename from the keyboard", vec![Intent::BeginRename]),
+        (
+            "rename from the context menu",
+            vec![menu, Intent::MenuChoose(MenuItem::Rename)],
+        ),
+    ]
+}
+
+/// `s1` and `s2`, `s1` selected, with the popup that `opens` opens.
+fn with_popup(case: &str, opens: Vec<Intent>) -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::SelectSession(sid("s1")));
+    for intent in opens {
+        c.user(intent);
+    }
+    assert!(c.client().popup().is_some(), "{case}: the popup opens");
+    c
+}
+
+#[test]
+fn a_popup_about_a_session_closes_when_the_host_removes_that_session() {
+    for (case, opens) in session_popups() {
+        let mut c = with_popup(case, opens);
+        c.host().close("s1");
+        c.sync();
+        assert_eq!(c.client().popup(), None, "{case}");
+    }
+}
+
+#[test]
+fn a_popup_about_a_session_stays_when_the_host_removes_another_session() {
+    for (case, opens) in session_popups() {
+        let mut c = with_popup(case, opens);
+        let open = c.client().popup().cloned();
+        c.host().close("s2");
+        c.sync();
+        assert_eq!(c.client().popup().cloned(), open, "{case}");
+    }
+}
+
+#[test]
+fn help_stays_open_when_a_session_is_removed() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::ShowHelp);
+    c.host().close("s1");
+    c.sync();
+    assert_eq!(c.client().popup(), Some(&Popup::Help));
+}
+
 #[test]
 fn quit_quits() {
     let mut c = ClientDriver::with_sessions(&["s1"]);

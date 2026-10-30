@@ -766,6 +766,78 @@ fn a_press_on_a_menu_item_released_elsewhere_does_nothing() {
     assert!(out.iter().all(Vec::is_empty), "{out:?}");
 }
 
+// ---------- the collapsed sidebar ----------
+
+/// Where `text` is drawn in the sidebar of `window`, from the bottom up.
+fn in_sidebar(buf: &Buffer, window: Rect, text: &str) -> Position {
+    let side = layout(window).sidebar;
+    side.positions()
+        .filter(|p| buf[*p].symbol() == text)
+        .last()
+        .unwrap_or_else(|| panic!("{text:?} not drawn in the sidebar: {buf:?}"))
+}
+
+#[test]
+fn the_collapsed_sidebar_has_detach_and_help_buttons_at_the_bottom() {
+    let c = sessions(1, NARROW);
+    let buf = buffer(&c, NARROW);
+    let detach = in_sidebar(&buf, NARROW, "⏏");
+    let help = in_sidebar(&buf, NARROW, "?");
+    assert_eq!(help.y, NARROW.bottom() - 1, "help is on the last line");
+    assert_eq!(help, below(detach, 1), "detach is just above it");
+    assert_eq!(hit_at(&c, NARROW, detach), Some(Target::Detach));
+    assert_eq!(hit_at(&c, NARROW, help), Some(Target::Help));
+    let left = Position::new(detach.x - 1, detach.y);
+    assert_eq!(hit_at(&c, NARROW, left), None);
+}
+
+#[test]
+fn clicking_the_collapsed_detach_quits_and_help_shows_it() {
+    let mut c = sessions(1, NARROW);
+    let buf = buffer(&c, NARROW);
+    let detach = in_sidebar(&buf, NARROW, "⏏");
+    let help = in_sidebar(&buf, NARROW, "?");
+    assert_eq!(click(&mut c, NARROW, detach), [vec![], vec![Intent::Quit]]);
+    assert_eq!(
+        click(&mut c, NARROW, help),
+        [vec![], vec![Intent::ShowHelp]]
+    );
+    assert_eq!(c.client().popup(), Some(&Popup::Help));
+}
+
+#[test]
+fn the_collapsed_sidebars_buttons_stay_below_a_full_list() {
+    let c = sessions(10, NARROW);
+    let buf = buffer(&c, NARROW);
+    let detach = in_sidebar(&buf, NARROW, "⏏");
+    assert_eq!(hit_at(&c, NARROW, detach), Some(Target::Detach));
+    // The last row shown ends above the buttons.
+    let above = Position::new(detach.x, detach.y - 1);
+    assert_ne!(buf[above].symbol(), "◌", "{buf:?}");
+}
+
+#[test]
+fn a_collapsed_row_is_closed_by_right_click_then_close() {
+    let mut c = sessions(2, NARROW);
+    let buf = buffer(&c, NARROW);
+    let plus = at(&buf, "+");
+    // The second glyph down is the older session, s1.
+    let glyph = (plus.y + 1..NARROW.bottom())
+        .map(|y| Position::new(plus.x, y))
+        .filter(|p| buf[*p].symbol() == "◌")
+        .nth(1)
+        .unwrap_or_else(|| panic!("two glyphs: {buf:?}"));
+    right_click(&mut c, NARROW, glyph);
+    let close = at(&buffer(&c, NARROW), "Close");
+    click(&mut c, NARROW, close);
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::ConfirmClose {
+            session: SessionId::new("s1")
+        })
+    );
+}
+
 // ---------- dialogs ----------
 
 #[test]

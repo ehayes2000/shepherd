@@ -486,6 +486,16 @@ impl Client {
         self.states.retain(|id, _| open.iter().any(|s| &s.id == id));
         self.seen.retain(|id, _| self.states.contains_key(id));
         self.rebuild(open);
+        // A popup about a session that's gone has nothing left to act on.
+        if let Some(
+            Popup::Rename { session, .. }
+            | Popup::ConfirmClose { session }
+            | Popup::Menu { session, .. },
+        ) = &self.popup
+            && !self.listed(session)
+        {
+            self.popup = None;
+        }
         if let Some(id) = self.select_when_listed.clone()
             && self.listed(&id)
         {
