@@ -4,6 +4,10 @@ import os, pty, select, signal, subprocess, sys, tempfile, time, struct, fcntl, 
 BIN = sys.argv[1]
 home = tempfile.mkdtemp(prefix="shsmoke")
 os.chmod(home, 0o700)
+# Agent sessions are the default now; the smoke run must never start a real agent, so new sessions run the shell.
+os.mkdir(os.path.join(home, ".shepherd"), 0o700)
+with open(os.path.join(home, ".shepherd", "config.toml"), "w") as f:
+    f.write('[defaults]\nagent = "shell"\n')
 env = {"HOME": home, "SHELL": "/bin/sh", "PATH": "/usr/bin:/bin", "TERM": "xterm-256color"}
 CTRL_B = b"\x02"
 log = []
