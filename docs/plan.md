@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T36b host hot-swap by re-exec | building | task/t36b-hotswap @ 18410d7 | 0 | PtyHandoff port approved; rebases after T37 |
+| T36b host hot-swap by re-exec | in review | task/t36b-hotswap @ a52f5e0 (on 99e47e6) | 1 | PM-accepted: listener handed over before closing conns; 1-column resize nudge; adopt on fresh instance. Linux unverified until CI |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -93,7 +93,7 @@ dependencies are done.
 | port | side | first task | real adapter |
 |---|---|---|---|
 | `EventLog` | host | T04 | JSONL files in `~/.shepherd` |
-| `Pty` | host | T08 | portable-pty |
+| `Pty` | host | T08 | portable-pty (`PtyHandoff` for hot-swap, T36b) |
 | `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
 | `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid); `terminate` via socket peer creds (T36a) |
