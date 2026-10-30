@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use shepherd_core::config::{AgentKind, Config, ConfigError, KeyPrefix, RawConfig};
 
@@ -301,4 +302,34 @@ fn login_shell_only_affects_the_shell_profile() {
     let config = Config::resolve(None, Some("/bin/zsh".into())).unwrap();
     assert_eq!(config.profile("claude").unwrap().command, "claude");
     assert_eq!(config.profile("codex").unwrap().command, "codex");
+}
+
+// ---------- quiet idle ----------
+
+#[test]
+fn profiles_go_idle_after_three_quiet_seconds_by_default() {
+    let config = Config::resolve(None, None).unwrap();
+    for profile in config.profiles() {
+        assert_eq!(
+            profile.idle_after_quiet,
+            SignedDuration::from_millis(3000),
+            "{}",
+            profile.name
+        );
+    }
+}
+
+#[test]
+fn idle_after_quiet_ms_sets_a_profiles_quiet_period() {
+    let config = resolve(json!({
+        "agents": {
+            "claude": { "idle_after_quiet_ms": 1500 },
+            "mine": { "kind": "codex", "command": "codex", "idle_after_quiet_ms": 10000 },
+        }
+    }))
+    .unwrap();
+    let quiet = |name: &str| config.profile(name).unwrap().idle_after_quiet;
+    assert_eq!(quiet("claude"), SignedDuration::from_millis(1500));
+    assert_eq!(quiet("mine"), SignedDuration::from_secs(10));
+    assert_eq!(quiet("codex"), SignedDuration::from_millis(3000));
 }

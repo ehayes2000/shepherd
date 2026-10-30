@@ -27,6 +27,9 @@
 //!   `session/closed` is appended. A session waiting for its worktree keeps its files until the result comes back
 //!   (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
+//! - **Quiet watch.** A [`QuietWatch`] (the quiet-output idle fallback) sees every entry appended, and the logs on
+//!   start. Output of, and client input to, the sessions it watches are fed to it stamped with `Env::now`; its
+//!   deadline is serviced like the others: when it is due, a tick stamped with `Env::now` returns the idles to append.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -37,11 +40,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use shepherd_core::acpp::{
-    Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp,
+    Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp, Timestamp,
 };
 use shepherd_core::agents::Translators;
 use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
+use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
 };
@@ -267,6 +271,9 @@ pub struct HostRuntime<P, W, L, E, V> {
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
+    quiet: QuietWatch,
+    /// When the quiet watch's deadline is due on the monotonic clock.
+    quiet_due: Option<Instant>,
 }
 
 impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
@@ -287,9 +294,11 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         rx: RuntimeRx,
     ) -> Result<Self, StartError> {
         let mut host = Host::new();
+        let mut quiet = QuietWatch::new(&settings.config);
         for id in log.logs()? {
             for envelope in log.read(id, Seq::ZERO)? {
                 host.apply(&envelope);
+                quiet.apply(&envelope);
             }
         }
         let worktrees =
@@ -317,6 +326,8 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             awaiting_worktree: HashMap::new(),
             shutdown_by: None,
             finished: false,
+            quiet,
+            quiet_due: None,
         };
         let orphans: Vec<SessionId> = runtime
             .host
@@ -388,6 +399,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                     .filter_map(|c| c.sub.as_ref().and_then(|s| s.blocked).map(|b| b.retry_at)),
             )
             .chain(self.shutdown_by)
+            .chain(self.quiet_due)
             .min()
     }
 
@@ -559,7 +571,18 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         }
                     }
                 }
-                HostCommand::WritePty { session, bytes } => self.write_pty(&session, &bytes),
+                HostCommand::WritePty { session, bytes } => {
+                    self.write_pty(&session, &bytes);
+                    // A client's input: the quiet watch takes it as an answer to a permission dialog.
+                    if self.quiet.watches(&session) {
+                        let at = self.env.now();
+                        self.quiet.handle(QuietEvent::Input {
+                            session,
+                            at: at.clone(),
+                        });
+                        self.schedule_quiet(&at);
+                    }
+                }
                 HostCommand::ResizePty { session, size } => {
                     if let Err(error) = self.pty.resize(&session, size) {
                         tracing::warn!(%session, %error, "resize failed");
@@ -689,6 +712,8 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         let log = LogId::of(&draft);
         let envelope = self.log.append(log.clone(), draft, stamp)?;
         self.host.apply(&envelope);
+        self.quiet.apply(&envelope);
+        self.schedule_quiet(envelope.ts());
         self.release_if_ended(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
@@ -721,6 +746,14 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
     }
 
     fn pty_output(&mut self, session: SessionId, bytes: Vec<u8>) {
+        if self.quiet.watches(&session) {
+            let at = self.env.now();
+            self.quiet.handle(QuietEvent::Output {
+                session: session.clone(),
+                at: at.clone(),
+            });
+            self.schedule_quiet(&at);
+        }
         if let Some(screen) = self.screens.get_mut(&session) {
             let fed = screen_guard::update(screen, |s| s.feed(&bytes));
             log_screen_panic(&session, fed);
@@ -803,6 +836,9 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 self.after_feed(&session);
             }
         }
+        if self.quiet_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
+            self.tick_quiet();
+        }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
             tracing::warn!(
                 left = self.screens.len(),
@@ -810,6 +846,27 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             );
             self.finish();
         }
+    }
+
+    /// Appends the idles the quiet watch infers now, and schedules its next deadline.
+    fn tick_quiet(&mut self) {
+        let at = self.env.now();
+        let commands = self.quiet.handle(QuietEvent::Tick { at: at.clone() });
+        let mut follow_up = VecDeque::new();
+        self.execute(commands, &mut follow_up);
+        for event in follow_up {
+            self.dispatch(event);
+        }
+        self.schedule_quiet(&at);
+    }
+
+    /// Puts the quiet watch's deadline on the monotonic clock, `at` being the wall-clock time now.
+    fn schedule_quiet(&mut self, at: &Timestamp) {
+        self.quiet_due = self.quiet.deadline().map(|deadline| {
+            let wait =
+                Duration::try_from(deadline.duration_since(at.instant())).unwrap_or(Duration::ZERO);
+            self.env.instant() + wait
+        });
     }
 
     // ---------- clients ----------

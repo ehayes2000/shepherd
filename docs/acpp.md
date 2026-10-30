@@ -76,7 +76,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/session/closed`    | `{ worktree_removed: bool }` |
 | `_shepherd/session/failed`    | `{ reason }` (it never got a PTY, e.g. its worktree couldn't be made) |
 | `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command }` (source `shepherd`: a resume respawned the agent) |
-| `_shepherd/agent/idle`        | `{}` (agent is at its prompt with nothing to do) |
+| `_shepherd/agent/idle`        | `{ inferred? }` (agent is at its prompt with nothing to do; `inferred`: no agent signal said so and the host inferred it, `"quiet"` or `"quiet-after-permission"`) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
 | `_shepherd/worktree/created`  | `{ path, branch, base, fetch_error? }` (`path` is the session's cwd from then on; `fetch_error`: `base` is as last fetched, or local) |
 | `_shepherd/worktree/hook`     | `{ hook, exit_code, output_tail }` |

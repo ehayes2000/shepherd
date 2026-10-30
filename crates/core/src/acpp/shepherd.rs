@@ -144,7 +144,24 @@ pub struct AgentStarted {
 
 /// The agent is at its prompt with nothing to do.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentIdle {}
+pub struct AgentIdle {
+    /// Set when no agent signal said so and the host inferred it. `None` for a real idle (e.g. a `Stop` hook).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred: Option<IdleInference>,
+}
+
+/// How the host inferred an idle. Open: a value this build doesn't know is kept as [`IdleInference::Other`], so the
+/// frame is still an idle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdleInference {
+    /// The PTY went quiet during a turn.
+    Quiet,
+    /// The PTY redrew after a permission request (the dialog was answered), then went quiet.
+    QuietAfterPermission,
+    #[serde(untagged)]
+    Other(String),
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentExited {

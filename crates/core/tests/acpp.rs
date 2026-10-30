@@ -6,9 +6,9 @@ use shepherd_core::acpp::acp::{
     ToolCallStatus, ToolKind,
 };
 use shepherd_core::acpp::{
-    Correlated, Dir, ENVELOPE_VERSION, EntryId, Envelope, EnvelopeError, Frame, FrameDraft,
-    FrameError, PendingRequests, RequestId, Seq, ShepherdFrame, Source, SourceKind, Stamp,
-    Timestamp,
+    AgentIdle, Correlated, Dir, ENVELOPE_VERSION, EntryId, Envelope, EnvelopeError, Frame,
+    FrameDraft, FrameError, IdleInference, PendingRequests, RequestId, Seq, ShepherdFrame, Source,
+    SourceKind, Stamp, Timestamp,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 
@@ -541,6 +541,51 @@ fn shepherd_frames_expose_typed_params() {
 fn shepherd_frame_without_params_parses() {
     let f = frame(json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle" }));
     assert!(matches!(&f, Frame::Shepherd(m) if matches!(m.body(), ShepherdFrame::AgentIdle(_))));
+}
+
+fn idle_inference(params: Value) -> Option<IdleInference> {
+    let f = frame(json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": params }));
+    let Frame::Shepherd(m) = &f else {
+        panic!("expected a shepherd frame, got {f:?}")
+    };
+    let ShepherdFrame::AgentIdle(idle) = m.body() else {
+        panic!("expected agent/idle")
+    };
+    idle.inferred.clone()
+}
+
+#[test]
+fn an_idle_says_how_it_was_inferred() {
+    assert_eq!(idle_inference(json!({})), None);
+    assert_eq!(
+        idle_inference(json!({ "inferred": "quiet" })),
+        Some(IdleInference::Quiet)
+    );
+    assert_eq!(
+        idle_inference(json!({ "inferred": "quiet-after-permission" })),
+        Some(IdleInference::QuietAfterPermission)
+    );
+}
+
+#[test]
+fn an_idle_inferred_some_new_way_is_still_an_idle() {
+    assert_eq!(
+        idle_inference(json!({ "inferred": "telepathy" })),
+        Some(IdleInference::Other("telepathy".to_owned()))
+    );
+}
+
+#[test]
+fn an_inferred_idle_serializes_its_inference_and_a_plain_one_has_none() {
+    let inferred = ShepherdFrame::AgentIdle(AgentIdle {
+        inferred: Some(IdleInference::QuietAfterPermission),
+    });
+    assert_eq!(
+        reserialized(&inferred.to_frame())["params"],
+        json!({ "inferred": "quiet-after-permission" })
+    );
+    let plain = ShepherdFrame::AgentIdle(AgentIdle::default());
+    assert_eq!(reserialized(&plain.to_frame())["params"], json!({}));
 }
 
 #[test]

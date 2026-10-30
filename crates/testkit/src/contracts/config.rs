@@ -132,6 +132,7 @@ bell = true
                         command: Some("claude".into()),
                         args: Some(vec!["--dangerously-skip-permissions".into()]),
                         env: Some(map(&[("A", "1"), ("B", "2")])),
+                        idle_after_quiet_ms: None,
                     },
                 ),
             ])),

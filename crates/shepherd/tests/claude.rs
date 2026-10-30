@@ -52,7 +52,8 @@ fn read_json(path: &Path) -> Value {
 /// does with the settings it was given: looks up the handler for the payload's `hook_event_name` in the
 /// `--settings` file and runs it with the payload on stdin and its own environment. Running is simulated: a handler
 /// whose command is [`SHEPHERD_EXE`] is `shepherd`, so the fake calls `shepherd hook <args[1]>` in-process, on its
-/// own thread like a separate hook process. Any other handler, or none, does nothing.
+/// own thread like a separate hook process. Any other handler, or none, does nothing. Typed `print:<text>`, it prints
+/// `<text>`, as its TUI redrawing. Resized, it prints too.
 fn fake_claude(net: &FakeNetwork, hooks: &Hooks, spawned: &Spawned) -> Program {
     let (net, hooks, spawned) = (net.clone(), hooks.clone(), spawned.clone());
     Arc::new(move |input, p| {
@@ -61,8 +62,11 @@ fn fake_claude(net: &FakeNetwork, hooks: &Hooks, spawned: &Spawned) -> Program {
             ProgramInput::Start => return spawned.lock().unwrap().push(spec),
             ProgramInput::Stdin(b"/exit\r") => return p.exit(0),
             ProgramInput::Stdin(bytes) => bytes,
-            ProgramInput::Resized => return,
+            ProgramInput::Resized => return p.print(b"redrawn"),
         };
+        if let Some(text) = bytes.strip_prefix(b"print:") {
+            return p.print(text);
+        }
         let Ok(payload) = serde_json::from_slice::<Value>(bytes.trim_ascii_end()) else {
             return;
         };
@@ -525,6 +529,129 @@ fn a_claude_sessions_status_follows_its_hooks_through_a_permission_prompt() {
         }
     }
     assert_eq!(seen, ["Working", "NeedsPermission", "Working", "Idle"]);
+}
+
+// ---------- quiet idle ----------
+
+#[test]
+fn a_claude_turn_that_ends_without_a_stop_hook_goes_idle_once_its_pty_is_quiet() {
+    // Esc interrupts a turn without a `Stop` hook: nothing says it ended but the spinner stopping.
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    c.hook(&mut client, &session, "UserPromptSubmit");
+    assert_eq!(status(c.activity(&session).activity()), "Working");
+    let quiet = Duration::from_secs(3);
+    assert_eq!(
+        c.h.runtime().next_deadline(),
+        Some(c.h.clock().now() + quiet)
+    );
+
+    // The spinner prints, then stops.
+    c.h.clock().advance(Duration::from_secs(2));
+    client.input(&session, b"print:spinner");
+    c.h.step();
+    assert_eq!(
+        c.h.runtime().next_deadline(),
+        Some(c.h.clock().now() + quiet)
+    );
+    c.h.clock().advance(Duration::from_millis(2900));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "Working");
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 0);
+
+    c.h.clock().advance(Duration::from_millis(100));
+    c.h.step();
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    let last = log.last().unwrap();
+    assert_eq!(last.frame().method(), Some("_shepherd/agent/idle"));
+    assert_eq!(
+        serde_json::to_value(last.frame()).unwrap()["params"],
+        json!({ "inferred": "quiet" })
+    );
+    assert_eq!(status(c.activity(&session).activity()), "Idle");
+    assert_eq!(c.h.runtime().next_deadline(), None);
+
+    // Redraws while it waits don't make it working again.
+    client.input(&session, b"print:prompt");
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 1);
+}
+
+#[test]
+fn a_claude_permission_dialog_answered_without_a_hook_goes_idle_once_its_pty_is_quiet() {
+    // Choosing "No" fires no hook: the user types, the dialog redraws, and the agent waits at its prompt.
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    for hook in [
+        "UserPromptSubmit",
+        "PreToolUse.Bash",
+        "PermissionRequest.Bash",
+    ] {
+        c.hook(&mut client, &session, hook);
+    }
+    assert_eq!(status(c.activity(&session).activity()), "NeedsPermission");
+
+    // Redraws nobody asked for (a resize) and quiet don't clear it.
+    client.resize(&session, 100, 30);
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "NeedsPermission");
+    assert_eq!(c.h.runtime().next_deadline(), None);
+
+    // The user answers and the dialog redraws, then it goes quiet.
+    client.input(&session, b"print:no");
+    c.h.step();
+    c.h.clock().advance(Duration::from_millis(2999));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "NeedsPermission");
+    c.h.clock().advance(Duration::from_millis(1));
+    c.h.step();
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(log.last().unwrap().frame()).unwrap()["params"],
+        json!({ "inferred": "quiet-after-permission" })
+    );
+    assert_eq!(status(c.activity(&session).activity()), "Idle");
+}
+
+#[test]
+fn a_shell_session_is_never_inferred_idle() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("shell")).unwrap();
+    client.input(&session, b"hello\r");
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 0);
+    assert_eq!(c.h.runtime().next_deadline(), None);
+}
+
+impl Claude {
+    /// `session`'s state, folded from its log.
+    fn activity(&self, session: &SessionId) -> SessionState {
+        let mut state = SessionState::default();
+        for env in self
+            .h
+            .log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap()
+        {
+            state.apply(&env);
+        }
+        state
+    }
 }
 
 // ---------- resume ----------

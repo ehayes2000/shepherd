@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 
 // ---------- raw (as written) ----------
@@ -40,6 +41,8 @@ pub struct RawAgent {
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub env: Option<BTreeMap<String, String>>,
+    /// How long an agent's PTY must stay quiet in a turn before its session is inferred idle. Agent kinds only.
+    pub idle_after_quiet_ms: Option<u64>,
 }
 
 /// `[keys]`.
@@ -122,7 +125,14 @@ pub struct AgentProfile {
     pub args: Vec<String>,
     /// Added to the inherited environment. Already includes `[defaults] env`.
     pub env: BTreeMap<String, String>,
+    /// How long the PTY of a session running this profile must be quiet during a turn before the host infers the
+    /// agent went idle (`idle_after_quiet_ms`, default [`DEFAULT_IDLE_AFTER_QUIET`]). Ignored for shells.
+    pub idle_after_quiet: SignedDuration,
 }
+
+/// How long an agent's PTY stays quiet during a turn before the host infers it went idle: agent TUIs animate a
+/// spinner while they work, so a few seconds of silence means the agent is waiting.
+pub const DEFAULT_IDLE_AFTER_QUIET: SignedDuration = SignedDuration::from_millis(3000);
 
 /// The key that starts a shepherd key chord. Written `ctrl-<a..z>` or `ctrl-space`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +212,7 @@ impl Config {
     /// - `[defaults] agent` defaults to `claude` and must name a resulting profile.
     /// - `[keys] prefix` defaults to `ctrl-b` and must be `ctrl-<a..z>` or `ctrl-space`.
     /// - `[notify] bell` defaults to off.
+    /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
     pub fn resolve(
         raw: Option<RawConfig>,
         login_shell: Option<String>,
@@ -293,6 +304,7 @@ fn builtin_profiles(login_shell: Option<String>) -> impl Iterator<Item = AgentPr
         command,
         args: Vec::new(),
         env: BTreeMap::new(),
+        idle_after_quiet: DEFAULT_IDLE_AFTER_QUIET,
     })
 }
 
@@ -308,6 +320,9 @@ fn overlay(mut profile: AgentProfile, user: RawAgent) -> Result<AgentProfile, Co
         profile.args = args;
     }
     profile.env.extend(user.env.unwrap_or_default());
+    if let Some(ms) = user.idle_after_quiet_ms {
+        profile.idle_after_quiet = quiet_period(ms);
+    }
     check_command(profile)
 }
 
@@ -325,7 +340,15 @@ fn new_profile(name: String, user: RawAgent) -> Result<AgentProfile, ConfigError
         command,
         args: user.args.unwrap_or_default(),
         env: user.env.unwrap_or_default(),
+        idle_after_quiet: user
+            .idle_after_quiet_ms
+            .map_or(DEFAULT_IDLE_AFTER_QUIET, quiet_period),
     })
+}
+
+/// `idle_after_quiet_ms` as a duration. Values past what a duration holds saturate, which means never.
+fn quiet_period(ms: u64) -> SignedDuration {
+    SignedDuration::from_millis(i64::try_from(ms).unwrap_or(i64::MAX))
 }
 
 fn parse_kind(agent: &str, kind: String) -> Result<AgentKind, ConfigError> {
