@@ -129,14 +129,26 @@ mod tests {
             let text = std::fs::read_to_string(self.dir.join("child.pid")).ok()?;
             text.trim().parse().ok()
         }
+
+        /// The recorded child and its process group, if it is running: not exiting (`E`, its SIGKILL delivered) and
+        /// not a zombie (`Z`) waiting for launchd (its parent once the hook's shell is gone) to reap it, which may be
+        /// a moment after the port returns. Neither runs anything.
+        fn running_child(&self) -> Option<(libc::pid_t, String)> {
+            let pid = self.child_pid()?;
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=,pgid=", "-p", &pid.to_string()])
+                .output()
+                .ok()?;
+            let line = String::from_utf8_lossy(&ps.stdout);
+            let mut fields = line.split_whitespace();
+            let (stat, pgid) = (fields.next()?, fields.next()?);
+            (!stat.contains('Z') && !stat.contains('E')).then(|| (pid, pgid.to_owned()))
+        }
     }
 
     impl Drop for ShellFixture {
         fn drop(&mut self) {
-            if let Some(pid) = self
-                .child_pid()
-                .filter(|_| self.forked_child_alive() == Some(true))
-            {
+            if let Some((pid, _)) = self.running_child() {
                 // SAFETY: plain syscall, on the child our own script started and recorded.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
@@ -154,17 +166,21 @@ mod tests {
             &self.dir
         }
 
-        /// A killed child is a zombie until launchd (its parent once the hook's shell is gone) reaps it, which may be
-        /// a moment after the port returns: a zombie runs nothing, so it counts as dead.
+        /// Alive means running ([`ShellFixture::running_child`]). A live child must be in the shell's process group,
+        /// which the shell leads: the port's group kill depends on it, and without this check a missing `setsid` would
+        /// only show as the timeout case hanging for minutes.
         fn forked_child_alive(&self) -> Option<bool> {
-            let pid = self.child_pid()?;
-            let ps = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", &pid.to_string()])
-                .output()
-                .unwrap();
-            let stat = String::from_utf8_lossy(&ps.stdout);
-            let stat = stat.trim();
-            Some(!stat.is_empty() && !stat.starts_with('Z'))
+            self.child_pid()?;
+            let Some((_, pgid)) = self.running_child() else {
+                return Some(false);
+            };
+            let shell = std::fs::read_to_string(self.dir.join("shell.pid")).unwrap();
+            assert_eq!(
+                pgid,
+                shell.trim(),
+                "the hook's child is not in the group the hook's shell leads"
+            );
+            Some(true)
         }
     }
 
@@ -182,6 +198,45 @@ mod tests {
             timeout: Duration::from_secs(60),
         };
         f.port.run(&spec).unwrap()
+    }
+
+    /// Set in the environment of the child test process [`stdin_probe`] runs in.
+    const STDIN_PROBE: &str = "T23_STDIN_PROBE";
+
+    /// Only does something in the child test process [`stdin_is_closed_whatever_the_runners_stdin`] starts: runs a
+    /// hook that reads stdin, and prints what it saw.
+    #[test]
+    fn stdin_probe() {
+        if std::env::var_os(STDIN_PROBE).is_none() {
+            return;
+        }
+        let f = ShellFixture::new();
+        let out = run(&f, "cat; printf done");
+        let seen = format!("T23PROBE[{}]", String::from_utf8_lossy(&out.tail));
+        std::io::Write::write_all(&mut std::io::stdout(), seen.as_bytes()).unwrap();
+    }
+
+    /// The contract's `stdin_is_closed` would pass with an inherited stdin whenever the test runner's own stdin is
+    /// `/dev/null`. Here the runner (a child copy of this test binary) has a pipe holding data as its stdin, which a
+    /// hook with an inherited stdin would read.
+    #[test]
+    fn stdin_is_closed_whatever_the_runners_stdin() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["commands::tests::stdin_probe", "--exact", "--nocapture"])
+            .env(STDIN_PROBE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        std::io::Write::write_all(&mut stdin, b"data from the runner\n").unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{stdout}");
+        assert!(stdout.contains("T23PROBE[done]"), "{stdout}");
     }
 
     #[test]

@@ -54,11 +54,13 @@ pub const ENV_AND_CWD: &str = "printf '%s|%s' \"$T23_CONTRACT_VAR\" \"$(pwd -P)\
 pub const ENV_VAR: &str = "T23_CONTRACT_VAR";
 /// Reads stdin to its end, then prints `done`.
 pub const READS_STDIN: &str = "cat; printf done";
-/// Prints `started`, starts a `sleep` in the background, records its pid in `child.pid`, and waits for it: it never
-/// finishes on its own.
-pub const FORK_AND_HANG: &str = "echo started; sleep 300 & echo $! > child.pid; wait";
-/// Starts a `sleep` in the background, records its pid in `child.pid`, and exits 0 without waiting for it.
-pub const FORK_AND_EXIT: &str = "sleep 300 & echo $! > child.pid";
+/// Prints `started`, records its own pid in `shell.pid`, starts a `sleep` in the background, records its pid in
+/// `child.pid`, and waits for it: it never finishes on its own.
+pub const FORK_AND_HANG: &str =
+    "echo started; echo $$ > shell.pid; sleep 300 & echo $! > child.pid; wait";
+/// Records its own pid in `shell.pid`, starts a `sleep` in the background, records its pid in `child.pid`, and exits 0
+/// without waiting for it.
+pub const FORK_AND_EXIT: &str = "echo $$ > shell.pid; sleep 300 & echo $! > child.pid";
 
 /// A timeout no case here comes near, except on purpose.
 const GENEROUS: Duration = Duration::from_secs(60);

@@ -24,6 +24,8 @@ use support::*;
 
 /// A liveness bound for a held call, never a measurement.
 const LIMIT: Duration = Duration::from_secs(10);
+/// How long each wait in a loop polling for two things at once lasts: a liveness slice of [`LIMIT`], never a measurement.
+const STEP: Duration = Duration::from_millis(20);
 
 /// A fake `claude` that records, each time it starts, its cwd and whether its `--settings` file (a run file) exists.
 fn recording_claude(seen: &Arc<Mutex<Vec<(PathBuf, bool)>>>) -> Program {
@@ -128,10 +130,15 @@ impl Setup {
     fn start_with_first_hook_held(&mut self) -> (SessionId, shepherd_testkit::fakes::hold::Hold) {
         let hold = self.commands.hold_next();
         let req = self.new_claude_session();
-        // The request, then the worktree's result, which runs the first hook.
+        // The request, then the worktree's result, which runs the first hook. The result may already have been handled
+        // by the poll, so wait for the hook to start rather than for any one event: handle what arrives meanwhile.
         self.h.poll();
-        assert!(self.h.runtime_mut().run_next(LIMIT), "no worktree result");
-        assert!(hold.wait_entered(LIMIT), "the hook never reached the port");
+        let mut waited = Duration::ZERO;
+        while !hold.wait_entered(STEP) {
+            assert!(waited < LIMIT, "the hook never reached the port");
+            self.h.runtime_mut().run_next(STEP);
+            waited += STEP * 2;
+        }
         let id = new_session_id(&self.client.take(), &req);
         (id, hold)
     }

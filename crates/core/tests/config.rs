@@ -408,7 +408,7 @@ fn workspace_keys_are_compared_as_paths() {
 
 #[test]
 fn a_relative_or_empty_workspace_key_is_an_error() {
-    for key in ["src/app", "./app", "~/src/app", ""] {
+    for key in ["src/app", "./app", "~/src/app", "", ".", ".."] {
         let result =
             resolve(json!({ "workspaces": { key: { "hooks": { "post_create": ["x"] } } } }));
         assert_eq!(
