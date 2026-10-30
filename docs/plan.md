@@ -9,10 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F34 client marks answer keys | in review | task/f34-answer-keys @ 7af3269 (on 1a8ada4) | 1 | PM-accepted: Keys still byte-judged for old clients; prefix keys stay Keys |
-| T24 auto-naming | re-review (round 3) | task/t24-auto-naming @ 1c3386d (on a2a41a6) | 3 | NFC + alnum/≤2 marks + byte cap |
 | T25 close removes worktree | in review | task/t25-close-cleanup @ 808391d | 1 | PM-accepted: worktree/removing frame; worktree_kept; SessionClose.worktree mode; worktree/status request; Restarted event; force=false default |
-| F28 workspace repo root + ~ | re-review | task/f28-repo-root @ ee7104c (on 6cbdf73) | 2 | bareness-based main checkout; fake add_dir; symlink case; separate-git-dir worktree gap documented |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -49,6 +46,9 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T24 | 4 | control chars, boundaries untested; NFD split; bidi/format chars and unbounded graphemes in names (decision 0017) |
+| F28 | 2 | .git-named bare repo gave a root the port rejects |
+| F34 | 1 | mixed-version: new client's `answer` not counted by an F31 host (accepted) |
 | F31 | 2 | runtime kind forwarding untested (focus test passed via ESC rule) |
 | T23 | 2 | timeout contract flaky (?E stat), scenario hold race; setsid/stdin cases weak |
 | F25 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
@@ -472,7 +472,7 @@ notes: Decide in the report whether this is an async port shape (`start_*` + eve
 sync port; prefer the wrapper if it keeps the port trait and its contract suite unchanged.
 
 ### F28: Workspace from a subdirectory, and `~` in typed paths
-status: in-progress
+status: done (6f1c62b)
 depends: T21
 touches: ports::worktrees, adapters::worktrees, core::host (workspace)
 goal: Running `shepherd` in `<repo>/crates` should pick `<repo>`, and typing `~/Code/x` in the switcher should work.
@@ -536,6 +536,8 @@ acceptance:
   to clean), then `git worktree add <path> <b>` without `-b`. Cleanup deletes the branch only if this create made it (and
   only with `update-ref -d refs/heads/<b> <base-oid>`, i.e. only if it still points where we put it). Regression tests: a branch
   appearing just before update-ref → BranchExists, untouched; a branch moved by someone after we created it → not deleted.
+- F28 review: pin `main_checkout`'s checks with an adapter test for a main checkout with `core.worktree` set (and a comment
+  that the same-repo check is defensive); fake `add_dir` parent semantics needs a contract case.
 - F25 review: the signal-kill path sends SIGKILL to the group after git was reaped (theoretical pid reuse). Learn how git
   died with `waitid(WNOWAIT)` (as `wait_unreaped` does), kill the group, then reap.
 scope: crates/adapters
@@ -556,7 +558,7 @@ acceptance:
 scope: crates/adapters, crates/core, crates/testkit, crates/shepherd
 
 ### F34: The client marks keys that can answer a dialog
-status: in-progress
+status: done (274b3e2)
 depends: F31
 touches: tui::keys, core::wire (input kind)
 goal: F31 classifies answers from bytes, so Esc and Ctrl-C (which dismiss Claude's permission dialog without a hook) don't
@@ -578,6 +580,9 @@ acceptance:
   alert: drops Cc and Cf (bidi controls, ZWJ, BOM, tags), caps combining marks per base, caps length by graphemes, NFC.
   Table tests with Trojan-Source bidi strings, Zalgo, and huge inputs (counted work). Every render/alert site uses it (grep
   test or a reviewer checklist item).
+- From the T24 final review: a name must never start with `-` when the first word is dropped (over-long first cluster);
+  test the exact 120-byte boundary for later words; no combining marks after in-word punctuation; drop the redundant
+  apostrophe strip.
 scope: crates/core, crates/tui, crates/shepherd
 
 ## Out of scope for the initial feature set
@@ -1287,7 +1292,7 @@ Contract cases: exit code, output tail cap, timeout kills the group (no leaked c
 `sleep`), env and cwd, a missing cwd is an error.
 
 ### T24: Auto-naming
-status: in-progress
+status: done (6bfeb19)
 depends: T05, T22
 touches: core::host (naming)
 goal: Sessions get useful names without effort. Manual rename always wins.
