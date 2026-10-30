@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
 | F32 atomic branch create | fixing (CHANGES) | task/f32-atomic-branch @ 740967d | 1 | Blocking: core.filesRefLockTimeout lets cleanup delete another process's lock → pin =0 |
-| T25 close removes worktree | fixing (CHANGES) | task/t25-close-cleanup @ 808391d | 1 | Blocking: Remove-anyway can force-delete unconfirmed new changes; escape test passes via error. Minors: stale status answer, Failed→Keep, is_gone, wording (PM decisions) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T25 | 2 | Remove-anyway could force-delete unconfirmed new changes; escape test passed via an error |
 | T24 | 4 | control chars, boundaries untested; NFD split; bidi/format chars and unbounded graphemes in names (decision 0017) |
 | F28 | 2 | .git-named bare repo gave a root the port rejects |
 | F34 | 1 | mixed-version: new client's `answer` not counted by an F31 host (accepted) |
@@ -1361,7 +1361,7 @@ translators); exactly once per session; a host restart must not re-name (decide 
 required. Resume and replay keep the name.
 
 ### T25: Close removes the worktree when it's safe
-status: in-progress
+status: done (a812e2a)
 depends: T22, T23
 touches: core::host (close), core::client, tui::popup
 goal: Worktrees go away when they should. No more pile of abandoned worktrees.
@@ -1377,7 +1377,7 @@ notes: The session closes immediately (PTY killed) and shows "removing worktree�
 the close is recorded once the outcome is known. A session whose worktree is already gone closes normally.
 
 ### T25b: Cleanup view
-status: todo
+status: ready
 depends: T25
 touches: core::client, tui::popup, core::host
 goal: Find and remove abandoned worktrees in bulk.
@@ -1385,6 +1385,9 @@ acceptance:
 - A cleanup view (opened from a `Cleanup` button in the sidebar footer, decision 0014) lists managed worktrees with no open
   session and stale sessions (exited, and merged for more than N days) with status columns, and supports bulk removal of the
   safe ones (same safety rules and pre_remove hooks as T25). Hit tests click rendered cells; snapshot.
+- From the T25 final review: a runtime test that a listed worktree with status NotARepo whose directory still exists is kept
+  (the `exists` computation in runtime.rs is untested); force only when `confirmed.dirty && status.dirty`; the safe and
+  unpushed-only dialogs mention that ignored files are removed.
 scope: crates/core, crates/tui, crates/shepherd
 
 ### T26: Search and open
