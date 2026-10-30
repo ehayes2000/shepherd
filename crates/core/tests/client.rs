@@ -390,6 +390,75 @@ fn the_catch_up_after_connecting_does_not_alert() {
     );
 }
 
+// ---------- attention follows window focus ----------
+
+#[test]
+fn while_the_window_is_unfocused_the_selected_session_going_idle_is_marked() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::WindowFocus(false));
+    go_idle(&mut c, "s2");
+    c.sync();
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    assert!(attention(&c, "s2"));
+}
+
+#[test]
+fn while_the_window_is_unfocused_the_selected_session_asking_permission_alerts() {
+    let mut c = live(true);
+    c.user(Intent::WindowFocus(false));
+    start_turn(&mut c, "s2", 1);
+    ask_permission(&mut c, "s2", 7);
+    assert_eq!(
+        alerts(&c.sync()),
+        [(
+            "s2".into(),
+            "shepherd: shell-2 needs permission: rm -rf build".into()
+        )]
+    );
+}
+
+#[test]
+fn the_selected_sessions_mark_clears_when_the_window_regains_focus() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::WindowFocus(false));
+    go_idle(&mut c, "s2");
+    c.sync();
+    c.user(Intent::WindowFocus(true));
+    assert!(!attention(&c, "s2"));
+}
+
+#[test]
+fn regaining_focus_leaves_unselected_sessions_marked() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::WindowFocus(false));
+    go_idle(&mut c, "s1");
+    c.sync();
+    c.user(Intent::WindowFocus(true));
+    assert!(attention(&c, "s1"));
+}
+
+#[test]
+fn after_regaining_focus_the_selected_session_is_seen_again() {
+    let mut c = live(true);
+    c.user(Intent::WindowFocus(false));
+    c.user(Intent::WindowFocus(true));
+    go_idle(&mut c, "s2");
+    assert_eq!(alerts(&c.sync()), []);
+    assert!(!attention(&c, "s2"));
+}
+
+#[test]
+fn a_wait_seen_before_the_window_lost_focus_does_not_alert_again() {
+    let mut c = live(true);
+    go_idle(&mut c, "s2");
+    c.sync();
+    c.user(Intent::WindowFocus(false));
+    // The agent repeats it's idle: the same wait, already seen.
+    go_idle(&mut c, "s2");
+    assert_eq!(alerts(&c.sync()), []);
+    assert!(!attention(&c, "s2"));
+}
+
 // ---------- selection ----------
 
 #[test]
@@ -1171,6 +1240,15 @@ fn layout_reports_are_not_user_actions_and_keep_the_notice() {
         let mut c = with_notice();
         c.user(report.clone());
         assert!(c.client().notice().is_some(), "after {report:?}");
+    }
+}
+
+#[test]
+fn the_window_gaining_or_losing_focus_is_not_a_user_action_and_keeps_the_notice() {
+    for focused in [false, true] {
+        let mut c = with_notice();
+        c.user(Intent::WindowFocus(focused));
+        assert!(c.client().notice().is_some(), "after focused = {focused}");
     }
 }
 

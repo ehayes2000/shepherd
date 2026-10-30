@@ -86,11 +86,18 @@ pub fn map_event(
             ],
             (None, Focus::Terminal) => vec![Intent::Input(encode::paste(text, modes))],
         },
-        Event::FocusGained | Event::FocusLost if to_terminal => {
-            input(encode::focus(*event == Event::FocusGained, modes))
+        // The window's focus is reported to shepherd, and forwarded to the session too if it asked and keys go to it.
+        Event::FocusGained | Event::FocusLost => {
+            let gained = *event == Event::FocusGained;
+            let mut intents = if to_terminal {
+                input(encode::focus(gained, modes))
+            } else {
+                Vec::new()
+            };
+            intents.push(Intent::WindowFocus(gained));
+            intents
         }
         Event::Mouse(mouse) => map_mouse(mouse, client, modes, window, pointer),
-        Event::FocusGained | Event::FocusLost => Vec::new(),
     }
 }
 
