@@ -69,3 +69,11 @@ fn a_query_never_matches_part_of_a_grapheme() {
 fn a_word_boundary_is_found_in_non_latin_text() {
     assert_eq!(rank("ログ", "修正 ログイン"), Some(Rank::WordBoundary));
 }
+
+#[test]
+fn a_word_starts_where_uax_29_says_even_between_letters() {
+    // No space or punctuation: only UAX #29 puts a boundary between the kanji and the katakana.
+    assert_eq!(rank("ログ", "修正ログイン"), Some(Rank::WordBoundary));
+    // Within one katakana word there is none.
+    assert_eq!(rank("グイ", "修正ログイン"), Some(Rank::Subsequence));
+}

@@ -29,7 +29,9 @@
 //! Orphans (the finder, T26): a client can ask for the workspace's managed worktrees that no session that isn't closed
 //! runs in or is having made ([`HostEvent::ListWorktrees`], answered from `Worktrees::list_managed` off the runtime
 //! thread). A new session asked to run in one of them, with its branch, records both in its `session/created`: the
-//! worktree is the session's own from the start, so closing it treats it like one the host made.
+//! worktree is the session's own from the start, so closing it treats it like one the host made. A worktree that
+//! another session that isn't closed uses (as its worktree or cwd) can't be started in this way, and closing a
+//! session keeps a worktree another session still uses, saying so in its `session/closed`.
 //!
 //! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
 //! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a
@@ -687,6 +689,17 @@ impl Host {
                     (true, Some(branch), Some(path)) => Some((path.to_owned(), branch)),
                     _ => None,
                 };
+                // Two sessions owning one worktree would let closing one remove it under the other.
+                if let Some(user) = adopted
+                    .as_ref()
+                    .and_then(|(path, _)| self.used_by(None, Path::new(path)))
+                {
+                    let error = WireError::InvalidParams(format!(
+                        "{} is already in use by {user}",
+                        spec.spawn.cwd.display()
+                    ));
+                    return vec![reply_err(reply, error)];
+                }
                 let branch = match (&worktree, &adopted) {
                     (Some((_, name)), _) => Some(name.as_str().to_owned()),
                     (None, Some((_, branch))) => Some(branch.clone()),
@@ -988,6 +1001,11 @@ impl Host {
             commands.push(ack(reply));
             return commands;
         };
+        if let Some(why) = self.still_used(&session, path) {
+            commands.push(closed(&session, false, Some(why)));
+            commands.push(ack(reply));
+            return commands;
+        }
         let removing = ShepherdFrame::WorktreeRemoving(WorktreeRemoving {
             path: path.to_string_lossy().into_owned(),
             force: confirmed.is_some(),
@@ -1023,6 +1041,10 @@ impl Host {
     ) -> Vec<HostCommand> {
         if !self.removing(&session) {
             return Vec::new();
+        }
+        // Another session may have started in it since the close began.
+        if let Some(why) = self.still_used(&session, path.as_path()) {
+            return vec![closed(&session, false, Some(why))];
         }
         let status = match result {
             Ok(Inspection::Listed {
@@ -1434,27 +1456,26 @@ impl Host {
         }
     }
 
-    /// The worktrees in `listed` (a repo's managed ones) that no session that isn't closed runs in, or is having made:
-    /// told apart by path, and by branch for a worktree still being made. A path that isn't UTF-8 can't be a client's
-    /// cwd, so it is left out.
+    /// The worktrees in `listed` (the current workspace's managed ones) that no session that isn't closed uses: as its
+    /// worktree or cwd ([`Host::used_by`]), or, for a worktree still being made in this workspace, by the branch it was
+    /// given. A path that isn't UTF-8 can't be a client's cwd, so it is left out.
     fn orphans(&self, listed: Vec<Worktree>) -> WorktreeListOk {
-        let live: Vec<&Entry> = self.sessions.values().filter(|e| !e.closed).collect();
-        let taken = |w: &Worktree| {
-            live.iter().any(|e| {
-                let by_path = e
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|(path, _)| path == w.path.as_path());
-                let by_branch = match (&e.branch, &w.branch) {
+        let workspace = self.workspace();
+        let being_made = |w: &Worktree| {
+            self.sessions.values().any(|e| {
+                let same_branch = match (&e.branch, &w.branch) {
                     (Some(theirs), Some(branch)) => theirs == branch.as_str(),
                     _ => false,
                 };
-                by_path || by_branch
+                !e.closed
+                    && e.phase == Phase::Starting
+                    && e.workspace.as_deref() == workspace
+                    && same_branch
             })
         };
         let worktrees = listed
             .into_iter()
-            .filter(|w| !taken(w))
+            .filter(|w| self.used_by(None, w.path.as_path()).is_none() && !being_made(w))
             .filter_map(|w| {
                 Some(WorktreeInfo {
                     path: w.path.as_path().to_str()?.to_owned(),
@@ -1463,6 +1484,24 @@ impl Host {
             })
             .collect();
         WorktreeListOk { worktrees }
+    }
+
+    /// A session that isn't closed, other than `except`, that uses `path`: as its worktree, or as its cwd.
+    fn used_by(&self, except: Option<&SessionId>, path: &Path) -> Option<&SessionId> {
+        self.sessions
+            .iter()
+            .filter(|(id, e)| !e.closed && Some(*id) != except)
+            .find(|(_, e)| {
+                let worktree = e.worktree.as_ref().is_some_and(|(p, _)| p == path);
+                worktree || e.cwd.as_deref() == Some(path)
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// Why closing `session` keeps its worktree at `path`: another session still uses it.
+    fn still_used(&self, session: &SessionId, path: &Path) -> Option<String> {
+        self.used_by(Some(session), path)
+            .map(|other| format!("it is still in use by {other}"))
     }
 
     /// A session that exists and isn't closed or closing.

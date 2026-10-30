@@ -219,6 +219,156 @@ fn closing_a_session_started_in_a_listed_worktree_inspects_that_worktree() {
     );
 }
 
+/// A new shell session asked to run in `/wt/old-idea` without saying it is a worktree: it doesn't own it.
+fn plain_in_old_idea() -> NewSessionSpec {
+    NewSessionSpec {
+        worktree_branch: None,
+        ..in_old_idea()
+    }
+}
+
+fn closed(id: &str, why: &str) -> HostCommand {
+    append(
+        id,
+        "_shepherd/session/closed",
+        json!({ "worktree_removed": false, "worktree_kept": why }),
+    )
+}
+
+fn refused(cmds: &[HostCommand]) -> Option<String> {
+    cmds.iter().find_map(|c| match c {
+        HostCommand::Reply {
+            result: Err(WireError::InvalidParams(why)),
+            ..
+        } => Some(why.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn starting_in_a_worktree_another_session_owns_or_runs_in_is_refused() {
+    for (why, first) in [("owns", in_old_idea()), ("runs in", plain_in_old_idea())] {
+        let mut host = in_workspace();
+        host.new_session_with("s1", first);
+        let cmds = host.new_session_with("s2", in_old_idea());
+        assert_eq!(
+            refused(&cmds),
+            Some("/wt/old-idea is already in use by s1".to_owned()),
+            "{why}: {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, HostCommand::Append(_) | HostCommand::SpawnPty { .. })),
+            "{why}: nothing is created"
+        );
+        assert_eq!(host.host().sessions().len(), 1, "{why}");
+    }
+}
+
+#[test]
+fn closing_a_session_keeps_its_worktree_while_another_session_runs_in_it() {
+    let mut host = in_workspace();
+    host.new_session_with("s1", in_old_idea());
+    host.new_session_with("s2", plain_in_old_idea());
+    let cmds = host.close("s1");
+    assert!(
+        cmds.contains(&closed("s1", "it is still in use by s2")),
+        "{cmds:?}"
+    );
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, HostCommand::InspectWorktree { .. })),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn a_worktree_another_session_started_in_while_closing_is_kept() {
+    let mut host = in_workspace();
+    host.new_session_with("s1", in_old_idea());
+    let close = host.close_with(
+        "s1",
+        CloseWorktree::Remove {
+            confirmed: shepherd_core::ports::WorktreeStatus {
+                dirty: true,
+                ..Default::default()
+            },
+        },
+        shepherd_core::config::WorkspaceHooks::default(),
+    );
+    let Some(HostCommand::InspectWorktree { purpose, .. }) = close
+        .iter()
+        .find(|c| matches!(c, HostCommand::InspectWorktree { .. }))
+        .cloned()
+    else {
+        panic!("{close:?}");
+    };
+    host.new_session_with("s2", plain_in_old_idea());
+    let cmds = host.handle(HostEvent::WorktreeInspected {
+        session: sid("s1"),
+        path: WorktreePath::new("/wt/old-idea"),
+        purpose,
+        result: Ok(shepherd_core::host::Inspection::Listed {
+            status: Ok(shepherd_core::ports::WorktreeStatus {
+                dirty: true,
+                merged_into_default: true,
+                ..Default::default()
+            }),
+            exists: true,
+        }),
+    });
+    assert_eq!(cmds, vec![closed("s1", "it is still in use by s2")]);
+}
+
+#[test]
+fn a_worktree_a_session_runs_in_without_owning_it_is_no_orphan() {
+    let mut host = in_workspace();
+    host.new_session_with("s1", plain_in_old_idea());
+    let reply = host.reply_to();
+    let cmds = listed(&mut host, reply, Ok(vec![worktree("/wt/old-idea", None)]));
+    assert_eq!(
+        cmds,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Ok(HostResult::WorktreeList(WorktreeListOk::default())),
+        }]
+    );
+}
+
+#[test]
+fn only_a_worktree_being_made_in_this_workspace_hides_one_on_its_branch() {
+    let mut host = HostDriver::new();
+    let ask = WorkspaceAsk::Select(host.reply_to());
+    host.handle(HostEvent::WorkspaceProbed {
+        ask,
+        repo: Ok(PathBuf::from("/src/other")),
+    });
+    // Waiting for a worktree of `/src/other`, on branch `shell-1`.
+    host.new_session("s1");
+    let ask = WorkspaceAsk::Select(host.reply_to());
+    host.handle(HostEvent::WorkspaceProbed {
+        ask,
+        repo: Ok(PathBuf::from("/src/app")),
+    });
+    let reply = host.reply_to();
+    let cmds = listed(
+        &mut host,
+        reply,
+        Ok(vec![worktree("/wt/app/shell-1", Some("shell-1"))]),
+    );
+    assert_eq!(
+        cmds,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Ok(HostResult::WorktreeList(WorktreeListOk {
+                worktrees: vec![info("/wt/app/shell-1", Some("shell-1"))],
+            })),
+        }]
+    );
+}
+
 #[test]
 fn a_branch_given_without_an_explicit_cwd_is_ignored() {
     let mut host = HostDriver::new();

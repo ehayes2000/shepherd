@@ -148,6 +148,14 @@ fn orphan_worktrees_match_by_their_branch_and_directory_name() {
 }
 
 #[test]
+fn the_query_is_trimmed() {
+    let mut c = named(&[("s1", "docs"), ("s2", "api")]);
+    find(&mut c, json!([]));
+    c.user(Intent::EditFind(" docs ".into()));
+    assert_eq!(results(&c), [session("s1")]);
+}
+
+#[test]
 fn a_query_nothing_matches_leaves_no_results() {
     let mut c = named(&[("s1", "docs")]);
     find(&mut c, json!([]));
@@ -291,6 +299,21 @@ fn an_answer_after_the_finder_closed_is_ignored_and_reopening_asks_again() {
         Ok(json!({ "worktrees": [{ "path": "/wt/app/x", "branch": "x" }] })),
     );
     assert_eq!(c.client().orphans(), Some(&Orphans::Loading));
+}
+
+#[test]
+fn the_first_finders_answer_arriving_after_it_was_reopened_is_not_taken_for_the_second() {
+    let mut c = named(&[("s1", "docs")]);
+    let first = c.user(Intent::BeginFind);
+    c.user(Intent::Dismiss);
+    let second = c.user(Intent::BeginFind);
+    c.answer(
+        &first,
+        Ok(json!({ "worktrees": [{ "path": "/wt/app/x", "branch": "x" }] })),
+    );
+    assert_eq!(c.client().orphans(), Some(&Orphans::Loading));
+    c.answer(&second, Ok(json!({ "worktrees": [] })));
+    assert_eq!(c.client().orphans(), Some(&Orphans::Listed(vec![])));
 }
 
 #[test]

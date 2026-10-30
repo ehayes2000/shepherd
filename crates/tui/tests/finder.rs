@@ -186,6 +186,44 @@ fn the_finder_keeps_its_top_while_typing_changes_its_height() {
     assert_eq!(at(&buffer(&c, WIDE), "┌ find"), top);
 }
 
+const SHORT: Rect = Rect::new(0, 0, 80, 12);
+
+/// Thirty sessions, `name-01` (oldest) to `name-30`, with the finder open and scrolled down three rows.
+fn scrolled_finder() -> ClientDriver {
+    let ids: Vec<String> = (1..=30).map(|i| format!("s{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut c = ClientDriver::with_sessions(&ids);
+    for i in 1..=30 {
+        c.host().rename(&format!("s{i}"), &format!("name-{i:02}"));
+    }
+    c.sync();
+    let asked = c.user(Intent::BeginFind);
+    c.answer(&asked, Ok(json!({ "worktrees": [] })));
+    c.user(Intent::ScrollFinder { by: 3, shown: 6 });
+    c
+}
+
+#[test]
+fn finder_scrolled() {
+    let c = scrolled_finder();
+    insta::assert_debug_snapshot!(buffer(&c, SHORT));
+}
+
+#[test]
+fn clicking_a_row_of_the_scrolled_finder_chooses_what_is_drawn_there() {
+    let mut c = scrolled_finder();
+    // Newest first, three rows down: name-27 is the first row shown.
+    let buf = buffer(&c, SHORT);
+    let row = in_finder(&buf, "name-27");
+    assert_eq!(row.y, at(&buf, "┌ find").y + 2, "the top row: {buf:?}");
+    let s27 = FinderItem::Session(SessionId::new("s27"));
+    assert_eq!(
+        click(&mut c, SHORT, row),
+        [vec![], vec![Intent::FinderChoose(s27)]]
+    );
+    assert_eq!(c.client().selected(), Some(&SessionId::new("s27")));
+}
+
 // ---------- clicks ----------
 
 #[test]
