@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
+| F19 drop translator state | building | task/f19-drop-translators @ 64d2a42 | 0 | – |
 | F07 palette in snapshots | in review | task/f07-palette-snapshots @ 694310a | 1 | Builder found host-crash bug → F23 |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
@@ -324,7 +326,7 @@ notes: `LaunchError` gains `HostFailed(String)` (additive). The fake launcher ca
 contract case for it if the contract suite covers error variants.
 
 ### F19: Drop hook translator state when a session closes
-status: ready
+status: in-progress
 depends: T16
 touches: core::agents (Translators), shepherd::host
 goal: `Translators` keeps one translator per session for the life of the host run, even after the session closes.
@@ -905,7 +907,7 @@ acceptance:
 scope: crates/core, crates/shepherd
 
 ### T17b: Profile picker
-status: ready
+status: in-progress
 depends: T17, T34
 touches: tui::popup, core::client
 goal: Clicking `+ New session` lets you pick which agent to run (decision 0014).
