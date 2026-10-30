@@ -50,6 +50,7 @@ struct Setup {
     app: PathBuf,
     root: PathBuf,
     commands: FakeCommands,
+    worktrees: FakeWorktrees,
     claude: Arc<Mutex<Vec<(PathBuf, bool)>>>,
     h: HostHarness,
     client: FakeClient,
@@ -86,7 +87,7 @@ impl Setup {
         let claude = Arc::default();
         let mut h = HostHarness::builder()
             .program("claude", recording_claude(&claude))
-            .worktrees(worktrees)
+            .worktrees(worktrees.clone())
             .commands(commands.clone())
             .config(config)
             .start();
@@ -107,6 +108,7 @@ impl Setup {
             app,
             root,
             commands,
+            worktrees,
             claude,
             h,
             client,
@@ -279,8 +281,9 @@ fn a_session_closed_while_a_hook_runs_runs_no_more_hooks_and_never_spawns() {
         [
             "_shepherd/session/created",
             "_shepherd/worktree/created",
-            "_shepherd/session/closed",
+            "_shepherd/worktree/removing",
             "_shepherd/worktree/hook",
+            "_shepherd/session/closed",
         ]
     );
     assert!(!s.h.runtime().pty().is_running(&id));
@@ -334,9 +337,15 @@ fn closing_a_session_cancels_its_running_hook() {
     let runs: Vec<String> = s.commands.runs().into_iter().map(|r| r.script).collect();
     assert_eq!(runs, ["setup-a"]);
     let frames = frames(&s.h, &id);
+    let n = frames.len();
     assert!(
-        matches!(frames.last(), Some(ShepherdFrame::WorktreeHook(hook))
+        matches!(&frames[n - 2], ShepherdFrame::WorktreeHook(hook)
             if hook.hook == "setup-a" && hook.error.as_deref() == Some("cancelled")),
+        "{frames:?}"
+    );
+    // The cancelled hook left nothing: the worktree is removed, as any close that loses nothing removes it.
+    assert!(
+        matches!(&frames[n - 1], ShepherdFrame::SessionClosed(closed) if closed.worktree_removed),
         "{frames:?}"
     );
     assert!(!s.h.runtime().pty().is_running(&id));
@@ -366,5 +375,55 @@ fn shutting_the_host_down_cancels_running_hooks_and_waits_for_them() {
         "the host stopped before its hooks did"
     );
     // Nothing was started after them.
+    assert!(s.claude.lock().unwrap().is_empty());
+}
+
+/// F33 (PM): a session closed mid-hook goes through the normal close. Its worktree is inspected only once the cancelled
+/// hook is gone, so what the half-run hook left (here: uncommitted files, written as it dies) keeps the worktree, and the
+/// close says why.
+#[test]
+fn a_session_closed_mid_hook_keeps_a_worktree_the_dying_hook_left_files_in() {
+    let mut s = Setup::new(&["setup-a"]);
+    let path = s.make_worktree_dir("claude-1");
+    let (dying_tx, dying) = std::sync::mpsc::channel::<()>();
+    let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+    let finish_rx = Mutex::new(finish_rx);
+    let worktrees = s.worktrees.clone();
+    let left_in = path.clone();
+    s.commands.add_script("setup-a", move |c| {
+        c.wait_for_cancel();
+        dying_tx.send(()).unwrap();
+        // Still dying when the test lets it go: it writes into the worktree before it is gone.
+        finish_rx.lock().unwrap().recv_timeout(LIMIT).unwrap();
+        worktrees.set_dirty(&left_in, true);
+    });
+    let req = s.new_claude_session();
+    s.h.poll();
+    let mut waited = Duration::ZERO;
+    while s.commands.running() == 0 {
+        assert!(waited < LIMIT, "the hook never reached the port");
+        s.h.runtime_mut().run_next(STEP);
+        waited += STEP;
+    }
+    let id = new_session_id(&s.client.take(), &req);
+    s.client.request(ClientRequest::SessionClose(SessionClose {
+        session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+    }));
+    s.h.poll();
+    dying
+        .recv_timeout(LIMIT)
+        .expect("the hook was never cancelled");
+    finish.send(()).unwrap();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+
+    let frames = frames(&s.h, &id);
+    assert!(
+        matches!(frames.last(), Some(ShepherdFrame::SessionClosed(closed))
+            if !closed.worktree_removed
+                && closed.worktree_kept.as_deref() == Some("it has uncommitted changes")),
+        "{frames:?}"
+    );
+    assert!(path.is_dir(), "the worktree was removed");
     assert!(s.claude.lock().unwrap().is_empty());
 }

@@ -16,6 +16,7 @@ use shepherd::host::{HostRuntime, runtime_channel};
 use shepherd_adapters::GitWorktrees;
 use shepherd_core::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame};
 use shepherd_core::config::{RawConfig, RawHooks, RawWorkspace};
+use shepherd_core::host::{HostEvent, Inspect, Inspection, PreRemove};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::WorktreeStatus;
 use shepherd_core::ports::{
@@ -484,5 +485,69 @@ fn shutting_the_host_down_cancels_a_running_pre_remove_hook() {
     assert!(s.h.runtime_mut().run_until_settled(LIMIT));
     assert!(s.h.runtime().is_finished());
     assert_eq!(s.commands.running(), 0);
+    assert!(s.listed(), "the worktree was removed");
+}
+
+/// F33 review: a close's inspection that answers after shutdown began must not start the pre-remove hook (nothing would
+/// cancel it, and it would outlive the host). Another session's PTY keeps the shutdown waiting, and the inspection's
+/// answer is handed to the runtime right after the shutdown, before that PTY's exit: the order that let it start.
+#[test]
+fn a_hook_due_after_shutdown_began_never_starts() {
+    let mut s = Setup::new();
+    let other_path = s.path.parent().unwrap().join("shell-2");
+    std::fs::create_dir_all(&other_path).unwrap();
+    let req = s
+        .client
+        .request(ClientRequest::SessionNew(SessionNew::default()));
+    s.h.step();
+    let other = new_session_id(&s.client.take(), &req);
+    assert!(s.h.runtime().pty().is_running(&other));
+    // The real inspection stays held: its answer is the one handed over below.
+    let hold = s.worktrees.hold_next();
+    s.close(CloseWorktree::IfSafe);
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "the inspection never started");
+
+    s.h.runtime_mut()
+        .handle(shepherd::host::RuntimeEvent::Shutdown);
+    assert!(
+        !s.h.runtime().is_finished(),
+        "the other PTY's exit is still queued"
+    );
+    let clean = WorktreeStatus {
+        dirty: false,
+        ahead: 0,
+        pushed: false,
+        merged_into_default: true,
+    };
+    s.h.runtime_mut()
+        .handle(shepherd::host::RuntimeEvent::Worktrees(
+            HostEvent::WorktreeInspected {
+                session: s.id.clone(),
+                path: WorktreePath::new(&s.path),
+                purpose: Inspect::Close {
+                    confirmed: None,
+                    hooks: PreRemove {
+                        hooks: vec!["make clean".to_owned()],
+                        timeout: Duration::from_secs(90),
+                    },
+                },
+                result: Ok(Inspection::Listed {
+                    status: Ok(clean),
+                    exists: true,
+                }),
+            },
+        ));
+    assert!(
+        s.commands.runs().is_empty(),
+        "a hook started after shutdown"
+    );
+    hold.release();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert!(
+        s.commands.runs().is_empty(),
+        "a hook started after shutdown"
+    );
     assert!(s.listed(), "the worktree was removed");
 }

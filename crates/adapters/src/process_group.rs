@@ -40,8 +40,15 @@ pub(crate) fn wait_group_gone(pgid: u32) {
         return;
     };
     let started = Instant::now();
-    // SAFETY: plain syscall; signal 0 only checks that the group exists.
-    while unsafe { libc::killpg(pgid, 0) } == 0 && started.elapsed() < GROUP_EXIT_WAIT {
+    while group_exists(pgid) && started.elapsed() < GROUP_EXIT_WAIT {
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Whether process group `pgid` has any member. macOS answers EPERM, not ESRCH, while the only members left are dying
+/// or zombies not yet reaped (by launchd, once their parent is gone): they still hold the group id, so they count.
+fn group_exists(pgid: libc::pid_t) -> bool {
+    // SAFETY: plain syscall; signal 0 only checks that the group exists.
+    let rc = unsafe { libc::killpg(pgid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

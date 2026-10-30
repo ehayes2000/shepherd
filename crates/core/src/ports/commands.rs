@@ -17,7 +17,8 @@ use std::time::Duration;
 /// The most bytes of a command's output [`Commands::run`] returns: the end of it.
 pub const OUTPUT_TAIL: usize = 4096;
 
-/// Names a [`Commands::run`] for [`Commands::cancel`]. The caller picks it, and never uses one twice.
+/// Names a [`Commands::run`] for [`Commands::cancel`]. Given out by [`Commands::new_run`], never twice; the number
+/// means nothing to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RunId(pub u64);
 
@@ -67,12 +68,17 @@ pub enum CommandError {
 }
 
 pub trait Commands {
-    /// Runs `command` to completion, or until its timeout. A command that ran is `Ok` whatever its exit; only one that
-    /// couldn't run is an error.
+    /// A new id for one [`Commands::run`]. The port knows the run from now on, so a cancel before the run has started
+    /// isn't lost; it forgets the id once that run returns. An id never passed to `run` stays known.
+    fn new_run(&self) -> RunId;
+
+    /// Runs `command`, as run `id` (from [`Commands::new_run`]), to completion, or until its timeout. A command that
+    /// ran is `Ok` whatever its exit; only one that couldn't run is an error.
     fn run(&self, id: RunId, command: &CommandSpec) -> Result<CommandOutput, CommandError>;
 
     /// Stops run `id`: kills its whole process group, and that `run` returns [`CommandExit::Cancelled`] once the group
     /// is gone. A run that hasn't started yet is cancelled as it starts, running nothing. One that has already returned
-    /// is not undone. Never waits, so it may be called from the thread that is waiting for the run's answer.
+    /// is not undone, and its id is then ignored. Never waits, so it may be called from the thread that is waiting for
+    /// the run's answer.
     fn cancel(&self, id: RunId);
 }

@@ -42,7 +42,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use shepherd_core::ports::{
-    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL, RunId,
+    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL,
 };
 
 /// Prints `out` to stdout, then `err` to stderr, and exits 3.
@@ -88,6 +88,9 @@ pub trait CommandsFixture {
     /// Blocks until the running script has recorded its background child, up to `limit` (a liveness bound). Whether it
     /// did.
     fn wait_for_child(&self, limit: Duration) -> bool;
+    /// Whether the process group of the last script that recorded `shell.pid` is gone: no member left, so nothing it
+    /// started still runs.
+    fn shell_group_gone(&self) -> bool;
 }
 
 fn spec<F: CommandsFixture>(f: &F, script: &str, timeout: Duration) -> CommandSpec {
@@ -99,12 +102,9 @@ fn spec<F: CommandsFixture>(f: &F, script: &str, timeout: Duration) -> CommandSp
     }
 }
 
-/// The id every case's one run uses, unless it says otherwise.
-const ONE: RunId = RunId(1);
-
 fn run<F: CommandsFixture>(f: &F, spec: &CommandSpec) -> CommandOutput {
     f.port()
-        .run(ONE, spec)
+        .run(f.port().new_run(), spec)
         .unwrap_or_else(|e| panic!("running {:?}: {e}", spec.script))
 }
 
@@ -148,7 +148,7 @@ pub fn a_missing_cwd_is_an_error<F: CommandsFixture>(f: &F) {
     let mut spec = spec(f, PRINT_AND_EXIT, GENEROUS);
     spec.cwd = f.dir().join("missing");
     assert_eq!(
-        f.port().run(ONE, &spec),
+        f.port().run(f.port().new_run(), &spec),
         Err(CommandError::NoSuchDir(spec.cwd.clone()))
     );
 }
@@ -158,7 +158,8 @@ pub fn a_file_as_cwd_is_an_error<F: CommandsFixture>(f: &F) {
     std::fs::write(&file, b"").unwrap();
     let mut spec = spec(f, PRINT_AND_EXIT, GENEROUS);
     spec.cwd = file.clone();
-    assert_eq!(f.port().run(ONE, &spec), Err(CommandError::NoSuchDir(file)));
+    let id = f.port().new_run();
+    assert_eq!(f.port().run(id, &spec), Err(CommandError::NoSuchDir(file)));
 }
 
 /// The command never finishes, so any timeout is passed. A short one may pass before the script has even recorded its
@@ -171,6 +172,10 @@ pub fn timeout_kills_the_whole_group<F: CommandsFixture>(f: &F) {
         match f.forked_child_alive() {
             Some(alive) => {
                 assert!(!alive, "the hook's background child outlived the timeout");
+                assert!(
+                    f.shell_group_gone(),
+                    "it returned before its group was gone"
+                );
                 assert_eq!(out.tail, b"started\n");
                 return;
             }
@@ -196,22 +201,27 @@ pub fn chatty_output_keeps_only_its_tail<F: CommandsFixture>(f: &F) {
     assert_eq!(out.tail, all[all.len() - OUTPUT_TAIL..]);
 }
 
-/// A cancel while the command runs kills it and everything it started, and the run says it was cancelled. Bounded: a
-/// cancel that did nothing ends in the generous timeout instead, and fails.
+/// A cancel while the command runs kills it and everything it started, and the run says it was cancelled once they are
+/// gone. Bounded: a cancel that did nothing ends in the generous timeout instead, which is reported as such and fails.
 pub fn cancel_kills_the_whole_group<F: CommandsFixture + Sync>(f: &F) {
     let spec = spec(f, FORK_AND_WAIT, GENEROUS);
+    let id = f.port().new_run();
     let out = std::thread::scope(|s| {
-        let call = s.spawn(|| f.port().run(ONE, &spec));
+        let call = s.spawn(|| f.port().run(id, &spec));
         assert!(
             f.wait_for_child(GENEROUS),
             "the script never started its child"
         );
-        f.port().cancel(ONE);
+        f.port().cancel(id);
         call.join().unwrap()
     });
     let out = out.unwrap_or_else(|e| panic!("running {FORK_AND_WAIT:?}: {e}"));
     assert_eq!(out.exit, CommandExit::Cancelled);
     assert_eq!(out.tail, b"started\n");
+    assert!(
+        f.shell_group_gone(),
+        "it returned before its group was gone"
+    );
     assert_eq!(
         f.forked_child_alive(),
         Some(false),
@@ -220,8 +230,9 @@ pub fn cancel_kills_the_whole_group<F: CommandsFixture + Sync>(f: &F) {
 }
 
 pub fn a_run_cancelled_before_it_starts_runs_nothing<F: CommandsFixture>(f: &F) {
-    f.port().cancel(ONE);
-    let out = run(f, &spec(f, FORK_AND_EXIT, GENEROUS));
+    let id = f.port().new_run();
+    f.port().cancel(id);
+    let out = f.port().run(id, &spec(f, FORK_AND_EXIT, GENEROUS)).unwrap();
     assert_eq!(
         out,
         CommandOutput {
@@ -232,23 +243,27 @@ pub fn a_run_cancelled_before_it_starts_runs_nothing<F: CommandsFixture>(f: &F) 
     assert_eq!(f.forked_child_alive(), None, "it ran");
 }
 
-/// A cancel names one run: the next run, and a run going on at the same time, are left alone.
+/// A cancel names one run: a run not started yet, a run going on at the same time, and a run after a cancel of one
+/// that already returned are left alone.
 pub fn cancelling_one_run_leaves_another_alone<F: CommandsFixture + Sync>(f: &F) {
     let waiting = spec(f, FORK_AND_WAIT, GENEROUS);
     let printing = spec(f, PRINT_AND_EXIT, GENEROUS);
+    let (first, second, third) = (f.port().new_run(), f.port().new_run(), f.port().new_run());
+    assert!(first != second && second != third && first != third);
     std::thread::scope(|s| {
-        let call = s.spawn(|| f.port().run(RunId(1), &waiting));
+        let call = s.spawn(|| f.port().run(first, &waiting));
         assert!(
             f.wait_for_child(GENEROUS),
             "the script never started its child"
         );
-        f.port().cancel(RunId(2));
-        let other = f.port().run(RunId(3), &printing).unwrap();
+        let other = f.port().run(second, &printing).unwrap();
         assert_eq!(other.exit, CommandExit::Code(3));
+        // `second` has returned: cancelling it now does nothing to anything else.
+        f.port().cancel(second);
         assert_eq!(f.forked_child_alive(), Some(true));
-        f.port().cancel(RunId(1));
+        f.port().cancel(first);
         assert_eq!(call.join().unwrap().unwrap().exit, CommandExit::Cancelled);
     });
-    let after = f.port().run(RunId(4), &printing).unwrap();
+    let after = f.port().run(third, &printing).unwrap();
     assert_eq!(after.exit, CommandExit::Code(3));
 }

@@ -27,9 +27,11 @@
 //!   running create. The `Commands` port (a worktree's post-create and pre-remove hooks) runs each hook on a thread of
 //!   its own the same way, its results coming back as [`RuntimeEvent::Commands`], so a long hook never holds up git
 //!   calls, the loop, or another session's hooks. Closing a session whose hook is running cancels it
-//!   (`Commands::cancel`, which kills its process group and never waits), and its answer comes back as usual. Shutting
-//!   the host down cancels every running hook and waits (within the shutdown grace) for their answers, which it drops:
-//!   a session stopping with the host spawns nothing.
+//!   (`Commands::cancel`, which kills its process group and never waits), and its answer comes back as usual; the
+//!   close's inspection of the worktree waits for that answer, so it sees what the hook left. Shutting the host down
+//!   cancels every running hook and waits (within the shutdown grace) for their answers, which it drops: a session
+//!   stopping with the host spawns nothing. From then on no hook starts (a close's inspection or a create's result
+//!   that arrives later would otherwise start one nothing cancels).
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -66,8 +68,8 @@ use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::upgrade::{Preflight, UpgradeFacts, UpgradeStep, Work, decide};
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, Inspection, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
-    expand_home,
+    Host, HostCommand, HostEvent, Inspect, Inspection, NewSessionSpec, ReplyTo, ResumeSpec,
+    WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
@@ -382,8 +384,9 @@ pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
     /// `Commands` calls (hooks) running and not yet answered, by session (a session runs one hook at a time), for
     /// `Commands::cancel`.
     hooks: HashMap<SessionId, RunId>,
-    /// The id the next hook runs as: never reused.
-    next_run: u64,
+    /// A close's inspection of a session whose hook (cancelled by that close) hasn't answered yet: it starts once the
+    /// hook has, so it sees what the hook left.
+    after_hook: HashMap<SessionId, HostCommand>,
     link: L,
     log: E,
     env: V,
@@ -499,7 +502,7 @@ impl<
             worktree_calls: 0,
             commands,
             hooks: HashMap::new(),
-            next_run: 0,
+            after_hook: HashMap::new(),
             link,
             log,
             env,
@@ -813,9 +816,12 @@ impl<
                 }
             }
             RuntimeEvent::Commands(event) => {
-                if let HostEvent::HookFinished { session, .. }
-                | HostEvent::PreRemoveFinished { session, .. } = &event
-                {
+                let session = match &event {
+                    HostEvent::HookFinished { session, .. }
+                    | HostEvent::PreRemoveFinished { session, .. } => Some(session.clone()),
+                    _ => None,
+                };
+                if let Some(session) = &session {
                     self.hooks.remove(session);
                 }
                 // A hook cancelled by the shutdown: its session stops with the host, so nothing follows from it.
@@ -829,6 +835,10 @@ impl<
                         self.worktree_created(session, event);
                     }
                     _ => self.dispatch(event),
+                }
+                // The hook is gone: a close waiting for it inspects the worktree now.
+                if let Some(inspect) = session.and_then(|s| self.after_hook.remove(&s)) {
+                    self.run_commands(vec![inspect]);
                 }
             }
             RuntimeEvent::Shutdown => self.start_shutdown(),
@@ -846,7 +856,14 @@ impl<
 
     /// Runs `event` through core and executes what it returns, then any events that execution produced.
     fn dispatch(&mut self, event: HostEvent) {
-        let mut queue = VecDeque::from([event]);
+        let commands = self.host.handle(event);
+        self.run_commands(commands);
+    }
+
+    /// Executes `commands`, then runs any events that execution produced through core, as [`Self::dispatch`] does.
+    fn run_commands(&mut self, commands: Vec<HostCommand>) {
+        let mut queue = VecDeque::new();
+        self.execute(commands, &mut queue);
         while let Some(event) = queue.pop_front() {
             let commands = self.host.handle(event);
             self.execute(commands, &mut queue);
@@ -1008,6 +1025,13 @@ impl<
                         self.commands.port().cancel(*id);
                     }
                 }
+                // Once shutdown has started no hook starts: nothing would cancel it, and it would outlive the host. Its
+                // session stops with the host, as a hook's answer during shutdown would be dropped anyway.
+                HostCommand::RunHook { .. } | HostCommand::RunPreRemove { .. }
+                    if self.shutdown_by.is_some() =>
+                {
+                    tracing::debug!("not starting a hook: the host is shutting down");
+                }
                 HostCommand::RunHook {
                     session,
                     command,
@@ -1050,6 +1074,13 @@ impl<
                             follow_up.push_back(*unanswered);
                         }
                     }
+                }
+                HostCommand::InspectWorktree {
+                    ref session,
+                    purpose: Inspect::Close { .. },
+                    ..
+                } if self.hooks.contains_key(session) => {
+                    self.after_hook.insert(session.clone(), command);
                 }
                 HostCommand::InspectWorktree {
                     session,
@@ -1167,10 +1198,8 @@ impl<
     }
 
     /// A new id for a hook of `session`, and the name of the thread it runs on.
-    fn next_hook(&mut self, session: &SessionId) -> (RunId, String) {
-        let id = RunId(self.next_run);
-        self.next_run += 1;
-        (id, format!("hook-{session}"))
+    fn next_hook(&self, session: &SessionId) -> (RunId, String) {
+        (self.commands.port().new_run(), format!("hook-{session}"))
     }
 
     /// Hands a session's worktree or hook result (`event`) to core, with the run files that waited for it ready for its

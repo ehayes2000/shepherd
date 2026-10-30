@@ -8,7 +8,7 @@
 //! [`FakeCommands::hold_next`] makes the next call block until the test releases it (or the code under test cancels
 //! it), to stand in for a long hook. Calls run at the same time on different threads, as the real port's do.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -110,10 +110,12 @@ struct State {
 /// The runs a cancel can reach. Kept apart from `state`, so a held call holds no lock a cancel needs.
 #[derive(Default)]
 struct Flights {
+    /// The last id given out.
+    last: u64,
+    /// Ids given out whose run hasn't started, and whether each was cancelled.
+    pending: HashMap<RunId, bool>,
     /// Each run in progress, and the gate it waits at while held or waiting for a cancel.
     running: HashMap<RunId, Arc<Gate>>,
-    /// Runs cancelled before they started.
-    cancelled_early: HashSet<RunId>,
 }
 
 #[derive(Clone, Default)]
@@ -259,7 +261,7 @@ impl Commands for FakeCommands {
         let held = self.hold.take();
         let gate = {
             let mut flights = self.flights();
-            if flights.cancelled_early.remove(&id) {
+            if flights.pending.remove(&id) == Some(true) {
                 drop(flights);
                 self.lock().runs.push(command.clone());
                 return Ok(cancelled());
@@ -275,15 +277,23 @@ impl Commands for FakeCommands {
         result
     }
 
+    fn new_run(&self) -> RunId {
+        let mut flights = self.flights();
+        flights.last += 1;
+        let id = RunId(flights.last);
+        flights.pending.insert(id, false);
+        id
+    }
+
     /// A held call, or one waiting for its cancel, stops waiting at once. Any other running call is past the point
-    /// where a cancel could reach it (the fake's scripts take no time), so a cancel then does nothing.
+    /// where a cancel could reach it (the fake's scripts take no time), so a cancel then does nothing, as it does for
+    /// an id whose run has returned.
     fn cancel(&self, id: RunId) {
         let mut flights = self.flights();
-        match flights.running.get(&id) {
-            Some(gate) => gate.cancel(),
-            None => {
-                flights.cancelled_early.insert(id);
-            }
+        if let Some(gate) = flights.running.get(&id) {
+            gate.cancel();
+        } else if let Some(cancelled) = flights.pending.get_mut(&id) {
+            *cancelled = true;
         }
     }
 }
@@ -375,6 +385,11 @@ mod tests {
         fn wait_for_child(&self, limit: Duration) -> bool {
             self.fake.wait_child_forked(limit)
         }
+
+        /// The fake runs no processes: a group it "killed" is gone at once.
+        fn shell_group_gone(&self) -> bool {
+            true
+        }
     }
 
     mod contract {
@@ -397,7 +412,7 @@ mod tests {
         let f = FakeFixture::new();
         let out = f
             .fake
-            .run(RunId(1), &spec("frobnicate", f.dir.clone()))
+            .run(f.fake.new_run(), &spec("frobnicate", f.dir.clone()))
             .unwrap();
         assert_eq!(out.exit, CommandExit::Code(127));
         assert_eq!(out.tail, b"sh: frobnicate: command not found\n");
@@ -409,11 +424,11 @@ mod tests {
         f.fake.fail_next(CommandError::Failed("no fork".into()));
         let first = spec(PRINT_AND_EXIT, f.dir.clone());
         assert_eq!(
-            f.fake.run(RunId(1), &first),
+            f.fake.run(f.fake.new_run(), &first),
             Err(CommandError::Failed("no fork".into()))
         );
         assert_eq!(
-            f.fake.run(RunId(2), &first).unwrap().exit,
+            f.fake.run(f.fake.new_run(), &first).unwrap().exit,
             CommandExit::Code(3)
         );
         assert_eq!(f.fake.runs(), vec![first.clone(), first]);
@@ -425,7 +440,8 @@ mod tests {
         let hold = f.fake.hold_next();
         let fake = f.fake.clone();
         let s = spec(PRINT_AND_EXIT, f.dir.clone());
-        let call = std::thread::spawn(move || fake.run(RunId(1), &s));
+        let id = f.fake.new_run();
+        let call = std::thread::spawn(move || fake.run(id, &s));
         assert!(hold.wait_entered(Duration::from_secs(10)));
         assert!(!call.is_finished());
         assert_eq!(f.fake.running(), 1);
@@ -440,9 +456,10 @@ mod tests {
         let hold = f.fake.hold_next();
         let fake = f.fake.clone();
         let s = spec(FORK_AND_EXIT, f.dir.clone());
-        let call = std::thread::spawn(move || fake.run(RunId(1), &s));
+        let id = f.fake.new_run();
+        let call = std::thread::spawn(move || fake.run(id, &s));
         assert!(hold.wait_entered(Duration::from_secs(10)));
-        f.fake.cancel(RunId(1));
+        f.fake.cancel(id);
         assert!(hold.wait_cancelled(Duration::from_secs(10)));
         let out = call.join().unwrap().unwrap();
         assert_eq!(out.exit, CommandExit::Cancelled);

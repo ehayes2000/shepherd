@@ -31,23 +31,28 @@ const SHELL: &str = "/bin/sh";
 
 #[derive(Debug, Default)]
 pub struct ShellCommands {
-    /// Runs going on, and runs cancelled before they started, for [`Commands::cancel`].
-    runs: Mutex<HashMap<RunId, Flight>>,
+    /// Every id given out whose run hasn't returned, for [`Commands::cancel`].
+    runs: Mutex<Runs>,
 }
 
-/// A run [`ShellCommands::runs`] knows of.
+#[derive(Debug, Default)]
+struct Runs {
+    /// The last id given out.
+    last: u64,
+    known: HashMap<RunId, Flight>,
+}
+
+/// A run [`ShellCommands::runs`] knows of: given out, and not yet returned.
 #[derive(Debug, Default)]
 struct Flight {
-    /// `false`: cancelled before it started.
-    started: bool,
     cancelled: bool,
     /// The shell's process group, while the shell is unreaped (so the id can't be reused).
     pgid: Option<u32>,
 }
 
-/// A run going on, registered in [`ShellCommands::runs`] until it is dropped.
+/// A run going on, known to [`ShellCommands::runs`] until it is dropped: on every way out of `run`.
 struct Registered<'a> {
-    runs: &'a Mutex<HashMap<RunId, Flight>>,
+    runs: &'a Mutex<Runs>,
     id: RunId,
 }
 
@@ -56,7 +61,7 @@ impl Registered<'_> {
     /// it.
     fn spawned(&self, pgid: u32) -> bool {
         let mut runs = lock(self.runs);
-        let Some(run) = runs.get_mut(&self.id) else {
+        let Some(run) = runs.known.get_mut(&self.id) else {
             return false;
         };
         run.pgid = Some(pgid);
@@ -66,7 +71,7 @@ impl Registered<'_> {
     /// Forgets the shell's process group, once it has exited and before it is reaped. Whether the run was cancelled.
     fn exited(&self) -> bool {
         let mut runs = lock(self.runs);
-        let Some(run) = runs.get_mut(&self.id) else {
+        let Some(run) = runs.known.get_mut(&self.id) else {
             return false;
         };
         run.pgid = None;
@@ -76,7 +81,7 @@ impl Registered<'_> {
 
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        lock(self.runs).remove(&self.id);
+        lock(self.runs).known.remove(&self.id);
     }
 }
 
@@ -89,36 +94,44 @@ impl ShellCommands {
         Self::default()
     }
 
-    /// Registers run `id`, unless it was cancelled before it started (`None`, consuming that cancel).
-    fn start(&self, id: RunId) -> Option<Registered<'_>> {
-        let mut runs = lock(&self.runs);
-        if runs.get(&id).is_some_and(|run| !run.started) {
-            runs.remove(&id);
-            return None;
-        }
-        let started = Flight {
-            started: true,
-            ..Flight::default()
-        };
-        runs.insert(id, started);
-        Some(Registered {
+    /// Starts run `id`: known until the returned guard is dropped, which also forgets a cancel that came before it
+    /// started. Whether it was cancelled already.
+    fn start(&self, id: RunId) -> (Registered<'_>, bool) {
+        let cancelled = lock(&self.runs).known.entry(id).or_default().cancelled;
+        let registered = Registered {
             runs: &self.runs,
             id,
-        })
+        };
+        (registered, cancelled)
+    }
+
+    /// How many runs it knows of: given out and not yet returned.
+    #[cfg(test)]
+    fn known(&self) -> usize {
+        lock(&self.runs).known.len()
     }
 }
 
 impl Commands for ShellCommands {
+    fn new_run(&self) -> RunId {
+        let mut runs = lock(&self.runs);
+        runs.last += 1;
+        let id = RunId(runs.last);
+        runs.known.insert(id, Flight::default());
+        id
+    }
+
     fn run(&self, id: RunId, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
-        if !std::fs::metadata(&spec.cwd).is_ok_and(|m| m.is_dir()) {
-            return Err(CommandError::NoSuchDir(spec.cwd.clone()));
-        }
-        let Some(registered) = self.start(id) else {
+        let (registered, cancelled) = self.start(id);
+        if cancelled {
             return Ok(CommandOutput {
                 exit: CommandExit::Cancelled,
                 tail: Vec::new(),
             });
-        };
+        }
+        if !std::fs::metadata(&spec.cwd).is_ok_and(|m| m.is_dir()) {
+            return Err(CommandError::NoSuchDir(spec.cwd.clone()));
+        }
         let failed = |what: &str, e: io::Error| CommandError::Failed(format!("{what}: {e}"));
         let no_pipe = |e| failed("cannot make its output pipe", e);
         let (mut output, stdout) = io::pipe().map_err(no_pipe)?;
@@ -187,8 +200,8 @@ impl Commands for ShellCommands {
         }
         let status = status.map_err(|e| failed("cannot wait for it", e))?;
         let exit = match (status.code(), status.signal()) {
-            (_, Some(_)) if cancelled => CommandExit::Cancelled,
             _ if timed_out => CommandExit::TimedOut,
+            (_, Some(_)) if cancelled => CommandExit::Cancelled,
             (Some(code), _) => CommandExit::Code(code),
             (None, Some(signal)) => CommandExit::Signal(signal),
             (None, None) => {
@@ -202,10 +215,13 @@ impl Commands for ShellCommands {
     }
 
     /// Kills the run's process group if its shell is running (the run's own thread then waits for the group to be
-    /// gone); a run that hasn't spawned its shell yet kills it as it does.
+    /// gone); a run that hasn't spawned its shell yet kills it as it does, and one not started runs nothing.
     fn cancel(&self, id: RunId) {
         let mut runs = lock(&self.runs);
-        let run = runs.entry(id).or_default();
+        // An id it doesn't know has returned (or was never given out): nothing to stop.
+        let Some(run) = runs.known.get_mut(&id) else {
+            return;
+        };
         run.cancelled = true;
         if let Some(pgid) = run.pgid {
             kill_group(pgid);
@@ -224,6 +240,12 @@ impl Tail {
             let cut = self.0.len() - OUTPUT_TAIL;
             self.0.drain(..cut);
         }
+    }
+
+    /// How many bytes it holds now.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.0.len()
     }
 
     fn into_bytes(mut self) -> Vec<u8> {
@@ -327,11 +349,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use shepherd_core::ports::{CommandExit, CommandOutput, CommandSpec, Commands, RunId};
+    use shepherd_core::ports::{CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL};
     use shepherd_testkit::contracts::commands::CommandsFixture;
     use tempfile::TempDir;
 
-    use super::ShellCommands;
+    use super::{ShellCommands, Tail};
 
     /// A fresh port and a tempdir to run in. Kills a background child the contract's scripts left running.
     pub struct ShellFixture {
@@ -410,6 +432,17 @@ mod tests {
             Some(true)
         }
 
+        /// `killpg(shell, 0)` fails with ESRCH: no member of the group the shell led is left, not even a dying one or
+        /// a zombie (for which macOS answers EPERM). The port reaps the shell before it returns, so its pid can only
+        /// name the group while members remain.
+        fn shell_group_gone(&self) -> bool {
+            let shell = std::fs::read_to_string(self.dir.join("shell.pid")).unwrap();
+            let pgid: libc::pid_t = shell.trim().parse().unwrap();
+            // SAFETY: plain syscall; signal 0 only checks whether the group exists.
+            let rc = unsafe { libc::killpg(pgid, 0) };
+            rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+
         /// Polls for `child.pid`, which the script writes once its child has started.
         fn wait_for_child(&self, limit: Duration) -> bool {
             let started = std::time::Instant::now();
@@ -436,7 +469,7 @@ mod tests {
             env: vec![("T23_ADDED".to_owned(), "added".to_owned())],
             timeout: Duration::from_secs(60),
         };
-        f.port.run(RunId(1), &spec).unwrap()
+        f.port.run(f.port.new_run(), &spec).unwrap()
     }
 
     /// Set in the environment of the child test process [`stdin_probe`] runs in.
@@ -535,6 +568,71 @@ mod tests {
                 "the background child never got past writing"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// F33 review: the tail is bounded while the command runs, not only trimmed at the end. Pushing 1 MiB in pipe-sized
+    /// reads, it never holds more than twice the tail, and keeps the last bytes pushed.
+    #[test]
+    fn the_tail_never_holds_more_than_twice_its_size() {
+        let mut tail = Tail::default();
+        let chunk: Vec<u8> = (0..=255u8).cycle().take(16 * 1024 + 7).collect();
+        let mut pushed = 0;
+        while pushed < 1024 * 1024 {
+            tail.push(&chunk);
+            pushed += chunk.len();
+            assert!(
+                tail.held() <= 2 * OUTPUT_TAIL,
+                "held {} after {pushed}",
+                tail.held()
+            );
+        }
+        assert_eq!(tail.into_bytes(), chunk[chunk.len() - OUTPUT_TAIL..]);
+    }
+
+    /// A cancel between the run starting and its shell spawning isn't lost: the run learns it as it records the shell's
+    /// group, and kills it. (`u32::MAX` names no group `kill_group` would signal, so nothing is killed here.)
+    #[test]
+    fn a_cancel_before_the_shell_spawns_is_seen_when_it_does() {
+        let f = ShellFixture::new();
+        let id = f.port.new_run();
+        let (registered, cancelled) = f.port.start(id);
+        assert!(!cancelled);
+        f.port.cancel(id);
+        assert!(registered.spawned(u32::MAX), "the cancel was lost");
+        assert!(registered.exited());
+    }
+
+    /// Every way out of a run forgets its id, and a cancel of an id that returned leaves nothing behind.
+    #[test]
+    fn a_run_is_forgotten_however_it_ends() {
+        let f = ShellFixture::new();
+        run(&f, "printf ok");
+        assert_eq!(f.port.known(), 0, "after a run");
+        let returned = f.port.new_run();
+        f.port.run(returned, &spec_in(&f, "true")).unwrap();
+        f.port.cancel(returned);
+        assert_eq!(f.port.known(), 0, "after cancelling a run that returned");
+        let early = f.port.new_run();
+        f.port.cancel(early);
+        let mut missing = spec_in(&f, "true");
+        missing.cwd = f.dir.join("missing");
+        assert_eq!(
+            f.port.run(early, &missing).unwrap().exit,
+            CommandExit::Cancelled
+        );
+        assert_eq!(f.port.known(), 0, "after a run cancelled before it started");
+        let failing = f.port.new_run();
+        assert!(f.port.run(failing, &missing).is_err());
+        assert_eq!(f.port.known(), 0, "after a run whose cwd is missing");
+    }
+
+    fn spec_in(f: &ShellFixture, script: &str) -> CommandSpec {
+        CommandSpec {
+            script: script.to_owned(),
+            cwd: f.dir.clone(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(60),
         }
     }
 }
