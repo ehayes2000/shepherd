@@ -10,8 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F22 agent session polish | in review | task/f22-agent-session-polish @ 8b98124 (on f019c37) | 1 | PM-accepted: relative cwd refused; global counter; pending_run_files() accessor; sweep race |
-| T18 attention | building | task/t18-attention @ HEAD | 0 | – |
-| T19 Codex | building | task/t19-codex @ HEAD | 0 | – |
+| T18 attention | building | task/t18-attention @ 0fa5b1e | 0 | – |
+| T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | – |
 | F23 kitty push panic | fixing (CHANGES) | task/f23-kitty-push-panic @ 1a64a4d | 1 | Wrapper design approved. Blocking: expire_sync path, pop count, guard flag reset, forward set_mouse_cursor_icon + missing_trait_methods lint. PM: host expire_sync guard untested OK; panic-trigger OK (decision 0015) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
