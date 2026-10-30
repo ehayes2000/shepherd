@@ -417,6 +417,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{AppendFile, JsonlEventLog, TornTail};
+    use crate::private_fs::tests::{private_fifo, within_liveness_bound};
 
     /// A fresh tempdir, chmodded 0700 so it passes the store's private-root check whatever the umask.
     fn private_tempdir() -> TempDir {
@@ -1089,5 +1090,100 @@ mod tests {
             }]
         );
         assert_eq!(try_push(&mut log, &session("s1"), 4), Ok(Seq::new(4)));
+    }
+
+    /// A FIFO swapped in for a log would block a plain `open` until something opened its other end, hanging the
+    /// host. Read and append refuse it instead.
+    #[test]
+    fn a_fifo_at_a_log_path_is_refused_by_read_and_append_without_blocking() {
+        let dir = private_tempdir();
+        let mut log = three_entries(dir.path());
+        let path = s1_path(dir.path());
+        fs::remove_file(&path).unwrap();
+        private_fifo(&path);
+
+        let (read, appended) = within_liveness_bound(move || {
+            let read = log.read(session("s1"), Seq::ZERO).map(|_| ());
+            let appended = try_push(&mut log, &session("s1"), 4).map(|_| ());
+            (read, appended)
+        });
+        assert_wrong_type(read);
+        assert_wrong_type(appended);
+    }
+
+    /// A socket or directory swapped in for a log is the wrong kind of file for read and append alike, however
+    /// the OS reports it.
+    #[test]
+    fn a_socket_or_dir_at_a_log_path_is_refused_by_read_and_append() {
+        for kind in ["socket", "dir"] {
+            let dir = private_tempdir();
+            let mut log = three_entries(dir.path());
+            let path = s1_path(dir.path());
+            fs::remove_file(&path).unwrap();
+            let _listener = match kind {
+                "socket" => Some(std::os::unix::net::UnixListener::bind(&path).unwrap()),
+                _ => {
+                    fs::create_dir(&path).unwrap();
+                    None
+                }
+            };
+            chmod(&path, if kind == "dir" { 0o700 } else { 0o600 });
+
+            assert_wrong_type(log.read(session("s1"), Seq::ZERO).map(|_| ()));
+            assert_wrong_type(try_push(&mut log, &session("s1"), 4).map(|_| ()));
+        }
+    }
+
+    fn assert_wrong_type(result: Result<(), LogError>) {
+        assert!(
+            matches!(&result, Err(LogError::Io(msg)) if msg.contains("wrong kind of file")),
+            "{result:?}"
+        );
+    }
+
+    /// Set by `an_append_survives_the_process_being_killed_right_after` to the store its child appends to.
+    const CRASH_ROOT: &str = "SHEPHERD_TEST_CRASH_ROOT";
+
+    /// Only meaningful in the child of the test below; passes trivially anywhere else. Appends one entry and
+    /// then kills its own process outright: no destructors, no exit handlers, no flushing.
+    #[test]
+    fn append_then_die() {
+        let Some(root) = std::env::var_os(CRASH_ROOT) else {
+            return;
+        };
+        let mut log = JsonlEventLog::open(root).unwrap();
+        push(&mut log, &session("s1"), 1);
+        // SIGKILL rather than abort(): just as abrupt, and it doesn't leave a crash report on the machine.
+        // SAFETY: signalling our own pid.
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        unreachable!("SIGKILL is not catchable");
+    }
+
+    /// The durability claim in the module docs: once `append` returns, the entry is in the file even if this
+    /// process dies at once.
+    #[test]
+    fn an_append_survives_the_process_being_killed_right_after() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = private_tempdir();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "--test-threads=1",
+                "event_log::tests::append_then_die",
+            ])
+            .env(CRASH_ROOT, dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.signal(),
+            Some(libc::SIGKILL),
+            "the child must die right after appending: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let log = JsonlEventLog::open(dir.path()).unwrap();
+        assert_eq!(log.recovered(), []);
+        assert_eq!(seqs(&log, &session("s1")), [1]);
     }
 }
