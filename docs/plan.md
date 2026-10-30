@@ -10,6 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F22 agent session polish | in review | task/f22-agent-session-polish @ 8b98124 (on f019c37) | 1 | PM-accepted: relative cwd refused; global counter; pending_run_files() accessor; sweep race |
+| T18 attention | building | task/t18-attention @ HEAD | 0 | – |
+| T19 Codex | building | task/t19-codex @ HEAD | 0 | – |
 | F23 kitty push panic | fixing (CHANGES) | task/f23-kitty-push-panic @ 1a64a4d | 1 | Wrapper design approved. Blocking: expire_sync path, pop count, guard flag reset, forward set_mouse_cursor_icon + missing_trait_methods lint. PM: host expire_sync guard untested OK; panic-trigger OK (decision 0015) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -939,7 +941,7 @@ carries the chosen profile name (`wire::SessionNew.profile` already exists). The
 host may be another machine).
 
 ### T18: Attention and notifications
-status: todo
+status: in-progress
 depends: T13, T17
 touches: core::client (attention), tui::sidebar
 goal: Never miss an agent that's waiting on you.
@@ -949,7 +951,13 @@ acceptance:
 - Attention rows are visually marked so they can be clicked (decision 0014). No new hotkey.
 - An optional terminal bell or OSC 9 notification on attention, controlled by config `[notify] bell = true`.
 - Snapshot of the sidebar with attention markers.
-scope: crates/core, crates/tui
+scope: crates/core (client, wire hello), crates/tui, crates/shepherd (client runtime bell output, host hello wiring)
+notes: The client never reads config (T17b), so the host sends `notify: { bell: bool }` in the hello response (additive,
+default false), like `profiles`. Attention is pure client state in core: computed from log entries folded with
+`core::session` activity, the selected session, and `last_seen_seq` per session. The bell/OSC 9 is a `ClientCommand` the
+runtime writes to the real terminal (behind the existing terminal seam, so tests assert the command, not bytes on a tty).
+Attention for a session that becomes selected is cleared immediately; a session that needs attention while selected and
+focused is not marked.
 
 ### T18b: Quiet-output idle fallback
 status: todo
@@ -974,7 +982,7 @@ acceptance:
 scope: crates/core, crates/shepherd
 
 ### T19: Codex integration
-status: todo
+status: in-progress
 depends: T14, T16, T17
 touches: core::agents::codex, core::host (spawn spec)
 goal: Codex sessions with status, matching what Claude Code gets wherever Codex exposes the data.
@@ -984,6 +992,11 @@ acceptance:
 - The spawn spec injects hooks without touching the user's `~/.codex` config, using a per-session config override.
 - Scenario with a fake `codex`, as in T17.
 scope: crates/core, crates/shepherd
+notes: Builders never run the real `codex` binary (a T02 builder upgraded the user's Codex): verify the surface from the
+official docs and source (github.com/openai/codex: hooks / `notify` / `-c key=value` overrides / `CODEX_HOME`), cite what
+you found, and build fixtures from documented payload shapes. Follow T17's structure (`core::host::launch`, run files under
+`~/.shepherd/run/<session>/`, `shepherd hook codex`). If Codex offers no way to add hooks without touching `~/.codex`, stop and
+report options rather than editing user config. The PM does the real-codex check after merge.
 
 ### T19b: Resume after restart
 status: todo
