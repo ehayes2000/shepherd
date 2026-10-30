@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18b quiet idle fallback | building | task/t18b-quiet-idle @ HEAD | 0 | merges before T23 |
-| T23 worktree hooks | building | task/t23-worktree-hooks @ HEAD | 0 | rebases after T18b |
+| T18b quiet idle fallback | building | task/t18b-quiet-idle @ fbd8af6 | 0 | merges before T23 |
+| T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
