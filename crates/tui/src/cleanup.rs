@@ -195,6 +195,9 @@ fn state_of(row: &CleanupRow) -> (String, Style) {
         (Some(CleanupOutcome::Removed), _) => ("removed".to_owned(), green),
         (Some(CleanupOutcome::Gone), _) => ("already gone".to_owned(), gray),
         (Some(CleanupOutcome::Kept(why)), _) => (format!("kept: {why}"), yellow),
+        (Some(CleanupOutcome::Unknown), _) => {
+            ("outcome unknown (connection dropped)".to_owned(), yellow)
+        }
         (None, CleanupCheck::Checking) => ("checking…".to_owned(), gray),
         (None, CleanupCheck::Failed(why)) => {
             (format!("can't check: {why}"), Style::new().fg(Color::Red))

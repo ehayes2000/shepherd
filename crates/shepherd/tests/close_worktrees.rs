@@ -568,6 +568,7 @@ fn a_hook_due_after_shutdown_began_never_starts() {
                 result: Ok(Inspection::Listed {
                     status: Ok(clean),
                     exists: true,
+                    branch: None,
                 }),
             },
         ));

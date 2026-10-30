@@ -89,11 +89,10 @@ impl Setup {
         }
     }
 
-    fn remove(&mut self, path: &Path, branch: &str) -> shepherd_core::acpp::RequestId {
+    fn remove(&mut self, path: &Path) -> shepherd_core::acpp::RequestId {
         self.client
             .request(ClientRequest::WorktreeRemove(WorktreeRemove {
                 path: path.to_str().unwrap().to_owned(),
-                branch: Some(branch.to_owned()),
             }))
     }
 
@@ -157,7 +156,7 @@ fn the_cleanup_list_has_each_orphan_with_its_status_and_the_configured_days() {
 #[test]
 fn removing_an_orphan_that_loses_nothing_runs_its_pre_remove_hook_then_removes_it() {
     let mut s = Setup::new();
-    let req = s.remove(&s.old_idea.clone(), "old-idea");
+    let req = s.remove(&s.old_idea.clone());
     s.h.step();
     assert_eq!(
         response(&s.client.take(), &req),
@@ -187,10 +186,54 @@ fn removing_an_orphan_that_loses_nothing_runs_its_pre_remove_hook_then_removes_i
     assert_eq!(s.h.replayed(), *s.h.host());
 }
 
+/// A stale or crafted request naming another branch (an older client sent one) doesn't reach the hooks: they get the
+/// branch git lists for the worktree.
+#[test]
+fn an_orphans_hooks_get_the_listed_branch_never_one_the_client_named() {
+    let mut s = Setup::new();
+    let line = json!({
+        "jsonrpc": "2.0", "id": "crafted", "method": "_shepherd/worktree/remove",
+        "params": { "path": s.old_idea, "branch": "main" },
+    });
+    s.client.send_raw(line.to_string().as_bytes());
+    s.h.step();
+    let msgs = s.client.take();
+    let id = shepherd_core::acpp::RequestId::String("crafted".into());
+    assert_eq!(response(&msgs, &id), Ok(json!({ "removed": true })));
+    let runs = s.commands.runs();
+    assert_eq!(runs.len(), 1);
+    let branch: Vec<&(String, String)> = runs[0]
+        .env
+        .iter()
+        .filter(|(k, _)| k == "SHEPHERD_BRANCH")
+        .collect();
+    assert_eq!(
+        branch,
+        [&("SHEPHERD_BRANCH".to_owned(), "old-idea".to_owned())]
+    );
+}
+
+#[test]
+fn an_orphans_hook_record_says_which_worktree_it_ran_in() {
+    let mut s = Setup::new();
+    s.remove(&s.old_idea.clone());
+    s.h.step();
+    let entries = s.h.log().read(LogId::Host, Seq::ZERO).expect("host log");
+    let hook = entries.iter().find_map(|e| match e.frame() {
+        Frame::Shepherd(m) => match m.body() {
+            ShepherdFrame::WorktreeHook(hook) => Some(hook.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    let hook = hook.expect("a worktree/hook in the host log");
+    assert_eq!(hook.path.as_deref(), s.old_idea.to_str());
+}
+
 #[test]
 fn removing_an_orphan_that_would_lose_work_keeps_it_and_runs_no_hook() {
     let mut s = Setup::new();
-    let req = s.remove(&s.wip.clone(), "wip");
+    let req = s.remove(&s.wip.clone());
     s.h.step();
     assert_eq!(
         response(&s.client.take(), &req),
@@ -203,7 +246,7 @@ fn removing_an_orphan_that_would_lose_work_keeps_it_and_runs_no_hook() {
 /// Removes `old-idea` with its pre-remove hook held: returns once the hook is running and waiting.
 fn remove_with_hook_held(s: &mut Setup) -> Hold {
     let hold = s.commands.hold_next();
-    s.remove(&s.old_idea.clone(), "old-idea");
+    s.remove(&s.old_idea.clone());
     s.h.poll();
     let mut waited = Duration::ZERO;
     while !hold.wait_entered(STEP) {
@@ -253,7 +296,6 @@ fn a_host_restarting_while_an_orphan_is_removed_records_it_kept() {
     let mut client = s.h.connect();
     let req = client.request(ClientRequest::WorktreeRemove(WorktreeRemove {
         path: s.old_idea.to_str().unwrap().to_owned(),
-        branch: Some("old-idea".to_owned()),
     }));
     s.h.step();
     assert_eq!(

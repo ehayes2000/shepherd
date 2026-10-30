@@ -259,6 +259,10 @@ pub struct WorktreeHook {
     /// when it exited with `exit_code`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The worktree it ran in. Set on the pre-remove hooks of orphan worktrees, whose records share the host log;
+    /// absent on a session's own hooks, whose log says whose worktree it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Closing the session is removing its worktree: the session stays listed, its PTY gone, until its `session/closed`

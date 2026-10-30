@@ -45,6 +45,9 @@ pub enum CleanupOutcome {
     Gone,
     /// It was kept, for this reason, for the user.
     Kept(String),
+    /// The link to the host dropped while it was being removed: the host most likely finished, but the client didn't
+    /// hear how.
+    Unknown,
 }
 
 /// One row of the cleanup view.

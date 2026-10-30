@@ -78,6 +78,7 @@ fn path() -> WorktreePath {
     WorktreePath::new(ORPHAN)
 }
 
+/// The orphan's remover once inspected: on the branch the port listed, `old-idea`.
 fn remover(reply: ReplyTo) -> Remover {
     Remover::Orphan {
         reply,
@@ -86,14 +87,21 @@ fn remover(reply: ReplyTo) -> Remover {
     }
 }
 
-/// Asks to remove [`ORPHAN`] (on branch `old-idea`), the workspace's hooks being `hooks_`. Returns the reply token
-/// and the commands.
+/// The orphan's remover until it is inspected: no branch known yet.
+fn uninspected(reply: ReplyTo) -> Remover {
+    Remover::Orphan {
+        reply,
+        repo: PathBuf::from(REPO),
+        branch: None,
+    }
+}
+
+/// Asks to remove [`ORPHAN`], the workspace's hooks being `hooks_`. Returns the reply token and the commands.
 fn remove_orphan(host: &mut HostDriver, hooks_: &[&str]) -> (ReplyTo, Vec<HostCommand>) {
     let reply = host.reply_to();
     let commands = host.handle(HostEvent::RemoveOrphan {
         reply,
         path: PathBuf::from(ORPHAN),
-        branch: Some("old-idea".to_owned()),
         hooks: hooks(hooks_),
     });
     (reply, commands)
@@ -106,7 +114,7 @@ fn inspected(
     result: Result<Inspection, WorktreeError>,
 ) -> Vec<HostCommand> {
     host.handle(HostEvent::WorktreeInspected {
-        remover: remover(reply),
+        remover: uninspected(reply),
         path: path(),
         purpose: Inspect::Close {
             confirmed: None,
@@ -116,10 +124,12 @@ fn inspected(
     })
 }
 
+/// A managed worktree on branch `old-idea`, with `status`.
 fn listed(status: Result<WorktreeStatus, WorktreeError>) -> Inspection {
     Inspection::Listed {
         status,
         exists: true,
+        branch: Some("old-idea".to_owned()),
     }
 }
 
@@ -188,7 +198,7 @@ fn removing_an_orphan_records_it_and_inspects_it_like_a_closing_sessions_worktre
                 json!({ "path": ORPHAN, "pre_remove": ["make clean"] }),
             ),
             HostCommand::InspectWorktree {
-                remover: remover(reply),
+                remover: uninspected(reply),
                 repo: RepoRef::new(REPO),
                 path: path(),
                 purpose: Inspect::Close {
@@ -243,6 +253,32 @@ fn an_orphan_that_loses_nothing_runs_its_pre_remove_hooks_then_is_removed_and_an
         exists: false,
     });
     assert_eq!(removed, finished(reply, true, None));
+}
+
+#[test]
+fn an_orphans_hooks_get_the_branch_the_port_listed() {
+    let mut host = in_workspace();
+    let (reply, _) = remove_orphan(&mut host, &["make clean"]);
+    let found = inspected(
+        &mut host,
+        reply,
+        &["make clean"],
+        Ok(Inspection::Listed {
+            status: Ok(clean_merged()),
+            exists: true,
+            branch: Some("what-git-says".to_owned()),
+        }),
+    );
+    let [HostCommand::RunPreRemove { command, .. }] = &found[..] else {
+        panic!("{found:?}")
+    };
+    assert!(
+        command
+            .env
+            .contains(&("SHEPHERD_BRANCH".to_owned(), "what-git-says".to_owned())),
+        "{:?}",
+        command.env
+    );
 }
 
 #[test]

@@ -46,7 +46,8 @@
 //! ([`CleanupRow::safe`]) removes them one at a time, each through the host's own checks: an orphan with
 //! `_shepherd/worktree/remove`, a stale session by closing it (its `session/closed` says how that went). Each row says
 //! how its removal went. Closing the view stops nothing; when the removals end while it is closed, a notice sums them
-//! up. A dropped link ends the removal under way and unqueues the rest.
+//! up. A dropped link leaves the removal under way's outcome unknown (the host most likely finishes it) and unqueues
+//! the rest.
 //!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
@@ -1946,7 +1947,6 @@ impl Client {
             CleanupItem::Orphan(orphan) => match orphan.path.to_str() {
                 Some(path) => Ok(ClientRequest::WorktreeRemove(WorktreeRemove {
                     path: path.to_owned(),
-                    branch: orphan.branch.clone(),
                 })),
                 None => Err("its path is not UTF-8".to_owned()),
             },
@@ -2006,8 +2006,7 @@ impl Client {
     /// list asked for won't be answered.
     fn cleanup_disconnected(&mut self) {
         if self.cleanup.running.is_some() {
-            let why = "the connection to the host dropped".to_owned();
-            self.cleanup.finish(CleanupOutcome::Kept(why));
+            self.cleanup.finish(CleanupOutcome::Unknown);
         }
         for row in &mut self.cleanup.rows {
             if row.outcome == Some(CleanupOutcome::Queued) {

@@ -305,15 +305,13 @@ pub struct CleanupInfo {
     pub error: Option<String>,
 }
 
-/// Remove `path`, one of the current workspace's orphan worktrees (on `branch`, as listed), if that loses nothing:
-/// the same inspection, pre-remove hooks and removal as closing a session's worktree. Answered with
-/// [`WorktreeRemoveOk`] once that is done, or [`WireError::InvalidParams`] when it can't start (no workspace, the
-/// worktree is in use or already being removed).
+/// Remove `path`, one of the current workspace's orphan worktrees, if that loses nothing: the same inspection,
+/// pre-remove hooks and removal as closing a session's worktree. Its hooks get the branch git lists for it, so the
+/// client names none (any other field is ignored). Answered with [`WorktreeRemoveOk`] once that is done, or
+/// [`WireError::InvalidParams`] when it can't start (no workspace, the worktree is in use or already being removed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeRemove {
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
 }
 
 /// The host's answer to `_shepherd/worktree/remove`: removed, or kept and why. Neither means it was already gone.

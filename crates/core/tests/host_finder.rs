@@ -320,6 +320,7 @@ fn a_worktree_another_session_started_in_while_closing_is_kept() {
                 ..Default::default()
             }),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(cmds, vec![closed("s1", "it is still in use by s2")]);
@@ -408,6 +409,7 @@ fn closing_with_a_hook(host: &mut HostDriver) -> HostCommand {
                 ..Default::default()
             }),
             exists: true,
+            branch: None,
         }),
     });
     match &cmds[..] {

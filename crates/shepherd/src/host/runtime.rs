@@ -1719,7 +1719,6 @@ impl<
                 self.dispatch(HostEvent::RemoveOrphan {
                     reply,
                     path: PathBuf::from(remove.path),
-                    branch: remove.branch,
                     hooks,
                 });
             }
@@ -2279,7 +2278,7 @@ fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, S
     Ok(root)
 }
 
-/// Whether `path` is one of `repo`'s managed worktrees, at exactly the path the port lists, and if so its status; and
+/// Whether `path` is one of `repo`'s managed worktrees, at exactly the path the port lists, and if so its status and branch; and
 /// whether anything is there at all (without following a symlink). Runs on the worker thread.
 fn inspect_worktree(
     worktrees: &impl Worktrees,
@@ -2287,10 +2286,15 @@ fn inspect_worktree(
     path: &WorktreePath,
 ) -> Result<Inspection, WorktreeError> {
     let listed = worktrees.list_managed(repo)?;
-    if listed.iter().any(|w| w.path == *path) {
+    if let Some(found) = listed.into_iter().find(|w| w.path == *path) {
         let status = worktrees.status(path);
         let exists = anything_at(path);
-        return Ok(Inspection::Listed { status, exists });
+        let branch = found.branch.map(|b| b.as_str().to_owned());
+        return Ok(Inspection::Listed {
+            status,
+            exists,
+            branch,
+        });
     }
     let exists = anything_at(path);
     Ok(Inspection::Unlisted { exists })

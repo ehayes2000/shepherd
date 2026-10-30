@@ -130,6 +130,7 @@ fn listed(status: Result<WorktreeStatus, WorktreeError>) -> Inspection {
     Inspection::Listed {
         status,
         exists: true,
+        branch: None,
     }
 }
 
@@ -523,6 +524,7 @@ fn a_worktree_that_is_already_gone_closes_normally() {
         Inspection::Listed {
             status: Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
             exists: false,
+            branch: None,
         },
     ] {
         let (mut host, _) = closing(remove_anyway(), &["make clean"]);
@@ -644,6 +646,7 @@ fn not_a_repo_with_something_still_at_the_path_keeps_it_and_says_why() {
     let found = Inspection::Listed {
         status: not_a_repo(),
         exists: true,
+        branch: None,
     };
     let commands = inspected(&mut host, close_purpose(None, &["make clean"]), Ok(found));
     assert_eq!(commands, vec![closed(false, Some(why))]);
@@ -663,6 +666,7 @@ fn not_a_repo_with_something_still_at_the_path_keeps_it_and_says_why() {
     let found = Inspection::Listed {
         status: not_a_repo(),
         exists: true,
+        branch: None,
     };
     let answer = host.handle(HostEvent::WorktreeInspected {
         remover: Remover::Session(sid("s1")),
@@ -765,6 +769,7 @@ fn asking_for_a_worktrees_status_inspects_it_and_answers_what_it_finds() {
             Ok(Inspection::Listed {
                 status: Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
                 exists: false,
+                branch: None,
             }),
             Ok(HostResult::WorktreeStatus(WorktreeStatusOk {
                 status: None,

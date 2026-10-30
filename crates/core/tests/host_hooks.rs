@@ -396,6 +396,7 @@ fn a_session_closed_mid_hook_keeps_a_worktree_the_hook_left_files_in_and_says_wh
         result: Ok(Inspection::Listed {
             status: Ok(dirty),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(
@@ -441,6 +442,7 @@ fn a_session_closed_mid_hook_removes_a_worktree_that_loses_nothing() {
         result: Ok(Inspection::Listed {
             status: Ok(clean),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(

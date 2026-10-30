@@ -237,7 +237,6 @@ fn removing_the_safe_ones_removes_them_one_at_a_time_and_never_an_unsafe_one() {
         bodies(&first),
         [ClientRequest::WorktreeRemove(WorktreeRemove {
             path: "/wt/app/old-idea".into(),
-            branch: Some("old-idea".into()),
         })]
     );
     assert_eq!(
@@ -340,7 +339,7 @@ fn reopening_the_view_while_removals_run_shows_them_without_asking_again() {
 }
 
 #[test]
-fn a_dropped_connection_ends_the_removal_under_way_and_unqueues_the_rest() {
+fn a_dropped_connection_leaves_the_removal_under_way_unknown_and_unqueues_the_rest() {
     let mut c = in_workspace();
     let both = json!([
         { "path": "/wt/app/a", "branch": "a", "status": status(false, 0, true) },
@@ -349,9 +348,46 @@ fn a_dropped_connection_ends_the_removal_under_way_and_unqueues_the_rest() {
     open(&mut c, both);
     c.user(Intent::CleanupRemoveSafe);
     c.handle(ClientEvent::Disconnected);
-    let rows = outcomes(&c);
-    assert!(matches!(rows[0], Some(CleanupOutcome::Kept(_))), "{rows:?}");
-    assert_eq!(rows[1], None);
+    // The host most likely finishes it: it isn't shown, or counted, as kept.
+    assert_eq!(outcomes(&c), [Some(CleanupOutcome::Unknown), None]);
+}
+
+/// A stale session's check answered while a removal runs brings `[Remove safe]` back; a second click queues it behind
+/// the removal under way instead of starting a second one.
+#[test]
+fn removing_again_while_a_removal_runs_queues_behind_it() {
+    let mut c = in_workspace();
+    exited_at(&mut c, "s1", "2026-10-01T12:00:00Z");
+    let check = open(&mut c, two_orphans());
+    let first = c.user(Intent::CleanupRemoveSafe);
+    assert_eq!(bodies(&first).len(), 1, "old-idea");
+    answer_status(&mut c, &check, status(false, 0, true));
+    assert_eq!(c.client().cleanup_safe(), 1, "s1 is safe now");
+    assert_eq!(c.user(Intent::CleanupRemoveSafe), [], "one at a time");
+    assert_eq!(outcomes(&c)[2], Some(CleanupOutcome::Queued));
+    let next = c.answer(&first, Ok(json!({ "removed": true })));
+    assert_eq!(
+        bodies(&next),
+        [ClientRequest::SessionClose(SessionClose {
+            session: sid("s1"),
+            worktree: CloseWorktree::IfSafe,
+        })]
+    );
+}
+
+#[test]
+fn a_session_from_another_workspace_is_never_stale_here() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/other");
+    exited_at(&mut c, "s1", "2026-10-01T12:00:00Z");
+    c.host().select_workspace("/src/app");
+    c.sync();
+    c.handle(ClientEvent::Tick {
+        at: ts("2026-10-29T12:00:00Z"),
+    });
+    let checks = open(&mut c, json!([]));
+    assert_eq!(bodies(&checks), []);
+    assert_eq!(items(&c), []);
 }
 
 #[test]

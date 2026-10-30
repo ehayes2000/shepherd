@@ -157,6 +157,15 @@ fn the_cleanup_button_is_not_offered_without_a_workspace() {
 }
 
 #[test]
+fn the_cleanup_button_is_not_offered_while_disconnected_and_reconnecting_shows_instead() {
+    let mut c = in_workspace();
+    c.handle(ClientEvent::Disconnected);
+    let buf = buffer(&c, WIDE);
+    assert_eq!(find(&buf, "Cleanup"), None);
+    assert!(find(&buf, "reconnecting…").is_some(), "{buf:?}");
+}
+
+#[test]
 fn the_cleanup_button_hits_across_its_label_only() {
     let c = in_workspace();
     let button = at(&buffer(&c, WIDE), "Cleanup");
@@ -189,7 +198,6 @@ fn clicking_remove_safe_removes_the_safe_rows_one_at_a_time() {
         bodies,
         [ClientRequest::WorktreeRemove(WorktreeRemove {
             path: "/wt/shepherd/old-idea".into(),
-            branch: Some("old-idea".into()),
         })]
     );
 }

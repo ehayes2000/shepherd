@@ -183,8 +183,10 @@ pub type InspectedOrphans = Vec<(Worktree, Result<WorktreeStatus, WorktreeError>
 pub enum Remover {
     /// Closing this session: its `session/closed` records how it went.
     Session(SessionId),
-    /// The cleanup view, removing an orphan worktree (one no open session uses) of workspace `repo` on `branch` (as
-    /// listed): `worktree/removed` in the host log records how it went, and `reply` is answered with it.
+    /// The cleanup view, removing an orphan worktree (one no open session uses) of workspace `repo`: `worktree/removed`
+    /// in the host log records how it went, and `reply` is answered with it. `branch` is its branch as
+    /// `Worktrees::list_managed` lists it, set once it is inspected (never from the client), and `None` before that or
+    /// when its HEAD is detached: its pre-remove hooks' `SHEPHERD_BRANCH`.
     Orphan {
         reply: ReplyTo,
         repo: PathBuf,
@@ -212,10 +214,12 @@ pub enum Inspection {
     /// ours, so it is left alone); otherwise the worktree is gone.
     Unlisted { exists: bool },
     /// It is a managed worktree, with this status (or the error getting it). `exists`: something is at the path, so a
-    /// [`WorktreeError::NotARepo`] doesn't mean it's gone.
+    /// [`WorktreeError::NotARepo`] doesn't mean it's gone. `branch`: its branch as the port lists it (`None` when its
+    /// HEAD is detached).
     Listed {
         status: Result<WorktreeStatus, WorktreeError>,
         exists: bool,
+        branch: Option<String>,
     },
 }
 
@@ -319,12 +323,11 @@ pub enum HostEvent {
         after_days: u32,
         result: Result<InspectedOrphans, WorktreeError>,
     },
-    /// A client asked to remove `path`, an orphan worktree of the current workspace on `branch`, if that loses nothing.
-    /// `hooks` are the workspace's hooks, whose `pre_remove` run first.
+    /// A client asked to remove `path`, an orphan worktree of the current workspace, if that loses nothing. `hooks` are
+    /// the workspace's hooks, whose `pre_remove` run first.
     RemoveOrphan {
         reply: ReplyTo,
         path: PathBuf,
-        branch: Option<String>,
         hooks: WorkspaceHooks,
     },
     /// Bytes a client typed into a session, and what made them. A notification: never answered.
@@ -934,12 +937,9 @@ impl Host {
                     Err(error) => Err(WireError::InvalidParams(error.to_string())),
                 },
             }],
-            HostEvent::RemoveOrphan {
-                reply,
-                path,
-                branch,
-                hooks,
-            } => self.remove_orphan(reply, path, branch, hooks),
+            HostEvent::RemoveOrphan { reply, path, hooks } => {
+                self.remove_orphan(reply, path, hooks)
+            }
             HostEvent::Hook {
                 reply,
                 session,
@@ -1191,7 +1191,6 @@ impl Host {
         &self,
         reply: ReplyTo,
         path: PathBuf,
-        branch: Option<String>,
         hooks: WorkspaceHooks,
     ) -> Vec<HostCommand> {
         let refuse = |why: String| vec![reply_err(reply, WireError::InvalidParams(why))];
@@ -1218,7 +1217,7 @@ impl Host {
                 remover: Remover::Orphan {
                     reply,
                     repo: repo.to_path_buf(),
-                    branch,
+                    branch: None,
                 },
                 repo: RepoRef::new(repo),
                 path: WorktreePath::new(path),
@@ -1252,13 +1251,16 @@ impl Host {
         if let Some(why) = self.still_in_use(&remover, path.as_path()) {
             return finish(&remover, &path, false, Some(why));
         }
-        let status = match result {
+        let (status, branch) = match result {
             Ok(Inspection::Listed {
-                status: Ok(status), ..
-            }) => status,
+                status: Ok(status),
+                branch,
+                ..
+            }) => (status, branch),
             Ok(Inspection::Listed {
                 status: Err(error),
                 exists,
+                ..
             }) if is_gone(&error, exists) => {
                 return finish(&remover, &path, false, None);
             }
@@ -1290,6 +1292,15 @@ impl Host {
         }
         // Forced only past uncommitted changes the user confirmed losing and that are still there.
         let force = confirmed.is_some_and(|c| c.dirty) && status.dirty;
+        // An orphan's hooks are told the branch git lists for it, never one a client named.
+        let remover = match remover {
+            Remover::Orphan { reply, repo, .. } => Remover::Orphan {
+                reply,
+                repo,
+                branch,
+            },
+            session @ Remover::Session(_) => session,
+        };
         self.next_pre_remove(remover, path, force, hooks)
     }
 
@@ -1360,7 +1371,11 @@ impl Host {
         if !self.removal_live(&remover, &path) {
             return Vec::new();
         }
-        let recorded = hook_record(&command, result);
+        let mut recorded = hook_record(&command, result);
+        // Orphans' records share the host log, so each says which worktree it ran in.
+        if let Remover::Orphan { .. } = remover {
+            recorded.path = Some(path.as_path().to_string_lossy().into_owned());
+        }
         let failure = hook_failure(&recorded);
         let why = failure.map(|why| format!("pre_remove hook failed ({why}): {}", recorded.hook));
         let hook = ShepherdFrame::WorktreeHook(recorded);
@@ -1899,6 +1914,7 @@ fn hook_record(command: &CommandSpec, result: Result<CommandOutput, CommandError
         exit_code,
         output_tail,
         error,
+        path: None,
     }
 }
 
@@ -1929,6 +1945,7 @@ fn status_answer(
         Ok(Inspection::Listed {
             status: Err(error),
             exists,
+            ..
         }) if is_gone(&error, exists) => None,
         Ok(Inspection::Unlisted { exists: false }) => None,
         Ok(Inspection::Unlisted { exists: true }) => {
