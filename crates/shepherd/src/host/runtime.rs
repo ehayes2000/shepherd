@@ -69,8 +69,8 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, WorktreeError,
-    WorktreeName, WorktreePath, Worktrees,
+    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, Worktree,
+    WorktreeError, WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -1062,7 +1062,7 @@ impl<
                     };
                     let call = move |worktrees: &W| HostEvent::WorktreesListed {
                         reply,
-                        result: worktrees.list_managed(&repo),
+                        result: worktrees.list_managed(&repo).map(canonical_worktrees),
                     };
                     match self.worktrees.submit(call, panicked) {
                         Ok(()) => self.worktree_calls += 1,
@@ -1645,7 +1645,9 @@ impl<
             WireError::InvalidParams(format!("unknown profile `{}`", name.unwrap_or_default()))
         })?;
         let cwd = match (new.cwd.as_deref(), self.host.workspace()) {
-            (Some(cwd), _) => existing_dir(Path::new(cwd))?,
+            // Resolved, so core compares one spelling of each directory: `..` and symlinks can't make a worktree in
+            // use look free.
+            (Some(cwd), _) => canonical(&existing_dir(Path::new(cwd))?)?,
             // Checked here too, to say which workspace is gone; the spawn checks every cwd again.
             (None, Some(workspace)) => existing_dir(workspace).map_err(|_| {
                 WireError::InvalidParams(format!(
@@ -2063,6 +2065,24 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 
 /// `cwd` as a directory a session can start in: absolute, since a client can't know where the host started, and an
 /// existing directory.
+/// `dir`, an existing directory, with `..` and symlinks resolved.
+fn canonical(dir: &Path) -> Result<PathBuf, WireError> {
+    std::fs::canonicalize(dir)
+        .map_err(|e| WireError::InvalidParams(format!("cwd `{}`: {e}", dir.display())))
+}
+
+/// Listed worktrees with their paths resolved as an explicit cwd is, so core can tell which ones sessions use. A path
+/// that can't be resolved (gone meanwhile) is kept as listed.
+fn canonical_worktrees(listed: Vec<Worktree>) -> Vec<Worktree> {
+    listed
+        .into_iter()
+        .map(|w| Worktree {
+            path: std::fs::canonicalize(w.path.as_path()).map_or(w.path, WorktreePath::new),
+            ..w
+        })
+        .collect()
+}
+
 fn existing_dir(path: &Path) -> Result<PathBuf, WireError> {
     let cwd = path.display();
     if !path.is_absolute() {

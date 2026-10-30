@@ -31,7 +31,9 @@
 //! thread). A new session asked to run in one of them, with its branch, records both in its `session/created`: the
 //! worktree is the session's own from the start, so closing it treats it like one the host made. A worktree that
 //! another session that isn't closed uses (as its worktree or cwd) can't be started in this way, and closing a
-//! session keeps a worktree another session still uses, saying so in its `session/closed`.
+//! session keeps a worktree another session still uses, saying so in its `session/closed` (checked again before the
+//! removal itself). Nothing may start in a worktree that is being removed. Paths are compared as given: the runtime
+//! resolves every explicit cwd and every listed worktree path first, so each directory has one spelling.
 //!
 //! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
 //! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a
@@ -700,6 +702,17 @@ impl Host {
                     ));
                     return vec![reply_err(reply, error)];
                 }
+                // A worktree being removed is about to go: nothing may start in it.
+                if let Some(closing) = self
+                    .removing_at(&spec.spawn.cwd)
+                    .filter(|_| spec.explicit_cwd)
+                {
+                    let error = WireError::InvalidParams(format!(
+                        "{} is being removed by closing {closing}",
+                        spec.spawn.cwd.display()
+                    ));
+                    return vec![reply_err(reply, error)];
+                }
                 let branch = match (&worktree, &adopted) {
                     (Some((_, name)), _) => Some(name.as_str().to_owned()),
                     (None, Some((_, branch))) => Some(branch.clone()),
@@ -1086,7 +1099,8 @@ impl Host {
         vec![self.next_pre_remove(session, path, force, hooks)]
     }
 
-    /// Runs the first of `hooks` in closing session `session`'s worktree at `path`, or with none left removes it.
+    /// Runs the first of `hooks` in closing session `session`'s worktree at `path`, or with none left removes it, unless
+    /// another session uses it by then, which keeps it.
     fn next_pre_remove(
         &self,
         session: SessionId,
@@ -1095,6 +1109,9 @@ impl Host {
         mut hooks: PreRemove,
     ) -> HostCommand {
         if hooks.hooks.is_empty() {
+            if let Some(why) = self.still_used(&session, path.as_path()) {
+                return closed(&session, false, Some(why));
+            }
             return HostCommand::RemoveWorktree {
                 session,
                 path,
@@ -1494,6 +1511,16 @@ impl Host {
             .find(|(_, e)| {
                 let worktree = e.worktree.as_ref().is_some_and(|(p, _)| p == path);
                 worktree || e.cwd.as_deref() == Some(path)
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// The session that is closing and removing its worktree at `path`, if one is.
+    fn removing_at(&self, path: &Path) -> Option<&SessionId> {
+        self.sessions
+            .iter()
+            .find(|(id, e)| {
+                self.removing(id) && e.worktree.as_ref().is_some_and(|(p, _)| p == path)
             })
             .map(|(id, _)| id)
     }

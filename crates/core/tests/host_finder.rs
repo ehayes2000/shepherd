@@ -305,7 +305,8 @@ fn a_worktree_another_session_started_in_while_closing_is_kept() {
     else {
         panic!("{close:?}");
     };
-    host.new_session_with("s2", plain_in_old_idea());
+    // A new session there is refused now, so one that got past that (say, recorded by another host run) stands in.
+    started_there_anyway(&mut host, "s2");
     let cmds = host.handle(HostEvent::WorktreeInspected {
         session: sid("s1"),
         path: WorktreePath::new("/wt/old-idea"),
@@ -364,6 +365,127 @@ fn only_a_worktree_being_made_in_this_workspace_hides_one_on_its_branch() {
             to: reply,
             result: Ok(HostResult::WorktreeList(WorktreeListOk {
                 worktrees: vec![info("/wt/app/shell-1", Some("shell-1"))],
+            })),
+        }]
+    );
+}
+
+/// Records session `id` running in `/wt/old-idea` straight into the log, past `session/new`'s refusals.
+fn started_there_anyway(host: &mut HostDriver, id: &str) {
+    host.append(
+        Some(id),
+        Source::new(SourceKind::Shepherd, None),
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/created",
+                "params": { "name": "other", "cwd": "/wt/old-idea" } }),
+    );
+}
+
+/// `s1` started in `/wt/old-idea` and closing with one pre-remove hook, which is running. Returns that hook's
+/// command.
+fn closing_with_a_hook(host: &mut HostDriver) -> HostCommand {
+    host.new_session_with("s1", in_old_idea());
+    let hooks = shepherd_core::config::WorkspaceHooks {
+        pre_remove: vec!["make clean".to_owned()],
+        ..Default::default()
+    };
+    let close = host.close_with("s1", CloseWorktree::IfSafe, hooks);
+    let Some(HostCommand::InspectWorktree { purpose, .. }) = close
+        .iter()
+        .find(|c| matches!(c, HostCommand::InspectWorktree { .. }))
+        .cloned()
+    else {
+        panic!("{close:?}");
+    };
+    let cmds = host.handle(HostEvent::WorktreeInspected {
+        session: sid("s1"),
+        path: WorktreePath::new("/wt/old-idea"),
+        purpose,
+        result: Ok(shepherd_core::host::Inspection::Listed {
+            status: Ok(shepherd_core::ports::WorktreeStatus {
+                merged_into_default: true,
+                ..Default::default()
+            }),
+            exists: true,
+        }),
+    });
+    match &cmds[..] {
+        [run @ HostCommand::RunPreRemove { .. }] => run.clone(),
+        _ => panic!("{cmds:?}"),
+    }
+}
+
+#[test]
+fn nothing_starts_in_a_worktree_being_removed() {
+    let mut host = in_workspace();
+    closing_with_a_hook(&mut host);
+    let cmds = host.new_session_with("s2", plain_in_old_idea());
+    assert_eq!(
+        refused(&cmds),
+        Some("/wt/old-idea is being removed by closing s1".to_owned()),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn a_worktree_a_session_started_in_while_its_pre_remove_hook_ran_is_kept() {
+    let mut host = in_workspace();
+    let HostCommand::RunPreRemove {
+        command,
+        rest,
+        path,
+        force,
+        ..
+    } = closing_with_a_hook(&mut host)
+    else {
+        unreachable!()
+    };
+    // A session in it got past the refusal (say, recorded by another host run).
+    started_there_anyway(&mut host, "s2");
+    let cmds = host.handle(HostEvent::PreRemoveFinished {
+        session: sid("s1"),
+        command,
+        rest,
+        path,
+        force,
+        result: Ok(shepherd_core::ports::CommandOutput {
+            exit: shepherd_core::ports::CommandExit::Code(0),
+            tail: Vec::new(),
+        }),
+    });
+    assert_eq!(cmds.last(), Some(&closed("s1", "it is still in use by s2")));
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, HostCommand::RemoveWorktree { .. })),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn a_session_whose_worktree_failed_or_was_cancelled_hides_no_orphan_on_its_branch() {
+    let mut host = in_workspace();
+    host.new_session("s1");
+    host.new_session("s2");
+    host.worktree_result("s1", Err(WorktreeError::FetchFailed("offline".to_owned())));
+    host.close("s2");
+    let reply = host.reply_to();
+    let cmds = listed(
+        &mut host,
+        reply,
+        Ok(vec![
+            worktree("/wt/app/shell-1", Some("shell-1")),
+            worktree("/wt/app/shell-2", Some("shell-2")),
+        ]),
+    );
+    assert_eq!(
+        cmds,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Ok(HostResult::WorktreeList(WorktreeListOk {
+                worktrees: vec![
+                    info("/wt/app/shell-1", Some("shell-1")),
+                    info("/wt/app/shell-2", Some("shell-2")),
+                ],
             })),
         }]
     );

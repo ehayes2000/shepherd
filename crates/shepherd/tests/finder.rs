@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -63,11 +63,25 @@ impl Setup {
 }
 
 fn setup() -> Setup {
+    setup_with(false)
+}
+
+/// Like [`setup`], with the worktrees' root reached through a symlink, so the port lists paths that aren't resolved.
+fn setup_linked() -> Setup {
+    setup_with(true)
+}
+
+fn setup_with(linked_root: bool) -> Setup {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).unwrap();
     let app = base.join("app");
     let root = base.join("worktrees");
     std::fs::create_dir(&app).unwrap();
+    if linked_root {
+        let real = base.join("worktrees-real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &root).unwrap();
+    }
     let worktrees = FakeWorktrees::new(&root);
     worktrees.add_repo(&app, "main");
     let mut h = HostHarness::builder()
@@ -159,4 +173,36 @@ fn a_worktree_list_the_port_fails_to_give_is_refused_with_the_reason() {
         panic!("expected a refusal");
     };
     assert!(why.contains("git worktree list"), "{why}");
+}
+
+/// Asks for a session in worktree `path` on `branch`, and returns the answer.
+fn start_in(s: &mut Setup, path: &Path, branch: &str) -> Result<serde_json::Value, WireError> {
+    let asked = s.client.request(ClientRequest::SessionNew(SessionNew {
+        profile: None,
+        cwd: Some(path.to_str().unwrap().to_owned()),
+        branch: Some(branch.to_owned()),
+    }));
+    s.h.step();
+    response(&s.client.take(), &asked)
+}
+
+#[test]
+fn every_spelling_of_a_worktree_in_use_is_the_same_worktree() {
+    let mut s = setup_linked();
+    // Made, and listed by the port, through the symlinked root.
+    let linked = s.orphan("old-idea");
+    let real = std::fs::canonicalize(&linked).unwrap();
+    assert_ne!(linked, real);
+    assert_eq!(
+        s.list(),
+        Ok(json!({ "worktrees": [{ "path": real.to_str().unwrap(), "branch": "old-idea" }] }))
+    );
+    // Started through a `..` spelling, it is in use under the symlinked one too.
+    let dotted = linked.join("..").join("old-idea");
+    assert!(start_in(&mut s, &dotted, "old-idea").is_ok());
+    assert_eq!(s.list(), Ok(json!({ "worktrees": [] })));
+    let Err(WireError::InvalidParams(why)) = start_in(&mut s, &linked, "old-idea") else {
+        panic!("a second session in it was accepted");
+    };
+    assert!(why.contains("already in use"), "{why}");
 }

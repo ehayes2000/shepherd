@@ -323,7 +323,8 @@ fn a_new_session_starts_in_the_directory_it_asks_for() {
     let mut client = c.h.connect();
     c.new_session_in(&mut client, Some("claude"), dir.path().to_str())
         .unwrap();
-    assert_eq!(c.spawned().cwd, dir.path());
+    // Resolved: on macOS the tempdir is behind the `/var` symlink.
+    assert_eq!(c.spawned().cwd, std::fs::canonicalize(dir.path()).unwrap());
 }
 
 /// Asks for a session starting in `cwd`, and checks it was refused with `InvalidParams` and nothing was created.
@@ -818,7 +819,7 @@ fn an_exited_claude_session_resumes_its_agent_session_in_the_same_session_after_
             "abc123"
         ]
     );
-    assert_eq!(resumed.cwd, dir.path());
+    assert_eq!(resumed.cwd, std::fs::canonicalize(dir.path()).unwrap());
     assert_eq!(env_var(resumed, "SHEPHERD_SESSION"), Some(session.as_str()));
     // The hooks are injected again, exactly as for a new session.
     assert_eq!(
