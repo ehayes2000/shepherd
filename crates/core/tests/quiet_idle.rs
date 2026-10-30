@@ -134,6 +134,15 @@ impl Driver {
         assert_eq!(commands, vec![], "output never appends");
     }
 
+    /// A client's input written to the session's PTY at `ms`.
+    fn input(&mut self, ms: i64) {
+        let commands = self.watch.handle(QuietEvent::Input {
+            session: session(),
+            at: t(ms),
+        });
+        assert_eq!(commands, vec![], "input never appends");
+    }
+
     /// Ticks at `ms`, appends what the watch asks for, and returns how each idle it appended was inferred.
     fn tick(&mut self, ms: i64) -> Vec<IdleInference> {
         let commands = self.watch.handle(QuietEvent::Tick { at: t(ms) });
@@ -343,6 +352,18 @@ fn output_for_a_session_it_does_not_know_is_ignored() {
     assert_eq!(watch.handle(QuietEvent::Tick { at: t(60_000) }), vec![]);
 }
 
+#[test]
+fn an_idle_the_host_failed_to_append_is_retried_one_quiet_period_later() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    // The runtime couldn't append what the tick asked for: the session is still working.
+    let asked = d.watch.handle(QuietEvent::Tick { at: t(3000) });
+    assert_eq!(asked.len(), 1);
+    assert_eq!(d.deadline(), Some(t(6000).instant()));
+    assert_eq!(d.watch.handle(QuietEvent::Tick { at: t(5999) }), vec![]);
+    assert_eq!(d.tick(6000), vec![IdleInference::Quiet]);
+}
+
 // ---------- permission ----------
 
 #[test]
@@ -359,11 +380,25 @@ fn an_untouched_permission_dialog_stays_put_however_long_it_is_quiet() {
 }
 
 #[test]
-fn a_permission_dialog_redrawn_and_then_quiet_goes_idle_inferred_quiet_after_permission() {
-    // Choosing "No" fires no hook: the dialog redraws, then the agent waits at its prompt.
+fn a_permission_dialog_that_only_redraws_stays_put() {
+    // Its own first draw, and redraws after a resize, come after the request with nobody answering.
     let mut d = Driver::claude();
     d.append(0, prompt(1));
     d.append(500, permission(2, "t1"));
+    d.output(600);
+    d.output(5000);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+}
+
+#[test]
+fn a_permission_dialog_answered_and_redrawn_then_quiet_goes_idle_inferred_quiet_after_permission() {
+    // Choosing "No" fires no hook: the user types, the dialog redraws, then the agent waits at its prompt.
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(500, permission(2, "t1"));
+    d.output(600);
+    d.input(900);
     d.output(1000);
     assert_eq!(d.tick(3999), vec![]);
     assert_eq!(d.tick(4000), vec![IdleInference::QuietAfterPermission]);
@@ -371,22 +406,36 @@ fn a_permission_dialog_redrawn_and_then_quiet_goes_idle_inferred_quiet_after_per
 }
 
 #[test]
-fn output_before_the_permission_request_does_not_count_as_an_answer() {
+fn an_answer_with_no_redraw_after_it_stays_put() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));
-    d.output(400);
     d.append(500, permission(2, "t1"));
+    d.output(600);
+    d.input(900);
     assert_eq!(d.deadline(), None);
     assert_eq!(d.tick(600_000), vec![]);
 }
 
 #[test]
-fn a_second_permission_request_needs_its_own_redraw() {
+fn input_before_the_permission_request_does_not_count_as_an_answer() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.input(400);
+    d.append(500, permission(2, "t1"));
+    d.output(1000);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+}
+
+#[test]
+fn a_second_permission_request_needs_its_own_answer() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));
     d.append(500, permission(2, "t1"));
+    d.input(900);
     d.output(1000);
     d.append(1500, permission(3, "t2"));
+    d.output(1600);
     assert_eq!(d.tick(600_000), vec![]);
 }
 

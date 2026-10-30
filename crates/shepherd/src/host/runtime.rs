@@ -28,8 +28,8 @@
 //!   (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
 //! - **Quiet watch.** A [`QuietWatch`] (the quiet-output idle fallback) sees every entry appended, and the logs on
-//!   start. Output of the sessions it watches is fed to it stamped with `Env::now`, and its deadline is serviced like
-//!   the others: when it is due, a tick stamped with `Env::now` returns the idles to append.
+//!   start. Output of, and client input to, the sessions it watches are fed to it stamped with `Env::now`; its
+//!   deadline is serviced like the others: when it is due, a tick stamped with `Env::now` returns the idles to append.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -571,7 +571,18 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         }
                     }
                 }
-                HostCommand::WritePty { session, bytes } => self.write_pty(&session, &bytes),
+                HostCommand::WritePty { session, bytes } => {
+                    self.write_pty(&session, &bytes);
+                    // A client's input: the quiet watch takes it as an answer to a permission dialog.
+                    if self.quiet.watches(&session) {
+                        let at = self.env.now();
+                        self.quiet.handle(QuietEvent::Input {
+                            session,
+                            at: at.clone(),
+                        });
+                        self.schedule_quiet(&at);
+                    }
+                }
                 HostCommand::ResizePty { session, size } => {
                     if let Err(error) = self.pty.resize(&session, size) {
                         tracing::warn!(%session, %error, "resize failed");

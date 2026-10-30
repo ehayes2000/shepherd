@@ -7,15 +7,18 @@
 //!
 //! - **Working**: quiet for the period since the last PTY output or log entry gives
 //!   [`IdleInference::Quiet`].
-//! - **NeedsPermission**: an untouched dialog is legitimately quiet, so quiet alone never clears it. Output after the
-//!   request (the dialog was answered and redrawn) and then the quiet period gives
+//! - **NeedsPermission**: an untouched dialog is legitimately quiet, so quiet alone never clears it, and neither does
+//!   output alone (the dialog's own first draw and resize redraws come after the request too). Client input written to
+//!   the PTY after the request (someone answered), then output (it redrew), then the quiet period gives
 //!   [`IdleInference::QuietAfterPermission`].
 //! - Anything else, and shell sessions always, are left alone. Output never makes a session working again: only a
 //!   real turn signal does (`core::session`).
+//! - A tick that asks for an idle restarts that session's quiet period, so an idle the runtime failed to append is
+//!   asked for again at most once per period.
 //!
 //! Not host state: PTY output isn't logged, so when it last happened is known only to this host run. The runtime keeps
-//! one [`QuietWatch`], applies every entry it appends (and replays the logs into it on start), feeds it PTY output and
-//! ticks with the time they happened, wakes up at its [`QuietWatch::deadline`], and executes what it returns like
+//! one [`QuietWatch`], applies every entry it appends (and replays the logs into it on start), feeds it PTY output,
+//! client input and ticks with the time they happened, wakes up at its [`QuietWatch::deadline`], and executes what it returns like
 //! [`Host::handle`](super::Host::handle)'s commands.
 
 use std::collections::BTreeMap;
@@ -34,6 +37,8 @@ use crate::session::{Activity, SessionState};
 pub enum QuietEvent {
     /// `session`'s PTY printed something at `at`.
     Output { session: SessionId, at: Timestamp },
+    /// A client's input was written to `session`'s PTY at `at`.
+    Input { session: SessionId, at: Timestamp },
     /// It is `at`: the deadline the runtime scheduled, or later.
     Tick { at: Timestamp },
 }
@@ -53,8 +58,19 @@ struct Watched {
     state: SessionState,
     /// The latest PTY output or log entry.
     last: Option<jiff::Timestamp>,
-    /// The PTY printed after the current permission request.
-    redrawn: bool,
+    /// How far the current permission request has been answered.
+    answer: Answer,
+}
+
+/// Evidence that the current permission dialog was answered, though no signal said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// No client input since the request.
+    Untouched,
+    /// Client input since the request, and no output since.
+    Typed,
+    /// Client input since the request, then output: it redrew.
+    Redrawn,
 }
 
 impl Watched {
@@ -62,7 +78,9 @@ impl Watched {
     fn due(&self) -> Option<(jiff::Timestamp, IdleInference)> {
         let inference = match self.state.activity() {
             Activity::Working { .. } => IdleInference::Quiet,
-            Activity::NeedsPermission { .. } if self.redrawn => IdleInference::QuietAfterPermission,
+            Activity::NeedsPermission { .. } if self.answer == Answer::Redrawn => {
+                IdleInference::QuietAfterPermission
+            }
             _ => return None,
         };
         let at = self.last?.checked_add(self.quiet).ok()?;
@@ -104,7 +122,7 @@ impl QuietWatch {
                             quiet,
                             state: SessionState::default(),
                             last: None,
-                            redrawn: false,
+                            answer: Answer::Untouched,
                         });
                     }
                 }
@@ -123,18 +141,29 @@ impl QuietWatch {
         let asks = matches!(watched.state.activity(), Activity::NeedsPermission { .. });
         let new_request = matches!(env.frame(), Frame::Acp(m) if matches!(m.body(), AcpFrame::RequestPermission(_)));
         if asks && (!was_asking || new_request) {
-            watched.redrawn = false;
+            watched.answer = Answer::Untouched;
         }
         watched.last = watched.last.max(Some(env.ts().instant()));
     }
 
-    /// Notes PTY output, or appends an idle for every watched session whose quiet period has run out.
+    /// Notes PTY output or client input, or appends an idle for every watched session whose quiet period has run out.
     pub fn handle(&mut self, event: QuietEvent) -> Vec<HostCommand> {
         match event {
             QuietEvent::Output { session, at } => {
                 if let Some(watched) = self.sessions.get_mut(&session) {
-                    if matches!(watched.state.activity(), Activity::NeedsPermission { .. }) {
-                        watched.redrawn = true;
+                    if watched.answer == Answer::Typed {
+                        watched.answer = Answer::Redrawn;
+                    }
+                    watched.last = watched.last.max(Some(at.instant()));
+                }
+                Vec::new()
+            }
+            QuietEvent::Input { session, at } => {
+                if let Some(watched) = self.sessions.get_mut(&session) {
+                    let asking =
+                        matches!(watched.state.activity(), Activity::NeedsPermission { .. });
+                    if asking && watched.answer == Answer::Untouched {
+                        watched.answer = Answer::Typed;
                     }
                     watched.last = watched.last.max(Some(at.instant()));
                 }
@@ -142,10 +171,12 @@ impl QuietWatch {
             }
             QuietEvent::Tick { at } => self
                 .sessions
-                .iter()
+                .iter_mut()
                 .filter_map(|(id, watched)| {
                     let (due, inference) = watched.due()?;
                     (at.instant() >= due).then(|| {
+                        // Asked for once per period, even if the append fails.
+                        watched.last = Some(at.instant());
                         let idle = AgentIdle {
                             inferred: Some(inference),
                         };
