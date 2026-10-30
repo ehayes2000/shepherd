@@ -916,7 +916,11 @@ acceptance:
   first and marked); clicking one creates the session with that profile. With exactly one profile it creates it directly.
 - `ctrl-b n` keeps creating the default profile without a popup.
 - Clicking outside or `[Cancel]` dismisses. Hit tests click rendered cells (T33/T34 pattern). Snapshot of the picker.
-scope: crates/core (client), crates/tui
+scope: crates/core (client, wire, host hello), crates/tui, crates/shepherd (host hello wiring)
+notes: Profiles live in the host's config, so the host tells the client: the hello response gains `profiles: [{ name, agent }]`
+and `default_profile` (additive; old clients ignore it). The client keeps them in `ClientState`. The new-session request
+carries the chosen profile name (`wire::SessionNew.profile` already exists). The client never reads config itself (in M4 the
+host may be another machine).
 
 ### T18: Attention and notifications
 status: todo
