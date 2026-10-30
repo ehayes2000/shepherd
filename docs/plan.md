@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T26 search and open | building | task/t26-search @ 8558383 | 0 | – |
+| T26 search and open | in review | task/t26-search @ 294f900 (on c5585e6) | 1 | PM-accepted: worktree/list; SessionNew.branch → session owns the orphan worktree; 3-line sidebar header |
 | T36b host hot-swap by re-exec | fixing (CHANGES) | task/t36b-hotswap @ a52f5e0 | 1 | Blocking: bad config after adoption kills sessions; refuse() can killpg/close what isn't ours; vacuous refusal tests; CLOEXEC re-set, hooks-busy, 0600, drain untested |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
