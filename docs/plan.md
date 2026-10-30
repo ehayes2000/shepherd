@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T19b resume | re-review | task/t19b-resume @ 865e95b (on 4d6e8aa) | 2 | cwd validated on resume; guard + refusal tests added |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T19b | 2 | resume ignored a deleted cwd (portable-pty falls back to $HOME); exited guard untested |
 | F08 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
 | T19 | 2 | translator matching/resets/kind replacement untested; seed reuse across replaced translators |
 | T18 | 2 | C1 strip untested; session name could form a ConEmu OSC 9 subcommand |
@@ -1027,7 +1027,7 @@ you found, and build fixtures from documented payload shapes. Follow T17's struc
 report options rather than editing user config. The PM does the real-codex check after merge.
 
 ### T19b: Resume after restart
-status: in-progress
+status: done (a87962e)
 depends: T17, T19
 touches: core::host, tui
 goal: Exited agent sessions can be resumed where they left off.
