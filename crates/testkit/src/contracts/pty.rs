@@ -29,6 +29,8 @@ macro_rules! pty_contract {
             unacked_output_stops_reading_until_acked,
             kill_ends_a_session_blocked_on_unacked_output,
             ack_of_an_unknown_session_is_an_error,
+            kill_drops_output_past_the_credit,
+            acking_more_than_outstanding_banks_nothing,
         );
     };
     (@cases $make:expr; $($case:ident),* $(,)?) => {
@@ -473,4 +475,46 @@ pub fn ack_of_an_unknown_session_is_an_error<P: Pty>(mut h: PtyHarness<P>) {
     h.pty.spawn(s.clone(), spec("printf", &["hi"])).unwrap();
     h.run_to_exit(&s);
     assert_eq!(h.pty.ack(&s, 2), Err(PtyError::UnknownSession));
+}
+
+/// After a kill, output past the credit is dropped rather than waiting for an ack. A flooder that ignores SIGHUP,
+/// already at its credit when killed, delivers less than the credit plus one chunk in all before its one `Exited`.
+pub fn kill_drops_output_past_the_credit<P: Pty>(mut h: PtyHarness<P>) {
+    let s = sid("stubborn-yes");
+    h.pty
+        .spawn(s.clone(), spec("sh", &["-c", "trap '' HUP; exec yes"]))
+        .unwrap();
+    let mut output = h.output_unacked(&s, OUTPUT_CREDIT);
+    h.pty.kill(&s).unwrap();
+    let (rest, code) = h.run_to_exit(&s);
+    // `run_to_exit` decodes lossily, but `yes` prints ASCII.
+    output.extend(rest.into_bytes());
+    assert!(
+        output.len() < OUTPUT_CREDIT + MAX_OUTPUT_CHUNK,
+        "{} bytes delivered with nothing acked",
+        output.len()
+    );
+    assert_eq!(code, None, "a killed process has no exit code");
+    h.assert_quiet(QUIET);
+}
+
+/// Acknowledging more than is outstanding banks nothing: a flood acked far past what it sent still stops short of
+/// the credit plus one chunk of new output.
+pub fn acking_more_than_outstanding_banks_nothing<P: Pty>(mut h: PtyHarness<P>) {
+    let s = sid("yes");
+    h.pty.spawn(s.clone(), spec("yes", &[])).unwrap();
+    let mut first = h.output_unacked(&s, OUTPUT_CREDIT);
+    first.extend(h.output_within(&s, QUIET));
+
+    h.pty.ack(&s, first.len() + 10 * OUTPUT_CREDIT).unwrap();
+    let mut second = h.output_unacked(&s, OUTPUT_CREDIT);
+    second.extend(h.output_within(&s, QUIET));
+    assert!(
+        second.len() < OUTPUT_CREDIT + MAX_OUTPUT_CHUNK,
+        "{} bytes delivered after an excess ack",
+        second.len()
+    );
+
+    h.pty.kill(&s).unwrap();
+    h.run_to_exit(&s);
 }

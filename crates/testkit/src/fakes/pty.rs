@@ -303,6 +303,12 @@ mod tests {
                             cat(input, p);
                         }
                     }
+                    // No SIGHUP here either.
+                    "trap '' HUP; exec yes" => {
+                        if input == ProgramInput::Start {
+                            p.flood("y\r\n");
+                        }
+                    }
                     "stty -opost; exec seq 1 400000" => {
                         if input == ProgramInput::Start {
                             let text: String = (1..=400_000).map(|i| format!("{i}\n")).collect();

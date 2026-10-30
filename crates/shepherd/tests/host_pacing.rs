@@ -732,3 +732,49 @@ fn a_flooding_session_is_paced_by_acks_and_starves_no_other_session_or_client() 
         "the flood stalled after {flooded} bytes"
     );
 }
+
+#[test]
+fn output_dropped_during_shutdown_is_still_acknowledged() {
+    let program: Program = Arc::new(|input, p| {
+        if input == ProgramInput::Start {
+            p.flood("y\r\n");
+        }
+    });
+    let pushed = Pushed::default();
+    let net = shepherd_testkit::fakes::link::FakeNetwork::new();
+    let (for_link, for_pty) = (pushed.clone(), pushed.clone());
+    let rt = runtime_with_sinks(
+        &net,
+        &[(SHELL.to_owned(), program)],
+        FakeEventLog::new(),
+        TestEnv::new(),
+        |sink| Arc::new(CountLink(sink, for_link)),
+        |sink| Arc::new(CountPty(sink, for_pty)),
+    );
+    let client = FakeClient::connect_with(&net, false);
+    let mut h = Flooded {
+        rt,
+        client,
+        msgs: Vec::new(),
+        pushed,
+        handled: 0,
+        flooder: SessionId::new("s_t1"),
+    };
+    let first = h.client.new_session();
+    h.run_until(1, |m| Flooded::answered(m, &first));
+
+    // The kill fails, so the flooder lives on through the shutdown, its output dropped unread.
+    h.rt.pty_mut().fail_next(PtyError::Io("stuck".into()));
+    h.rt.handle(RuntimeEvent::Shutdown);
+    assert!(!h.rt.is_finished());
+    let before = h.pushed.output.load(Ordering::SeqCst);
+    for _ in 0..3 * Flooded::BOUND {
+        h.step();
+    }
+    // Still acknowledged, so the flood isn't stuck at its credit and the backlog keeps draining.
+    let during = h.pushed.output.load(Ordering::SeqCst) - before;
+    assert!(
+        during > 2 * OUTPUT_CREDIT,
+        "only {during} bytes read during shutdown"
+    );
+}
