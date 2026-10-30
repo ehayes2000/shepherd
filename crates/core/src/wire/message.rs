@@ -28,7 +28,8 @@ use serde_json::{Map, Value};
 use super::WireError;
 use super::base64::serde_bytes;
 use super::codec::frame;
-use crate::acpp::{Envelope, FrameDraft, RequestId, Seq};
+use crate::acpp::{Envelope, RequestId, Seq};
+use crate::config::AgentKind;
 use crate::ids::{MachineId, SessionId};
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
@@ -200,10 +201,13 @@ pub struct SubscribeFrom {
     pub sessions: BTreeMap<SessionId, Seq>,
 }
 
-/// A frame from `shepherd hook`, for the host to seal and append.
+/// A hook payload from `shepherd hook`, exactly as the agent wrote it to the hook's stdin. The host translates it
+/// with `agent`'s translator, keeping per-session translation state, and appends the frames to `session`'s log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookFrame {
-    pub draft: FrameDraft,
+    pub session: SessionId,
+    pub agent: AgentKind,
+    pub payload: Value,
 }
 
 impl ClientRequest {

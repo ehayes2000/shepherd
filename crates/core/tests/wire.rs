@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{
     Dir, EntryId, Frame, FrameDraft, RequestId, Seq, Source, SourceKind, Stamp, Timestamp,
 };
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
@@ -33,6 +34,15 @@ fn draft() -> FrameDraft {
     )
 }
 
+/// A Claude Code hook payload as `shepherd hook` reads it from stdin.
+fn hook_frame() -> HookFrame {
+    HookFrame {
+        session: sid("s_1"),
+        agent: AgentKind::ClaudeCode,
+        payload: json!({ "hook_event_name": "Stop", "session_id": "abc", "extra": [1, 2] }),
+    }
+}
+
 fn one_of_each_request() -> Vec<ClientRequest> {
     vec![
         ClientRequest::Hello(Hello {
@@ -58,7 +68,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             },
         }),
         ClientRequest::Subscribe(Subscribe::default()),
-        ClientRequest::HookFrame(Box::new(HookFrame { draft: draft() })),
+        ClientRequest::HookFrame(Box::new(hook_frame())),
     ]
 }
 
@@ -246,17 +256,42 @@ fn session_new_without_params_uses_defaults() {
 }
 
 #[test]
-fn hook_frame_carries_the_draft_frame_verbatim() {
+fn hook_frame_carries_the_session_agent_and_raw_payload_verbatim() {
     let line = encode_request(&Request {
         id: 1.into(),
-        body: ClientRequest::HookFrame(Box::new(HookFrame { draft: draft() })),
+        body: ClientRequest::HookFrame(Box::new(hook_frame())),
     });
     let v = wire_json(&line);
     assert_eq!(
-        v["params"]["draft"]["frame"],
-        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": { "extra": [1, 2] } })
+        v["params"],
+        json!({
+            "session": "s_1",
+            "agent": "claude-code",
+            "payload": { "hook_event_name": "Stop", "session_id": "abc", "extra": [1, 2] },
+        })
     );
-    assert_eq!(v["params"]["draft"]["source"]["kind"], "hook");
+}
+
+#[test]
+fn hook_frame_payload_may_be_any_json() {
+    let line = request_line(
+        "_shepherd/hook/frame",
+        json!({ "session": "s_1", "agent": "claude-code", "payload": "not an object" }),
+    );
+    let ClientRequest::HookFrame(hook) = request(&line).body else {
+        panic!("expected a hook frame");
+    };
+    assert_eq!(hook.payload, json!("not an object"));
+}
+
+#[test]
+fn hook_frame_for_an_unknown_agent_kind_is_invalid_params() {
+    let line = request_line(
+        "_shepherd/hook/frame",
+        json!({ "session": "s_1", "agent": "robot", "payload": {} }),
+    );
+    let err = decode_client_message(&line).expect_err("refused");
+    assert!(matches!(err.error, WireError::InvalidParams(_)), "{err:?}");
 }
 
 #[test]

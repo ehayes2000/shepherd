@@ -153,6 +153,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Listens on `net` instead of a network of its own, e.g. so a fake program can reach the host.
+    pub fn network(mut self, net: FakeNetwork) -> Self {
+        self.net = net;
+        self
+    }
+
     pub fn start(self) -> HostHarness {
         let HarnessBuilder {
             programs,

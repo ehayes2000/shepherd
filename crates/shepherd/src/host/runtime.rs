@@ -25,8 +25,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use shepherd_core::acpp::{Envelope, FrameDraft, RequestId, Seq, Stamp};
-use shepherd_core::config::Config;
+use shepherd_core::agents::Translators;
+use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
@@ -34,8 +36,8 @@ use shepherd_core::ports::{
     PtyEventSink, PtySize, SpawnSpec,
 };
 use shepherd_core::wire::{
-    self, ClientMessage, ClientNotification, ClientRequest, HostNotification, HostResponse,
-    HostResult, LogEntry, PtyOutput, SubscribeFrom, WireError,
+    self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
+    HostResponse, HostResult, LogEntry, PtyOutput, SubscribeFrom, WireError,
 };
 use shepherd_term::Screen;
 
@@ -207,6 +209,10 @@ pub struct HostRuntime<P, L, E, V> {
     conns: BTreeMap<ConnId, ConnState>,
     replies: HashMap<ReplyTo, (ConnId, RequestId)>,
     next_reply: u64,
+    /// Per-session hook translation state. Not host state: a restarted host starts with none.
+    translators: Translators,
+    /// Seeds every translator this host run creates; made on the first hook.
+    hook_seed: Option<String>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -245,6 +251,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             conns: BTreeMap::new(),
             replies: HashMap::new(),
             next_reply: 0,
+            translators: Translators::new(),
+            hook_seed: None,
             shutdown_by: None,
             finished: false,
         };
@@ -397,13 +405,17 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             match command {
                 HostCommand::Append(draft) => {
                     if let Err(error) = self.append(*draft) {
-                        tracing::error!(%error, "append failed; skipping the rest of the batch");
-                        for rest in commands.by_ref() {
-                            if let HostCommand::Reply { to, .. } = rest {
-                                let error = WireError::Internal(format!("append failed: {error}"));
-                                self.reply(to, Err(error));
-                            }
-                        }
+                        self.abandon(&error, commands.by_ref());
+                        return;
+                    }
+                }
+                HostCommand::TranslateHook {
+                    session,
+                    agent,
+                    payload,
+                } => {
+                    if let Err(error) = self.translate_hook(&session, agent, &payload) {
+                        self.abandon(&error, commands.by_ref());
                         return;
                     }
                 }
@@ -440,6 +452,38 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 HostCommand::Reply { to, result } => self.reply(to, result),
             }
         }
+    }
+
+    /// After a failed append: skips the rest of the batch, answering its replies with an error.
+    fn abandon(&mut self, error: &LogError, rest: impl Iterator<Item = HostCommand>) {
+        tracing::error!(%error, "append failed; skipping the rest of the batch");
+        for command in rest {
+            if let HostCommand::Reply { to, .. } = command {
+                let error = WireError::Internal(format!("append failed: {error}"));
+                self.reply(to, Err(error));
+            }
+        }
+    }
+
+    /// Translates a hook payload with the session's translator and appends what it gives. A session's first hook
+    /// in this host run creates its translator, seeded with an entry id made once per host run: globally unique,
+    /// so its ids never collide with those of a translator from an earlier run still in the log.
+    fn translate_hook(
+        &mut self,
+        session: &SessionId,
+        agent: AgentKind,
+        payload: &Value,
+    ) -> Result<(), LogError> {
+        let env = &mut self.env;
+        let seed = &mut self.hook_seed;
+        let drafts = self.translators.translate(session, agent, payload, || {
+            seed.get_or_insert_with(|| env.new_entry_id().as_str().to_owned())
+                .clone()
+        });
+        for draft in drafts {
+            self.append(draft)?;
+        }
+        Ok(())
     }
 
     /// Seals and appends `draft`, applies the envelope, and fans it out to subscribers.
@@ -603,12 +647,19 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 self.respond(conn, &respond_now(result));
             }
             ClientRequest::Subscribe(subscribe) => self.subscribe(conn, id, &subscribe.from),
-            ClientRequest::HookFrame(_) => {
-                let error = WireError::MethodNotFound(format!(
-                    "{} is not available on this host yet",
-                    wire::Method::HookFrame.as_str()
-                ));
-                self.respond(conn, &respond_now(Err(error)));
+            ClientRequest::HookFrame(hook) => {
+                let reply = self.reply_to(conn, id);
+                let HookFrame {
+                    session,
+                    agent,
+                    payload,
+                } = *hook;
+                self.dispatch(HostEvent::Hook {
+                    reply,
+                    session,
+                    agent,
+                    payload,
+                });
             }
             ClientRequest::SessionNew(_) => {
                 let reply = self.reply_to(conn, id);

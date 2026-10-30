@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
+use shepherd_core::config::AgentKind;
 use shepherd_core::host::{Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -215,6 +216,83 @@ fn renaming_a_closed_session_replies_unknown_session() {
                 result: Err(WireError::UnknownSession { .. }),
                 ..
             }]
+        ),
+        "{cmds:?}"
+    );
+}
+
+// ---------- hooks ----------
+
+fn hook(host: &mut HostDriver, id: &str, agent: AgentKind) -> (ReplyTo, Vec<HostCommand>) {
+    let reply = host.reply_to();
+    let cmds = host.handle(HostEvent::Hook {
+        reply,
+        session: sid(id),
+        agent,
+        payload: json!({ "hook_event_name": "Stop" }),
+    });
+    (reply, cmds)
+}
+
+#[test]
+fn a_hook_for_an_open_session_is_translated_then_acked() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    let (reply, cmds) = hook(&mut host, "s1", AgentKind::ClaudeCode);
+    assert_eq!(
+        cmds,
+        vec![
+            HostCommand::TranslateHook {
+                session: sid("s1"),
+                agent: AgentKind::ClaudeCode,
+                payload: json!({ "hook_event_name": "Stop" }),
+            },
+            HostCommand::Reply {
+                to: reply,
+                result: Ok(HostResult::Ack),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_hook_for_an_exited_session_is_still_translated() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    host.pty_exited("s1", Some(0));
+    let (_, cmds) = hook(&mut host, "s1", AgentKind::ClaudeCode);
+    assert!(
+        matches!(cmds[0], HostCommand::TranslateHook { .. }),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn a_hook_for_an_unknown_or_closed_session_is_refused() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    host.close("s1");
+    for id in ["s1", "nope"] {
+        let (reply, cmds) = hook(&mut host, id, AgentKind::ClaudeCode);
+        assert_eq!(
+            cmds,
+            vec![HostCommand::Reply {
+                to: reply,
+                result: Err(WireError::UnknownSession { session: sid(id) }),
+            }]
+        );
+    }
+}
+
+#[test]
+fn a_hook_from_an_agent_kind_without_a_translator_is_invalid_params() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    let (reply, cmds) = hook(&mut host, "s1", AgentKind::Shell);
+    assert!(
+        matches!(
+            &cmds[..],
+            [HostCommand::Reply { to, result: Err(WireError::InvalidParams(_)) }] if *to == reply
         ),
         "{cmds:?}"
     );

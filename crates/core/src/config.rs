@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------- raw (as written) ----------
 
@@ -76,7 +76,9 @@ pub enum ConfigError {
 
 // ---------- resolved ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// On the wire (`_shepherd/hook/frame`) by its [`as_str`](Self::as_str) name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     ClaudeCode,
     Codex,
