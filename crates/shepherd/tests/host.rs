@@ -306,7 +306,7 @@ fn errors_from_core_are_replied_to_the_requesting_client() {
 // ---------- wire ----------
 
 #[test]
-fn hello_is_answered_with_the_host_version_and_machine() {
+fn hello_is_answered_with_the_host_version_machine_and_profiles() {
     let mut h = HostHarness::new();
     let mut client = h.connect();
     let req = client.request(ClientRequest::Hello(Hello {
@@ -316,7 +316,16 @@ fn hello_is_answered_with_the_host_version_and_machine() {
     h.step();
     assert_eq!(
         response(&client.take(), &req),
-        Ok(json!({ "version": PROTOCOL_VERSION, "machine": "local" }))
+        Ok(json!({
+            "version": PROTOCOL_VERSION,
+            "machine": "local",
+            "profiles": [
+                { "name": "claude", "agent": "claude-code" },
+                { "name": "codex", "agent": "codex" },
+                { "name": "shell", "agent": "shell" },
+            ],
+            "default_profile": "shell",
+        }))
     );
 }
 

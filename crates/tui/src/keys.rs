@@ -143,7 +143,7 @@ fn map_mouse(
 /// A left click on `target`.
 fn click(target: Target, client: &Client) -> Vec<Intent> {
     match target {
-        Target::NewSession => vec![Intent::NewSession],
+        Target::NewSession => vec![Intent::BeginNewSession],
         Target::Session(id) if client.selected() == Some(&id) => {
             vec![Intent::SetFocus(Focus::Terminal)]
         }
@@ -155,6 +155,7 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::MenuItem(item) => vec![Intent::MenuChoose(item)],
         Target::Confirm => vec![Intent::Confirm],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
+        Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::Popup => Vec::new(),
     }
 }
@@ -220,7 +221,9 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
             KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
             _ => None,
         },
-        Popup::Menu { .. } => (key.code == KeyCode::Esc).then_some(Intent::Dismiss),
+        Popup::Menu { .. } | Popup::PickProfile => {
+            (key.code == KeyCode::Esc).then_some(Intent::Dismiss)
+        }
     }
 }
 

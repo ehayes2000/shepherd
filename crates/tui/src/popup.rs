@@ -1,4 +1,5 @@
-//! Popups drawn over everything: help, the rename input, the close confirmation, and a session's context menu.
+//! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, and the
+//! profile picker for a new session.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window. [`place`] says where a popup and its controls are, for both
@@ -45,11 +46,16 @@ const DIALOG_WIDTH: u16 = 40;
 const DIALOG_HEIGHT: u16 = 5;
 const HELP_WIDTH: u16 = 56;
 
+/// The profile picker's line above its rows.
+const PICK_PROMPT: &str = "Which agent should the session run?";
+/// How the default profile's row is marked.
+const DEFAULT_MARK: &str = "(default)";
+
 /// A clickable part of a popup.
 pub(crate) struct Control {
     pub area: Rect,
     pub target: Target,
-    pub label: &'static str,
+    pub label: String,
 }
 
 /// Where the open popup is in the window.
@@ -78,6 +84,7 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
             &[("[Close]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
         ),
         Popup::Menu { at, .. } => menu(*at, window),
+        Popup::PickProfile => pick_profile(client, window),
     })
 }
 
@@ -96,7 +103,7 @@ fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
             controls.push(Control {
                 area: Rect::new(x, y, width, 1),
                 target: target.clone(),
-                label,
+                label: (*label).to_owned(),
             });
             end = x.saturating_sub(2);
         }
@@ -119,10 +126,46 @@ fn menu(at: Cell, window: Rect) -> Placed {
         .map(|((item, label), y)| Control {
             area: Rect::new(inside.x, y, inside.width, 1),
             target: Target::MenuItem(*item),
-            label,
+            label: (*label).to_owned(),
         })
         .collect();
     Placed { area, controls }
+}
+
+/// The profile picker: a prompt, then one row per profile (the default first and marked), each a whole line of the
+/// dialog, then `[Cancel]`.
+fn pick_profile(client: &Client, window: Rect) -> Placed {
+    let profiles = client.profiles();
+    let height = profiles.len() as u16 + 4;
+    let mut placed = dialog(
+        centered(window, DIALOG_WIDTH, height),
+        &[("[Cancel]", Target::Dismiss)],
+    );
+    let inside = inner(placed.area);
+    let name_width = profiles
+        .iter()
+        .map(|p| p.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let rows = (inside.y + 1)..inside.bottom().saturating_sub(1);
+    for (profile, y) in profiles.iter().zip(rows) {
+        let mark = if client.default_profile() == Some(profile.name.as_str()) {
+            DEFAULT_MARK
+        } else {
+            ""
+        };
+        let label = format!(
+            " {:<name_width$}  {:<11}  {mark}",
+            profile.name,
+            profile.agent.as_str()
+        );
+        placed.controls.push(Control {
+            area: Rect::new(inside.x, y, inside.width, 1),
+            target: Target::Profile(profile.name.clone()),
+            label: label.trim_end().to_owned(),
+        });
+    }
+    placed
 }
 
 /// Draws the open popup, if any, over `area`. Returns where the cursor goes, for a popup with an input.
@@ -134,6 +177,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::Rename { .. } => " rename session ",
         Popup::ConfirmClose { .. } => " close session ",
         Popup::Menu { .. } => "",
+        Popup::PickProfile => " new session ",
     };
     frame(placed.area, title, buf);
     let inside = inner(placed.area);
@@ -157,15 +201,21 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             confirm_close(name, body, buf);
             None
         }
+        Popup::PickProfile => {
+            let style = Style::new().fg(Color::Gray);
+            buf.set_stringn(body.x, body.y, PICK_PROMPT, usize::from(body.width), style);
+            None
+        }
         Popup::Menu { .. } => None,
     };
-    let style = match popup {
-        Popup::Menu { .. } => Style::new(),
-        _ => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    };
+    let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     for control in &placed.controls {
+        let style = match (popup, &control.target) {
+            (Popup::Menu { .. }, _) | (_, Target::Profile(_)) => Style::new(),
+            _ => button,
+        };
         let at = control.area;
-        buf.set_stringn(at.x, at.y, control.label, usize::from(at.width), style);
+        buf.set_stringn(at.x, at.y, &control.label, usize::from(at.width), style);
     }
     cursor
 }
