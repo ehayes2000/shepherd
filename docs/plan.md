@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T26 search and open | re-review | task/t26-search @ c02fc34 (on 349b8dd) | 2 | refuse shared adopt + keep in-use on close; stale/scroll tests added |
+| T26 search and open | fixing (round 3) | task/t26-search @ c02fc34 | 2 | Blocking: in-use bypass via plain cwd during pre_remove hooks, and path aliases → re-check before remove, refuse cwd into removing path, canonicalize cwds in runtime |
 | T36b host hot-swap by re-exec | fixing (CHANGES) | task/t36b-hotswap @ a52f5e0 | 1 | Blocking: bad config after adoption kills sessions; refuse() can killpg/close what isn't ours; vacuous refusal tests; CLOEXEC re-set, hooks-busy, 0600, drain untested |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
