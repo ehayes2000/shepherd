@@ -5,6 +5,9 @@
 //! When the child exits, the pump drains what is left on the master and closes the slave. Then it forgets the
 //! session and sends `Exited`. The parent holds a slave handle until the drain finishes, because on macOS
 //! closing the last slave handle throws away output that hasn't been read yet.
+//!
+//! The pump counts the output it has sent and not had acknowledged. At [`OUTPUT_CREDIT`] it stops reading (but
+//! keeps checking for exit and kill) until an ack arrives, so the child blocks once the kernel's buffer is full.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -16,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, SlavePty, native_pty_system};
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec};
+use shepherd_core::ports::{
+    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
+};
 
 /// How often the pump checks for exit and kill requests while the child is quiet.
 const TICK: Duration = Duration::from_millis(20);
@@ -27,7 +32,13 @@ const KILL_GRACE: Duration = Duration::from_secs(1);
 struct Live {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    kill: Sender<()>,
+    control: Sender<Control>,
+}
+
+/// What callers tell a session's pump.
+enum Control {
+    Kill,
+    Ack(usize),
 }
 
 struct Entry {
@@ -97,11 +108,11 @@ impl Pty for PortablePty {
             }
         };
 
-        let (kill, kill_requests) = mpsc::channel();
+        let (control, controls) = mpsc::channel();
         let live = Arc::new(Live {
             master: Mutex::new(master),
             writer: Mutex::new(writer),
-            kill,
+            control,
         });
         let pump = Pump {
             session: session.clone(),
@@ -109,7 +120,8 @@ impl Pty for PortablePty {
             fd,
             reader,
             slave: pair.slave,
-            kill_requests,
+            controls,
+            unacked: 0,
             sessions: self.sessions.clone(),
             sink: self.sink.clone(),
         };
@@ -145,7 +157,16 @@ impl Pty for PortablePty {
     fn kill(&mut self, session: &SessionId) -> Result<(), PtyError> {
         let live = self.live(session)?;
         // The pump only stops listening after it has forgotten the session.
-        live.kill.send(()).map_err(|_| PtyError::UnknownSession)
+        live.control
+            .send(Control::Kill)
+            .map_err(|_| PtyError::UnknownSession)
+    }
+
+    fn ack(&mut self, session: &SessionId, bytes: usize) -> Result<(), PtyError> {
+        let live = self.live(session)?;
+        live.control
+            .send(Control::Ack(bytes))
+            .map_err(|_| PtyError::UnknownSession)
     }
 }
 
@@ -155,7 +176,7 @@ impl Drop for PortablePty {
     fn drop(&mut self) {
         let entries: Vec<Entry> = lock(&self.sessions).drain().map(|(_, e)| e).collect();
         for entry in &entries {
-            let _ = entry.live.kill.send(());
+            let _ = entry.live.control.send(Control::Kill);
         }
         for entry in entries {
             let _ = entry.pump.join();
@@ -170,7 +191,9 @@ struct Pump {
     fd: RawFd,
     reader: Box<dyn Read + Send>,
     slave: Box<dyn SlavePty + Send>,
-    kill_requests: Receiver<()>,
+    controls: Receiver<Control>,
+    /// Output sent and not acknowledged yet.
+    unacked: usize,
     sessions: Sessions,
     sink: Arc<dyn PtyEventSink>,
 }
@@ -194,14 +217,20 @@ impl Pump {
                 Err(_) => break None,
             }
 
-            let kill_requested = if output_open {
+            let mut kill_requested = false;
+            let killed = !matches!(killing, Killing::No);
+            // A dying child may be stuck in `exit` until its output is read (macOS drains the tty on close), so
+            // once it is being killed it is read whatever the credit.
+            if output_open && (self.unacked < OUTPUT_CREDIT || killed) {
                 if readable(self.fd, TICK) {
-                    output_open = self.forward();
+                    output_open = self.forward(killed);
                 }
-                self.kill_requests.try_recv().is_ok()
-            } else {
-                self.kill_requests.recv_timeout(TICK).is_ok()
-            };
+            } else if let Ok(control) = self.controls.recv_timeout(TICK) {
+                kill_requested |= self.apply(control);
+            }
+            while let Ok(control) = self.controls.try_recv() {
+                kill_requested |= self.apply(control);
+            }
 
             killing = match killing {
                 Killing::No if kill_requested => {
@@ -216,9 +245,11 @@ impl Pump {
             };
         };
 
-        // The child is gone but its output may still be queued on the master.
+        // The child is gone but its output may still be queued on the master. That much is bounded by the kernel's
+        // buffer, so it is read whatever the credit, and `Exited` never waits for an ack.
+        let killed = !matches!(killing, Killing::No);
         while output_open && readable(self.fd, Duration::ZERO) {
-            output_open = self.forward();
+            output_open = self.forward(killed);
         }
         drop(self.slave);
         drop(self.live);
@@ -230,12 +261,27 @@ impl Pump {
         });
     }
 
-    /// Reads once and forwards it. Returns false once the master has nothing more to give.
-    fn forward(&mut self) -> bool {
-        let mut buf = [0u8; 8192];
+    /// Takes in one control message. Returns whether it asks for a kill.
+    fn apply(&mut self, control: Control) -> bool {
+        match control {
+            Control::Kill => true,
+            Control::Ack(n) => {
+                self.unacked = self.unacked.saturating_sub(n);
+                false
+            }
+        }
+    }
+
+    /// Reads once and forwards it. A `killed` session's output past its credit is read and dropped, so a kill never
+    /// waits on an ack and a flooding child that ignores SIGHUP can't run past the credit during the grace period.
+    /// Returns false once the master has nothing more to give.
+    fn forward(&mut self, killed: bool) -> bool {
+        let mut buf = [0u8; MAX_OUTPUT_CHUNK];
         match self.reader.read(&mut buf) {
             Ok(0) => false,
+            Ok(_) if killed && self.unacked >= OUTPUT_CREDIT => true,
             Ok(n) => {
+                self.unacked += n;
                 self.sink.send(PtyEvent::Output {
                     session: self.session.clone(),
                     bytes: buf[..n].to_vec(),

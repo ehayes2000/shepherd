@@ -1,7 +1,8 @@
 //! The `Pty` contract. Commands used here (`printf`, `cat`, `sh`, `printenv`, `pwd`) run for real on the
 //! adapter; the fake gets scripted versions of them (see `fakes::pty`).
 //!
-//! Run it with [`pty_contract!`](crate::pty_contract), which expands to one `#[test]` per case.
+//! Run it with [`pty_contract!`](crate::pty_contract), which expands to one `#[test]` per case. Add every new case
+//! to the macro's list.
 
 // Contract cases are tests that live outside `#[cfg(test)]` so other crates can run them.
 #![allow(clippy::unwrap_used)]
@@ -25,6 +26,9 @@ macro_rules! pty_contract {
             unknown_session_is_an_error,
             spawning_a_live_id_again_is_already_exists,
             spawning_a_missing_command_is_spawn_failed,
+            unacked_output_stops_reading_until_acked,
+            kill_ends_a_session_blocked_on_unacked_output,
+            ack_of_an_unknown_session_is_an_error,
         );
     };
     (@cases $make:expr; $($case:ident),* $(,)?) => {
@@ -43,7 +47,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec};
+use shepherd_core::ports::{
+    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to watch for stray events after an exit. Only used to assert that nothing else arrives.
@@ -121,6 +127,56 @@ impl<P: Pty> PtyHarness<P> {
         );
     }
 
+    /// Collects `session`'s output, acknowledging none of it, until it holds at least `bytes`. Panics on its exit.
+    pub fn output_unacked(&self, session: &SessionId, bytes: usize) -> Vec<u8> {
+        let mut output = Vec::new();
+        self.wait_for(
+            |e| {
+                output.extend(output_of(e, session));
+                output.len() >= bytes
+            },
+            TIMEOUT,
+        );
+        output
+    }
+
+    /// Every output of `session` that arrives within `window`. Panics on any other event.
+    pub fn output_within(&self, session: &SessionId, window: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + window;
+        let mut output = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(left) {
+                Ok(PtyEvent::Output { session: s, bytes }) if &s == session => output.extend(bytes),
+                Ok(event) => panic!("expected only output of {session}, got {event:?}"),
+                Err(_) => return output,
+            }
+        }
+    }
+
+    /// Like [`run_to_exit`](Self::run_to_exit), but acknowledges each output as it arrives, and checks that no
+    /// output is bigger than [`MAX_OUTPUT_CHUNK`].
+    pub fn run_to_exit_acking(&mut self, session: &SessionId) -> (Vec<u8>, Option<i32>) {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut output = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(left) {
+                Ok(PtyEvent::Output { session: s, bytes }) if &s == session => {
+                    assert!(bytes.len() <= MAX_OUTPUT_CHUNK, "{} bytes", bytes.len());
+                    // Racing the exit: the port may have forgotten the session already.
+                    let _ = self.pty.ack(session, bytes.len());
+                    output.extend(bytes);
+                }
+                Ok(PtyEvent::Exited { session: s, code }) if &s == session => {
+                    return (output, code);
+                }
+                Ok(_) => {}
+                Err(e) => panic!("{session} didn't exit: {e:?} after {} bytes", output.len()),
+            }
+        }
+    }
+
     /// Panics if any event arrives within `window`.
     pub fn assert_quiet(&self, window: Duration) {
         if let Ok(event) = self.events.recv_timeout(window) {
@@ -157,6 +213,16 @@ fn temp_dir() -> PathBuf {
 
 fn is_exit_of(event: &PtyEvent, session: &SessionId) -> bool {
     matches!(event, PtyEvent::Exited { session: s, .. } if s == session)
+}
+
+fn output_of<'a>(event: &'a PtyEvent, session: &SessionId) -> &'a [u8] {
+    match event {
+        PtyEvent::Output { session: s, bytes } if s == session => bytes,
+        PtyEvent::Exited { session: s, .. } if s == session => {
+            panic!("{session} exited early")
+        }
+        _ => &[],
+    }
 }
 
 fn sid(id: &str) -> SessionId {
@@ -339,4 +405,72 @@ pub fn spawning_a_missing_command_is_spawn_failed<P: Pty>(mut h: PtyHarness<P>) 
         "got {result:?}"
     );
     assert_eq!(h.pty.write(&s, b"x"), Err(PtyError::UnknownSession));
+}
+
+/// A child printing far more than [`OUTPUT_CREDIT`] while nothing is acknowledged stops being read: the bytes
+/// delivered stop short of the credit plus one chunk, and the child can't finish. Acknowledged, it resumes and
+/// delivers everything, in order, then exactly one `Exited`.
+///
+/// Output processing is off (`-opost`) because macOS's newline translation emits a stray `\r` when the pty's buffer
+/// fills mid-`\r\n`, which is exactly what backpressure does. That is the kernel's doing, and harmless on a screen.
+pub fn unacked_output_stops_reading_until_acked<P: Pty>(mut h: PtyHarness<P>) {
+    let expected: String = (1..=400_000).map(|i| format!("{i}\n")).collect();
+    assert!(expected.len() > 2 * OUTPUT_CREDIT);
+    let s = sid("seq");
+    h.pty
+        .spawn(
+            s.clone(),
+            spec("sh", &["-c", "stty -opost; exec seq 1 400000"]),
+        )
+        .unwrap();
+
+    let mut output = h.output_unacked(&s, OUTPUT_CREDIT);
+    output.extend(h.output_within(&s, QUIET));
+    assert!(
+        output.len() < OUTPUT_CREDIT + MAX_OUTPUT_CHUNK,
+        "{} bytes delivered with nothing acked",
+        output.len()
+    );
+
+    h.pty.ack(&s, output.len()).unwrap();
+    let (rest, code) = h.run_to_exit_acking(&s);
+    output.extend(rest);
+    if output != expected.as_bytes() {
+        let at = output
+            .iter()
+            .zip(expected.as_bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(output.len().min(expected.len()));
+        let around = |b: &[u8]| {
+            String::from_utf8_lossy(&b[at.saturating_sub(40)..(at + 40).min(b.len())]).into_owned()
+        };
+        panic!(
+            "output differs at byte {at} of {} (expected {}): got {:?}, expected {:?}",
+            output.len(),
+            expected.len(),
+            around(&output),
+            around(expected.as_bytes())
+        );
+    }
+    assert_eq!(code, Some(0));
+    h.assert_quiet(QUIET);
+}
+
+/// A child blocked on output nobody acknowledged can still be killed, and exits exactly once.
+pub fn kill_ends_a_session_blocked_on_unacked_output<P: Pty>(mut h: PtyHarness<P>) {
+    let s = sid("yes");
+    h.pty.spawn(s.clone(), spec("yes", &[])).unwrap();
+    h.output_unacked(&s, OUTPUT_CREDIT);
+    h.pty.kill(&s).unwrap();
+    let (_, code) = h.run_to_exit(&s);
+    assert_eq!(code, None, "a killed process has no exit code");
+    h.assert_quiet(QUIET);
+}
+
+pub fn ack_of_an_unknown_session_is_an_error<P: Pty>(mut h: PtyHarness<P>) {
+    assert_eq!(h.pty.ack(&sid("nobody"), 1), Err(PtyError::UnknownSession));
+    let s = sid("printf");
+    h.pty.spawn(s.clone(), spec("printf", &["hi"])).unwrap();
+    h.run_to_exit(&s);
+    assert_eq!(h.pty.ack(&s, 2), Err(PtyError::UnknownSession));
 }
