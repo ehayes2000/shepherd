@@ -164,20 +164,44 @@ fn selecting_a_directory_that_is_not_a_repo_says_why_and_selects_nothing() {
     let mut client = h.connect();
     select(&mut client, &d.app);
     h.step();
-    for path in [
-        d.plain.clone(),
-        d.root.join("missing"),
-        PathBuf::from("app"),
+    let file = d.root.join("file");
+    std::fs::write(&file, b"not a dir").unwrap();
+    // Each refusal names the path and says why.
+    for (path, why) in [
+        (d.plain.clone(), "not a git repository"),
+        (d.root.join("missing"), "No such file"),
+        (PathBuf::from("app"), "not an absolute path"),
+        (file, "not a directory"),
     ] {
         let req = select(&mut client, &path);
         h.step();
         let result = response(&client.take(), &req);
         assert!(
-            matches!(&result, Err(WireError::InvalidParams(why)) if why.contains(path.to_str().unwrap())),
+            matches!(&result, Err(WireError::InvalidParams(msg))
+                if msg.contains(path.to_str().unwrap()) && msg.contains(why)),
             "{path:?}: {result:?}"
         );
     }
     assert_eq!(h.host().workspaces(), std::slice::from_ref(&d.app));
+}
+
+#[test]
+fn a_hello_the_host_refuses_selects_nothing_from_its_cwd() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    let d = dirs(&worktrees);
+    let mut h = harness(&worktrees);
+    let mut client = h.connect();
+    let req = client.request(ClientRequest::Hello(Hello {
+        version: PROTOCOL_VERSION + 1,
+        machine: MachineId::new("laptop"),
+        cwd: Some(d.app.to_str().unwrap().to_owned()),
+    }));
+    h.step();
+    assert!(matches!(
+        response(&client.take(), &req),
+        Err(WireError::VersionMismatch { .. })
+    ));
+    assert_eq!(h.host().workspace(), None);
 }
 
 #[test]
