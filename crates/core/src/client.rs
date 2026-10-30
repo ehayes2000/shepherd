@@ -2,9 +2,11 @@
 //! popups, and turning what the user means into wire messages.
 //!
 //! Attention: a session wants the user when it starts waiting on them (asks permission or input, or goes idle) at
-//! a seq of its log the user hasn't seen. The selected session is seen up to its latest entry, so it is never marked,
-//! and selecting a marked session clears its mark. With the host's `[notify] bell` on, a session that newly wants the
-//! user gives a [`ClientCommand::Alert`], except while the log is being caught up after a (re)connect.
+//! a seq of its log the user hasn't seen. While the terminal window has focus, the selected session is seen up to its
+//! latest entry, so it is never marked, and selecting a marked session clears its mark. While the window is in the
+//! background ([`Intent::WindowFocus`]) the selected session is treated like any other, and its mark clears when the
+//! window regains focus. With the host's `[notify] bell` on, a session that newly wants the user gives a
+//! [`ClientCommand::Alert`], except while the log is being caught up after a (re)connect.
 //!
 //! Workspaces: the host's workspace and the ones used before are folded from its log like the sessions. Every session
 //! is listed, whatever its workspace; one created in a workspace other than the current one is marked
@@ -72,6 +74,9 @@ pub enum Intent {
     /// The terminal view's size changed.
     Resize(PtySize),
     SetFocus(Focus),
+    /// The terminal window shepherd runs in gained (`true`) or lost focus. While it is unfocused the user isn't
+    /// looking, so the selected session isn't seen.
+    WindowFocus(bool),
     /// Select this session (a click on its row). A session that isn't listed is ignored.
     SelectSession(SessionId),
     /// Scroll the session list by this many rows: down for positive, up for negative. The selection stays put, even
@@ -263,6 +268,8 @@ pub struct Client {
     /// A session the user created, to select once it is listed.
     select_when_listed: Option<SessionId>,
     focus: Focus,
+    /// The terminal window has focus. Assumed until the terminal says otherwise.
+    window_focused: bool,
     popup: Option<Popup>,
     size: Option<PtySize>,
     /// The index of the first session the sidebar shows, before clamping to the list (see
@@ -306,6 +313,7 @@ impl Client {
             chosen: false,
             select_when_listed: None,
             focus: Focus::default(),
+            window_focused: true,
             popup: None,
             size: None,
             scroll: 0,
@@ -768,9 +776,10 @@ impl Client {
         }
     }
 
-    /// The selected session has been seen up to its latest entry.
+    /// The selected session has been seen up to its latest entry, if the window has focus: in the background, it's
+    /// no more seen than any other.
     fn mark_seen(&mut self) {
-        let Some(id) = self.selected.clone() else {
+        let Some(id) = self.selected.clone().filter(|_| self.window_focused) else {
             return;
         };
         if let Some(&seq) = self.seqs.get(&Some(id.clone())) {
@@ -863,8 +872,12 @@ impl Client {
     // ---------- the user ----------
 
     fn intent(&mut self, intent: Intent) -> Vec<ClientCommand> {
-        // Anything the user does clears the notice; the layout reporting sizes isn't the user doing anything.
-        if !matches!(intent, Intent::Resize(_) | Intent::SidebarRows(_)) {
+        // Anything the user does clears the notice. The layout reporting sizes isn't the user doing anything, and
+        // neither is the window gaining or losing focus: switching back to shepherd shouldn't hide what it said.
+        if !matches!(
+            intent,
+            Intent::Resize(_) | Intent::SidebarRows(_) | Intent::WindowFocus(_)
+        ) {
             self.notice = None;
         }
         match intent {
@@ -886,6 +899,11 @@ impl Client {
             }
             Intent::SetFocus(focus) => {
                 self.focus = focus;
+                Vec::new()
+            }
+            Intent::WindowFocus(focused) => {
+                self.window_focused = focused;
+                self.mark_seen();
                 Vec::new()
             }
             Intent::SelectSession(id) => {

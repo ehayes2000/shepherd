@@ -319,9 +319,32 @@ fn focus_changes_are_reported_when_the_session_asked() {
     };
     assert_eq!(
         events(&client(), Event::FocusGained, focus),
-        [Intent::Input(b"\x1b[I".to_vec())]
+        [Intent::Input(b"\x1b[I".to_vec()), Intent::WindowFocus(true)]
     );
-    assert_eq!(events(&client(), Event::FocusLost, Modes::default()), []);
+    assert_eq!(
+        events(&client(), Event::FocusLost, Modes::default()),
+        [Intent::WindowFocus(false)]
+    );
+}
+
+#[test]
+fn focus_changes_are_reported_to_shepherd_even_when_keys_do_not_go_to_the_session() {
+    let focus = Modes {
+        focus: true,
+        ..Modes::default()
+    };
+    let mut helping = client();
+    helping.user(Intent::ShowHelp);
+    for c in [prefixed(), helping] {
+        assert_eq!(
+            events(&c, Event::FocusLost, focus),
+            [Intent::WindowFocus(false)]
+        );
+        assert_eq!(
+            events(&c, Event::FocusGained, focus),
+            [Intent::WindowFocus(true)]
+        );
+    }
 }
 
 fn click(column: u16, row: u16) -> Event {
