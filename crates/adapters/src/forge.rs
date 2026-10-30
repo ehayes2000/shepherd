@@ -229,7 +229,7 @@ impl Forge for GhForge {
 fn kill_and_reap(child: &mut Child) {
     let pid = child.id();
     kill_group(pid);
-    wait_unreaped(pid);
+    let _ = wait_unreaped(pid);
     // Again, for anything forked while the first kill was being delivered.
     kill_group(pid);
     let _ = child.wait();

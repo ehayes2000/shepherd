@@ -165,7 +165,7 @@ impl Commands for ShellCommands {
         let waiter = std::thread::Builder::new()
             .name("hook-wait".into())
             .spawn(move || {
-                wait_unreaped(pid);
+                let _ = wait_unreaped(pid);
                 drop(exited);
             });
         if let Err(e) = waiter {

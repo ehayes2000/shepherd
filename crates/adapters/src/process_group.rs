@@ -19,22 +19,32 @@ pub(crate) fn kill_group(pid: u32) {
     }
 }
 
-/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken.
-pub(crate) fn wait_unreaped(pid: u32) {
+/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken, and returns how it
+/// exited: the `si_code` of `waitid`, e.g. `CLD_EXITED` or `CLD_KILLED`.
+pub(crate) fn wait_unreaped(pid: u32) -> io::Result<libc::c_int> {
     let pid = libc::id_t::from(pid);
     loop {
         // SAFETY: `info` is a valid out-pointer; `pid` is our own unreaped child.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let rc =
             unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if rc == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return;
+        if rc == 0 {
+            return Ok(info.si_code);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
 
-/// Blocks until process group `pgid` has no members left, or [`GROUP_EXIT_WAIT`] has passed. Its id can't be reused
-/// by a new process while the group has members.
+/// Whether a child that exited as `code` (from [`wait_unreaped`]) was killed by a signal.
+pub(crate) fn killed_by_signal(code: libc::c_int) -> bool {
+    code == libc::CLD_KILLED || code == libc::CLD_DUMPED
+}
+
+/// Blocks until process group `pgid` has no members left, killing any still alive, or [`GROUP_EXIT_WAIT`] has passed.
+/// Its id can't be reused by a new process while the group has members.
 pub(crate) fn wait_group_gone(pgid: u32) {
     let Ok(pgid) = libc::pid_t::try_from(pgid) else {
         return;
@@ -45,10 +55,16 @@ pub(crate) fn wait_group_gone(pgid: u32) {
     }
 }
 
-/// Whether process group `pgid` has any member. macOS answers EPERM, not ESRCH, while the only members left are dying
-/// or zombies not yet reaped (by launchd, once their parent is gone): they still hold the group id, so they count.
+/// Whether process group `pgid` has any member, killing every live one. macOS answers EPERM, not ESRCH, while the only
+/// members left are dying or zombies not yet reaped (by launchd, once their parent is gone): they still hold the group
+/// id, so they count.
+///
+/// The probe is SIGKILL, not signal 0: a member forked while an earlier kill was being delivered (a hook's shell in the
+/// middle of starting a command) missed it and would live on, and the wait run out with it still there. While the
+/// group has members its id can't be reused, and the wait stops at the first probe that finds it gone, so each probe
+/// reaches only our group, short of the id being freed and handed to a new group within one poll interval.
 fn group_exists(pgid: libc::pid_t) -> bool {
-    // SAFETY: plain syscall; signal 0 only checks that the group exists.
-    let rc = unsafe { libc::killpg(pgid, 0) };
+    // SAFETY: plain syscall, on a group that is ours while it has members (see above).
+    let rc = unsafe { libc::killpg(pgid, libc::SIGKILL) };
     rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
