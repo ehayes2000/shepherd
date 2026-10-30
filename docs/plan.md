@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | re-review (round 2) | `task/T11-host-runtime` @ 9286f73 | 1 | Round-1 fixes in: paced catch-up (`Link::queued_bytes` added), deadlines every iteration, Shutdown jumps the queue, startup errors logged and name paths. PM-accepted: the debug-build `yes` backlog is handled by F14 (PTY backpressure), not blocking. T12 merged first: T11 must rebase onto main (conflicts in main.rs, lib.rs, crates/shepherd/Cargo.toml, tests/support) |
+| T11 host runtime | builder fixing round-2 findings | `task/T11-host-runtime` @ 9286f73 | 2 | Rebase onto main (T12 merged). Fix: disconnect a client that stalls mid-catch-up (stall window plus tick backoff); flaky `a_startup_error_is_also_logged` (tracing interest cache, so its own binary); scenarios for subscribe replacement and disconnect mid-catch-up. PM-accepted: F14 handles the `yes` backlog |
 | T13 TUI layout, sidebar, keys (finishes M1) | building | `task/T13-tui` from 6c9e8ac | 0 | Includes real-terminal wiring in the client runtime; terminal restore on every exit path; rebase if T11 lands |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
