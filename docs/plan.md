@@ -9,6 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T36b host hot-swap by re-exec | building | task/t36b-hotswap @ HEAD | 0 | PtyHandoff port approved; rebases after T37 |
 | T37 worktree no cap + concurrent + cancel | fixing (CHANGES) | task/t37-worktree-nocap @ 8934970 | 1 | Blocking: F32 test item not done; 2-reader FIFO gate hang; inherited GIT_ASKPASS/core.askPass can hang uncapped create. PM: cancel creates on shutdown |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -666,9 +667,9 @@ scope: crates/core, crates/tui, crates/adapters, crates/testkit, crates/shepherd
 notes: This ships before T36b. Its stale-host row is replaced by the swap in T36b.
 
 ### T36b: Hot-swap the host by re-exec, keeping sessions running
-status: ready
+status: in-progress
 depends: T36a
-touches: ports::pty (new `PtyHandoff` port, needs PM approval: new-port skill), adapters::{pty, event_log, link},
+touches: ports::pty (new `PtyHandoff` port — PM-approved 2026-10-30, decision 0018; follow the new-port skill), adapters::{pty, event_log, link},
 shepherd::host (swap, `host --adopt`, `handoff-check`), core::wire (`_shepherd/host/upgrade`), core::client
 goal: When the host is stale, the client asks it to upgrade, and it re-execs the installed binary in place. The agents
 keep running, and screens and status carry over. If that isn't possible, the user is asked before anything is killed.
