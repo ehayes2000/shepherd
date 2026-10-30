@@ -143,9 +143,18 @@ impl Codex {
     }
 
     fn new_session(&mut self, client: &mut FakeClient) -> Result<SessionId, WireError> {
+        self.new_session_in(client, None)
+    }
+
+    /// A Codex session starting in `cwd`, else the home directory.
+    fn new_session_in(
+        &mut self,
+        client: &mut FakeClient,
+        cwd: Option<&str>,
+    ) -> Result<SessionId, WireError> {
         let sent = client.request(ClientRequest::SessionNew(SessionNew {
             profile: Some("codex".to_owned()),
-            cwd: None,
+            cwd: cwd.map(str::to_owned),
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -276,8 +285,9 @@ fn a_codex_sessions_status_follows_its_hooks_through_a_permission_prompt_and_an_
 #[test]
 fn an_exited_codex_session_resumes_with_the_resume_subcommand_and_the_same_trusted_hooks() {
     let mut c = Codex::start();
+    let dir = tempfile::tempdir().unwrap();
     let mut client = c.h.connect();
-    let session = c.new_session(&mut client).unwrap();
+    let session = c.new_session_in(&mut client, dir.path().to_str()).unwrap();
     let mut line = serde_json::to_vec(&fixture("SessionStart.startup")).unwrap();
     line.push(b'\r');
     client.input(&session, &line);

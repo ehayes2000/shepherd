@@ -794,7 +794,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 
     /// What resuming `session` runs, and the run files to write before spawning it: its profile, as it is in the
     /// config now, planned with the agent session to resume in the directory it started in (see
-    /// [`Host::resume_target`]). Core checks the profile is still the kind the session started with.
+    /// [`Host::resume_target`]), which must still be a directory. Core checks the profile is still the kind the
+    /// session started with.
     fn plan_resume(&self, session: &SessionId) -> Result<(ResumeSpec, Vec<RunFile>), WireError> {
         let target = match self.host.resume_target(session) {
             None => {
@@ -819,9 +820,21 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                     target.profile
                 ))
             })?;
+        // Checked as for a new session: the PTY would silently start a missing directory's agent in the home
+        // directory instead.
+        let cwd = target
+            .cwd
+            .to_str()
+            .and_then(|cwd| existing_dir(cwd).ok())
+            .ok_or_else(|| {
+                WireError::InvalidParams(format!(
+                    "can't resume {session}: {} no longer exists",
+                    target.cwd.display()
+                ))
+            })?;
         let ctx = LaunchContext {
             session: session.clone(),
-            cwd: target.cwd,
+            cwd,
             size: INITIAL_SIZE,
             run_dir: run_files::session_dir(&self.settings.run_root, session),
             shepherd: self.settings.shepherd.clone(),

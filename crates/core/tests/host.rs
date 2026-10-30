@@ -577,6 +577,19 @@ fn a_session_created_before_resume_was_recorded_cannot_be_resumed() {
 }
 
 #[test]
+fn a_hook_reporting_an_agent_start_after_the_pty_exited_does_not_mark_it_running() {
+    // Only the host's own `agent/started` (a resume) means its PTY runs again.
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    host.agent_started("s1", "claude-code", Some("later"));
+    let listed = &host.host().sessions()[0];
+    assert!(listed.exited);
+    assert_eq!(listed.resume, Ok(()));
+    let target = resume_target(&host, "s1").and_then(Result::ok);
+    assert_eq!(target.map(|t| t.agent_session_id), Some("later".to_owned()));
+}
+
+#[test]
 fn resume_target_of_an_unknown_or_closed_session_is_none() {
     let mut host = HostDriver::new();
     exited_claude(&mut host, "s1", Some("abc123"));

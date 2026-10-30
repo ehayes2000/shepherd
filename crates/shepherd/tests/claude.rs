@@ -14,11 +14,13 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd::hook::{self, HookError};
 use shepherd_core::acpp::Seq;
-use shepherd_core::config::RawConfig;
+use shepherd_core::config::{AgentKind, RawAgent, RawConfig};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogId, PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
-use shepherd_core::wire::{ClientRequest, SessionClose, SessionNew, SessionResume, WireError};
+use shepherd_core::wire::{
+    ClientRequest, HookFrame, SessionClose, SessionNew, SessionResume, WireError,
+};
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::FakeNetwork;
@@ -626,6 +628,111 @@ fn a_claude_session_whose_agent_never_reported_its_session_cannot_be_resumed() {
     );
     assert_eq!(c.all_spawned().len(), 1);
     assert!(!c.h.run_root().join(session.as_str()).exists());
+}
+
+/// [`support::shell_default_config`] plus a profile `mine` of `kind` running `claude`, or without it for `None`.
+fn mine(kind: Option<&str>) -> RawConfig {
+    let mut config = support::shell_default_config();
+    if let Some(kind) = kind {
+        let agent = RawAgent {
+            kind: Some(kind.to_owned()),
+            command: Some(CLAUDE.to_owned()),
+            ..RawAgent::default()
+        };
+        config.agents = Some([("mine".to_owned(), agent)].into());
+    }
+    config
+}
+
+/// How many entries of `session`'s log are `method`.
+fn count(c: &Claude, session: &SessionId, method: &str) -> usize {
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    log.iter()
+        .filter(|e| e.frame().method() == Some(method))
+        .count()
+}
+
+/// Checks a resume of `session` was refused with `InvalidParams` saying `why`, and nothing was spawned, written or
+/// logged for it.
+fn assert_resume_refused(c: &mut Claude, session: &SessionId, why: &str) {
+    let mut client = c.h.connect();
+    let result = c.resume(&mut client, session);
+    assert!(
+        matches!(&result, Err(WireError::InvalidParams(m)) if m.contains(why)),
+        "{result:?}"
+    );
+    assert_eq!(c.all_spawned().len(), 1);
+    assert_eq!(count(c, session, "_shepherd/agent/started"), 1);
+    assert_eq!(c.h.runtime().pending_run_files(), 0);
+    assert!(!c.h.run_root().join(session.as_str()).exists());
+    assert!(c.h.host().sessions()[0].exited);
+}
+
+#[test]
+fn resuming_a_session_whose_directory_is_gone_is_refused() {
+    // The PTY would silently start in the home directory instead.
+    let mut c = Claude::start();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap().to_owned();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("claude"), Some(&path))
+        .unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    c.h.restart();
+    dir.close().unwrap();
+    assert_resume_refused(&mut c, &session, &format!("{path} no longer exists"));
+}
+
+#[test]
+fn resuming_a_session_whose_profile_was_removed_is_refused() {
+    let mut c = Claude::with_config(mine(Some("claude-code")));
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("mine"), dir.path().to_str())
+        .unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    c.h.restart_with_config(mine(None));
+    assert_resume_refused(&mut c, &session, "profile `mine` no longer exists");
+}
+
+#[test]
+fn resuming_a_session_whose_profile_became_a_shell_is_refused() {
+    let mut c = Claude::with_config(mine(Some("claude-code")));
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("mine"), dir.path().to_str())
+        .unwrap();
+    c.hook(&mut client, &session, "SessionStart.startup");
+    c.h.restart_with_config(mine(Some("shell")));
+    assert_resume_refused(&mut c, &session, "shell sessions can't be resumed");
+}
+
+#[test]
+fn resuming_a_session_whose_profile_changed_kind_is_refused_and_drops_the_planned_run_files() {
+    // Started as Codex; the profile now plans Claude Code's settings file, which core refuses to spawn.
+    let mut c = Claude::with_config(mine(Some("codex")));
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = c.h.connect();
+    let session = c
+        .new_session_in(&mut client, Some("mine"), dir.path().to_str())
+        .unwrap();
+    let start = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../core/tests/fixtures/codex/SessionStart.startup.json");
+    let sent = client.request(ClientRequest::HookFrame(Box::new(HookFrame {
+        session: session.clone(),
+        agent: AgentKind::Codex,
+        payload: read_json(&start),
+    })));
+    c.h.step();
+    assert_eq!(response(&client.take(), &sent), Ok(json!({})));
+    c.h.restart_with_config(mine(Some("claude-code")));
+    assert_resume_refused(&mut c, &session, "started as profile `mine` (codex)");
 }
 
 // ---------- the real adapters ----------
