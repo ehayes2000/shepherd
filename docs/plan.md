@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T24 auto-naming | in review | task/t24-auto-naming @ 9145fc7 (on 9197e58) | 1 | PM-accepted: HookTranslated event; built-in stopwords; explicit-name sessions follow-up |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
-| F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
+| F28 workspace repo root + ~ | in review | task/f28-repo-root @ 15094a9 (on 9197e58) | 1 | PM-accepted: hand-written expand_home; hello cwd not expanded; Worker doc softened |
 | F31 real answers only | in review | task/f31-answer-input @ 4acc88f (on ec8b1b5) | 1 | PM-accepted: Enter/printable/paste answer; ESC-prefixed etc don't; Esc/Ctrl-C dismissal → F34 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -91,7 +91,7 @@ dependencies are done.
 | `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
 | `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid) |
-| `Worktrees` | host | T20 | git CLI |
+| `Worktrees` | host | T20 | git CLI (`repo_root` added in F28) |
 | `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
 | `Peers` | host | T29 | iroh |
