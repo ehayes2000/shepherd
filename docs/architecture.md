@@ -427,6 +427,194 @@ and listener fds and a handoff file, and only after a `handoff-check` preflight 
 happens only with the user's click. Consequences: one new port (`PtyHandoff`). A handoff format that is versioned and
 read by older and newer builds. Agents survive host updates on unix.
 
+## Spike T28: iroh peering
+
+Findings of the T28 spike (2026-10-30). This is not a decision yet: the PM records one (proposed text at the end). The
+prototype was a throwaway crate in the session scratchpad, never in the repo. It ran on one Mac (Darwin 24.6, arm64,
+14 cores, rustc 1.96), with its own `CARGO_HOME` and identity keys in fresh tempdirs. It depended on this repo's
+`shepherd-core` (real `wire` messages, the real `Link` trait) and `shepherd-adapters` (the unix-link baseline).
+
+**Versions and API.** iroh **1.4.1** (crates.io, 2026-10-21; MSRV 1.91; QUIC stack `noq` 1.4.0), built with
+`default-features = false, features = ["tls-ring", "fast-apple-datapath"]`, which drops `portmapper` and `metrics`.
+iroh-tickets **1.0.0** for the pairing ticket. iroh's own normal dependency tree is about 240 crates: tokio, rustls/ring,
+reqwest, hickory. Sources: <https://docs.rs/iroh/1.4.1/iroh/> and <https://github.com/n0-computer/iroh> (tag
+`iroh-v1.4.1`). The API used:
+- `Endpoint::builder(presets::N0)`, then `.secret_key(..)`, `.alpns(..)`, `.hooks(..)`, `.clear_address_lookup()` and
+  `.clear_ip_transports()` (the last one is relay-only mode), then `.bind()` and `.online()`.
+- `Endpoint::connect(EndpointAddr, alpn)` and `Endpoint::accept()`, then `Incoming::accept()`.
+- `Connection::{open_bi, accept_bi, remote_id, alpn, paths, close}`.
+- `EndpointHooks::after_handshake` returning `AfterHandshakeOutcome::{Accept, Reject}`.
+- `SecretKey::{generate, to_bytes, from_bytes}`.
+- `iroh_tickets::Ticket`.
+
+`.clear_address_lookup()` was used only because of the spike's network constraint, which allowed n0's relays and
+localhost and nothing else. It means nothing was published to, or resolved from, n0's pkarr/DNS service (`iroh.link`).
+
+### What the prototype is
+
+- `IrohLink` implements `shepherd_core::ports::Link` unchanged: `send`, `close`, `queued_bytes`, and events into a
+  `LinkEventSink`.
+  - One tokio **current-thread** runtime runs on its own thread, and the caller stays synchronous (decision 0011).
+  - One iroh connection is one `ConnId`. Each conn carries one bidirectional QUIC stream, opened by the dialler, framed
+    with `wire::Decoder` like the unix adapter.
+  - Each conn has a writer task that drains an unbounded queue, with the same `MAX_QUEUED` slow-consumer rule, and a
+    reader task that is the only one emitting that conn's `Line`s and its one `Disconnected`.
+- A "host" process runs the shepherd host loop in miniature. It answers every `_shepherd/session/input` with a
+  `_shepherd/pty/output` echo of the same bytes, standing in for a PTY that echoes.
+- A "bench" process sends one-byte `session/input` keystrokes through `Link::send` and times each one until its echo
+  arrives as a `LinkEvent::Line`. The timer runs on the caller's thread, so each round trip includes four runtime
+  thread hops and JSON encoding and decoding on both sides.
+- Pairing, the allowlist hook, identity files and a `peers.json` are described below.
+
+### Results
+
+Everything below worked on the first run unless it says otherwise. The run scripts are `run.sh`, `gaps.sh` and
+`dupkey.sh` in the scratchpad.
+
+| check | result |
+|---|---|
+| Two hosts exchange wire messages over a relay | Yes. `bench --relay-only` → host: every sample's selected path was `Relay(https://use1-1.relay.n0.iroh.link./)`, and `Connection::paths()` showed no IP path. |
+| …and directly | Yes. With IP transports on both sides, the selected path was `Ip(192.168.x.x)` (sometimes the Tailscale `100.x` address). |
+| Identity persists | `identity.key` is 32 bytes, mode 0600, created with `O_EXCL`. A host restarted from the same dir has the same node ID. |
+| Pairing | `join <ticket>` added each side to the other's `peers.json`. The ticket is 256 characters: it carries 7 IP addresses plus the relay URL. |
+| Ticket replay | A second `join` with the same ticket, from a fresh key, was refused: `closed by peer: no pairing in progress (code 410)`. A wrong token is refused with code 403 by the same code path, but that wasn't exercised separately. |
+| Untrusted node | A fresh key that knows the host's address but isn't in the allowlist was rejected in `after_handshake` (host log: `rejected untrusted node …`). The host emitted no `Connected`. The dialler saw `Disconnected(PeerGone)`. |
+| Known peer found on start | The host was restarted relay-only, with the same identity and `peers.json`. B reconnected using its stored `last_addr` (the relay URL is unchanged) in 29 ms. |
+| `close` semantics | The closing end saw `Disconnected(Closed)` and the peer saw `PeerGone`, as the port requires. |
+| Endpoint start | `online()` (home relay up) took 3.0–3.2 s with IP transports, and 1.35–1.47 s relay-only. |
+| Connect (stored address, handshake + stream) | 24–56 ms, once 135–189 ms. Relay-only and direct dials take about the same time: both are about one relay round trip. |
+| Direct upgrade | Usually 29–300 ms after connecting, or direct from the first packet when the stored address had the IP. It took 2.2 s once, with debug logging on. **Once, it stayed on the relay for the whole 20 s wait.** That run's host had already served a pairing and a rejected connection. Not reproduced in about 10 later direct runs; cause unknown. |
+| Two endpoints, same key | B's key online twice at once, both relay-only, both talking to A. One connection saw **one 8.8 s stall** (max sample 8776 ms, otherwise normal). See "Where the endpoint lives". |
+
+**Keystroke round trips** (ms, `session/input` → `pty/output` echo, through the `Link` port on both ends):
+
+| path | gap between keys | n | min | p50 | p90 | p99 |
+|---|---|---|---|---|---|---|
+| unix socket (today's adapter, baseline) | 30 ms | 300 | 0.07 | 0.18 | 12.9 | 38.0 |
+| iroh direct (loopback/LAN interface) | 0 | 300 | 0.13 | 0.21 | 0.32 | 0.98 |
+| iroh direct | 5 ms | 200 | 0.21 | 0.37 | 0.50 | 0.69 |
+| iroh direct | 30 ms | 300 | 0.20 | 0.53 | 9.0 | 76 |
+| iroh relay (use1, n0) | 0 | 300 | 22.7 | 27.9 | 65 | 140 |
+| iroh relay | 5 ms | 200 | 21.3 | 25.9 | 40 | 123 |
+| iroh relay | 30 ms | 300 | 21.0 | 27.5 | 112 | 161 |
+| iroh relay (host relay-only, client direct-capable) | 30 ms | 300 | 22.4 | 26.5 | 109 | 146 |
+| iroh relay | 100 ms | 200 | 22.6 | 30.4 | 46 | 130 |
+
+How these were measured, and the caveats:
+- `Instant` was taken around each keystroke on the bench's main thread. Percentiles are nearest-rank over the sorted
+  samples. The gap is a `thread::sleep` between keys.
+- The machine was **heavily loaded** by other agents' builds: load average 28–94 on 14 cores, read with `uptime` at the
+  start and end of each run. The tails (p90/p99) track load: even the unix baseline has a 13 ms p90. **Read the
+  medians, not the tails.** One "direct, 100 ms gap" run had a 10 ms median, which is load noise, not iroh.
+- `ping use1-1.relay.n0.iroh.link` gave min/avg 11.6/28.0 ms. A relayed keystroke crosses the relay twice
+  (client→relay→host and back), so the relay floor is about 2× the relay RTT. The measured minimum of 21–23 ms matches
+  that.
+- About 10% of relayed keystrokes take about 100–120 ms when typing at a 30 ms pace. This showed up in every gapped
+  relay run; at 0 or 5 ms gaps it moves to p99. iroh-relay sets `TCP_NODELAY` on both ends (iroh-relay 1.4.1
+  `client/tls.rs:293`, `server/streams.rs:221`), so Nagle isn't the cause. Not isolated.
+
+**Bottom line:**
+- A direct connection costs about what the unix socket costs (sub-millisecond medians).
+- Through n0's relay a keystroke echo costs about 26–30 ms median from this location. That is usable for typing, but
+  it is noticeable, with occasional spikes of about 100+ ms.
+- Most real pairs (LAN, or punchable NAT) should end up direct within about 0.1–0.3 s.
+
+### Recommended design
+
+**Where the endpoint lives: the host owns the machine's only iroh endpoint.**
+- A machine has one identity, and iroh routes by node ID. Two endpoints online with the same key make the relay flip
+  between them: the spike saw an 8.8 s stall. So a TUI must never bind a second endpoint with the machine key.
+- The host is long-lived, so it is what peers can reach.
+- The client stays tokio-free and unix-only.
+- A client reaches a remote host **through its local host**. It opens a unix conn and sends one first request,
+  `_shepherd/tunnel { machine }`. The local host opens (or reuses) an iroh conn to that peer and then pipes lines both
+  ways verbatim.
+- The remote host sees an ordinary client conn from a trusted node and runs the normal hello. The wire protocol stays
+  end to end, client ↔ remote host, so T31's routing, subscribe and catch-up logic is unchanged.
+- The extra local hop costs about what the unix baseline costs (0.2 ms median), against 26 ms for a relay.
+- What the tunnel needs: read pausing for flow control. The local host stops reading the iroh stream while the unix
+  conn's `queued_bytes` is above a high-water mark, so QUIC flow control pushes back. The remote host's 0013 pacing then
+  sees the backlog in its own `queued_bytes`. The splice is plumbing, so it belongs in the adapter or runtime, not core.
+- The alternative is to give each client its own key and an iroh `Link` in the client (T31 as written today). That
+  needs a second trust relationship per client and tokio in the client process. Not recommended.
+
+**Node identity storage.**
+- `~/.shepherd/identity.key`: 32 raw ed25519 secret-key bytes, mode 0600, created with `O_EXCL` inside the 0700 root
+  (decision 0010). The key is generated by the runtime, never by core.
+- The node ID is its public key. `MachineId` (T29) is the node ID's canonical lowercase hex, iroh's `Display`, 64
+  characters. Core keeps treating it as opaque.
+- Trust checks compare `EndpointId`s as typed values in the adapter, never strings. If core ever needs to compare node
+  IDs itself, add a `NodeId([u8; 32])` newtype and an encoding crate to `CORE_ALLOWED` (a PM call).
+- A reinstalled machine has a new identity and must pair again. That's acceptable, and it's also what revoking a lost
+  machine needs.
+
+**Pairing (`shepherd pair` / `shepherd join <ticket>`).**
+- `shepherd pair` asks the local host for a ticket: `_shepherd/pair/start`.
+  - The runtime generates a 16-byte token, which reaches core as an event field.
+  - Core records one pending pairing: single use, expires after 10 minutes.
+  - The answer is a `PairTicket { addr: EndpointAddr, name, token }`, encoded with `iroh_tickets::Ticket`, kind
+    `shepherd`, as postcard + base32.
+- The host accepts the pair ALPN (`shepherd/pair/0`) only while a pairing is pending.
+- `shepherd join <ticket>` asks the local host to dial the inviter on the pair ALPN and send
+  `{token, name, addr}`. TLS authenticates both node IDs.
+- On a matching token, the inviter appends `_shepherd/peer/trusted {node, name}` and answers with its name. The
+  joiner appends the same frame for the inviter.
+- A pending pairing is consumed by the first attempt, right or wrong, so a ticket can't be brute-forced. Compare
+  tokens in constant time (`subtle` or ring's `constant_time`).
+- To shorten the ticket, carry only the relay URL plus at most the LAN addresses (it's 256 characters with 7
+  addresses). Direct addresses still help a LAN pair go direct immediately.
+
+**Trust.**
+- The allowlist is the set of `peer/trusted` node IDs folded from the host log (T30). `_shepherd/peer/removed`
+  revokes one.
+- Core owns the set and pushes it to the adapter as data. The iroh hook rejects any other node in `after_handshake`,
+  before any `Connected`, so untrusted peers never reach core.
+- This keeps policy (who is trusted) in core and leaves the adapter a mechanical membership test, the same split as
+  `MAX_QUEUED`.
+
+**Discovery of known peers on start.**
+- Bind with `presets::N0`, which keeps address lookup on (pkarr publish plus DNS resolve). Its publisher defaults to
+  `AddrFilter::relay_only`, so no IP addresses leak to n0.
+- Also seed iroh's `address_lookup::MemoryLookup` with each peer's last address that worked. Persist those hints in a
+  small non-authoritative cache (`~/.shepherd/peer-addrs.json`), not as log frames.
+- Then dial trusted peers by node ID when a client tunnels to them, and reconnect with backoff.
+- The spike verified the stored-address route. **The pkarr/DNS route was not exercised**: the network constraint
+  excluded `iroh.link`. It is what lets a peer whose home relay changed still be found. T30 should verify it.
+
+### Proposed `Link` adaptation
+
+- **The `Link` trait needs no change for transport.** `IrohLink` meets the port's semantics as written: order per conn,
+  one `Disconnected` after all lines, non-blocking `send`, `MAX_QUEUED`, `close` flushing, `queued_bytes`. It must pass
+  the T10 contract suite in T31. The spike didn't run the contract.
+- **Additive, PM call: `fn peer(&self, conn: ConnId) -> Option<PeerId>`**, in the style of `queued_bytes`. It says which
+  authenticated node a host-side conn is from. The unix adapter returns `None` (the local user, by file permissions).
+  Core uses it to stamp who is connected, and to let `_shepherd/pair/*` and `_shepherd/tunnel` through only from local
+  conns.
+- **Additive, PM call: a distinct disconnect reason for a refused peer**, e.g. `DisconnectReason::Refused`. Today a
+  rejected dialler sees `PeerGone`, so the UI can't say "this machine doesn't trust you". The iroh close code (403) is
+  available to the adapter.
+- **Runtime:** tokio stays inside `shepherd-adapters`, on one current-thread runtime thread per process. That was
+  enough for every run here. Constructors that dial (`connect`) block only the calling thread, while it waits on a
+  oneshot. The runtime never blocks.
+- **Unmeasured, and to test in T31:** throughput and 0013 catch-up of a multi-megabyte history over a relay, QUIC
+  stream flow-control windows against `MAX_LINE` (16 MiB), roaming/network change, two real machines behind real NATs,
+  and Linux.
+
+### Proposed decision (for the PM to record)
+
+`### 0019: Machines peer over iroh; the host owns the endpoint`. Context: spike T28. Decision:
+- Each host binds one iroh endpoint (iroh 1.x, `presets::N0`, n0's public relays) with the machine identity in
+  `~/.shepherd/identity.key`. `MachineId` is its node ID.
+- Machines pair with a single-use ticket (`shepherd pair` / `shepherd join`). Trust is the allowlist of node IDs folded
+  from `_shepherd/peer/trusted` frames, enforced in an iroh handshake hook.
+- Clients reach remote hosts through a tunnel in their local host, never with their own endpoint.
+
+Consequences:
+- tokio enters `shepherd-adapters`, on one thread (amends 0011).
+- `Link` gains `peer()` and possibly a `Refused` reason.
+- T31 changes from "iroh Link in the client" to "tunnel via the local host".
+- Relayed typing costs about 26–30 ms per echo; direct costs about the same as the unix socket.
+
 ## Decision log
 
 Append-only. Format: `### NNNN: title (YYYY-MM-DD)`, then context, decision, consequences.
