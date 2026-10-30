@@ -71,6 +71,11 @@ Core may use **pure, well-established crates** (allowlist in the script). Never 
 Core purity is also enforced by `crates/core/clippy.toml` `disallowed-methods`/`disallowed-types`: `std::fs`,
 `std::process`, `std::net`, `std::thread`, `std::env`, `Instant::now`, `SystemTime::now`.
 
+The TUI draws text only through `crates/tui/src/draw.rs`, whose functions take a `DisplayText` that only
+`shepherd_core::display::display_safe` can build (drops Cc/Cf, NFC, caps marks and length). `crates/tui/clippy.toml` bans
+ratatui's raw text-drawing methods everywhere else (F35). The session's own terminal output (`render_screen`) is the one
+deliberate exception: it is drawn faithfully by the emulator.
+
 ## Ports
 
 A port is a trait in `shepherd-core::ports`. It describes a capability in domain terms, such as

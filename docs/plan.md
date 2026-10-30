@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
 | T36a build id + mismatch UX | building | task/t36a-build-id @ c4bfd3b | 0 | – |
-| F35 display-safe text | in review | task/f35-display-safe @ b040224 (on 97ff773) | 1 | PM-accepted: core::display module; DisplayText newtype + tui clippy ban (draw.rs only); ZWJ dropped (families split) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F35 | 1 | idempotence claim false (unbounded clusters), clippy ban gaps (title_top, List, &str Widget) → F36 |
 | F32 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
 | T25 | 2 | Remove-anyway could force-delete unconfirmed new changes; escape test passed via an error |
 | T24 | 4 | control chars, boundaries untested; NFD split; bidi/format chars and unbounded graphemes in names (decision 0017) |
@@ -573,7 +573,7 @@ acceptance:
 scope: crates/core, crates/tui
 
 ### F35: One display-safe text rule for everything agents and hooks can name
-status: in-progress
+status: done (f79d427)
 depends: T24
 touches: tui (render), core (display text)
 goal: Several strings shown in the UI come from untrusted sources: auto names (T24), manual renames from any client, hook
@@ -701,6 +701,23 @@ acceptance:
 scope: crates/core, crates/adapters, crates/testkit, crates/shepherd, crates/tui
 notes: Not verified on Linux in the spike (`ETXTBSY`, `/proc/self/exe` "(deleted)"). Run the end-to-end test in CI on
 Linux too.
+
+### F36: Close the display-safe gaps from F35's review
+status: todo
+depends: F35
+touches: core::display, tui (clippy.toml, check-arch), shepherd (stderr)
+goal: Small gaps left by F35.
+acceptance:
+- Cap chars kept per grapheme cluster (non-mark extenders like U+FF9E and emoji modifiers can grow one cluster without
+  bound), so `display_safe` is truly idempotent; the proptest then holds (include the reviewer's counterexample:
+  31×U+1100 + U+0344 at max 1).
+- Also drop Zl/Zp (U+2028, U+2029).
+- `crates/tui/clippy.toml`: add `Block::title_top`/`title_bottom` and the `List`/`Table`/`Tabs`/`Row`/`Cell` constructors;
+  check-arch greps tui for `Line::from(`, `Text::from(`, `Span::from(` on non-`draw` input and for `.render(` on strings.
+- Sanitize the two stderr prints that can carry host text (`crates/shepherd/src/main.rs` fatal error,
+  `crates/shepherd/src/host/mod.rs` startup report) with `display_safe`.
+- Pending user decision: keep a ZWJ when it joins two visible chars inside one grapheme (emoji families, Indic half-forms).
+scope: crates/core, crates/tui, crates/shepherd, scripts
 
 ## Out of scope for the initial feature set
 
