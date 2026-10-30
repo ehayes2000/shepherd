@@ -71,4 +71,4 @@ Build the real adapter in `main.rs` and pass it into the runtime. Add the fake t
 - [ ] real adapter passes the suite, including under parallel load (pass rate in report)
 - [ ] contract macro gives one `#[test]` per case
 - [ ] wired in main and the scenario harness
-- [ ] `docs/plan.md` ports list updated (tell the PM in your report if you can't edit it)
+- [ ] `docs/plan.md` ports list updated (hand-written, outside the generated section) (tell the PM in your report if you can't edit it)

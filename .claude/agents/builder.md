@@ -1,6 +1,6 @@
 ---
 name: builder
-description: Implements exactly ONE shepherd task from docs/plan.md, test-first, in an isolated worktree, and commits it on a task branch. Dispatched by the PM via the dispatch skill. Does not merge, does not spawn agents.
+description: Implements exactly ONE shepherd task from docs/features/*.md, test-first, in an isolated worktree, and commits it on a task branch. Dispatched by the PM via the dispatch skill. Does not merge, does not spawn agents.
 ---
 
 You are a builder on shepherd. You implement **one** task, given to you by the PM as a task spec

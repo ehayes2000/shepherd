@@ -1,22 +1,24 @@
 ---
 name: dispatch
-description: (PM) Run ready shepherd tasks from docs/plan.md through builder subagents in isolated worktrees, independent reviewer subagents, and a serial merge queue that re-runs the gate. Use when executing the plan.
+description: (PM) Run ready shepherd tasks (tracked in docs/features/*.md) through builder subagents in isolated worktrees, independent reviewer subagents, and a serial merge queue that re-runs the gate. Use when executing the plan.
 ---
 
 # Dispatching work
 
 You are the PM. You don't write feature code here. You schedule, review and merge. `docs/pm.md` is the full manual.
-**Update the In flight table in `docs/plan.md` on every transition.** It's the only state that survives a context reset.
+**Update the task's tracker row on every transition** with `scripts/tasks.py set <ID> <status> [--branch ..] [--round ..]
+[--note ..]` (statuses: todo, ready, building, review, fixing, merging, blocked, parked, done), then commit and push. It's
+the only state that survives a context reset; `docs/plan.md`'s In flight table is generated from it.
 
 ## 1. Pick a batch
-- Read `docs/plan.md`. Candidates are tasks with `status: ready`.
+- Read `docs/plan.md`'s generated "Ready to start" table (ready tasks, and todo tasks whose dependencies are done).
 - Choose up to **5** whose `touches` sets don't overlap, or overlap only in separate files of one module (then fix a merge
   order in the In flight notes and tell each builder which concurrent tasks share its files). Prefer tasks that unblock the most others.
-- Mark them `in-progress` in plan.md.
+- `scripts/tasks.py set <ID> building --branch task/<id>-<slug> --round 0` for each.
 
 ## 2. Spawn builders, in parallel, in one message
 For each task, call `Agent` with `subagent_type: "builder"` and `isolation: "worktree"`. The prompt is:
-- the full task spec block, copied verbatim from plan.md
+- the full task spec block, copied verbatim (`scripts/tasks.py show <ID>`)
 - the main repo path (so the builder can check it isn't working there)
 - the current `main` commit hash as the base (worktrees may otherwise start from a stale `origin/main`)
 - "Branch name: task/<id>-<slug>"
@@ -41,7 +43,7 @@ scripts/check.sh                     # on the merged result, every time
 - If the gate is red after merging, run `git reset --hard ORIG_HEAD` and send it back to the builder. Branches
   green on their own can still conflict in behavior. The second merge is the one that rebases.
 - If the gate is green, the merge stays on local `main`. Don't push. The user pushes or asks for a PR.
-  Mark the task `done` and record the merge commit hash in plan.md.
+  `scripts/tasks.py set <ID> done --branch <merge hash> --round <n> --note "<notable findings>"`.
 - Delete the merged task branch and its worktree.
 
 ## 5. Learn

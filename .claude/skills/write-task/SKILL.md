@@ -1,6 +1,6 @@
 ---
 name: write-task
-description: (PM) Break a shepherd feature into builder-sized task specs in docs/plan.md with testable acceptance criteria, scope, and dependencies. Use when planning new work or when a builder reports a follow-up.
+description: (PM) Break a shepherd feature into builder-sized task specs in docs/features/<feature>.md with testable acceptance criteria, scope, and dependencies. Use when planning new work or when a builder reports a follow-up.
 ---
 
 # Writing tasks
@@ -15,10 +15,19 @@ equivalent code.
 - Split by **vertical behavior** ("new session creates worktree"), not by layer ("write the git code").
   The exception is port creation: a port (trait, fake, contract suite, adapter) is a good standalone task.
 
-## Template (append to `docs/plan.md`)
+## Where it goes
+Every task belongs to one feature file, `docs/features/<feature>.md`. Pick the feature it serves (a follow-up goes in
+the feature of the task it came from). A genuinely new feature gets a new file: `# <title>`, then `milestone:` and
+`goal:` lines, then `## Tracker` (the table, copied from any feature file) and `## Specs`. Ids are global: take the next
+free `T<NN>` / `F<NN>` (`grep -rho '^### [TF][0-9]*' docs/features | sort -V | tail`).
+
+Add a row to the feature's `## Tracker` table (`| T<NN> | <title> | todo |  |  |  |`; no `|` inside cells) and the spec
+block under `## Specs`. The tracker row is the only place status lives. Then run `scripts/tasks.py` to regenerate the
+index in `docs/plan.md` (the gate checks it).
+
+## Template (under `## Specs`)
 ```markdown
 ### T<NN>: <imperative title>
-status: todo | ready | in-progress | review | done | blocked
 depends: T<a>, T<b>
 touches: core::session, ports::worktrees, tui::sidebar      # for conflict detection
 goal: <one or two sentences of user-visible outcome>

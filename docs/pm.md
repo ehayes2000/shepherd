@@ -1,15 +1,15 @@
 # PM handbook
 
 How the project manager (the main Claude session) runs this project, written so a successor can take over in the middle
-of work. Read with `CLAUDE.md`, `docs/architecture.md`, `docs/plan.md` and the `dispatch` / `write-task` skills.
+of work. Read with `CLAUDE.md`, `docs/architecture.md`, `docs/plan.md` (the generated index of `docs/features/*.md`) and the `dispatch` / `write-task` skills.
 
 ## Taking over (do this first)
 
-1. Read `CLAUDE.md`, this file, the **In flight** table at the top of `docs/plan.md`, and the decision log in
+1. Read `CLAUDE.md`, this file, the generated **In flight** table in `docs/plan.md`, `docs/inbox.md`, and the decision log in
    `docs/architecture.md`.
 2. **Check reality against the table, and trust git, not the table.** Run `git log --oneline --merges main | head -30`,
-   `git branch | grep task/`, `git worktree list`, and `grep -n "status:" docs/plan.md`. A task whose merge commit is on main
-   is done, whatever the table says. Fix the table first.
+   `git branch | grep task/`, `git worktree list`, and `python3 scripts/tasks.py --check`. A task whose merge commit is on main
+   is done, whatever its tracker row says. Fix the rows first (`scripts/tasks.py set`).
 3. Subagents don't survive a session. To continue an in-flight task:
    - **Building/fixing:** dispatch a fresh `builder` (worktree isolation). Give it the spec block, "continue on existing branch
      `task/<id>` (do not reset it)", the base commit, and the open review findings and PM decisions from the table.
@@ -30,8 +30,8 @@ move it to "Filed" with a pointer, and tell the user where it went.
 CHANGES: PM decides open questions and sends the findings plus decisions to the **same** builder (SendMessage keeps its context),
 then re-review by the **same** reviewer, which checks only what changed → APPROVE → merge queue → mark done → lessons.
 
-**Update the In flight table on every transition** (dispatch, report, verdict, merge). It's the only state that survives a
-context reset.
+**Update the task's tracker row on every transition** (dispatch, report, verdict, merge) with `scripts/tasks.py set`, then
+commit and push. It's the only state that survives a context reset.
 
 ### Dispatching
 - Up to about 5 builders at once (raised from 3 at the user's request), with no overlapping `touches` beyond separate files
@@ -59,7 +59,7 @@ scripts/check.sh > <scratchpad>/pm-gate.log 2>&1   # on the merged tree, every t
 ```
 - `git merge` doesn't run the pre-commit hook. Always run the gate yourself. If you resolved a conflict and already ran the gate,
   `git -c core.hooksPath=/dev/null commit --no-edit` avoids a second identical run (only then).
-- Then: set `status: done (<merge hash>)` in plan.md, remove the worktree and branch, push.
+- Then: `scripts/tasks.py set <ID> done --branch <merge hash> --round <n> --note ".."`, remove the worktree and branch, push.
 - macOS has no `timeout(1)`. Gate runs can exceed 10 minutes when run twice, so use background runs if needed.
 - Never use `git add -A` while builder worktrees exist under the repo unless `.claude/worktrees/` is in `.gitignore` (it is now).
 - Edit files with the Edit tool or a script that reads before it writes. Opening a file for writing truncates it (this
@@ -72,7 +72,7 @@ pty with an isolated temporary HOME (never the user's `~/.shepherd`), and prints
 ### Lessons
 After each verdict, ask "what general cause produced this finding?" and make it a rule in the cheapest place that enforces it:
 a gate check or lint (best), the reviewer checklist, a skill, `CLAUDE.md`, or a decision entry. Anything a reviewer flags twice
-gets enforced mechanically. File non-blocking findings as follow-ups (`F<NN>`) in plan.md rather than holding up merges.
+gets enforced mechanically. File non-blocking findings as follow-ups (`F<NN>`) in the feature file of the task they came from rather than holding up merges.
 
 ## User preferences (standing)
 - Pushing `main` to origin after merges is authorized. Merges happen on local main, with no PRs per task.

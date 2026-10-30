@@ -354,7 +354,7 @@ serializable `Token`:
 - `JsonlEventLog::adopt(root, lock_fd)` and `UnixListenLink::adopt(path, listener_fd)` are concrete adapter
   constructors, not trait changes.
 
-### Follow-up tasks (for `docs/plan.md`)
+### Follow-up tasks (for `docs/features/`)
 
 #### T36a: Build identity in the hello, and a clear mismatch UX
 status: todo

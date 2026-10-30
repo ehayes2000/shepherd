@@ -17,4 +17,8 @@ cargo test --workspace --quiet
 step "architecture"
 scripts/check-arch.sh
 
+step "tasks"
+python3 scripts/tasks.py --check
+echo "tasks ok"
+
 printf '\n==> gate passed\n'

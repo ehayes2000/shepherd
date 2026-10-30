@@ -9,7 +9,7 @@ description: Finish a shepherd builder task - run the gate, self-review the diff
 2. `scripts/check.sh` must be green. If it's red, fix it. Never use `--no-verify` and never weaken a test.
 3. **Self-review** `git diff main...HEAD` as if you were the reviewer:
    - every acceptance criterion has a test that would fail without the change
-   - no stray debug output, `dbg!`, commented-out code, or TODOs without a plan.md follow-up
+   - no stray debug output, `dbg!`, commented-out code, or TODOs without a follow-up task (tell the PM)
    - no files outside the task's scope
    - any changed existing test or snapshot is justified
    - every guarantee your docs or report claim ("never follows symlinks", "no Line after close") has a test that would fail

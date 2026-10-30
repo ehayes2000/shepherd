@@ -3,7 +3,8 @@
 A terminal agent manager: a sidebar of coding-agent sessions (Claude Code, Codex), each running in a
 shepherd-managed git worktree, across multiple machines. `manifesto.md` is the product intent.
 
-Before writing code, read `docs/architecture.md`. Current work lives in `docs/plan.md`. The PM's operating manual,
+Before writing code, read `docs/architecture.md`. Work is tracked per feature in `docs/features/<feature>.md` (a tracker
+table plus the task specs); `docs/plan.md` is the generated index (`scripts/tasks.py`). Requests go in `docs/inbox.md`. The PM's operating manual,
 including how to take over in-flight work, is `docs/pm.md`.
 
 ## How this project is built
@@ -15,7 +16,7 @@ each, in an isolated worktree) and checked by `reviewer` subagents that see only
 The PM does not write feature code. It may edit docs, the plan, and the gate tooling.
 
 Skills:
-- `write-task`: (PM) turn a feature into task specs in `docs/plan.md`
+- `write-task`: (PM) turn a feature into task specs in its `docs/features/<feature>.md`
 - `dispatch`: (PM) run ready tasks through builder → reviewer → merge
 - `tdd`: (builder) the red/green/refactor loop and where each kind of test goes
 - `new-port`: (builder) add a port: trait, fake, contract suite, real adapter, wiring
