@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F18 | Host startup errors reach the user | done | 03c6d2f | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
 | F27 | Worktrees calls run off the host runtime thread | done | db9a442 | 1 | – (2 minors → F28) |
 | F40 | Launcher test stand-ins can leak | done | 24f1b49 | 1 | stand-ins orphaned; now a watchdog per stand-in and a group kill on drop |
-| F45 | Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | review | task/f45-standin-load @ 552c61f (on 3649a78) | 1 | cause: syspolicyd scans each new executable on first exec; fixtures symlink to one committed script |
+| F45 | Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | merging | task/f45-standin-load @ 552c61f | 1 | approved |
 | F46 | Fake claude/codex scripts are fresh executables (macOS scan stall) | todo |  |  |  |
 
 ## Specs
