@@ -6,11 +6,14 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use shepherd_core::acpp::{Frame, Seq, ShepherdFrame};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{EventLog, LogId};
-use shepherd_core::wire::{ClientRequest, Hello, PROTOCOL_VERSION, WireError, WorkspaceSelect};
+use shepherd_core::wire::{
+    ClientRequest, Hello, PROTOCOL_VERSION, SessionRename, WireError, WorkspaceSelect,
+};
 use shepherd_testkit::fakes::pty::ProgramInput;
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 use support::*;
@@ -221,4 +224,47 @@ fn a_new_session_in_a_workspace_that_is_gone_is_refused_instead_of_starting_else
         "{result:?}"
     );
     assert!(h.host().sessions().is_empty());
+}
+
+#[test]
+fn while_a_workspace_probe_is_stuck_in_git_other_sessions_and_clients_are_still_served() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    let d = dirs(&worktrees);
+    // The default shell echoes what it is typed.
+    let mut h = HostHarness::builder().worktrees(worktrees.clone()).start();
+    let mut watcher = h.connect();
+    watcher.subscribe_all();
+    let req = watcher.new_session();
+    h.step();
+    let session = new_session_id(&watcher.take(), &req);
+
+    let hold = worktrees.hold_next();
+    let mut selector = h.connect();
+    let selecting = select(&mut selector, &d.app);
+    h.poll();
+    assert!(
+        hold.wait_entered(Duration::from_secs(10)),
+        "the probe never reached the port"
+    );
+
+    // Counted, not timed: the session's output and a request's answer both arrive while git is still stuck.
+    watcher.input(&session, b"still here");
+    let rename = watcher.request(ClientRequest::SessionRename(SessionRename {
+        session: session.clone(),
+        name: "busy".to_owned(),
+    }));
+    h.poll();
+    let msgs = watcher.take();
+    assert_eq!(output(&msgs, &session), b"still here");
+    assert!(response(&msgs, &rename).is_ok());
+    assert!(
+        selector.take().is_empty(),
+        "the select was answered before its probe finished"
+    );
+    assert_eq!(h.host().workspace(), None);
+
+    hold.release();
+    h.step();
+    assert!(response(&selector.take(), &selecting).is_ok());
+    assert_eq!(h.host().workspace(), Some(d.app.as_path()));
 }

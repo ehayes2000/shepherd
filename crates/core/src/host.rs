@@ -205,7 +205,8 @@ pub enum HostCommand {
         result: Result<HostResult, WireError>,
     },
     /// Find out whether `path` is in a git repo, resolving `..` and symlinks, and feed the answer back as
-    /// [`HostEvent::WorkspaceProbed`] with the same `ask`.
+    /// [`HostEvent::WorkspaceProbed`] with the same `ask`. The probe runs off the runtime thread, so other events may
+    /// be handled before its answer arrives, and the answer may no longer matter by then.
     ProbeWorkspace {
         ask: WorkspaceAsk,
         path: PathBuf,

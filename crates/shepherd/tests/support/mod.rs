@@ -40,6 +40,8 @@ pub const SOCKET: &str = "/home/test/.shepherd/host.sock";
 const NO_RUN_ROOT: &str = "/nonexistent/shepherd-run";
 /// The managed worktree root of the harness's fake `Worktrees`, which knows no repos unless a test adds them.
 pub const WORKTREE_ROOT: &str = "/home/test/.shepherd/worktrees";
+/// How long [`HostHarness::step`] waits for a port call on a worker thread: a liveness bound, never a measurement.
+const WORKER_LIMIT: Duration = Duration::from_secs(10);
 
 /// The harness's config: the defaults, except that new sessions without a profile run the `shell` profile, so
 /// scenarios don't need a fake `claude`.
@@ -343,8 +345,16 @@ impl HostHarness {
         &self.settings.run_root
     }
 
-    /// Runs the loop until no event is pending and no deadline is due.
+    /// Runs the loop until no event is pending, no deadline is due, and no port call on a worker thread is
+    /// unanswered. Panics if a worker call doesn't answer within a generous liveness bound.
     pub fn step(&mut self) {
+        let settled = self.runtime_mut().run_until_settled(WORKER_LIMIT);
+        assert!(settled, "a worker call never answered");
+    }
+
+    /// Runs the loop until no event is pending and no deadline is due, without waiting for port calls running on a
+    /// worker thread: for a test that holds one of them.
+    pub fn poll(&mut self) {
         self.runtime_mut().run_until_idle();
     }
 

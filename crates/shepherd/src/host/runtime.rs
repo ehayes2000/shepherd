@@ -17,6 +17,9 @@
 //!   live PTY output too. Appends only happen on this thread, so there is no gap and no duplicate.
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
+//! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
+//!   A command that needs it (a workspace probe) is submitted there and the loop carries on; the result comes back
+//!   as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still matters.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -53,6 +56,7 @@ use shepherd_term::Screen;
 
 use super::env::Env;
 use super::run_files;
+use super::worker::Worker;
 use crate::screen_guard;
 
 /// The machine id every entry is stamped with until machines get names (T29).
@@ -78,6 +82,8 @@ pub const CATCH_UP_BATCH: usize = 256;
 pub enum RuntimeEvent {
     Pty(PtyEvent),
     Link(LinkEvent),
+    /// The result of a `Worktrees` call that ran on the worker thread, for core.
+    Worktrees(HostEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
 }
@@ -127,6 +133,14 @@ impl LinkEventSink for RuntimeTx {
 /// The receiving side, owned by the runtime.
 pub struct RuntimeRx(Receiver<RuntimeEvent>);
 
+#[cfg(test)]
+impl RuntimeRx {
+    /// The next event, waiting up to `limit` (a liveness bound).
+    pub(crate) fn recv_timeout(&self, limit: Duration) -> Option<RuntimeEvent> {
+        self.0.recv_timeout(limit).ok()
+    }
+}
+
 /// A new channel for one runtime. Build the port sinks from the sender before building the ports.
 pub fn runtime_channel() -> (RuntimeTx, RuntimeRx) {
     let (tx, rx) = mpsc::channel();
@@ -135,6 +149,15 @@ pub fn runtime_channel() -> (RuntimeTx, RuntimeRx) {
         shutdown: Arc::default(),
     };
     (tx, RuntimeRx(rx))
+}
+
+/// Why [`HostRuntime::start`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error(transparent)]
+    Log(#[from] LogError),
+    #[error("cannot start the worktrees thread: {0}")]
+    Worker(std::io::Error),
 }
 
 /// What the runtime needs besides its ports.
@@ -215,7 +238,9 @@ struct Deadline {
 pub struct HostRuntime<P, W, L, E, V> {
     host: Host,
     pty: P,
-    worktrees: W,
+    worktrees: Worker<W>,
+    /// `Worktrees` calls submitted and not yet answered.
+    worktree_calls: usize,
     link: L,
     log: E,
     env: V,
@@ -240,9 +265,12 @@ pub struct HostRuntime<P, W, L, E, V> {
     finished: bool,
 }
 
-impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E, V> {
+impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
+    HostRuntime<P, W, L, E, V>
+{
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
-    /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed.
+    /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`
+    /// moves to a worker thread of its own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
@@ -253,17 +281,20 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
-    ) -> Result<Self, LogError> {
+    ) -> Result<Self, StartError> {
         let mut host = Host::new();
         for id in log.logs()? {
             for envelope in log.read(id, Seq::ZERO)? {
                 host.apply(&envelope);
             }
         }
+        let worktrees =
+            Worker::spawn("worktrees", worktrees, tx.clone()).map_err(StartError::Worker)?;
         let mut runtime = Self {
             host,
             pty,
             worktrees,
+            worktree_calls: 0,
             link,
             log,
             env,
@@ -379,13 +410,28 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
     }
 
     /// Handles every event already queued and every deadline already due, until there is none. For tests, where
-    /// the fakes queue their events synchronously.
+    /// the fakes queue their events synchronously. Doesn't wait for `Worktrees` calls on the worker thread.
     pub fn run_until_idle(&mut self) {
         loop {
             self.service();
             match self.rx.0.try_recv() {
                 Ok(event) => self.handle(event),
                 Err(_) => break,
+            }
+        }
+    }
+
+    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees` call is still unanswered, waits for the next
+    /// event and goes on. For tests. `limit` bounds each wait, for liveness; false if one ran out.
+    pub fn run_until_settled(&mut self, limit: Duration) -> bool {
+        loop {
+            self.run_until_idle();
+            if self.worktree_calls == 0 || self.finished {
+                return true;
+            }
+            match self.rx.0.recv_timeout(limit) {
+                Ok(event) => self.handle(event),
+                Err(_) => return false,
             }
         }
     }
@@ -419,6 +465,10 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
             RuntimeEvent::Link(LinkEvent::Disconnected { conn, reason }) => {
                 tracing::debug!(%conn, ?reason, "client disconnected");
                 self.forget(conn);
+            }
+            RuntimeEvent::Worktrees(event) => {
+                self.worktree_calls = self.worktree_calls.saturating_sub(1);
+                self.dispatch(event);
             }
             RuntimeEvent::Shutdown => self.start_shutdown(),
         }
@@ -493,28 +543,27 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
                 }
                 HostCommand::Reply { to, result } => self.reply(to, result),
                 HostCommand::ProbeWorkspace { ask, path } => {
-                    let repo = self.probe_workspace(&path);
-                    follow_up.push_back(HostEvent::WorkspaceProbed { ask, repo });
+                    let panicked = HostEvent::WorkspaceProbed {
+                        ask,
+                        repo: Err(format!(
+                            "{}: probing it failed unexpectedly",
+                            path.display()
+                        )),
+                    };
+                    let call = move |worktrees: &W| HostEvent::WorkspaceProbed {
+                        ask,
+                        repo: probe_workspace(worktrees, &path),
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
                 }
             }
         }
-    }
-
-    /// `path` resolved (no `..`, symlinks followed), if it is a directory in a git repo (its default branch can be
-    /// found), or why it can't be a workspace, for the user.
-    fn probe_workspace(&self, path: &Path) -> Result<PathBuf, String> {
-        let shown = path.display();
-        if !path.is_absolute() {
-            return Err(format!("{shown} is not an absolute path"));
-        }
-        let resolved = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
-        if !resolved.is_dir() {
-            return Err(format!("{shown} is not a directory"));
-        }
-        self.worktrees
-            .default_branch(&RepoRef::new(resolved.clone()))
-            .map_err(|e| format!("{shown}: {e}"))?;
-        Ok(resolved)
     }
 
     /// After a failed append: skips the rest of the batch, answering its replies with an error.
@@ -714,7 +763,7 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
                     .map(|ok| HostResult::Hello(ok.with_profiles(config).with_notify(config)));
                 let accepted = result.is_ok();
                 self.respond(conn, &respond_now(result));
-                // Before this conn's next request (its subscribe) is read, so a selection is in its catch-up.
+                // A selection from it reaches this conn either in its catch-up or live, whenever the probe ends.
                 if let Some(cwd) = hello.cwd.filter(|_| accepted) {
                     self.dispatch(HostEvent::SelectWorkspace {
                         ask: WorkspaceAsk::ClientCwd,
@@ -1174,6 +1223,23 @@ impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E,
         self.replies.clear();
         self.finished = true;
     }
+}
+
+/// `path` resolved (no `..`, symlinks followed), if it is a directory in a git repo (its default branch can be
+/// found), or why it can't be a workspace, for the user. Runs on the worker thread: it touches the filesystem and git.
+fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, String> {
+    let shown = path.display();
+    if !path.is_absolute() {
+        return Err(format!("{shown} is not an absolute path"));
+    }
+    let resolved = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
+    if !resolved.is_dir() {
+        return Err(format!("{shown} is not a directory"));
+    }
+    worktrees
+        .default_branch(&RepoRef::new(resolved.clone()))
+        .map_err(|e| format!("{shown}: {e}"))?;
+    Ok(resolved)
 }
 
 /// A session's screen panicked and was replaced with a blank one ([`screen_guard`]).

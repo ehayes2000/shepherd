@@ -6,10 +6,14 @@
 //! methods (`commit`, `push`, `advance_origin`, ...) stand in for what the user and other people do to the repo.
 //!
 //! Clones share state, so a test can keep a handle while the code under test owns another.
+//!
+//! [`FakeWorktrees::hold_next`] makes the next call block until the test releases it, to stand in for a slow git call
+//! (a fetch over the network) without timing anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use shepherd_core::ports::worktrees::{managed_parts, normalize_lexically};
 use shepherd_core::ports::{
@@ -64,6 +68,58 @@ struct State {
 pub struct FakeWorktrees {
     root: PathBuf,
     state: Arc<Mutex<State>>,
+    /// The gate the next call waits at, if [`FakeWorktrees::hold_next`] armed one. Apart from `state`, so a held
+    /// call holds no lock the test needs.
+    hold: Arc<Mutex<Option<Arc<Gate>>>>,
+}
+
+/// How long a held call waits for its release before panicking: a liveness bound, so a test that never releases
+/// (or code that blocks the thread meant to release it) fails instead of hanging.
+const HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    entered: bool,
+    released: bool,
+}
+
+impl Gate {
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The test's handle on a held call, from [`FakeWorktrees::hold_next`]. Releasing it, or dropping it, lets the call
+/// go on.
+#[derive(Debug)]
+pub struct Hold(Arc<Gate>);
+
+impl Hold {
+    /// Blocks until the held call has started and is waiting, up to `limit` (a liveness bound). Whether it did.
+    pub fn wait_entered(&self, limit: Duration) -> bool {
+        let state = self.0.lock();
+        let (state, _) = self
+            .0
+            .changed
+            .wait_timeout_while(state, limit, |s| !s.entered)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.entered
+    }
+
+    pub fn release(self) {}
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.0.lock().released = true;
+        self.0.changed.notify_all();
+    }
 }
 
 impl FakeWorktrees {
@@ -72,6 +128,7 @@ impl FakeWorktrees {
         Self {
             root: root.into(),
             state: Arc::default(),
+            hold: Arc::default(),
         }
     }
 
@@ -113,6 +170,14 @@ impl FakeWorktrees {
     /// The next port call fails with `error` and changes nothing.
     pub fn fail_next(&self, error: WorktreeError) {
         self.lock().fail_next = Some(error);
+    }
+
+    /// The next port call blocks, before it does anything, until the returned [`Hold`] is released or dropped. Calls
+    /// after it are not held. A call held for longer than a generous liveness bound panics.
+    pub fn hold_next(&self) -> Hold {
+        let gate = Arc::new(Gate::default());
+        *self.hold.lock().unwrap_or_else(PoisonError::into_inner) = Some(gate.clone());
+        Hold(gate)
     }
 
     /// Commits on the branch (or detached HEAD) checked out at `path`. The checkout becomes clean.
@@ -274,7 +339,32 @@ impl FakeWorktrees {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Waits at the gate [`FakeWorktrees::hold_next`] armed, if any, disarming it.
+    fn wait_if_held(&self) {
+        let Some(gate) = self
+            .hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let mut state = gate.lock();
+        state.entered = true;
+        gate.changed.notify_all();
+        let (state, _) = gate
+            .changed
+            .wait_timeout_while(state, HOLD_LIMIT, |s| !s.released)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            state.released,
+            "a held FakeWorktrees call was never released (is the thread that should release it blocked on it?)"
+        );
+    }
+
+    /// Every port call starts here: waits if held, then fails if a failure was injected.
     fn take_failure(&self) -> Result<MutexGuard<'_, State>, WorktreeError> {
+        self.wait_if_held();
         let mut s = self.lock();
         match s.fail_next.take() {
             Some(e) => Err(e),
@@ -633,6 +723,21 @@ mod tests {
         );
         assert!(f.fake.list_managed(&f.repo).unwrap().is_empty());
         assert!(f.fake.create(&f.repo, &n, BaseSpec::OriginDefault).is_ok());
+    }
+
+    #[test]
+    fn a_held_call_waits_until_released_and_only_one_call_is_held() {
+        let f = FakeFixture::new();
+        let hold = f.fake.hold_next();
+        let fake = f.fake.clone();
+        let repo = f.repo.clone();
+        let call = std::thread::spawn(move || fake.default_branch(&repo));
+        assert!(hold.wait_entered(Duration::from_secs(10)));
+        // Blocked in the call: the next call is not held, and the held one hasn't returned.
+        assert_eq!(f.fake.default_branch(&f.repo), Ok(BranchName::new(DEFAULT)));
+        assert!(!call.is_finished());
+        hold.release();
+        assert_eq!(call.join().unwrap(), Ok(BranchName::new(DEFAULT)));
     }
 
     #[test]

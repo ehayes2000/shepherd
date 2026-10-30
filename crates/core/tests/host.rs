@@ -1230,3 +1230,62 @@ fn a_probed_repo_whose_path_is_not_utf8_is_refused_and_selects_nothing() {
     );
     assert_eq!(host.host().workspace(), None);
 }
+
+#[test]
+fn probe_results_that_arrive_after_they_stopped_mattering_change_nothing() {
+    // Probes run off the runtime thread, so a result can arrive after the selection it would have made stopped
+    // mattering. Each row: what was selected meanwhile, the late result, and whether a user's select (answered) or a
+    // client's cwd (never answered) asked for it.
+    let cases: [(&str, &str, Result<&str, &str>, bool); 5] = [
+        // Two clients said hello from different repos while nothing was selected; the first probe to finish won.
+        ("another client's cwd won", "/src/a", Ok("/src/b"), false),
+        (
+            "the user selected meanwhile",
+            "/src/app",
+            Ok("/src/other"),
+            false,
+        ),
+        (
+            "a failed cwd probe after a selection",
+            "/src/app",
+            Err("/home/me is not a repo"),
+            false,
+        ),
+        (
+            "a cwd probe of the selected repo",
+            "/src/app",
+            Ok("/src/app"),
+            false,
+        ),
+        // A user's select is still answered, but appends nothing for a repo someone else already selected.
+        (
+            "a user's select of the repo selected meanwhile",
+            "/src/app",
+            Ok("/src/app"),
+            true,
+        ),
+    ];
+    for (why, meanwhile, late, user) in cases {
+        let mut host = HostDriver::new();
+        select(&mut host, meanwhile);
+        let before = host.host().clone();
+        let ask = if user {
+            WorkspaceAsk::Select(host.reply_to())
+        } else {
+            WorkspaceAsk::ClientCwd
+        };
+        let cmds = host.handle(HostEvent::WorkspaceProbed {
+            ask,
+            repo: late.map(path).map_err(str::to_owned),
+        });
+        let expected = match ask {
+            WorkspaceAsk::Select(to) => vec![HostCommand::Reply {
+                to,
+                result: Ok(HostResult::Ack),
+            }],
+            WorkspaceAsk::ClientCwd => vec![],
+        };
+        assert_eq!(cmds, expected, "{why}");
+        assert_eq!(*host.host(), before, "{why}");
+    }
+}
