@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-3 findings | `task/T11-host-runtime` @ 15ad661 | 3 | Fix: add `EventLog::read_batch(log, from, max)` (port, adapter, fake, contract) and batch the catch-up cursor (no quadratic re-reads); forget the conn when `queued_bytes` is None. PM-accepted: F14 for the `yes` backlog; the stall metric is per-line coarse (noted on T31) |
-| F16 terminal setup hardening | building | `task/F16-terminal-hardening` | 0 | From the T13 review: guard before enter/push; panic exit status; ctrl+alt legacy remap |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
@@ -260,7 +259,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### F16: Terminal setup hardening
-status: in-progress
+status: done (2475af9)
 depends: T13
 touches: shepherd::terminal, shepherd::client, tui::keys
 goal: Close the T13 review's last gaps.
