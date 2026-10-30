@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T27 PR status | building | task/t27-pr-status @ HEAD | 0 | – |
+| F33 hooks concurrent + bounded | building | task/f33-hooks @ HEAD | 0 | – |
 | T26 search and open | fixing (round 5) | task/t26-search @ 081ca46 | 4 | Blocking: host::open root-resolution line untested (real-host test). PM: 0700 worktrees dir; resolve recorded paths on replay |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -549,7 +551,7 @@ acceptance:
 scope: crates/adapters
 
 ### F33: Hooks don't queue behind each other or outlive the host
-status: ready
+status: in-progress
 depends: T23
 touches: adapters::commands, shepherd::host
 goal: From the T23 review: one shared `hooks` worker means session B's post-create hooks wait behind session A's (up to the
@@ -1521,7 +1523,7 @@ height, hit tests on rendered cells, every-popup tiny-window test). Typing filte
 pure, Unicode-aware (graphemes, case-insensitive via `to_lowercase`), never hand-rolled tables.
 
 ### T27: PR status in the sidebar
-status: todo
+status: in-progress
 depends: T13, T22
 touches: ports::forge, core::host, adapters::forge, tui::sidebar
 goal: Sidebar line 2 shows the session's PR.
@@ -1531,7 +1533,14 @@ acceptance:
 - The host polls open sessions on a timer driven by `Tick` events, with backoff and at most one call per session
   every 60s. Changes are appended as `_shepherd/session/pr`.
 - The sidebar shows `#123 ✓/✗/…`. Snapshot test.
-scope: core, testkit, adapters, tui
+scope: crates/core, crates/testkit, crates/adapters, crates/tui, crates/shepherd
+notes: (binding) `Forge` calls run off the runtime thread (F27 Worker pattern), with a bound (network), non-interactive
+(`gh` with `GH_PROMPT_DISABLED=1`, no tty, setsid, `GIT_ASKPASS=` like T37), stdout parsed as JSON with serde (`gh pr list
+--head <branch> --json number,state,statusCheckRollup` or equivalent — verify the flags in gh's docs; never parse text).
+Never touch the user's gh config/auth; adapter tests use a stand-in `gh` script on PATH, never the real `gh`. Poll only
+sessions whose worktree has a branch and that are not closed; polling state (last call, backoff) is pure core driven by
+`Tick { at }`. The PR number/state/checks shown go through draw.rs (F35). Sidebar line 2 shows `#123 ✓` etc. after the
+machine name (`local · #123 ✓`); clicking it is out of scope.
 
 ---
 
