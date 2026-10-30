@@ -54,7 +54,7 @@ use crate::ids::SessionId;
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{BaseSpec, BaseUsed, Created, RepoRef, WorktreeError, WorktreeName};
-use crate::wire::{HostResult, SessionNewOk, WireError};
+use crate::wire::{HostResult, InputKind, SessionNewOk, WireError};
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
 /// request it turns into a [`HostEvent`], and maps it back to the connection and JSON-RPC id when it replies.
@@ -180,10 +180,11 @@ pub enum HostEvent {
         reply: ReplyTo,
         session: SessionId,
     },
-    /// Bytes a client typed into a session. A notification: never answered.
+    /// Bytes a client typed into a session, and what made them. A notification: never answered.
     Input {
         session: SessionId,
         bytes: Vec<u8>,
+        kind: InputKind,
     },
     /// A client resized a session's terminal. A notification: never answered.
     Resize {
@@ -245,9 +246,11 @@ pub enum HostCommand {
         session: SessionId,
         spec: SpawnSpec,
     },
+    /// Write a client's input to a session's PTY, then tell the [`QuietWatch`](quiet::QuietWatch) about it.
     WritePty {
         session: SessionId,
         bytes: Vec<u8>,
+        kind: InputKind,
     },
     ResizePty {
         session: SessionId,
@@ -593,7 +596,15 @@ impl Host {
             {
                 Vec::new()
             }
-            HostEvent::Input { session, bytes } => vec![HostCommand::WritePty { session, bytes }],
+            HostEvent::Input {
+                session,
+                bytes,
+                kind,
+            } => vec![HostCommand::WritePty {
+                session,
+                bytes,
+                kind,
+            }],
             HostEvent::Resize { session, size } => vec![HostCommand::ResizePty { session, size }],
             HostEvent::PtyExited { session, code } => {
                 let exited = ShepherdFrame::AgentExited(AgentExited { code, signal: None });

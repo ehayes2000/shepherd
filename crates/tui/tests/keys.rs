@@ -8,6 +8,7 @@ use shepherd_core::client::{Cell, Focus, Intent, Popup};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::InputKind;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
 use shepherd_tui::{Pointer, layout, map_event, map_key};
@@ -80,7 +81,7 @@ fn each_prefix_binding_runs_its_command_and_returns_keys_to_the_terminal() {
 fn the_prefix_twice_sends_a_literal_prefix_to_the_terminal() {
     assert_eq!(
         keys(&prefixed(), ctrl('b')),
-        back_to_terminal_then(Intent::Input(vec![0x02]))
+        back_to_terminal_then(Intent::keys(vec![0x02]))
     );
 }
 
@@ -92,7 +93,7 @@ fn the_literal_prefix_follows_the_sessions_keyboard_mode() {
     };
     assert_eq!(
         map_key(&ctrl('b'), prefixed().client(), &kitty),
-        back_to_terminal_then(Intent::Input(b"\x1b[98;5u".to_vec()))
+        back_to_terminal_then(Intent::keys(b"\x1b[98;5u".to_vec()))
     );
 }
 
@@ -124,13 +125,13 @@ fn only_ctrl_b_alone_is_the_prefix() {
     );
     assert_eq!(
         keys(&client(), ctrl_alt_b),
-        [Intent::Input(b"\x1b\x02".to_vec())]
+        [Intent::keys(b"\x1b\x02".to_vec())]
     );
     let ctrl_shift_b = KeyEvent::new(
         KeyCode::Char('B'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     );
-    assert_eq!(keys(&client(), ctrl_shift_b), [Intent::Input(vec![0x02])]);
+    assert_eq!(keys(&client(), ctrl_shift_b), [Intent::keys(vec![0x02])]);
 }
 
 #[test]
@@ -148,9 +149,9 @@ fn an_unbound_key_after_the_prefix_cancels_it_and_is_dropped() {
 
 #[test]
 fn keys_without_the_prefix_go_to_the_terminal_encoded() {
-    assert_eq!(keys(&client(), ch('a')), [Intent::Input(b"a".to_vec())]);
-    assert_eq!(keys(&client(), ctrl('c')), [Intent::Input(vec![0x03])]);
-    assert_eq!(keys(&client(), ch('q')), [Intent::Input(b"q".to_vec())]);
+    assert_eq!(keys(&client(), ch('a')), [Intent::keys(b"a".to_vec())]);
+    assert_eq!(keys(&client(), ctrl('c')), [Intent::keys(vec![0x03])]);
+    assert_eq!(keys(&client(), ch('q')), [Intent::keys(b"q".to_vec())]);
 }
 
 #[test]
@@ -161,7 +162,7 @@ fn passthrough_follows_the_sessions_input_modes() {
     };
     assert_eq!(
         map_key(&press(KeyCode::Up), client().client(), &app_cursor),
-        [Intent::Input(b"\x1bOA".to_vec())]
+        [Intent::keys(b"\x1bOA".to_vec())]
     );
 }
 
@@ -311,7 +312,10 @@ fn a_paste_goes_to_the_terminal_encoded() {
     };
     assert_eq!(
         events(&client(), Event::Paste("hi".into()), bracketed),
-        [Intent::Input(b"\x1b[200~hi\x1b[201~".to_vec())]
+        [Intent::Input(
+            InputKind::Paste,
+            b"\x1b[200~hi\x1b[201~".to_vec()
+        )]
     );
 }
 
@@ -319,7 +323,7 @@ fn a_paste_goes_to_the_terminal_encoded() {
 fn a_paste_after_the_prefix_cancels_it_and_still_goes_through() {
     assert_eq!(
         events(&prefixed(), Event::Paste("hi".into()), Modes::default()),
-        back_to_terminal_then(Intent::Input(b"hi".to_vec()))
+        back_to_terminal_then(Intent::Input(InputKind::Paste, b"hi".to_vec()))
     );
 }
 
@@ -343,7 +347,10 @@ fn focus_changes_are_reported_when_the_session_asked() {
     };
     assert_eq!(
         events(&client(), Event::FocusGained, focus),
-        [Intent::Input(b"\x1b[I".to_vec()), Intent::WindowFocus(true)]
+        [
+            Intent::Input(InputKind::Focus, b"\x1b[I".to_vec()),
+            Intent::WindowFocus(true)
+        ]
     );
     assert_eq!(
         events(&client(), Event::FocusLost, Modes::default()),
@@ -395,7 +402,7 @@ fn mouse_in_the_pane_goes_to_the_session_in_its_own_coordinates() {
     let pane = layout(WINDOW).pane;
     assert_eq!(
         events(&client(), click(pane.x + 3, 2), sgr_mouse()),
-        [Intent::Input(b"\x1b[<0;4;3M".to_vec())]
+        [Intent::Input(InputKind::Mouse, b"\x1b[<0;4;3M".to_vec())]
     );
 }
 

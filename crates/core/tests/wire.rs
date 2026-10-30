@@ -10,9 +10,9 @@ use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
-    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
-    PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose, SessionInput,
-    SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
+    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, InputKind, LogEntry,
+    Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose,
+    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
     SubscribeFrom, WireError, WorkspaceSelect, code, decode_client_message, decode_host_message,
     encode_client_notification, encode_host_notification, encode_request, encode_response,
     negotiate,
@@ -90,6 +90,7 @@ fn one_of_each_notification() -> Vec<ClientNotification> {
         ClientNotification::SessionInput(SessionInput {
             session: sid("s_1"),
             data: vec![0x1b, b'[', b'A', 0xff, 0x00],
+            kind: InputKind::Mouse,
         }),
         ClientNotification::SessionResize(SessionResize {
             session: sid("s_1"),
@@ -446,11 +447,55 @@ fn input_bytes_are_base64_on_the_wire() {
     let line = encode_client_notification(&ClientNotification::SessionInput(SessionInput {
         session: sid("s_1"),
         data: b"foobar".to_vec(),
+        kind: InputKind::Keys,
     }));
     assert_eq!(
         wire_json(&line)["params"],
         json!({ "session": "s_1", "data": "Zm9vYmFy" })
     );
+}
+
+#[test]
+fn input_says_what_kind_of_input_it_is_unless_it_is_keys() {
+    let kinds = [
+        (InputKind::Paste, json!("paste")),
+        (InputKind::Focus, json!("focus")),
+        (InputKind::Mouse, json!("mouse")),
+    ];
+    for (kind, name) in kinds {
+        let line = encode_client_notification(&ClientNotification::SessionInput(SessionInput {
+            session: sid("s_1"),
+            data: b"x".to_vec(),
+            kind,
+        }));
+        assert_eq!(wire_json(&line)["params"]["kind"], name, "{kind:?}");
+    }
+}
+
+#[test]
+fn input_from_a_client_older_than_kinds_is_keys() {
+    let line = notification_line(
+        "_shepherd/session/input",
+        json!({ "session": "s_1", "data": "eA==" }),
+    );
+    let ClientNotification::SessionInput(input) = client_notification(&line) else {
+        panic!("expected input");
+    };
+    assert_eq!(input.kind, InputKind::Keys);
+}
+
+#[test]
+fn input_of_a_kind_this_host_does_not_know_is_still_written() {
+    // A newer client's kind must not drop its keystrokes.
+    let line = notification_line(
+        "_shepherd/session/input",
+        json!({ "session": "s_1", "data": "eA==", "kind": "gesture" }),
+    );
+    let ClientNotification::SessionInput(input) = client_notification(&line) else {
+        panic!("expected input");
+    };
+    assert_eq!(input.data, b"x");
+    assert_eq!(input.kind, InputKind::Other);
 }
 
 #[test]

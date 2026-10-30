@@ -199,6 +199,34 @@ pub struct SessionInput {
     pub session: SessionId,
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
+    /// What made the bytes. Keys from a client older than kinds, and left off the wire for keys.
+    #[serde(default, skip_serializing_if = "InputKind::is_keys")]
+    pub kind: InputKind,
+}
+
+/// What made a [`SessionInput`]'s bytes. Only some input can answer a dialog in the session
+/// ([`QuietWatch`](crate::host::quiet::QuietWatch)), and the bytes alone don't always say which.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputKind {
+    /// A key the user pressed, encoded for the session.
+    #[default]
+    Keys,
+    /// Text the user pasted.
+    Paste,
+    /// The window gaining or losing focus (`CSI I` / `CSI O`), reported because the session asked.
+    Focus,
+    /// A mouse event in the session's pane, reported because the session tracks the mouse.
+    Mouse,
+    /// A kind from a newer client that this side doesn't know. Its bytes are still written.
+    #[serde(other)]
+    Other,
+}
+
+impl InputKind {
+    fn is_keys(&self) -> bool {
+        *self == Self::Keys
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

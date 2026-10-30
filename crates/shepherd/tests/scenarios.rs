@@ -180,10 +180,10 @@ fn two_sessions_switching_between_them_routes_input_to_the_selected_one() {
         "a new session is selected"
     );
 
-    h.user(Intent::Input(b"two".to_vec()));
+    h.user(Intent::keys(b"two".to_vec()));
     h.user(Intent::NextSession);
     assert_eq!(h.selected().as_deref(), Some("s1"));
-    h.user(Intent::Input(b"one".to_vec()));
+    h.user(Intent::keys(b"one".to_vec()));
 
     assert_eq!(
         h.inputs(),
@@ -266,7 +266,7 @@ fn a_host_slow_to_answer_hello_is_retried_and_the_old_links_events_are_ignored()
     h.settle();
     assert_eq!(h.runtime.client().connection(), &Connection::Ready);
     h.user(Intent::NewSession);
-    h.user(Intent::Input(b"hi".to_vec()));
+    h.user(Intent::keys(b"hi".to_vec()));
     assert_eq!(h.inputs(), [("s1".into(), "hi".into())]);
 }
 
@@ -408,7 +408,7 @@ fn a_session_whose_screen_panics_gets_a_blank_one_of_the_same_size_and_the_clien
     let s1 = SessionId::new("s1");
     let size = h.runtime.screen(&s1).map(Screen::size);
     // The fake host echoes input, so this is fed to the client's screen of s1.
-    h.user(Intent::Input(PANIC_TRIGGER.to_vec()));
+    h.user(Intent::keys(PANIC_TRIGGER.to_vec()));
     assert!(!h.runtime.done());
     assert_eq!(h.runtime.screen(&s1).map(Screen::size), size);
     assert_eq!(h.screen("s1"), "");
@@ -422,7 +422,7 @@ fn a_flood_of_output_is_drawn_once() {
     h.keys(&[ctrl('b'), ch('n')]);
     // 50 echoes queue up in the client before it gets to run.
     for _ in 0..50 {
-        h.runtime.user(Intent::Input(b"x".to_vec()));
+        h.runtime.user(Intent::keys(b"x".to_vec()));
     }
     lock(&h.host).as_mut().map(FakeHost::pump);
     let mut view = CountingView::default();
@@ -490,7 +490,7 @@ fn mouse_goes_to_a_session_that_turned_mouse_mode_on() {
     h.keys(&[ctrl('b'), ch('n')]);
 
     // The fake host echoes input, so this turns on SGR mouse reporting in the session's terminal.
-    h.user(Intent::Input(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+    h.user(Intent::keys(b"\x1b[?1000h\x1b[?1006h".to_vec()));
 
     let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
     h.term(Event::Mouse(MouseEvent {
@@ -667,7 +667,7 @@ fn the_mouse_renames_a_session_from_its_menu_and_closes_one_by_its_close_button(
 fn mouse_follows_the_layout_after_the_window_crosses_the_collapse_width() {
     let mut h = Harness::ready();
     h.keys(&[ctrl('b'), ch('n')]);
-    h.user(Intent::Input(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+    h.user(Intent::keys(b"\x1b[?1000h\x1b[?1006h".to_vec()));
     // Narrow enough to collapse the sidebar: the pane moves left.
     h.term(Event::Resize(50, 30));
     let pane = layout(Rect::new(0, 0, 50, 30)).pane;
@@ -687,7 +687,7 @@ fn shift_enter_reaches_a_kitty_session_as_its_own_key_and_a_legacy_one_as_alt_en
     let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
     h.keys(&[ctrl('b'), ch('n')]);
     // The fake host echoes input, so this pushes kitty keyboard flag 1 in s1's terminal.
-    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.user(Intent::keys(b"\x1b[>1u".to_vec()));
     h.keys(&[shift_enter]);
     assert_eq!(
         h.inputs().last().cloned(),
@@ -711,7 +711,7 @@ fn ctrl_backslash_from_a_legacy_outer_terminal_reaches_the_session() {
         h.inputs().last().cloned(),
         Some(("s1".into(), "\x1c".into()))
     );
-    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.user(Intent::keys(b"\x1b[>1u".to_vec()));
     h.keys(&[reported]);
     assert_eq!(
         h.inputs().last().cloned(),
@@ -725,7 +725,7 @@ fn ctrl_and_a_digit_from_an_enhanced_outer_terminal_stay_a_digit() {
     h.runtime.set_keyboard_enhanced(true);
     let ctrl_4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
     h.keys(&[ctrl('b'), ch('n')]);
-    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.user(Intent::keys(b"\x1b[>1u".to_vec()));
     h.keys(&[ctrl_4]);
     assert_eq!(
         h.inputs().last().cloned(),
@@ -1021,7 +1021,7 @@ fn open_hold() -> (Harness, jiff::SignedDuration) {
     let mut h = Harness::ready();
     h.keys(&[ctrl('b'), ch('n')]);
     // The fake host echoes input.
-    h.user(Intent::Input(b"\x1b[?2026hheld".to_vec()));
+    h.user(Intent::keys(b"\x1b[?2026hheld".to_vec()));
     let hold = h
         .runtime
         .screen(&SessionId::new("s1"))
@@ -1036,7 +1036,7 @@ fn open_hold() -> (Harness, jiff::SignedDuration) {
 fn output_inside_an_open_hold_doesnt_put_off_its_deadline() {
     let (mut h, timeout) = open_hold();
     h.advance(timeout / 2);
-    h.user(Intent::Input(b"more".to_vec()));
+    h.user(Intent::keys(b"more".to_vec()));
     assert_eq!(h.screen("s1"), "");
     h.advance(timeout - timeout / 2);
     assert!(h.runtime.tick(), "a released hold redraws");
@@ -1114,7 +1114,7 @@ fn the_selected_sessions_cursor_shape_reaches_the_real_terminal() {
 
     h.keys(&[ctrl('b'), ch('n')]);
     // The fake host echoes it: the session asks for a blinking bar.
-    h.user(Intent::Input(BAR.to_vec()));
+    h.user(Intent::keys(BAR.to_vec()));
     draw(&h, &mut view);
     assert_eq!(written(BAR), 1);
     // Unchanged: not written again.

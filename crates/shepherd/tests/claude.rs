@@ -19,7 +19,7 @@ use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogId, PtySize, SpawnSpec};
 use shepherd_core::session::{Activity, SessionState};
 use shepherd_core::wire::{
-    ClientRequest, HookFrame, SessionClose, SessionNew, SessionResume, WireError,
+    ClientRequest, HookFrame, InputKind, SessionClose, SessionNew, SessionResume, WireError,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
@@ -37,6 +37,7 @@ const GENEROUS: Duration = Duration::from_secs(60);
 
 type Hooks = Arc<Mutex<Vec<JoinHandle<Result<(), HookError>>>>>;
 type Spawned = Arc<Mutex<Vec<SpawnSpec>>>;
+type Typed = Arc<Mutex<Vec<u8>>>;
 
 /// The value after `--settings` in `args`.
 fn settings_arg(args: &[String]) -> Option<PathBuf> {
@@ -53,16 +54,21 @@ fn read_json(path: &Path) -> Value {
 /// `--settings` file and runs it with the payload on stdin and its own environment. Running is simulated: a handler
 /// whose command is [`SHEPHERD_EXE`] is `shepherd`, so the fake calls `shepherd hook <args[1]>` in-process, on its
 /// own thread like a separate hook process. Any other handler, or none, does nothing. Typed `print:<text>`, it prints
-/// `<text>`, as its TUI redrawing. Resized, it prints too.
-fn fake_claude(net: &FakeNetwork, hooks: &Hooks, spawned: &Spawned) -> Program {
-    let (net, hooks, spawned) = (net.clone(), hooks.clone(), spawned.clone());
+/// `<text>`, as its TUI redrawing. Resized, it asks the terminal for its attributes (DA1) and redraws, and so does a
+/// focus report (`CSI I`). Everything typed into it is kept in `typed`.
+fn fake_claude(net: &FakeNetwork, hooks: &Hooks, spawned: &Spawned, typed: &Typed) -> Program {
+    let (net, hooks, spawned, typed) = (net.clone(), hooks.clone(), spawned.clone(), typed.clone());
     Arc::new(move |input, p| {
         let spec = p.spec().clone();
+        if let ProgramInput::Stdin(bytes) = input {
+            typed.lock().unwrap().extend_from_slice(bytes);
+        }
         let bytes = match input {
             ProgramInput::Start => return spawned.lock().unwrap().push(spec),
             ProgramInput::Stdin(b"/exit\r") => return p.exit(0),
+            ProgramInput::Stdin(b"\x1b[I") => return p.print(b"redrawn"),
             ProgramInput::Stdin(bytes) => bytes,
-            ProgramInput::Resized => return p.print(b"redrawn"),
+            ProgramInput::Resized => return p.print(b"\x1b[credrawn"),
         };
         if let Some(text) = bytes.strip_prefix(b"print:") {
             return p.print(text);
@@ -109,6 +115,7 @@ struct Claude {
     h: HostHarness,
     hooks: Hooks,
     spawned: Spawned,
+    typed: Typed,
 }
 
 impl Claude {
@@ -125,12 +132,18 @@ impl Claude {
         let net = FakeNetwork::new();
         let hooks = Hooks::default();
         let spawned = Spawned::default();
+        let typed = Typed::default();
         let builder = HostHarness::builder()
             .network(net.clone())
             .config(support::shell_default_config())
-            .program(CLAUDE, fake_claude(&net, &hooks, &spawned));
+            .program(CLAUDE, fake_claude(&net, &hooks, &spawned, &typed));
         let h = setup(builder).start();
-        Self { h, hooks, spawned }
+        Self {
+            h,
+            hooks,
+            spawned,
+            typed,
+        }
     }
 
     /// Creates a session with `profile` and returns its id, or the host's error.
@@ -626,6 +639,74 @@ fn a_claude_permission_dialog_answered_without_a_hook_goes_idle_once_its_pty_is_
 }
 
 #[test]
+fn a_permission_dialog_stays_put_through_screen_query_replies_and_focus_reports() {
+    // Neither is the user answering, though both are written to the PTY after the request and the dialog redraws.
+    // (A focus report starts with ESC, so this doesn't show the client's kind reaching the quiet watch: see
+    // `a_paste_answers_a_permission_dialog`.)
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    for hook in [
+        "UserPromptSubmit",
+        "PreToolUse.Bash",
+        "PermissionRequest.Bash",
+    ] {
+        c.hook(&mut client, &session, hook);
+    }
+
+    // Resized, it asks for DA1 and the host's screen answers.
+    c.typed.lock().unwrap().clear();
+    client.resize(&session, 100, 30);
+    c.h.step();
+    let typed = c.typed.lock().unwrap().clone();
+    assert!(
+        typed.starts_with(b"\x1b[?") && typed.ends_with(b"c"),
+        "the query was answered: {:?}",
+        String::from_utf8_lossy(&typed)
+    );
+    // The window regains focus: the app asked for focus reports, and redraws on one.
+    client.input_of(&session, InputKind::Focus, b"\x1b[I");
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "NeedsPermission");
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 0);
+}
+
+#[test]
+fn a_paste_answers_a_permission_dialog() {
+    // A bracketed paste starts with ESC like a cursor key: only its kind, as the client sent it, makes it an answer.
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    for hook in [
+        "UserPromptSubmit",
+        "PreToolUse.Bash",
+        "PermissionRequest.Bash",
+    ] {
+        c.hook(&mut client, &session, hook);
+    }
+
+    client.input_of(&session, InputKind::Paste, b"\x1b[200~1\x1b[201~");
+    c.h.step();
+    // A redraw that isn't typed: the resize redraws the dialog.
+    client.resize(&session, 100, 30);
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "Idle");
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 1);
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(log.last().unwrap().frame()).unwrap()["params"],
+        json!({ "inferred": "quiet-after-permission" })
+    );
+}
+
+#[test]
 fn a_shell_session_is_never_inferred_idle() {
     let mut c = Claude::start();
     let mut client = c.h.connect();
@@ -877,8 +958,8 @@ mod real {
     use shepherd_core::acpp::{Envelope, RequestId};
     use shepherd_core::ids::SessionId;
     use shepherd_core::wire::{
-        ClientNotification, ClientRequest, HostMessage, HostNotification, Request, SessionClose,
-        SessionInput, SessionNew, Subscribe, SubscribeFrom, decode_host_message,
+        ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
+        SessionClose, SessionInput, SessionNew, Subscribe, SubscribeFrom, decode_host_message,
         encode_client_notification, encode_request,
     };
 
@@ -1031,6 +1112,7 @@ read line
                 conn.notify(&ClientNotification::SessionInput(SessionInput {
                     session: session.clone(),
                     data: b"\n".to_vec(),
+                    kind: InputKind::Keys,
                 }));
                 conn.entry(&session, "_shepherd/agent/exited");
                 let exists_after_exit = dir.exists();

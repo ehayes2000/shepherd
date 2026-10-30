@@ -12,7 +12,7 @@ pub use codec::{Decoder, LineTooLong, MAX_LINE};
 pub use error::{WireError, code};
 pub use message::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Hello, HelloOk, HookFrame,
-    HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
+    HostMessage, HostNotification, HostResponse, HostResult, InputKind, LogEntry, Method, Notify,
     PROTOCOL_VERSION, ProfileInfo, PtyOutput, RawResponse, Request, RequestError, SessionClose,
     SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
     SubscribeFrom, WorkspaceSelect, decode_client_message, decode_host_message,
