@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/restart_host.rs
-expression: "text(&buffer(&answered(hello_ok(Some(2), Some(1))), WIDE))"
+expression: "text(&buffer(&c, WIDE))"
 ---
  ⌂ choose a workspace  │
  + New session         │
@@ -25,4 +25,4 @@ expression: "text(&buffer(&answered(hello_ok(Some(2), Some(1))), WIDE))"
                        │
                        │
                        │
- Restart host  Detach ?│
+ the host can't update itself: overwritten in place? reinstall it

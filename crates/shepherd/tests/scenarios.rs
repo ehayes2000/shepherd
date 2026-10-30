@@ -24,7 +24,7 @@ use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
-use shepherd_core::wire::{BuildId, ExeDigest, SessionNew};
+use shepherd_core::wire::{BuildId, ExeDigest, SessionNew, UpgradeAnswer};
 use shepherd_term::{PANIC_TRIGGER, Screen};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
@@ -1231,4 +1231,43 @@ fn not_now_leaves_the_stale_host_running() {
     assert_eq!(h.runtime.client().popup(), None);
     assert_eq!((h.launcher.terminations(), h.launcher.launches()), (0, 1));
     assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+}
+
+/// A client of build B finds a host still running build A, with B installed: it asks the host to update itself in
+/// place (T36b), says so, and once the host has re-execed (here: a host of build B takes its place on the same
+/// socket, no launch) the reconnect finds B and says "host updated". Nothing is restarted and no dialog shows.
+#[test]
+fn a_stale_host_is_asked_to_update_itself_and_the_reconnect_says_it_did() {
+    let (a, b) = (build(0xa), build(0xb));
+    let mut h = Harness::with_launcher(|net, host| {
+        let installed = b.digest;
+        let a = a.clone();
+        FakeHostLauncher::new().on_launch(move || {
+            *lock(&host) = Some(
+                FakeHost::start(&net)
+                    .with_build(a.clone(), installed)
+                    .with_upgrade_answers([UpgradeAnswer::Accepted]),
+            );
+        })
+    });
+    h.runtime.set_build(b.clone());
+    h.runtime.start();
+    h.settle();
+    h.wait_retry();
+    assert_eq!(h.host(FakeHost::upgrades), 1);
+    assert_eq!(h.runtime.client().popup(), None);
+    assert_eq!(
+        h.runtime.client().notice(),
+        Some("host is older — updating…")
+    );
+
+    // The re-exec: the old image's connections close, and the new one listens on the same socket.
+    drop(lock(&h.host).take());
+    *lock(&h.host) = Some(FakeHost::start(&h.net).with_build(b.clone(), b.digest));
+    h.settle();
+    h.wait_retry();
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+    assert_eq!(h.runtime.client().notice(), Some("host updated"));
+    assert_eq!(h.runtime.client().popup(), None);
+    assert_eq!((h.launcher.launches(), h.launcher.terminations()), (1, 0));
 }

@@ -118,7 +118,8 @@ mod tests {
         path
     }
 
-    const BOUND: Duration = Duration::from_secs(10);
+    /// A liveness bound, generous: a loaded machine can take seconds to fork and exec a shell.
+    const BOUND: Duration = Duration::from_secs(60);
 
     #[test]
     fn a_binary_without_handoff_check_exits_with_its_complaint() {

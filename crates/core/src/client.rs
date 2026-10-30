@@ -21,8 +21,11 @@
 //! worktree it tried to remove, the reason is a notice (live entries only, not the catch-up).
 //!
 //! Builds (spike T36): the hello carries this client's [`BuildId`], and the answer the host's and what is installed at
-//! its path. A host older than build identities, one speaking another protocol version, or a stale one (the installed
-//! build is this client's) gets the restart dialog ([`Popup::RestartHost`]), which says how many sessions restarting
+//! its path. A stale host (the installed build is this client's) is asked to update itself in place
+//! (`_shepherd/host/upgrade`, T36b): the footer says so, a busy host is asked again every [`UPGRADE_RETRY`] until
+//! [`UPGRADE_DEADLINE`], and once it accepts, the reconnect's hello that finds this build says "host updated". If it
+//! can't, it falls back to the restart dialog. A host older than build identities, one speaking another protocol
+//! version, or a stale one that can't update itself gets the restart dialog ([`Popup::RestartHost`]), which says how many sessions restarting
 //! stops; only a click restarts it ([`ClientCommand::TerminateHost`]), and the reconnect then launches this build. A
 //! client that is the odd one out only gets a notice. A request the host doesn't know (`-32601`) says the host is older.
 //! While the host should be restarted ([`Client::restart_offer`]), the dialog can be reopened ([`Intent::OfferRestart`]);
@@ -45,9 +48,10 @@ use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HelloOk,
-    HostMessage, HostNotification, HostResult, InputKind, Method, PROTOCOL_VERSION, ProfileInfo,
-    RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename, SessionResize,
-    SessionResume, Subscribe, SubscribeFrom, WireError, WorkspaceSelect, WorktreeCheck,
+    HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
+    ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename,
+    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
+    WorkspaceSelect, WorktreeCheck,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -58,6 +62,10 @@ pub const RETRY_INTERVAL: SignedDuration = SignedDuration::from_millis(100);
 pub const HELLO_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
 /// How long a notice shows, from the first tick after it appears, unless a user action clears it first.
 pub const NOTICE_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
+/// How soon a host that is too busy to update itself is asked again.
+pub const UPGRADE_RETRY: SignedDuration = SignedDuration::from_secs(1);
+/// How long a busy host is asked to update itself before the client offers to restart it instead.
+pub const UPGRADE_DEADLINE: SignedDuration = SignedDuration::from_secs(60);
 
 /// Something that happened, for the client to decide on.
 #[derive(Debug, Clone, PartialEq)]
@@ -346,6 +354,8 @@ pub struct Client {
     build: Option<BuildId>,
     /// Why the connected host should be restarted, if it should: the restart dialog can be reopened for it.
     restart_offer: Option<HostOutdated>,
+    /// A stale host being asked to update itself in place.
+    upgrade: Option<Upgrade>,
     connection: Connection,
     /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
@@ -391,6 +401,24 @@ pub struct Client {
     bell: bool,
 }
 
+/// Asking a stale host to update itself in place.
+#[derive(Debug, Clone, Copy)]
+struct Upgrade {
+    phase: UpgradePhase,
+    /// The first tick after it was first asked: [`UPGRADE_DEADLINE`] counts from there.
+    since: Option<jiff::Timestamp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradePhase {
+    /// Asked, not answered yet.
+    Asked,
+    /// It was busy: ask again at `retry_at` (set at the first tick after the answer).
+    Busy { retry_at: Option<jiff::Timestamp> },
+    /// It is updating: the link drops, and the reconnect's hello tells.
+    Accepted,
+}
+
 /// A message for the user in the footer. It shows until the next user action, or for [`NOTICE_TIMEOUT`] from the
 /// first tick after it appeared.
 #[derive(Debug, Clone)]
@@ -408,6 +436,7 @@ impl Client {
             cwd: None,
             build: None,
             restart_offer: None,
+            upgrade: None,
             connection: Connection::Idle,
             launched: false,
             next_request: 0,
@@ -594,7 +623,9 @@ impl Client {
             }
             ClientEvent::Tick { at } => {
                 self.age_notice(at.instant());
-                self.tick(at)
+                let mut commands = self.tick_upgrade(at.instant());
+                commands.extend(self.tick(at));
+                commands
             }
             ClientEvent::Host(HostMessage::Response(response)) => self.response(response),
             ClientEvent::Host(HostMessage::Notification(HostNotification::LogEntry(entry))) => {
@@ -690,6 +721,11 @@ impl Client {
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
                 self.pending.clear();
+                // Only an accepted update outlives its link: the drop is the host re-executing.
+                let dropped = self.upgrade.take_if(|u| u.phase != UpgradePhase::Accepted);
+                if dropped.is_some() {
+                    self.clear_updating();
+                }
                 // It was about the host that just went: the next hello decides afresh.
                 self.close_restart_dialog();
                 self.restart_offer = None;
@@ -741,7 +777,7 @@ impl Client {
         }
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
-                self.check_build(&ok);
+                let update = self.check_build(&ok);
                 self.set_profiles(ok.profiles, ok.default_profile);
                 self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
@@ -750,8 +786,13 @@ impl Client {
                     from: self.subscribe_from(),
                 };
                 let mut commands = vec![self.request(ClientRequest::Subscribe(subscribe))];
+                commands.extend(update);
                 commands.extend(self.resize_selected());
                 commands
+            }
+            (Method::HostUpgrade, result) => {
+                self.upgrade_answered(result);
+                Vec::new()
             }
             // The hello ended the outage: the host is there, it just can't be used until it is restarted.
             (Method::Hello, Err(WireError::VersionMismatch { .. })) => {
@@ -810,25 +851,101 @@ impl Client {
         }
     }
 
-    /// Compares the host's build in its hello answer with this client's (spike T36's table): offers to restart a host
-    /// that is older than build identities or stale, and tells a client that is the odd one out. A client that doesn't
-    /// know its own build compares nothing.
-    fn check_build(&mut self, ok: &HelloOk) {
+    /// Compares the host's build in its hello answer with this client's (spike T36's table): asks a stale host to
+    /// update itself (the request is returned), offers to restart a host older than build identities, and tells a client
+    /// that is the odd one out. A client that doesn't know its own build compares nothing.
+    fn check_build(&mut self, ok: &HelloOk) -> Option<ClientCommand> {
         self.close_restart_dialog();
         self.restart_offer = None;
-        let Some(mine) = &self.build else {
-            return;
-        };
+        let upgrade = self.upgrade.take();
+        let mine = self.build.as_ref()?;
         let installed = ok.installed.as_ref();
         match &ok.build {
             None => self.offer_restart(HostOutdated::Older),
-            Some(host) if host.digest == mine.digest => {}
-            Some(_) if installed == Some(&mine.digest) => self.offer_restart(HostOutdated::Stale),
+            Some(host) if host.digest == mine.digest => {
+                if upgrade.is_some_and(|u| u.phase == UpgradePhase::Accepted) {
+                    self.set_notice(UPDATED.to_owned());
+                }
+            }
+            Some(_) if installed == Some(&mine.digest) => return Some(self.ask_upgrade(None)),
             Some(host) if installed == Some(&host.digest) => {
                 self.set_notice(ODD_ONE_OUT.to_owned())
             }
             Some(_) => self.set_notice(ALL_DIFFER.to_owned()),
         }
+        None
+    }
+
+    /// Asks the host to update itself in place, saying so. `since` carries a retry's deadline over.
+    fn ask_upgrade(&mut self, since: Option<jiff::Timestamp>) -> ClientCommand {
+        self.upgrade = Some(Upgrade {
+            phase: UpgradePhase::Asked,
+            since,
+        });
+        self.set_notice(UPDATING.to_owned());
+        self.request(ClientRequest::HostUpgrade(HostUpgrade::default()))
+    }
+
+    /// The host answered the request to update itself.
+    fn upgrade_answered(&mut self, result: Result<HostResult, WireError>) {
+        let Some(upgrade) = &mut self.upgrade else {
+            return;
+        };
+        match result {
+            Ok(HostResult::Upgrade(UpgradeAnswer::Accepted)) => {
+                upgrade.phase = UpgradePhase::Accepted
+            }
+            Ok(HostResult::Upgrade(UpgradeAnswer::Busy { .. })) => {
+                upgrade.phase = UpgradePhase::Busy { retry_at: None }
+            }
+            Ok(HostResult::Upgrade(UpgradeAnswer::NothingToDo)) => {
+                self.upgrade = None;
+                self.clear_updating();
+            }
+            Ok(HostResult::Upgrade(UpgradeAnswer::Unavailable { reason })) => {
+                self.cannot_upgrade(Some(format!("the host can't update itself: {reason}")))
+            }
+            // Older than updating in place: the dialog says what to do.
+            Err(WireError::MethodNotFound(_)) => self.cannot_upgrade(None),
+            Err(e) => self.cannot_upgrade(Some(refusal(e))),
+            Ok(other) => self.cannot_upgrade(Some(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    /// The host can't update itself: offers to restart it instead, which asks first.
+    fn cannot_upgrade(&mut self, why: Option<String>) {
+        self.upgrade = None;
+        match why {
+            Some(why) => self.set_notice(why),
+            None => self.clear_updating(),
+        }
+        self.offer_restart(HostOutdated::Stale);
+    }
+
+    /// Takes down the notice that the host is updating, if it is the one showing.
+    fn clear_updating(&mut self) {
+        self.notice.take_if(|n| n.text == UPDATING);
+    }
+
+    /// Time passes: a busy host is asked again, until the deadline.
+    fn tick_upgrade(&mut self, now: jiff::Timestamp) -> Vec<ClientCommand> {
+        let Some(upgrade) = &mut self.upgrade else {
+            return Vec::new();
+        };
+        let since = *upgrade.since.get_or_insert(now);
+        let UpgradePhase::Busy { retry_at } = &mut upgrade.phase else {
+            return Vec::new();
+        };
+        if now >= since.checked_add(UPGRADE_DEADLINE).unwrap_or(since) {
+            let why = "the host stayed busy and didn't update itself".to_owned();
+            self.cannot_upgrade(Some(why));
+            return Vec::new();
+        }
+        let due = *retry_at.get_or_insert(now.checked_add(UPGRADE_RETRY).unwrap_or(now));
+        if now < due || self.connection != Connection::Ready {
+            return Vec::new();
+        }
+        vec![self.ask_upgrade(Some(since))]
     }
 
     /// Opens the restart dialog for `why`, and keeps it reopenable ([`Intent::OfferRestart`]) while this host lasts.
@@ -1455,6 +1572,8 @@ fn refusal(e: WireError) -> String {
 }
 
 /// What the user is told when the host doesn't know a request's method.
+const UPDATING: &str = "host is older — updating…";
+const UPDATED: &str = "host updated";
 const OLDER_HOST: &str = "the shepherd host is older than this client: restart it to use this";
 /// The notice for a client whose build is neither the host's nor the one installed at the host's path, while the host
 /// runs the installed one.

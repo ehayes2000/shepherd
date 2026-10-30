@@ -444,7 +444,7 @@ impl PtyHandoff for PortablePty {
         let pid = match libc::pid_t::try_from(token.pid) {
             Ok(pid) if pid > 0 => pid,
             _ => {
-                close_fds(&token.fds());
+                close_open(&token.fds());
                 return Err(io_error(format!("pid {} is not a process", token.pid)));
             }
         };
@@ -693,10 +693,11 @@ fn check_adoptable(pid: libc::pid_t, token: &PtyToken) -> Result<(), String> {
     Ok(())
 }
 
-/// A token that won't be adopted: closes its descriptors and kills its process group, so nothing is left running
+/// A token that won't be adopted: closes those of its descriptors that are open (one that isn't was never ours to
+/// close: its number may belong to something else by now) and kills its process group, so nothing is left running
 /// unattended.
 fn refuse(token: PtyToken) {
-    close_fds(&token.fds());
+    close_open(&token.fds());
     if let Ok(pid) = libc::pid_t::try_from(token.pid)
         && pid > 0
     {
@@ -718,7 +719,18 @@ fn kill_and_reap(pid: libc::pid_t) {
         });
 }
 
-/// Closes a token's descriptors. One that isn't open (a bad token) is skipped: `close` just fails with `EBADF`.
+/// Closes those of a token's descriptors that are open.
+fn close_open(fds: &[RawFd]) {
+    let open: Vec<RawFd> = fds
+        .iter()
+        .copied()
+        // SAFETY: plain syscall; only reads the descriptor's flags.
+        .filter(|&fd| fd >= 0 && unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1)
+        .collect();
+    close_fds(&open);
+}
+
+/// Closes descriptors this port owns.
 fn close_fds(fds: &[RawFd]) {
     for &fd in fds {
         if fd >= 0 {
@@ -817,8 +829,13 @@ mod tests {
         old.spawn(s.clone(), spec("sh", &["-c", "echo ready; cat"]))
             .unwrap();
         while !matches!(rx.recv().unwrap(), PtyEvent::Output { .. }) {}
-        let (_, token) = old.export().unwrap().remove(0);
-        close_fds(&[token.master]);
+        let (_, carried) = old.export().unwrap().remove(0);
+        // Its master went missing on the way: a descriptor number nothing has open.
+        close_fds(&[carried.master]);
+        let token = super::PtyToken {
+            master: i32::MAX,
+            ..carried
+        };
 
         let mut new = PortablePty::new(Arc::new(ChannelSink(tx)));
         assert!(matches!(new.adopt(s.clone(), token), Err(PtyError::Io(_))));
