@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18 attention | in review | task/t18-attention @ 9147ef6 (on 9206504) | 1 | PM-accepted: focused = selected (window focus → follow-up); permission seq tracked like idle; no ring on catch-up |
+| T18 attention | fixing (APPROVE + 2 minor) | task/t18-attention @ 9147ef6 | 1 | Fix: C1 strip test; OSC 9 payload starts with fixed text (no ConEmu subcommand from session names). Note: NeedsInput detection must set waiting_since |
 | T19 Codex | in review | task/t19-codex @ 09f87b9 (on 1a63b20) | 1 | Decision 0016. PM-accepted: single -c hooks= arg; no notify; NotShellSafe; translator replaced on agent-kind change |
 | F08 worktree create timeout cleanup | in review | task/f08-worktree-timeout @ 065762e | 1 | Reviewer to judge 5 s injected timeout under load |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
