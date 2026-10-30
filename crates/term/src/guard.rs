@@ -9,6 +9,7 @@
 //! The title stack (`CSI 22 t`) evicts from itself and is safe; no other alacritty stack is reachable from output.
 
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::cursor_icon::CursorIcon;
 use alacritty_terminal::vte::ansi::{
     Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
     KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, PrivateMode, Rgb,
@@ -58,6 +59,9 @@ macro_rules! pass_through {
     };
 }
 
+// Every `Handler` method is implemented, so one added by an alacritty upgrade fails the gate instead of silently
+// falling back to a no-op.
+#[deny(clippy::missing_trait_methods)]
 impl Handler for Guarded<'_> {
     fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
         let depth = self.kitty.active(*self.term.mode());
@@ -79,9 +83,7 @@ impl Handler for Guarded<'_> {
         <Term<Listener> as Handler>::reset_state(self.term);
     }
 
-    // Every other method of vte 0.15's `Handler`, so none falls back to its default no-op, except
-    // `set_mouse_cursor_icon`: its type isn't exported and `Term` leaves it a no-op too. Check this list when
-    // upgrading alacritty.
+    // Every other method, unchanged.
     pass_through! {
         fn set_title(a: Option<String>);
         fn set_cursor_style(a: Option<CursorStyle>);
@@ -145,6 +147,7 @@ impl Handler for Guarded<'_> {
         fn text_area_size_pixels();
         fn text_area_size_chars();
         fn set_hyperlink(a: Option<Hyperlink>);
+        fn set_mouse_cursor_icon(a: CursorIcon);
         fn report_keyboard_mode();
         fn set_keyboard_mode(a: KeyboardModes, b: KeyboardModesApplyBehavior);
         fn set_modify_other_keys(a: ModifyOtherKeys);

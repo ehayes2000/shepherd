@@ -456,3 +456,24 @@ fn kitty_push_flood_with_titles_on_their_stack_does_not_panic() {
     let mut screen = screen_with(10, 3, &bytes);
     assert_eq!(screen.take_replies(), b"\x1b[?1u");
 }
+
+#[test]
+fn kitty_push_flood_released_by_the_sync_timeout_does_not_panic() {
+    let mut bytes = b"\x1b[?2026h".to_vec();
+    bytes.extend(repeated(b"\x1b[>1u", FLOOD));
+    let mut screen = screen_with(10, 3, &bytes);
+    let hold = screen.sync_hold().expect("an open synchronized update");
+    screen.expire_sync(hold.id);
+    screen.feed(b"\x1b[?u");
+    assert_eq!(screen.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn popping_many_kitty_entries_frees_as_many_slots() {
+    let cap = KITTY_STACK_CAP;
+    let mut bytes = repeated(b"\x1b[>1u", cap);
+    bytes.extend_from_slice(format!("\x1b[<{cap}u").as_bytes());
+    bytes.extend_from_slice(b"\x1b[>2u\x1b[>7u\x1b[?u");
+    let mut screen = screen_with(10, 3, &bytes);
+    assert_eq!(screen.take_replies(), b"\x1b[?7u");
+}

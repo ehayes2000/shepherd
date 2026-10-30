@@ -1,5 +1,6 @@
 //! A screen panic caught by `screen_guard` doesn't fire the client's panic hook, so the terminal stays set up and the
-//! client keeps running. Its own test binary, because a panic hook is process-wide.
+//! client keeps running, while a later real panic still restores the terminal and stops the client. Its own test
+//! binary, because a panic hook is process-wide.
 
 mod support {
     pub mod fake_terminal;
@@ -37,11 +38,17 @@ fn a_caught_screen_panic_leaves_the_terminal_and_the_client_alone() {
         let mut screen = Screen::new(30, 7);
         let caught = screen_guard::update(&mut screen, |s| s.feed(PANIC_TRIGGER));
         runtime.pump();
-        (caught, screen.size(), terminal.calls(), runtime.done())
+        let after_caught = (caught, screen.size(), terminal.calls(), runtime.done());
+        // A real panic on the same thread afterwards still fires the hook.
+        let real = std::panic::catch_unwind(|| panic!("a real panic"));
+        assert!(real.is_err());
+        runtime.pump();
+        (after_caught, terminal.calls(), runtime.done())
     });
     let _ = std::panic::take_hook();
 
-    let (caught, size, calls, done) = result.unwrap_or_else(|e| panic!("{e}"));
+    let ((caught, size, calls, done), calls_after_real, done_after_real) =
+        result.unwrap_or_else(|e| panic!("{e}"));
     assert!(
         caught.is_err_and(|why| why.contains("test panic trigger")),
         "the panic is caught and its message returned"
@@ -49,4 +56,17 @@ fn a_caught_screen_panic_leaves_the_terminal_and_the_client_alone() {
     assert_eq!(size, (30, 7), "a blank screen of the same size");
     assert_eq!(calls, ["enter", "push keyboard", "mouse on"], "no restore");
     assert!(!done, "the client keeps running");
+    assert_eq!(
+        calls_after_real,
+        [
+            "enter",
+            "push keyboard",
+            "mouse on",
+            "mouse off",
+            "pop keyboard",
+            "leave"
+        ],
+        "a later real panic restores the terminal"
+    );
+    assert!(done_after_real, "and stops the client");
 }
