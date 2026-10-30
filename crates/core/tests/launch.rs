@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use shepherd_core::agents::codex;
-use shepherd_core::config::{AgentKind, AgentProfile, Config, RawConfig};
+use shepherd_core::config::{AgentKind, AgentProfile, Config, DEFAULT_IDLE_AFTER_QUIET, RawConfig};
 use shepherd_core::host::launch::{
     self, Launch, LaunchContext, LaunchError, SESSION_VAR, SETTINGS_FILE, SOCKET_VAR,
 };
@@ -37,6 +37,7 @@ fn profile(kind: AgentKind, command: &str, args: &[&str], env: &[(&str, &str)]) 
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        idle_after_quiet: DEFAULT_IDLE_AFTER_QUIET,
     }
 }
 

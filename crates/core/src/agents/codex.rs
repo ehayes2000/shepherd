@@ -474,7 +474,7 @@ fn turn_over(state: &mut CodexTranslation, reason: StopReason) -> Frames {
         }
         None => (
             Dir::Internal,
-            ShepherdFrame::AgentIdle(AgentIdle {}).to_frame(),
+            ShepherdFrame::AgentIdle(AgentIdle::default()).to_frame(),
         ),
     };
     state.end_turn();

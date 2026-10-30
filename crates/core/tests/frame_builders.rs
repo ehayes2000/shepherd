@@ -9,9 +9,9 @@ use shepherd_core::acpp::acp::{
     SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use shepherd_core::acpp::{
-    AgentExited, AgentIdle, AgentStarted, Correlated, Dir, Frame, PendingRequests, RequestId,
-    SessionClosed, SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame, WorkspaceSelected,
-    WorktreeCreated, WorktreeHook,
+    AgentExited, AgentIdle, AgentStarted, Correlated, Dir, Frame, IdleInference, PendingRequests,
+    RequestId, SessionClosed, SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame,
+    WorkspaceSelected, WorktreeCreated, WorktreeHook,
 };
 use shepherd_core::ids::MachineId;
 
@@ -481,7 +481,12 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
                     command,
                 })
             }),
-        Just(ShepherdFrame::AgentIdle(AgentIdle {})),
+        prop_oneof![
+            Just(None),
+            Just(Some(IdleInference::Quiet)),
+            Just(Some(IdleInference::QuietAfterPermission)),
+        ]
+        .prop_map(|inferred| ShepherdFrame::AgentIdle(AgentIdle { inferred })),
         (
             proptest::option::of(any::<i32>()),
             proptest::option::of(any::<i32>())

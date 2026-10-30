@@ -232,7 +232,7 @@ fn update(agent_session: &str, update: SessionUpdate) -> Option<Frame> {
 }
 
 fn agent_idle() -> Frame {
-    ShepherdFrame::AgentIdle(AgentIdle {}).to_frame()
+    ShepherdFrame::AgentIdle(AgentIdle::default()).to_frame()
 }
 
 /// The agent session id ACP frames carry: the payload's, else the last `SessionStart`'s.

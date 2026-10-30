@@ -57,7 +57,8 @@ pub fn shell_default_config() -> RawConfig {
 }
 
 /// A deterministic [`Env`]: session ids `s_t1`, `s_t2`, ..., entry ids `e1`, `e2`, ..., timestamps 1 ms apart from
-/// `2026-10-29T12:00:00.000Z`, and a monotonic clock that only moves through [`Clock::advance`].
+/// `2026-10-29T12:00:00.000Z`, and a monotonic clock that only moves through [`Clock::advance`]. Advancing the clock
+/// moves the timestamps by as much, so wall and monotonic time agree.
 #[derive(Clone)]
 pub struct TestEnv {
     counters: Arc<Mutex<Counters>>,
@@ -84,7 +85,12 @@ impl Clock {
     }
 
     pub fn now(&self) -> Instant {
-        self.base + *self.offset.lock().unwrap_or_else(PoisonError::into_inner)
+        self.base + self.elapsed()
+    }
+
+    /// How far the clock has been advanced.
+    pub fn elapsed(&self) -> Duration {
+        *self.offset.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -116,6 +122,7 @@ impl Env for TestEnv {
             c.ticks += 1;
             c.ticks
         };
+        let ms = ms + u64::try_from(self.clock.elapsed().as_millis()).expect("test clock");
         let (secs, ms) = (ms / 1000, ms % 1000);
         let (mins, secs) = (secs / 60, secs % 60);
         Timestamp::parse(format!("2026-10-29T12:{mins:02}:{secs:02}.{ms:03}Z"))
