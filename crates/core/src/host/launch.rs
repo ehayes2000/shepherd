@@ -1,5 +1,5 @@
 //! What a new session runs, built from its agent profile: the spawn spec, plus the files the runtime writes into the
-//! session's run directory (`~/.shepherd/run/<session>/`) before spawning, and removes when the session closes.
+//! session's run directory (`~/.shepherd/run/<session>/`) before spawning, and removes when its PTY exits or it closes.
 //!
 //! Every session gets [`SESSION_VAR`] and [`SOCKET_VAR`], which `shepherd hook` reads. A Claude Code session also
 //! gets shepherd's hooks without touching the user's settings files: the hooks go into a generated
