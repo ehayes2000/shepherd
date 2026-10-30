@@ -9,11 +9,10 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F18 host startup errors | building | task/f18-host-startup-errors @ 8817d2c | 0 | – |
-| T33 clickable sidebar | building | task/t33-clickable-sidebar @ 8817d2c | 0 | – |
-| T16 hook subcommand | building | task/t16-hook-subcommand @ 8817d2c | 0 | – |
-| F14 pty backpressure | building | task/f14-pty-backpressure @ 8817d2c | 0 | – |
-| F11 private_fs hardening | building | task/f11-private-fs-hardening @ 8817d2c | 0 | – |
+| F18 host startup errors | in review | task/f18-host-startup-errors @ fda5554 | 1 | PM-accepted: message on stderr after restore (no lingering error screen); hand-started host releases stderr too |
+| T33 clickable sidebar | building | task/t33-clickable-sidebar @ 9e868ad | 0 | – |
+| T16 hook subcommand | in review | task/t16-hook-subcommand @ 22256a6 | 1 | PM-accepted: wire carries raw payload; per-run ULID seed; 1 s ack wait; translator leak → F19. PM to fix acpp.md rule 6 + plan text after merge |
+| F14 pty backpressure | building | task/f14-pty-backpressure @ 9e868ad | 0 | – |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -40,6 +39,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T13 | 2 | ctrl-symbol keys typed digits, Shift+Enter submitted, paste end-marker, 7 surviving mutations |
 | T11 | 4 | 8 MB attach limit, stalled clients never dropped, quadratic re-reads, deadline starvation |
 | T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
+| F11 | 2 | doc claimed WrongType for every special file; sockets and dirs got Io |
 
 ## Milestones
 
@@ -204,7 +204,7 @@ acceptance:
 scope: crates/adapters
 
 ### F11: private_fs hardening and untested guarantees
-status: in-progress
+status: done (f8bc4d9)
 depends: F10
 touches: adapters::private_fs, adapters::event_log
 goal: Close the last F10 review gaps. Every documented guarantee is proven by a test (CLAUDE.md, reviewer rule).
@@ -313,6 +313,16 @@ scope: crates/core (port error variant, client), crates/adapters (launcher), cra
 out of scope: changing the 0700 policy (decision 0010); fixing the user's directory automatically.
 notes: `LaunchError` gains `HostFailed(String)` (additive). The fake launcher can be told to fail with `HostFailed`. Add a
 contract case for it if the contract suite covers error variants.
+
+### F19: Drop hook translator state when a session closes
+status: todo
+depends: T16
+touches: core::agents (Translators), shepherd::host
+goal: `Translators` keeps one translator per session for the life of the host run, even after the session closes.
+acceptance:
+- Closing a session (or its exit followed by close) removes its translator. A host test counts live translators after
+  open/close cycles (counted, not measured).
+scope: crates/core, crates/shepherd
 
 ## Out of scope for the initial feature set
 
