@@ -9,10 +9,15 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| (none) | M1 done; smoke run 12/12 passed. User run blocked by v1 `~/.shepherd` (0755) with a silent failure → F18 | – | – | – |
+| F18 host startup errors | building | task/f18-host-startup-errors @ 8817d2c | 0 | – |
+| T33 clickable sidebar | building | task/t33-clickable-sidebar @ 8817d2c | 0 | – |
+| T16 hook subcommand | building | task/t16-hook-subcommand @ 8817d2c | 0 | – |
+| F14 pty backpressure | building | task/f14-pty-backpressure @ 8817d2c | 0 | – |
+| F11 private_fs hardening | building | task/f11-private-fs-hardening @ 8817d2c | 0 | – |
 
-Next up: F18 and T33 (point-and-click, decision 0014) in parallel, then T34; M2 (T16, T17, F14, T18b, F11) after. T33/T34 touch
-tui and core::client, so they don't run alongside T17's profile picker.
+Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
+F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
+Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 
 ## Completed task log
 
@@ -199,7 +204,7 @@ acceptance:
 scope: crates/adapters
 
 ### F11: private_fs hardening and untested guarantees
-status: todo
+status: in-progress
 depends: F10
 touches: adapters::private_fs, adapters::event_log
 goal: Close the last F10 review gaps. Every documented guarantee is proven by a test (CLAUDE.md, reviewer rule).
@@ -234,7 +239,7 @@ acceptance:
 scope: crates/core
 
 ### F14: PTY read backpressure
-status: todo (high priority: right after M1)
+status: in-progress
 depends: T11
 touches: ports::pty, adapters::pty, testkit pty, shepherd::host
 goal: A session that floods output (`yes`, a huge `cat`) can't grow host memory without bound or starve other sessions.
@@ -286,7 +291,7 @@ acceptance:
 scope: crates/adapters, crates/testkit
 
 ### F18: Host startup errors reach the user
-status: ready
+status: in-progress
 depends: T12
 touches: adapters::launcher, core::ports::launcher, core::client, shepherd::client, shepherd::host
 goal: When the auto-launched host can't start (e.g. `~/.shepherd` is 0755), the user sees the host's own error message instead
@@ -689,7 +694,7 @@ notes: The status glyph shapes and colors are decided in this task and recorded 
 Decision 0014: every action is reachable with the mouse. The `ctrl-b` bindings from T13 stay as they are.
 
 ### T33: Clickable sidebar and terminal focus
-status: ready
+status: in-progress
 depends: T13
 touches: tui::layout, tui::sidebar, tui::keys (mouse), core::client, shepherd::terminal
 goal: Click a session to switch to it, click a `+ New session` button to make one, click the terminal to type in it.
@@ -791,7 +796,7 @@ scope: crates/core
 out of scope: launching claude (T17).
 
 ### T16: `shepherd hook` subcommand
-status: todo
+status: in-progress
 depends: T07, T10, T11
 touches: shepherd::hook, core::host (hook frames)
 goal: Agents' hooks call `shepherd hook <agent>`, which delivers frames to the host.

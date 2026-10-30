@@ -28,7 +28,9 @@ then re-review by the **same** reviewer, which checks only what changed → APPR
 context reset.
 
 ### Dispatching
-- Up to about 3 builders at once, with no overlapping `touches`. Ports should follow the existing template (`contracts/pty.rs`,
+- Up to about 5 builders at once (raised from 3 at the user's request), with no overlapping `touches` beyond separate files
+  of one module. Reviewers' 24-copy load tests compete for the machine: run at most two load tests at once, and treat a
+  failure that appears only while another load test runs as a lead to re-run alone, not a verdict. Ports should follow the existing template (`contracts/pty.rs`,
   fixture-trait variant `contracts/config.rs`).
 - Every builder prompt includes the spec block verbatim, the main repo path, the **base commit hash** (worktrees can start from a
   stale `origin/main`), the branch name, and anything concurrent it must avoid (shared files: `crates/*/src/lib.rs` module

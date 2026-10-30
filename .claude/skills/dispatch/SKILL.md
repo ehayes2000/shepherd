@@ -10,7 +10,8 @@ You are the PM. You don't write feature code here. You schedule, review and merg
 
 ## 1. Pick a batch
 - Read `docs/plan.md`. Candidates are tasks with `status: ready`.
-- Choose up to **3** whose `touches` sets don't overlap. Prefer tasks that unblock the most others.
+- Choose up to **5** whose `touches` sets don't overlap, or overlap only in separate files of one module (then fix a merge
+  order in the In flight notes and tell each builder which concurrent tasks share its files). Prefer tasks that unblock the most others.
 - Mark them `in-progress` in plan.md.
 
 ## 2. Spawn builders, in parallel, in one message
