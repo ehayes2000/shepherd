@@ -1048,3 +1048,50 @@ fn clicking_outside_the_picker_dismisses_it() {
     assert_eq!(click(&mut c, WIDE, row), [vec![], vec![Intent::Dismiss]]);
     assert_eq!(c.client().popup(), None);
 }
+
+// ---------- resume ----------
+
+/// [`sessions`] plus a newest Claude Code session `s9`, `name-09`, whose agent reported `agent_session` and exited,
+/// with its menu open.
+fn exited_with_menu(agent_session: Option<&str>) -> ClientDriver {
+    let mut c = sessions(1, WIDE);
+    c.host()
+        .new_session_with("s9", shepherd_testkit::builders::claude_session_spec());
+    c.host().rename("s9", "name-09");
+    c.host().agent_started("s9", "claude-code", agent_session);
+    c.host().pty_exited("s9", Some(0));
+    c.sync();
+    let row = at(&buffer(&c, WIDE), "name-09");
+    right_click(&mut c, WIDE, row);
+    c
+}
+
+#[test]
+fn clicking_resume_in_an_exited_sessions_menu_resumes_it() {
+    let mut c = exited_with_menu(Some("abc123"));
+    let buf = buffer(&c, WIDE);
+    let resume = at(&buf, "Resume");
+    assert_eq!(resume, below(at(&buf, "Close"), 1));
+    assert_eq!(
+        click(&mut c, WIDE, resume),
+        [vec![], vec![Intent::MenuChoose(MenuItem::Resume)]]
+    );
+}
+
+#[test]
+fn an_unavailable_resume_is_shown_with_its_reason_and_clicks_do_nothing() {
+    let mut c = exited_with_menu(None);
+    let buf = buffer(&c, WIDE);
+    let resume = at(&buf, "Resume (no agent session id)");
+    assert_eq!(hit_at(&c, WIDE, resume), Some(Target::Popup));
+    assert_eq!(click(&mut c, WIDE, resume), [vec![], vec![]]);
+    assert!(matches!(c.client().popup(), Some(Popup::Menu { .. })));
+}
+
+#[test]
+fn a_running_sessions_menu_has_no_resume() {
+    let mut c = sessions(1, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    assert_eq!(find(&buffer(&c, WIDE), "Resume"), None);
+}

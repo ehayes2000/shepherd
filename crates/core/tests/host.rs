@@ -6,11 +6,16 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
 use shepherd_core::config::AgentKind;
-use shepherd_core::host::{Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo};
+use shepherd_core::host::{
+    Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo, ResumeSpec, ResumeTarget,
+    ResumeUnavailable,
+};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::wire::{HostResult, SessionNewOk, WireError};
-use shepherd_testkit::builders::{HostDriver, shell_session_spec, shell_spawn};
+use shepherd_testkit::builders::{
+    HostDriver, claude_resume_spec, claude_session_spec, shell_session_spec, shell_spawn,
+};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id)
@@ -69,7 +74,7 @@ fn new_session_appends_created_spawns_the_shell_and_replies_with_the_id() {
             append(
                 "s1",
                 "_shepherd/session/created",
-                json!({ "name": "shell-1", "agent": "shell" })
+                json!({ "name": "shell-1", "agent": "shell", "profile": "shell", "cwd": "/home/test" })
             ),
             HostCommand::SpawnPty {
                 session: sid("s1"),
@@ -101,7 +106,7 @@ fn new_session_uses_the_name_from_the_spec() {
         append(
             "s1",
             "_shepherd/session/created",
-            json!({ "name": "api", "agent": "shell" })
+            json!({ "name": "api", "agent": "shell", "profile": "shell", "cwd": "/home/test" })
         )
     );
     assert_eq!(names(host.host()), ["api"]);
@@ -138,7 +143,7 @@ fn placeholder_names_follow_the_profile_and_created_records_the_agent_kind() {
         append(
             "s2",
             "_shepherd/session/created",
-            json!({ "name": "claude-2", "agent": "claude-code" })
+            json!({ "name": "claude-2", "agent": "claude-code", "profile": "claude", "cwd": "/home/test" })
         )
     );
     assert_eq!(names(host.host()), ["claude-2", "shell-1"]);
@@ -423,6 +428,7 @@ fn pty_exit_appends_agent_exited() {
             name: "shell-1".to_owned(),
             created: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
             exited: true,
+            resume: Err(ResumeUnavailable::NotAnAgent),
         }]
     );
 }
@@ -471,6 +477,237 @@ fn an_agent_exiting_inside_the_shell_does_not_mark_the_pty_exited() {
             })
             .contains(&HostCommand::KillPty { session: sid("s1") })
     );
+}
+
+// ---------- resume ----------
+
+fn resume_target(host: &HostDriver, id: &str) -> Option<Result<ResumeTarget, ResumeUnavailable>> {
+    host.host().resume_target(&sid(id))
+}
+
+/// A Claude Code session `id` whose agent reported `agent_session` and then exited.
+fn exited_claude(host: &mut HostDriver, id: &str, agent_session: Option<&str>) {
+    host.new_session_with(id, claude_session_spec());
+    host.agent_started(id, "claude-code", agent_session);
+    host.pty_exited(id, Some(0));
+}
+
+#[test]
+fn the_agent_session_id_is_captured_from_agent_started() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    assert_eq!(
+        resume_target(&host, "s1"),
+        Some(Ok(ResumeTarget {
+            profile: "claude".to_owned(),
+            agent: AgentKind::ClaudeCode,
+            cwd: "/home/test".into(),
+            agent_session_id: "abc123".to_owned(),
+        }))
+    );
+    assert_eq!(host.host().sessions()[0].resume, Ok(()));
+}
+
+#[test]
+fn the_latest_agent_session_id_is_the_one_resumed() {
+    // `/clear` in Claude Code starts a new agent session in the same process.
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started("s1", "claude-code", Some("first"));
+    host.agent_started("s1", "claude-code", Some("second"));
+    host.agent_started("s1", "claude-code", None);
+    host.pty_exited("s1", Some(0));
+    let target = resume_target(&host, "s1").and_then(Result::ok);
+    assert_eq!(
+        target.map(|t| t.agent_session_id),
+        Some("second".to_owned())
+    );
+}
+
+#[test]
+fn a_running_session_cannot_be_resumed() {
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started("s1", "claude-code", Some("abc123"));
+    assert_eq!(
+        resume_target(&host, "s1"),
+        Some(Err(ResumeUnavailable::Running))
+    );
+    assert_eq!(
+        host.host().sessions()[0].resume,
+        Err(ResumeUnavailable::Running)
+    );
+}
+
+#[test]
+fn a_session_with_no_captured_agent_session_id_cannot_be_resumed() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", None);
+    assert_eq!(
+        resume_target(&host, "s1"),
+        Some(Err(ResumeUnavailable::NoAgentSession))
+    );
+}
+
+#[test]
+fn a_shell_session_cannot_be_resumed() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    host.agent_started("s1", "claude-code", Some("abc123"));
+    host.pty_exited("s1", Some(0));
+    assert_eq!(
+        resume_target(&host, "s1"),
+        Some(Err(ResumeUnavailable::NotAnAgent))
+    );
+}
+
+#[test]
+fn a_session_created_before_resume_was_recorded_cannot_be_resumed() {
+    // Its `session/created` has no profile or cwd.
+    let mut host = HostDriver::new();
+    let created = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/created",
+        "params": { "name": "old", "agent": "claude-code" } });
+    host.append(Some("s1"), Source::new(SourceKind::Shepherd, None), created);
+    host.agent_started("s1", "claude-code", Some("abc123"));
+    host.pty_exited("s1", Some(0));
+    assert_eq!(
+        resume_target(&host, "s1"),
+        Some(Err(ResumeUnavailable::NotRecorded))
+    );
+}
+
+#[test]
+fn a_hook_reporting_an_agent_start_after_the_pty_exited_does_not_mark_it_running() {
+    // Only the host's own `agent/started` (a resume) means its PTY runs again.
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    host.agent_started("s1", "claude-code", Some("later"));
+    let listed = &host.host().sessions()[0];
+    assert!(listed.exited);
+    assert_eq!(listed.resume, Ok(()));
+    let target = resume_target(&host, "s1").and_then(Result::ok);
+    assert_eq!(target.map(|t| t.agent_session_id), Some("later".to_owned()));
+}
+
+#[test]
+fn resume_target_of_an_unknown_or_closed_session_is_none() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    host.close("s1");
+    assert_eq!(resume_target(&host, "s1"), None);
+    assert_eq!(resume_target(&host, "nope"), None);
+}
+
+#[test]
+fn resume_appends_agent_started_spawns_the_agent_and_acks() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    let reply = host.reply_to();
+    let cmds = host.handle(HostEvent::Resume {
+        reply,
+        session: sid("s1"),
+        spec: claude_resume_spec(),
+    });
+    assert_eq!(
+        cmds,
+        vec![
+            append(
+                "s1",
+                "_shepherd/agent/started",
+                json!({ "agent": "claude-code", "agent_session_id": "abc123" })
+            ),
+            HostCommand::SpawnPty {
+                session: sid("s1"),
+                spec: claude_resume_spec().spawn,
+            },
+            HostCommand::Reply {
+                to: reply,
+                result: Ok(HostResult::Ack),
+            },
+        ]
+    );
+    let listed = &host.host().sessions()[0];
+    assert!(!listed.exited);
+    assert_eq!(listed.resume, Err(ResumeUnavailable::Running));
+    assert_eq!(replay(&host), *host.host());
+}
+
+#[test]
+fn a_resumed_session_takes_input_and_records_its_next_exit() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    host.resume("s1", claude_resume_spec());
+    let input = host.handle(HostEvent::Input {
+        session: sid("s1"),
+        bytes: b"x".to_vec(),
+    });
+    assert_eq!(input.len(), 1, "{input:?}");
+    assert_eq!(appends(&host.pty_exited("s1", Some(0))), 1);
+    assert_eq!(resume_target(&host, "s1").map(|r| r.is_ok()), Some(true));
+}
+
+#[test]
+fn resuming_a_session_that_cannot_be_resumed_says_why_and_does_nothing() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", None);
+    host.new_session_with("s2", claude_session_spec());
+    for id in ["s1", "s2"] {
+        let cmds = host.resume(id, claude_resume_spec());
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [HostCommand::Reply {
+                    result: Err(WireError::InvalidParams(_)),
+                    ..
+                }]
+            ),
+            "{id}: {cmds:?}"
+        );
+    }
+}
+
+#[test]
+fn resuming_an_unknown_session_replies_unknown_session() {
+    let mut host = HostDriver::new();
+    let cmds = host.resume("nope", claude_resume_spec());
+    assert!(
+        matches!(
+            cmds.as_slice(),
+            [HostCommand::Reply {
+                result: Err(WireError::UnknownSession { .. }),
+                ..
+            }]
+        ),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn resuming_with_a_profile_that_is_not_the_sessions_is_refused() {
+    let mut host = HostDriver::new();
+    exited_claude(&mut host, "s1", Some("abc123"));
+    let other_profile = ResumeSpec {
+        profile: "other".to_owned(),
+        ..claude_resume_spec()
+    };
+    let other_kind = ResumeSpec {
+        agent: AgentKind::Codex,
+        ..claude_resume_spec()
+    };
+    for spec in [other_profile, other_kind] {
+        let cmds = host.resume("s1", spec);
+        assert_eq!(appends(&cmds), 0, "{cmds:?}");
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [HostCommand::Reply {
+                    result: Err(WireError::InvalidParams(_)),
+                    ..
+                }]
+            ),
+            "{cmds:?}"
+        );
+    }
 }
 
 // ---------- input and resize ----------

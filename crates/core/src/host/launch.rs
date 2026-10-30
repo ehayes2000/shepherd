@@ -13,6 +13,15 @@
 //! touched (`codex-rs/utils/cli/src/config_override.rs`, `codex-rs/hooks/src/engine/discovery.rs`, rust-v0.166.0).
 //! The same table carries the trust state for exactly those hooks (see [`codex::hooks_config`], decision 0016).
 //! Codex runs a hook command with `$SHELL -lc`, so the `shepherd` path is single-quoted.
+//!
+//! Resuming an exited session ([`plan_resume`]) runs exactly what [`plan`] runs, plus the agent's resume args right
+//! after shepherd's own and before the profile's:
+//! - Claude Code: `--resume <session id>` ("Resume a specific session by ID or name";
+//!   <https://code.claude.com/docs/en/cli-reference>, read 2026-10-30). Without `--fork-session` it keeps the ID.
+//! - Codex: the `resume <SESSION_ID>` subcommand. `-c` overrides given before it are root overrides, which
+//!   `finalize_resume_interactive` prepends to the resumed session's own, and the args after it are the same
+//!   interactive options as plain `codex` (`codex-rs/cli/src/main.rs` `ResumeCommand`, rust-v0.166.0;
+//!   <https://learn.chatgpt.com/docs/developer-commands?surface=cli>, read 2026-10-30).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -73,10 +82,41 @@ pub enum LaunchError {
     /// Codex's hook override couldn't be built.
     #[error("cannot build the Codex hooks override")]
     CodexHooks,
+    /// This kind of agent has no way to resume a session.
+    #[error("{} sessions can't be resumed", .0.as_str())]
+    CannotResume(AgentKind),
 }
 
 /// What `profile` runs in the session `ctx` describes.
 pub fn plan(profile: &AgentProfile, ctx: &LaunchContext) -> Result<Launch, LaunchError> {
+    build(profile, ctx, Vec::new())
+}
+
+/// What `profile` runs to resume the agent's own session `agent_session` in the session `ctx` describes: [`plan`],
+/// with the resume args for the profile's kind (see the module docs).
+pub fn plan_resume(
+    profile: &AgentProfile,
+    ctx: &LaunchContext,
+    agent_session: &str,
+) -> Result<Launch, LaunchError> {
+    let resume = match profile.kind {
+        AgentKind::ClaudeCode => "--resume",
+        AgentKind::Codex => "resume",
+        AgentKind::Shell => return Err(LaunchError::CannotResume(profile.kind)),
+    };
+    build(
+        profile,
+        ctx,
+        vec![resume.to_owned(), agent_session.to_owned()],
+    )
+}
+
+/// [`plan`], with `extra` between shepherd's own args and the profile's.
+fn build(
+    profile: &AgentProfile,
+    ctx: &LaunchContext,
+    extra: Vec<String>,
+) -> Result<Launch, LaunchError> {
     let mut env: BTreeMap<String, String> = profile.env.clone();
     env.insert(SESSION_VAR.to_owned(), ctx.session.as_str().to_owned());
     env.insert(SOCKET_VAR.to_owned(), utf8(&ctx.socket)?.to_owned());
@@ -103,6 +143,7 @@ pub fn plan(profile: &AgentProfile, ctx: &LaunchContext) -> Result<Launch, Launc
         }
         AgentKind::Shell => (Vec::new(), Vec::new()),
     };
+    args.extend(extra);
     args.extend(profile.args.iter().cloned());
 
     Ok(Launch {

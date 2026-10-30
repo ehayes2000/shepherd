@@ -359,6 +359,13 @@ impl HostHarness {
         self.step();
     }
 
+    /// [`HostHarness::restart`], with the config changed to `config`, as if the user edited it meanwhile.
+    pub fn restart_with_config(&mut self, config: RawConfig) {
+        let run_root = self.settings.run_root.clone();
+        self.settings = settings(config, run_root);
+        self.restart();
+    }
+
     /// A fresh `Host` folded from every entry in the log, as a restarted host would build it.
     pub fn replayed(&self) -> Host {
         let log = self.log();

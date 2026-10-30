@@ -44,16 +44,18 @@ pub enum Method {
     SessionClose,
     Subscribe,
     HookFrame,
+    SessionResume,
 }
 
 impl Method {
-    pub const ALL: [Method; 6] = [
+    pub const ALL: [Method; 7] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
         Self::SessionClose,
         Self::Subscribe,
         Self::HookFrame,
+        Self::SessionResume,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -64,6 +66,7 @@ impl Method {
             Self::SessionClose => "_shepherd/session/close",
             Self::Subscribe => "_shepherd/subscribe",
             Self::HookFrame => "_shepherd/hook/frame",
+            Self::SessionResume => "_shepherd/session/resume",
         }
     }
 
@@ -87,6 +90,7 @@ pub enum ClientRequest {
     SessionClose(SessionClose),
     Subscribe(Subscribe),
     HookFrame(Box<HookFrame>),
+    SessionResume(SessionResume),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -167,6 +171,13 @@ pub struct SessionClose {
     pub session: SessionId,
 }
 
+/// Resume an exited session's agent where it left off, in the same session. Answered with an ack, or
+/// [`WireError::InvalidParams`] saying why it can't be resumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionResume {
+    pub session: SessionId,
+}
+
 /// Bytes typed into a session's PTY. `data` is base64 on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInput {
@@ -219,6 +230,7 @@ impl ClientRequest {
             Self::SessionClose(_) => Method::SessionClose,
             Self::Subscribe(_) => Method::Subscribe,
             Self::HookFrame(_) => Method::HookFrame,
+            Self::SessionResume(_) => Method::SessionResume,
         }
     }
 
@@ -230,6 +242,7 @@ impl ClientRequest {
             Self::SessionClose(p) => json(p),
             Self::Subscribe(p) => json(p),
             Self::HookFrame(p) => json(p),
+            Self::SessionResume(p) => json(p),
         }
     }
 
@@ -243,6 +256,7 @@ impl ClientRequest {
             Method::SessionClose => Self::SessionClose(invalid_params(params)?),
             Method::Subscribe => Self::Subscribe(invalid_params(params)?),
             Method::HookFrame => Self::HookFrame(invalid_params(params)?),
+            Method::SessionResume => Self::SessionResume(invalid_params(params)?),
         })
     }
 }

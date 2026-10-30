@@ -12,9 +12,10 @@ use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
     HookFrame, HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
     PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose, SessionInput,
-    SessionNew, SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom, WireError,
-    code, decode_client_message, decode_host_message, encode_client_notification,
-    encode_host_notification, encode_request, encode_response, negotiate,
+    SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
+    SubscribeFrom, WireError, code, decode_client_message, decode_host_message,
+    encode_client_notification, encode_host_notification, encode_request, encode_response,
+    negotiate,
 };
 
 fn sid(s: &str) -> SessionId {
@@ -69,6 +70,9 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::Subscribe(Subscribe::default()),
         ClientRequest::HookFrame(Box::new(hook_frame())),
+        ClientRequest::SessionResume(SessionResume {
+            session: sid("s_1"),
+        }),
     ]
 }
 
@@ -184,6 +188,7 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/subscribe",
         "_shepherd/subscribe",
         "_shepherd/hook/frame",
+        "_shepherd/session/resume",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -648,6 +653,7 @@ fn successful_responses_round_trip_by_method() {
         ),
         (Method::SessionClose, HostResult::Ack),
         (Method::HookFrame, HostResult::Ack),
+        (Method::SessionResume, HostResult::Ack),
     ];
     for (method, result) in cases {
         let resp = HostResponse {

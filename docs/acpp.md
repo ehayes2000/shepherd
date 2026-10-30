@@ -71,10 +71,10 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 
 | method | params (sketch) |
 |---|---|
-| `_shepherd/session/created`   | `{ name, workspace, worktree, branch, agent, machine }` |
+| `_shepherd/session/created`   | `{ name, workspace, worktree, branch, agent, machine, profile?, cwd? }` (profile and cwd: what resume runs again) |
 | `_shepherd/session/renamed`   | `{ name, auto: bool }` |
 | `_shepherd/session/closed`    | `{ worktree_removed: bool }` |
-| `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command }` |
+| `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command }` (source `shepherd`: a resume respawned the agent) |
 | `_shepherd/agent/idle`        | `{}` (agent is at its prompt with nothing to do) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
 | `_shepherd/worktree/created`  | `{ path, branch, base }` |

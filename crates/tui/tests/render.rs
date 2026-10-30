@@ -143,6 +143,34 @@ fn context_menu_open() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
+/// A Claude Code session `fix-login` whose agent reported `agent_session` and exited, right-clicked.
+fn exited_claude_menu(agent_session: Option<&str>) -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host()
+        .new_session_with("s1", shepherd_testkit::builders::claude_session_spec());
+    c.host().rename("s1", "fix-login");
+    c.host().agent_started("s1", "claude-code", agent_session);
+    c.host().pty_exited("s1", Some(0));
+    c.sync();
+    c.user(Intent::OpenMenu {
+        session: SessionId::new("s1"),
+        at: Cell { col: 3, row: 2 },
+    });
+    c
+}
+
+#[test]
+fn context_menu_on_an_exited_session_offers_resume() {
+    let c = exited_claude_menu(Some("abc123"));
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 8));
+}
+
+#[test]
+fn context_menu_with_resume_unavailable_says_why() {
+    let c = exited_claude_menu(None);
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 8));
+}
+
 /// Clicked `+ New session` with three profiles, `codex` the default.
 #[test]
 fn profile_picker() {
@@ -496,6 +524,7 @@ fn status_glyphs_follow_the_documented_table() {
         exited,
         activity,
         attention: false,
+        resume: Ok(()),
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),

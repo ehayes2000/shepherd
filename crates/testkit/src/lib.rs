@@ -16,7 +16,7 @@ pub mod builders {
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
     use shepherd_core::config::AgentKind;
-    use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
+    use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec};
     use shepherd_core::ids::{MachineId, SessionId};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
     use shepherd_core::wire::{
@@ -194,12 +194,45 @@ pub mod builders {
 
         /// A `NewSession` for `id`, with [`shell_session_spec`].
         pub fn new_session(&mut self, id: &str) -> Vec<HostCommand> {
+            self.new_session_with(id, shell_session_spec())
+        }
+
+        /// A `NewSession` for `id`, with `spec`.
+        pub fn new_session_with(&mut self, id: &str, spec: NewSessionSpec) -> Vec<HostCommand> {
             let reply = self.reply_to();
             self.handle(HostEvent::NewSession {
                 reply,
                 id: SessionId::new(id),
                 at: self.now(),
-                spec: shell_session_spec(),
+                spec,
+            })
+        }
+
+        /// Appends a hook-sourced `_shepherd/agent/started` from `agent` to session `id`'s log, as the hook translators
+        /// do on `SessionStart`.
+        pub fn agent_started(
+            &mut self,
+            id: &str,
+            agent: &str,
+            agent_session: Option<&str>,
+        ) -> Envelope {
+            let mut params = json!({ "agent": agent });
+            if let Some(agent_session) = agent_session {
+                params["agent_session_id"] = json!(agent_session);
+            }
+            let frame =
+                json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/started", "params": params });
+            let source = Source::new(SourceKind::Hook, Some(agent.to_owned()));
+            self.append(Some(id), source, frame)
+        }
+
+        /// A `Resume` of `id`, with `spec`.
+        pub fn resume(&mut self, id: &str, spec: ResumeSpec) -> Vec<HostCommand> {
+            let reply = self.reply_to();
+            self.handle(HostEvent::Resume {
+                reply,
+                session: SessionId::new(id),
+                spec,
             })
         }
 
@@ -415,6 +448,32 @@ pub mod builders {
             profile: "shell".to_owned(),
             agent: AgentKind::Shell,
             spawn: shell_spawn(),
+        }
+    }
+
+    /// A new session of the `claude` profile (Claude Code) with no name, running `claude` in `/home/test`, 80x24.
+    pub fn claude_session_spec() -> NewSessionSpec {
+        NewSessionSpec {
+            name: None,
+            profile: "claude".to_owned(),
+            agent: AgentKind::ClaudeCode,
+            spawn: SpawnSpec {
+                command: "claude".to_owned(),
+                ..shell_spawn()
+            },
+        }
+    }
+
+    /// A resume of a [`claude_session_spec`] session, running `claude --resume abc123` in `/home/test`.
+    pub fn claude_resume_spec() -> ResumeSpec {
+        ResumeSpec {
+            profile: "claude".to_owned(),
+            agent: AgentKind::ClaudeCode,
+            spawn: SpawnSpec {
+                command: "claude".to_owned(),
+                args: vec!["--resume".to_owned(), "abc123".to_owned()],
+                ..shell_spawn()
+            },
         }
     }
 

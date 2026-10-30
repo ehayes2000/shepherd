@@ -16,7 +16,7 @@ use shepherd_core::wire::{
     HostResult, LogEntry, Notify, PtyOutput, Request, SessionResize, decode_client_message,
     encode_host_notification, encode_response, negotiate,
 };
-use shepherd_testkit::builders::HostDriver;
+use shepherd_testkit::builders::{HostDriver, claude_resume_spec};
 use shepherd_testkit::contracts::link::ChannelSink;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 
@@ -154,6 +154,9 @@ impl FakeHost {
             }
             ClientRequest::SessionClose(c) => reply_of(self.driver.close(c.session.as_str())),
             ClientRequest::HookFrame(_) => Ok(HostResult::Ack),
+            ClientRequest::SessionResume(r) => {
+                reply_of(self.driver.resume(r.session.as_str(), claude_resume_spec()))
+            }
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

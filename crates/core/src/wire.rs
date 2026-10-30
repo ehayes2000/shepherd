@@ -14,7 +14,7 @@ pub use message::{
     ClientMessage, ClientNotification, ClientRequest, DecodeError, Hello, HelloOk, HookFrame,
     HostMessage, HostNotification, HostResponse, HostResult, LogEntry, Method, Notify,
     PROTOCOL_VERSION, ProfileInfo, PtyOutput, RawResponse, Request, RequestError, SessionClose,
-    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, Subscribe, SubscribeFrom,
-    decode_client_message, decode_host_message, encode_client_notification,
+    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
+    SubscribeFrom, decode_client_message, decode_host_message, encode_client_notification,
     encode_host_notification, encode_request, encode_response, negotiate,
 };
