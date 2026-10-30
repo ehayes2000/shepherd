@@ -6,7 +6,7 @@ use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind, Timestamp};
 use shepherd_core::client::{
     Cell, Client, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
-    MAX_CONNECT_ATTEMPTS, MenuEntry, MenuItem, Popup,
+    MAX_CONNECT_ATTEMPTS, MenuEntry, MenuItem, NOTICE_TIMEOUT, Popup,
 };
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::ResumeUnavailable;
@@ -1110,6 +1110,104 @@ fn an_error_answer_is_shown_as_a_notice() {
         "{:?}",
         c.client().notice()
     );
+}
+
+/// A connected client with session `s1`, showing a notice (a refused rename).
+fn with_notice() -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginRename);
+    let sent = c.user(Intent::Confirm);
+    c.answer(&sent, Err(WireError::Internal("refused".into())));
+    assert!(c.client().notice().is_some());
+    c
+}
+
+#[test]
+fn a_notice_is_cleared_by_the_next_user_action() {
+    let actions = [
+        Intent::NextSession,
+        Intent::PrevSession,
+        Intent::Input(b"x".to_vec()),
+        Intent::SetFocus(Focus::Terminal),
+        Intent::SelectSession(sid("s1")),
+        Intent::ScrollSidebar(1),
+        Intent::NewSession,
+        Intent::BeginNewSession,
+        Intent::ShowHelp,
+        Intent::BeginRename,
+        Intent::BeginClose,
+        Intent::BeginCloseSession(sid("s1")),
+        Intent::OpenMenu {
+            session: sid("s1"),
+            at: Cell { col: 1, row: 2 },
+        },
+        Intent::BeginWorkspace,
+        Intent::Confirm,
+        Intent::Dismiss,
+        Intent::Quit,
+    ];
+    for action in actions {
+        let mut c = with_notice();
+        c.user(action.clone());
+        assert_eq!(c.client().notice(), None, "after {action:?}");
+    }
+}
+
+#[test]
+fn layout_reports_are_not_user_actions_and_keep_the_notice() {
+    let reports = [
+        Intent::Resize(PtySize {
+            cols: 100,
+            rows: 30,
+        }),
+        Intent::SidebarRows(5),
+    ];
+    for report in reports {
+        let mut c = with_notice();
+        c.user(report.clone());
+        assert!(c.client().notice().is_some(), "after {report:?}");
+    }
+}
+
+#[test]
+fn a_notice_raised_by_a_user_action_shows_after_it() {
+    let mut c = ClientDriver::new();
+    c.user(Intent::NewSession);
+    assert_eq!(
+        c.client().notice(),
+        Some("not connected to the shepherd host")
+    );
+}
+
+#[test]
+fn a_notice_clears_once_it_has_shown_for_its_timeout() {
+    let mut c = with_notice();
+    let timeout = NOTICE_TIMEOUT.as_millis() as i64;
+    // The first tick after it appears starts its time.
+    c.handle(ClientEvent::Tick { at: at(1_000) });
+    c.handle(ClientEvent::Tick {
+        at: at(1_000 + timeout - 1),
+    });
+    assert!(c.client().notice().is_some());
+    c.handle(ClientEvent::Tick {
+        at: at(1_000 + timeout),
+    });
+    assert_eq!(c.client().notice(), None);
+}
+
+#[test]
+fn a_new_notice_gets_its_own_timeout() {
+    let mut c = with_notice();
+    let timeout = NOTICE_TIMEOUT.as_millis() as i64;
+    c.handle(ClientEvent::Tick { at: at(0) });
+    c.user(Intent::BeginRename);
+    let sent = c.user(Intent::Confirm);
+    c.answer(&sent, Err(WireError::Internal("again".into())));
+    c.handle(ClientEvent::Tick {
+        at: at(timeout - 1),
+    });
+    c.handle(ClientEvent::Tick { at: at(timeout) });
+    assert!(c.client().notice().is_some_and(|n| n.contains("again")));
 }
 
 #[test]

@@ -28,7 +28,7 @@ Buffer {
         "                       │                                                        ",
         "                       │                                                        ",
         "                       │                                                        ",
-        " unknown sessi Detach ?│                                                        ",
+        " unknown session s3    │                                                        ",
     ],
     styles: [
         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
@@ -105,10 +105,7 @@ Buffer {
         x: 23, y: 22, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
         x: 24, y: 22, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 1, y: 23, fg: Yellow, bg: Reset, underline: Reset, modifier: NONE,
-        x: 14, y: 23, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
-        x: 15, y: 23, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
-        x: 21, y: 23, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
-        x: 22, y: 23, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 19, y: 23, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 23, y: 23, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
         x: 24, y: 23, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
     ]

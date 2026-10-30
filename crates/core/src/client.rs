@@ -38,6 +38,8 @@ pub const MAX_CONNECT_ATTEMPTS: u32 = 50;
 pub const RETRY_INTERVAL: SignedDuration = SignedDuration::from_millis(100);
 /// How long a connected host has to answer the hello before the attempt counts as failed.
 pub const HELLO_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
+/// How long a notice shows, from the first tick after it appears, unless a user action clears it first.
+pub const NOTICE_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
 
 /// Something that happened, for the client to decide on.
 #[derive(Debug, Clone, PartialEq)]
@@ -268,12 +270,21 @@ pub struct Client {
     scroll: usize,
     /// How many sessions the sidebar shows at once, once the TUI has said.
     sidebar_rows: Option<usize>,
-    notice: Option<String>,
+    notice: Option<Notice>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
     default_profile: Option<String>,
     /// Alert when a session newly wants the user, from the host's hello answer.
     bell: bool,
+}
+
+/// A message for the user in the footer. It shows until the next user action, or for [`NOTICE_TIMEOUT`] from the
+/// first tick after it appeared.
+#[derive(Debug, Clone)]
+struct Notice {
+    text: String,
+    /// The first tick it was shown at.
+    since: Option<jiff::Timestamp>,
 }
 
 impl Client {
@@ -394,7 +405,7 @@ impl Client {
 
     /// The latest thing the host refused, for the user.
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+        self.notice.as_ref().map(|n| n.text.as_str())
     }
 
     /// Why the client gave up, once it has.
@@ -417,17 +428,10 @@ impl Client {
             ClientEvent::LaunchFailed { error } => {
                 self.fail(format!("could not start the shepherd host: {error}"))
             }
-            ClientEvent::Tick { at } => match self.connection {
-                Connection::Waiting { attempt, until } if at.instant() >= until => {
-                    self.connect(attempt + 1)
-                }
-                Connection::Handshaking { attempt, since }
-                    if at.instant() >= since.checked_add(HELLO_TIMEOUT).unwrap_or(since) =>
-                {
-                    self.attempt_failed(attempt, at.instant(), "the host didn't answer hello")
-                }
-                _ => Vec::new(),
-            },
+            ClientEvent::Tick { at } => {
+                self.age_notice(at.instant());
+                self.tick(at)
+            }
             ClientEvent::Host(HostMessage::Response(response)) => self.response(response),
             ClientEvent::Host(HostMessage::Notification(HostNotification::LogEntry(entry))) => {
                 self.log_entry(&entry.envelope)
@@ -441,6 +445,21 @@ impl Client {
     }
 
     // ---------- connection ----------
+
+    /// Time passes: a waiting retry or an unanswered hello is due.
+    fn tick(&mut self, at: Timestamp) -> Vec<ClientCommand> {
+        match self.connection {
+            Connection::Waiting { attempt, until } if at.instant() >= until => {
+                self.connect(attempt + 1)
+            }
+            Connection::Handshaking { attempt, since }
+                if at.instant() >= since.checked_add(HELLO_TIMEOUT).unwrap_or(since) =>
+            {
+                self.attempt_failed(attempt, at.instant(), "the host didn't answer hello")
+            }
+            _ => Vec::new(),
+        }
+    }
 
     fn connect(&mut self, attempt: u32) -> Vec<ClientCommand> {
         self.connection = Connection::Connecting { attempt };
@@ -563,7 +582,7 @@ impl Client {
                     // The host's reason is the whole story here, without the error's kind.
                     (Err(WireError::InvalidParams(why)), Some(error)) => *error = Some(why),
                     (Err(e), Some(error)) => *error = Some(e.to_string()),
-                    (Err(e), None) => self.notice = Some(e.to_string()),
+                    (Err(e), None) => self.set_notice(e.to_string()),
                 }
                 Vec::new()
             }
@@ -578,7 +597,7 @@ impl Client {
             }
             (_, Ok(_)) => Vec::new(),
             (_, Err(e)) => {
-                self.notice = Some(e.to_string());
+                self.set_notice(e.to_string());
                 Vec::new()
             }
         }
@@ -824,9 +843,30 @@ impl Client {
         }))
     }
 
+    // ---------- notices ----------
+
+    fn set_notice(&mut self, text: String) {
+        self.notice = Some(Notice { text, since: None });
+    }
+
+    /// Starts the shown notice's time at its first tick, and clears it once [`NOTICE_TIMEOUT`] has passed.
+    fn age_notice(&mut self, now: jiff::Timestamp) {
+        let Some(notice) = &mut self.notice else {
+            return;
+        };
+        let since = *notice.since.get_or_insert(now);
+        if now >= since.checked_add(NOTICE_TIMEOUT).unwrap_or(since) {
+            self.notice = None;
+        }
+    }
+
     // ---------- the user ----------
 
     fn intent(&mut self, intent: Intent) -> Vec<ClientCommand> {
+        // Anything the user does clears the notice; the layout reporting sizes isn't the user doing anything.
+        if !matches!(intent, Intent::Resize(_) | Intent::SidebarRows(_)) {
+            self.notice = None;
+        }
         match intent {
             Intent::NextSession => self.step(true),
             Intent::PrevSession => self.step(false),
@@ -1008,7 +1048,7 @@ impl Client {
             Ok(()) => {}
             Err(ResumeUnavailable::Running) => return Vec::new(),
             Err(why) => {
-                self.notice = Some(format!("can't resume: {why}"));
+                self.set_notice(format!("can't resume: {why}"));
                 return Vec::new();
             }
         }
@@ -1039,7 +1079,7 @@ impl Client {
     /// A request the user asked for. Dropped, with a notice, while not connected.
     fn user_request(&mut self, body: ClientRequest) -> Vec<ClientCommand> {
         if self.connection != Connection::Ready {
-            self.notice = Some("not connected to the shepherd host".to_owned());
+            self.set_notice("not connected to the shepherd host".to_owned());
             return Vec::new();
         }
         vec![self.request(body)]
