@@ -262,6 +262,21 @@ fn a_session_closed_while_its_worktree_is_made_never_spawns() {
     hold.release();
 }
 
+/// With no cap on a create, one left running would outlive the host: shutting down cancels it.
+#[test]
+fn shutting_the_host_down_cancels_a_worktree_still_being_made() {
+    let mut s = setup(|b| b);
+    let hold = s.worktrees.hold_next();
+    s.client.new_session();
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "create never reached the port");
+    s.h.runtime()
+        .sender()
+        .send(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.poll();
+    assert!(hold.wait_cancelled(LIMIT), "the create was left running");
+}
+
 #[test]
 fn two_new_sessions_make_their_worktrees_at_the_same_time() {
     let mut s = setup(|b| b);

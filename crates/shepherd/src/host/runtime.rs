@@ -18,12 +18,13 @@
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
 //! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
-//!   A command that needs it (a workspace probe, an inspection) is submitted there and the loop carries on; the result
-//!   comes back as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still matters. A new
-//!   session's worktree create runs on a thread of its own instead ([`Worker::run_alone`]), since its checkout has no
-//!   time cap: creates for different sessions run at the same time, and none holds up the worker. Closing a session
-//!   whose create is running cancels it (`Worktrees::cancel_create`, which never waits on git), and the create's
-//!   answer comes back as usual. Closing a session inspects and removes its worktree the same way. The `Commands` port (a worktree's
+//!   A command that needs it (a workspace probe) is submitted there and the loop carries on; the result comes back as
+//!   [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still matters. Closing a session inspects
+//!   and removes its worktree the same way. A new session's worktree create runs on a thread of its own instead
+//!   ([`Worker::run_alone`]), since its checkout has no time cap: creates for different sessions run at the same time,
+//!   and none holds up the worker. Closing a session whose create is running cancels it (`Worktrees::cancel_create`,
+//!   which never waits on git), and the create's answer comes back as usual; shutting the host down cancels every
+//!   running create. The `Commands` port (a worktree's
 //!   post-create and pre-remove hooks) runs on a worker of its own the same way, its results coming back as
 //!   [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
@@ -1573,6 +1574,11 @@ impl<
             return;
         }
         self.shutdown_by = Some(self.env.instant() + SHUTDOWN_GRACE);
+        // A create has no time cap: one left running would outlive the host. Its answer, if it comes before the loop
+        // stops, is dropped like any other.
+        for (repo, name) in self.creating.values() {
+            self.worktrees.port().cancel_create(repo, name);
+        }
         let live: Vec<SessionId> = self.screens.keys().cloned().collect();
         for session in live {
             if let Err(error) = self.pty.kill(&session) {

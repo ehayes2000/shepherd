@@ -4,8 +4,9 @@
 //!
 //! Each git process starts a new session (`setsid`), so it has no controlling terminal and neither do its children:
 //! ssh can't open `/dev/tty` to ask for a passphrase or host key. Stdin is closed, and the environment turns off the
-//! prompts that don't need a terminal: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential Manager) and
-//! `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
+//! prompts that don't need a terminal: an empty `GIT_ASKPASS` (which also overrides `core.askPass` and `SSH_ASKPASS`,
+//! so an editor's askpass helper never runs), `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential
+//! Manager) and `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
 //! ssh included. `worktree add` has no timeout (a big checkout, with git-lfs, takes as long as it takes); it is killed
 //! the same way only by [`Worktrees::cancel_create`]. Output goes to temp files rather than pipes, so a background
 //! process left behind by a hook can't hold a call open. A `worktree add` killed by a cancel is undone: its worktree
@@ -251,6 +252,9 @@ impl GitWorktrees {
             }
         }
         command
+            // Empty, not unset: git then skips `core.askPass` and `SSH_ASKPASS` too, and with terminal prompts off
+            // fails instead of asking.
+            .env("GIT_ASKPASS", "")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GCM_INTERACTIVE", "never")
             .env("SSH_ASKPASS_REQUIRE", "never")
@@ -1412,69 +1416,104 @@ mod tests {
         }
     }
 
+    fn mkfifo(path: &Path) {
+        let status = Command::new("mkfifo").arg(path).status().unwrap();
+        assert!(status.success());
+    }
+
+    /// Reads `fifo` to its end on a helper thread, up to `limit` (a liveness bound): whether it said `entered`. A writer
+    /// that never comes leaves the helper blocked until the test process exits, not the test.
+    fn read_entered(fifo: &Path, limit: Duration) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo = fifo.to_owned();
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            let ok = std::fs::File::open(&fifo)
+                .and_then(|mut fifo| fifo.read_to_string(&mut said))
+                .is_ok();
+            let _ = tx.send(ok && said.trim() == "entered");
+        });
+        rx.recv_timeout(limit).unwrap_or(false)
+    }
+
+    /// A FIFO hooks wait at. A hook opens it (`exec 3< <path>`, which returns at once because this holds a write end)
+    /// before it says it has started, then reads one byte from it ([`Gate::WAIT`]).
+    ///
+    /// The release is a byte per waiting hook, which stays in the FIFO for every hook that has it open, not the end of
+    /// the FIFO: on macOS, a read that starts after the last writer closed may block forever, and a hook can say it
+    /// started just before its read starts.
+    struct Gate {
+        path: PathBuf,
+        writer: std::fs::File,
+    }
+
+    impl Gate {
+        /// The shell line that makes a hook wait at the gate, on the fd 3 its `exec` opened.
+        const WAIT: &str = "dd bs=1 count=1 <&3 > /dev/null 2>&1";
+
+        fn new(path: PathBuf) -> Self {
+            mkfifo(&path);
+            // Read-write, so opening it doesn't wait for a reader.
+            let writer = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            Self { path, writer }
+        }
+
+        /// Lets every hook waiting at the gate (up to 64) go on.
+        fn release(mut self) {
+            use std::io::Write;
+            let _ = self.writer.write_all(&[b'x'; 64]);
+        }
+    }
+
     /// A `post-checkout` hook (run after git registered the worktree and made its branch) that runs a setup script,
-    /// opens the gate FIFO, says it has started on another FIFO, then reads the gate until it ends. The fixture holds
-    /// the gate's only write end until it is dropped, which ends the read of every hook that has said it started.
-    /// Dropping it also uninstalls the hook.
+    /// takes its place at a [`Gate`], says it has started on another FIFO, then waits at the gate. Every create that
+    /// runs the hook while it is installed is held. Dropping it releases the gate and uninstalls the hook.
     struct HeldHook<'a> {
         f: &'a GitFixture,
         entered: PathBuf,
-        /// The gate's write end (opened read-write, so opening it doesn't wait for a reader).
-        _gate: std::fs::File,
+        gate: Option<Gate>,
     }
 
     impl<'a> HeldHook<'a> {
         fn install(f: &'a GitFixture, setup: &str) -> Self {
             let n = f.counter.fetch_add(1, Ordering::Relaxed);
             let entered = f.tmp().join(format!("entered-{n}.fifo"));
-            let gate = f.tmp().join(format!("gate-{n}.fifo"));
-            for fifo in [&entered, &gate] {
-                let status = Command::new("mkfifo").arg(fifo).status().unwrap();
-                assert!(status.success());
-            }
-            let writer = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&gate)
-                .unwrap();
+            mkfifo(&entered);
+            let gate = Gate::new(f.tmp().join(format!("gate-{n}.fifo")));
             hook(
                 f,
                 "post-checkout",
                 &format!(
-                    "{setup}\nexec 3< '{}'\necho entered > '{}'\ncat <&3 > /dev/null",
-                    gate.display(),
-                    entered.display()
+                    "{setup}\nexec 3< '{}'\necho entered > '{}'\n{}",
+                    gate.path.display(),
+                    entered.display(),
+                    Gate::WAIT
                 ),
             );
             Self {
                 f,
                 entered,
-                _gate: writer,
+                gate: Some(gate),
             }
         }
     }
 
     impl HeldCreate for HeldHook<'_> {
-        /// Reads the `entered` FIFO on a helper thread, so a create that never reaches the hook fails the wait
-        /// instead of hanging it. (That helper then stays blocked until the test process exits.)
         fn wait_entered(&self, limit: Duration) -> bool {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let entered = self.entered.clone();
-            std::thread::spawn(move || {
-                let mut said = String::new();
-                let ok = std::fs::File::open(&entered)
-                    .and_then(|mut fifo| fifo.read_to_string(&mut said))
-                    .is_ok();
-                let _ = tx.send(ok && said.trim() == "entered");
-            });
-            rx.recv_timeout(limit).unwrap_or(false)
+            read_entered(&self.entered, limit)
         }
     }
 
     impl Drop for HeldHook<'_> {
-        /// Then the gate's write end closes (a field), ending the waiting hooks' reads.
         fn drop(&mut self) {
             let _ = std::fs::remove_file(self.f.app().join(".git/hooks/post-checkout"));
+            if let Some(gate) = self.gate.take() {
+                gate.release();
+            }
         }
     }
 
@@ -1725,16 +1764,39 @@ mod tests {
     /// A liveness bound for a held create to reach its hook, never a measurement.
     const HELD_LIMIT: Duration = Duration::from_secs(600);
 
+    type Answer = std::sync::mpsc::Receiver<Result<Created, WorktreeError>>;
+
+    /// The answer of a create started with its own channel, within [`HELD_LIMIT`] (a liveness bound). If it doesn't
+    /// come, `release` runs first (so the create's thread can finish and the scope end), then this panics.
+    fn answer(answer: &Answer, release: impl FnOnce()) -> Result<Created, WorktreeError> {
+        answer.recv_timeout(HELD_LIMIT).unwrap_or_else(|_| {
+            release();
+            panic!("the create never answered");
+        })
+    }
+
+    /// Fails unless `entered` (a held hook said it started); `release` runs first, as for [`answer`].
+    fn assert_entered(entered: bool, release: impl FnOnce(), what: &str) {
+        if !entered {
+            release();
+            panic!("{what}");
+        }
+    }
+
     /// Creates `n` with a `post-checkout` hook that runs `setup` and then blocks; once the hook is running, cancels
-    /// the create from another thread, and returns what the create returned.
+    /// the create from another thread, and returns what the create returned. A cancel that doesn't stop the create
+    /// fails the test (after releasing the hook), never hangs it.
     fn cancelled_create(f: &GitFixture, n: &str, setup: &str) -> Result<Created, WorktreeError> {
         let held = HeldHook::install(f, setup);
-        let repo = f.repo();
+        let repo = &f.repo();
         std::thread::scope(|s| {
-            let create = s.spawn(|| f.port.create(&repo, &name(n), BaseSpec::OriginDefault));
-            assert!(held.wait_entered(HELD_LIMIT), "the hook never ran");
-            f.port.cancel_create(&repo, &name(n));
-            create.join().unwrap()
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.spawn(move || tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault)));
+            let entered = held.wait_entered(HELD_LIMIT);
+            let mut held = Some(held);
+            assert_entered(entered, || drop(held.take()), "the hook never ran");
+            f.port.cancel_create(repo, &name(n));
+            answer(&rx, || drop(held.take()))
         })
     }
 
@@ -1744,16 +1806,20 @@ mod tests {
     fn worktree_add_has_no_time_cap() {
         let f = GitFixture::new();
         let held = HeldHook::install(&f, "");
-        let port = slow_port(&f);
-        let repo = f.repo();
+        let port = &slow_port(&f);
+        let repo = &f.repo();
         let created = std::thread::scope(|s| {
-            let create = s.spawn(|| port.create(&repo, &name("long"), BaseSpec::OriginDefault));
-            assert!(held.wait_entered(HELD_LIMIT), "the hook never ran");
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.spawn(move || tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)));
+            let entered = held.wait_entered(HELD_LIMIT);
+            let mut held = Some(held);
+            assert_entered(entered, || drop(held.take()), "the hook never ran");
             let witness = port.git(&f.app(), &["-c", "alias.nap=!sleep 900", "nap"]);
+            let still_held = rx.try_recv().is_err();
+            drop(held.take());
             assert!(matches!(witness, Err(Failure::Timeout)), "{witness:?}");
-            assert!(!create.is_finished());
-            drop(held);
-            create.join().unwrap()
+            assert!(still_held, "the add finished while its hook was held");
+            answer(&rx, || {})
         });
         let created = created.unwrap();
         assert!(created.path.as_path().is_dir());
@@ -1784,31 +1850,56 @@ mod tests {
     }
 
     /// Two creates in one repo check out at the same time: the second gets to its hook while the first is held in its
-    /// own.
+    /// own. Each hook says it started on a FIFO named after its worktree, so neither can answer for the other.
     #[test]
     fn creates_in_one_repo_check_out_at_the_same_time() {
         let f = GitFixture::new();
-        let held = HeldHook::install(&f, "");
-        let repo = f.repo();
-        std::thread::scope(|s| {
-            let first = s.spawn(|| {
-                f.port
-                    .create(&repo, &name("first"), BaseSpec::OriginDefault)
-            });
-            assert!(held.wait_entered(HELD_LIMIT), "the first hook never ran");
-            // The same hook file holds the second create on the same FIFOs.
-            let second = s.spawn(|| {
-                f.port
-                    .create(&repo, &name("second"), BaseSpec::OriginDefault)
-            });
-            assert!(
-                held.wait_entered(HELD_LIMIT),
-                "the second create waited for the first"
+        let tmp = f.tmp();
+        let fifo = |n: &str| tmp.join(format!("{n}.fifo"));
+        mkfifo(&fifo("entered-first"));
+        mkfifo(&fifo("entered-second"));
+        let gate = Gate::new(fifo("gate"));
+        hook(
+            &f,
+            "post-checkout",
+            &format!(
+                "exec 3< '{gate}'\n\
+                 echo entered > '{tmp}/entered-'\"$(basename \"$PWD\")\"'.fifo'\n\
+                 {wait}",
+                gate = gate.path.display(),
+                tmp = tmp.display(),
+                wait = Gate::WAIT
+            ),
+        );
+        let repo = &f.repo();
+        let port = &f.port;
+        let (first, second) = std::thread::scope(|s| {
+            let start = |n: &'static str| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.spawn(move || tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)));
+                rx
+            };
+            let mut gate = Some(gate);
+            let first = start("first");
+            let entered = read_entered(&fifo("entered-first"), HELD_LIMIT);
+            assert_entered(
+                entered,
+                || gate.take().into_iter().for_each(Gate::release),
+                "the first hook never ran",
             );
-            drop(held);
-            assert!(first.join().unwrap().is_ok());
-            assert!(second.join().unwrap().is_ok());
+            let second = start("second");
+            let entered = read_entered(&fifo("entered-second"), HELD_LIMIT);
+            let first_held = first.try_recv().is_err();
+            gate.take().into_iter().for_each(Gate::release);
+            assert!(entered, "the second create waited for the first");
+            assert!(
+                first_held,
+                "the first create finished while its hook was held"
+            );
+            (answer(&first, || {}), answer(&second, || {}))
         });
+        assert!(first.is_ok(), "{first:?}");
+        assert!(second.is_ok(), "{second:?}");
     }
 
     fn branch_exists(f: &GitFixture, branch: &str) -> bool {
@@ -1994,12 +2085,15 @@ mod tests {
                 lock = lock.display()
             ),
         );
-        let result = slow_port(&f).create(&f.repo(), &name("held"), BaseSpec::OriginDefault);
+        // A short cleanup bound: cleanup's delete waiting on the foreign lock would time out, not hang.
+        let port = slow_port(&f).with_cleanup_timeout(SHORT_TIMEOUT);
+        let result = port.create(&f.repo(), &name("held"), BaseSpec::OriginDefault);
         let Err(WorktreeError::Other(message)) = &result else {
             panic!("{result:?}");
         };
         assert!(message.contains("worktree add failed"), "{message}");
         assert!(message.contains("can't delete branch held"), "{message}");
+        assert!(!message.contains("timed out"), "{message}");
         assert!(lock.exists(), "{message}");
         assert!(!worktree_path(&f, "held").exists(), "{message}");
     }
@@ -2206,6 +2300,69 @@ mod tests {
         assert!(message.contains("worktree add failed"), "{message}");
         assert!(message.contains("can't delete branch stuck"), "{message}");
         assert!(lock.exists());
+    }
+
+    /// An HTTP origin on localhost that answers every request with `401`, so git asks for credentials. Each connection
+    /// is answered on a thread of its own; the listener lives until the test process exits.
+    fn origin_asking_for_credentials() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/x.git", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(&stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).is_ok_and(|n| n > 0) && line != "\r\n" {
+                        line.clear();
+                    }
+                    let _ = (&stream).write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
+                          Content-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+        url
+    }
+
+    /// The user's askpass helpers (`GIT_ASKPASS`, `core.askPass`, `SSH_ASKPASS`, e.g. an editor's) would ask a person
+    /// with no terminal to ask on, and with no cap on a create could wait forever. Git never runs them: the fetch fails
+    /// at once and the create falls back to the last fetched origin default.
+    #[test]
+    fn a_credential_prompt_never_runs_the_users_askpass() {
+        let f = GitFixture::new();
+        let ran = f.tmp().join("askpass.ran");
+        let askpass = f.tmp().join("askpass.sh");
+        std::fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho secret\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&askpass, Permissions::from_mode(0o755)).unwrap();
+        let askpass_arg = askpass.to_str().unwrap();
+        f.git(&f.app(), &["config", "core.askPass", askpass_arg]);
+        let url = origin_asking_for_credentials();
+        f.git(&f.app(), &["remote", "set-url", "origin", &url]);
+        let mut vars = env(f.tmp().as_path());
+        vars.push(("GIT_ASKPASS".into(), askpass.clone().into()));
+        vars.push(("SSH_ASKPASS".into(), askpass.clone().into()));
+        let port = GitWorktrees::new(f.root())
+            .with_isolated_env(vars)
+            .with_git_timeout(TEST_TIMEOUT)
+            .with_fetch_timeout(TEST_TIMEOUT)
+            .with_cleanup_timeout(TEST_TIMEOUT);
+        let created = port
+            .create(&f.repo(), &name("asked"), BaseSpec::OriginDefault)
+            .unwrap();
+        let BaseUsed::Stale { fetch_error, .. } = &created.base else {
+            panic!("{:?}", created.base);
+        };
+        assert!(!ran.exists(), "askpass ran: {fetch_error}");
+        assert!(!fetch_error.contains("timed out"), "{fetch_error}");
     }
 
     /// The background `sleep` keeps git's stdout and stderr open long after git exits.

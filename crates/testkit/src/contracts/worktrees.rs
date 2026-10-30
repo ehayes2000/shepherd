@@ -153,7 +153,8 @@ pub trait WorktreesFixture {
     /// `path` with symlinks resolved, as the port reports paths it found on its own (e.g. a tempdir behind `/var`).
     fn resolved(&self, path: &Path) -> PathBuf;
     /// The next create blocks while it makes the worktree (for git: in the checkout, after the branch is made and the
-    /// worktree registered) until the returned handle is dropped. Creates after it are not held.
+    /// worktree registered) until the returned handle is dropped. Whether creates after it are held too, while the
+    /// handle lives, is up to the fixture (the git fixture's hook holds every one), so cases hold one create at a time.
     fn hold_next_create(&self) -> Box<dyn HeldCreate + '_>;
 }
 
@@ -553,14 +554,21 @@ pub fn a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried<F: Work
 ) {
     let repo = f.repo();
     let port = f.port();
-    let held = f.hold_next_create();
+    let mut held = Some(f.hold_next_create());
+    let repo = &repo;
+    // A cancel that doesn't stop the create fails the case (after releasing the hold), never hangs it.
     let result = std::thread::scope(|s| {
-        let create = s.spawn(|| port.create(&repo, &name("doomed"), BaseSpec::OriginDefault));
-        assert!(held.wait_entered(HOLD_LIMIT), "the create never got going");
-        port.cancel_create(&repo, &name("doomed"));
-        create.join().unwrap()
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.spawn(move || tx.send(port.create(repo, &name("doomed"), BaseSpec::OriginDefault)));
+        if !held.as_ref().unwrap().wait_entered(HOLD_LIMIT) {
+            drop(held.take());
+            panic!("the create never got going");
+        }
+        port.cancel_create(repo, &name("doomed"));
+        let answer = rx.recv_timeout(HOLD_LIMIT);
+        drop(held.take());
+        answer.unwrap_or_else(|_| panic!("the cancelled create never answered"))
     });
-    drop(held);
     assert_eq!(result, Err(WorktreeError::Cancelled));
     assert!(listed_paths(f).is_empty());
     create(f, "doomed");

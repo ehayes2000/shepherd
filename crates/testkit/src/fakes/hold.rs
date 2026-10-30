@@ -67,6 +67,18 @@ impl Hold {
         state.entered
     }
 
+    /// Blocks until the held call was cancelled (e.g. by `cancel_create`), up to `limit` (a liveness bound). Whether
+    /// it was.
+    pub fn wait_cancelled(&self, limit: Duration) -> bool {
+        let state = self.0.lock();
+        let (state, _) = self
+            .0
+            .changed
+            .wait_timeout_while(state, limit, |s| !s.cancelled)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.cancelled
+    }
+
     pub fn release(self) {}
 }
 
