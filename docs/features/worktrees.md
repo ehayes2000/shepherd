@@ -235,6 +235,9 @@ acceptance:
   log not kept). Likely the same class.
 - Reproduce and find the cause: a git timeout, or a real race. If it's a timeout under extreme load, make the fixture's bounds and
   error reporting robust (print the actual error). If it's a race, fix it. Then 0 failures in 5 rounds of 24 parallel copies.
+- From the F43 merge gate (load average ~100): `close_worktrees.rs` `removal_never_touches_a_recorded_path_outside_the_managed_root`
+  and its `_beside_a_managed_worktree` twin failed `run_until_settled(LIMIT)` with `LIMIT = 10 s` (real git under load);
+  passed alone and on re-run. Make LIMIT a generous liveness bound (as F38 did) across the scenario tests that use real git.
 scope: crates/adapters, crates/testkit
 
 ### F25: Clean up after a failed worktree create

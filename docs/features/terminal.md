@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F23 | A program's output can panic the emulator (and the host) | done | 74e2abb | 2 | sync-timeout path unguarded; pop count, guard-flag reset untested; missing_trait_methods lint added |
 | F38 | PTY backpressure contract case fails under load | done | 24f1b49 | 1 | 10 s total deadline was a measurement; now an idle bound plus byte limit |
 | F42 | A new session starts at the wrong size until the window is resized | done | 2d82053 | 2 | runtime adopt-size wiring untested; sizes unclamped |
-| F43 | Tab next to wide chars stored as a '\t' spacer | merging | task/f43-tab-spacer @ 4aa1cf8 | 0 | PM spot check: snapshot last_column re-marks a tabbed spacer |
+| F43 | Tab next to wide chars stored as a '\t' spacer | done | 3649a78 | PM spot check | snapshot rebuild dropped a tab mark on a wide char's spacer |
 
 ## Specs
 
