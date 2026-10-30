@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T21 workspaces | building | task/t21-workspaces @ HEAD | 0 | – |
-| F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ HEAD | 0 | – |
+| T21 workspaces | building | task/t21-workspaces @ 7d2a1cf | 0 | – |
+| F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
