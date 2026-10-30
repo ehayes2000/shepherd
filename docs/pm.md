@@ -91,3 +91,4 @@ gets enforced mechanically. File non-blocking findings as follow-ups (`F<NN>`) i
 | A dev-dependency feature changed prod serialization | Decision 0012; behavior-changing features in normal builds only |
 | Builder `pkill -f` killed another agent's tests | Never kill by pattern; only pids you started |
 | PM reported a merged task as still in review | The In flight table plus checking it against git on takeover |
+| PM wrapped a merge in `git stash`/`stash pop` on a clean tree; the pop applied the user's old stash | Never use `git stash` in the merge queue. Commit plan edits first; merge only on a clean tree (`git status --short` empty) |

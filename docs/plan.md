@@ -9,10 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F21 collapsed sidebar targets | in review | task/f21-collapsed-sidebar @ 3644212 | 1 | PM-accepted: Rename popup also closes with its session. Reviewer asked about ⏏ emoji width |
 | F07 palette in snapshots | in review | task/f07-palette-snapshots @ 694310a | 1 | Builder found host-crash bug → F23 |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
-| T17 launch Claude sessions | in review | task/t17-launch-claude @ dc247bf (on 069e3b6) | 1 | PM-accepted: run files written by runtime (no port); default agent claude; exec-form hooks; names/agent field/startup sweep → F22 |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -45,6 +43,8 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T33 | 2 | stale press and sidebar clamp untested (mutation survivors) |
 | T16 | 2 | reply-timeout bound untested (two mutations survived); refused/disconnect paths untested |
 | T34 | 2 | same-button release rule untested; long-name truncation untested |
+| F21 | 1 | – |
+| T17 | 1 | 4 untested defensive lines in run_files (→ F22) |
 
 ## Milestones
 
@@ -268,6 +268,8 @@ acceptance:
 - The client runtime services `Screen::sync_hold()` deadlines (`expire_sync`), so a session stuck mid synchronized update
   doesn't freeze its displayed frame. Driven by runtime deadlines, no sleeps.
 - `ClientState::notice()` is cleared on the next user action or after a deadline. Core table test.
+- In the collapsed sidebar the help button `?` shares a column with `Activity::Unknown`'s `?` glyph; give Unknown a distinct
+  glyph (e.g. `·`) and update snapshots (F21 review).
 - While a notice is showing it gets the whole footer width and the Detach/? buttons hide; they return when it clears
   (T34 left notices at 13 columns because notices weren't transient yet). Snapshot both states.
 - The cursor shape and blink from the session's `Screen` are passed to the real terminal.
@@ -339,7 +341,7 @@ after `Disconnected`, so they already agree. Outcome: no fake/adapter change; th
 `a_host_that_drops_the_connection_before_answering_is_a_disconnect` now explains the sink copy (it keeps the channel open so
 only the `Disconnected` event can end the test).
 ### F21: Mouse targets in the collapsed sidebar
-status: in-progress
+status: done (c59acb7)
 depends: T34
 touches: tui::sidebar, tui::layout
 goal: In the narrow layout (sidebar collapsed to glyphs) Detach and help have no click target, and rows have no `×`
@@ -352,7 +354,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F22: Agent session polish from T17
-status: todo
+status: ready
 depends: T17
 touches: core::host (new session spec), shepherd::host (run files)
 goal: Small gaps left by T17.
@@ -361,6 +363,9 @@ acceptance:
 - `wire::SessionNew.cwd` is honored (validated: must be an existing directory; otherwise InvalidParams).
 - Run directories are removed when the PTY exits as well as on close, and stale `<root>/run/*` dirs with no live session
   are swept at host startup (never following symlinks; never outside `<root>/run`).
+- Close the T17 review's untested lines in `crates/shepherd/src/host/run_files.rs`: writing settings over a longer stale file
+  (truncate), the `BadName` guard (`"../x"`, `"a/b"`), closing a session with no run dir logs nothing (NotFound arm), and
+  `pending_run_files` is cleared when core refuses a session.
 scope: crates/core, crates/shepherd, crates/testkit
 
 ### F23: A program's output can panic the emulator (and the host)
@@ -881,7 +886,7 @@ acceptance:
 scope: crates/shepherd, crates/core
 
 ### T17: Launch Claude Code sessions
-status: in-progress
+status: done (b61bd59)
 depends: T14, T15, T16
 touches: core::host (spawn spec), shepherd::host
 goal: A new session with profile `claude` runs Claude Code with shepherd's hooks injected and shows live status.
@@ -900,7 +905,7 @@ acceptance:
 scope: crates/core, crates/shepherd
 
 ### T17b: Profile picker
-status: todo
+status: ready
 depends: T17, T34
 touches: tui::popup, core::client
 goal: Clicking `+ New session` lets you pick which agent to run (decision 0014).
