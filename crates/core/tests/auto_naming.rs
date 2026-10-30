@@ -144,19 +144,22 @@ fn indented_fences_still_drop_their_code() {
 }
 
 #[test]
-fn words_follow_unicode_segmentation_and_cuts_keep_graphemes_whole() {
-    let nfd_cut = format!("{}e\u{301}z", "a".repeat(29));
-    let nfd_cut_expected = format!("{}e\u{301}", "a".repeat(29));
-    let cases: [(&str, &str); 3] = [
-        // Decomposed accents stay in their word.
-        (
-            "cre\u{300}me bru\u{302}le\u{301}e",
-            "cre\u{300}me-bru\u{302}le\u{301}e",
-        ),
-        // So do Devanagari vowel signs and viramas.
+fn words_follow_unicode_segmentation_in_nfc_and_cuts_keep_graphemes_whole() {
+    // `x́` has no precomposed form, so it stays two chars in one grapheme cluster.
+    let cut = format!("{}x\u{301}z", "a".repeat(29));
+    let cut_expected = format!("{}x\u{301}", "a".repeat(29));
+    let cases: [(&str, &str); 4] = [
+        // Decomposed accents stay in their word, and are composed.
+        ("cre\u{300}me bru\u{302}le\u{301}e", "crème-brûlée"),
+        // Devanagari vowel signs and viramas stay in their word.
         ("नमस्ते दुनिया", "नमस्ते-दुनिया"),
-        // 30 grapheme clusters, the last a decomposed `é`: the cut doesn't strip its accent.
-        (&nfd_cut, &nfd_cut_expected),
+        // 30 grapheme clusters, the last `x́`: the cut doesn't strip its accent.
+        (&cut, &cut_expected),
+        // Words count grapheme clusters, not chars: 30 of them (31 chars) still fit.
+        (
+            "aaaaaaaaaa bbbbbbbbbb cccccccx\u{301}",
+            "aaaaaaaaaa-bbbbbbbbbb-cccccccx\u{301}",
+        ),
     ];
     for (prompt, expected) in cases {
         assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
@@ -164,9 +167,72 @@ fn words_follow_unicode_segmentation_and_cuts_keep_graphemes_whole() {
 }
 
 #[test]
+fn invisible_format_characters_are_dropped_from_words() {
+    let cases: [(&str, &str); 7] = [
+        // Bidi override, isolates, and marks.
+        ("fix \u{202E}login bug", "fix-login-bug"),
+        ("\u{2066}deploy\u{2069} staging", "deploy-staging"),
+        ("fix\u{200E} it", "fix"),
+        // Joiners, soft hyphen, BOM, tags.
+        ("a\u{200D}b\u{200C}c test", "abc-test"),
+        ("co\u{AD}operate nicely", "cooperate-nicely"),
+        ("\u{FEFF}hello world", "world"),
+        ("tag\u{E0041}\u{E007F}ged run", "tagged-run"),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
+fn auto_names_are_bounded_in_bytes_and_combining_marks() {
+    // At most two combining marks stay on each base.
+    let zalgo = format!("a{}", "\u{301}".repeat(100_000));
+    let name = auto_name(&zalgo).unwrap_or_default();
+    assert!(name.len() <= 120, "{} bytes", name.len());
+    assert_eq!(name, "á\u{301}\u{301}");
+    // Also for combining marks that are alphabetic, like the Greek ypogegrammeni.
+    let alphabetic = format!("a{}", "\u{345}".repeat(1_000));
+    assert_eq!(auto_name(&alphabetic).as_deref(), Some("a\u{345}\u{345}"));
+    // 30 graphemes of 5 bytes each are 150 bytes: cut to the 24 that fit in 120.
+    let heavy = "x\u{301}\u{302}".repeat(30);
+    assert_eq!(auto_name(&heavy), Some("x\u{301}\u{302}".repeat(24)));
+    // A later word that would pass 120 bytes doesn't fit, though it is within 30 graphemes (4 × 6 + 3 = 27).
+    let word = "x\u{301}\u{302}".repeat(6);
+    assert_eq!(
+        auto_name(&format!("{word} {word} {word} {word}")),
+        Some(format!("{word}-{word}-{word}"))
+    );
+}
+
+#[test]
+fn in_word_punctuation_is_kept_inside_and_trimmed_after_a_cut() {
+    let cut = format!("{}_bc", "a".repeat(29));
+    let cases: [(&str, &str); 3] = [
+        ("bump version 3.14", "bump-version-3.14"),
+        ("rename _private_ helper", "rename-private-helper"),
+        // Cut to 30, `aaa…a_`, then the trailing `_` goes.
+        (&cut, &cut[..29]),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+/// What an auto-name may hold: letters, digits and combining marks, the `-` between words, and the punctuation
+/// UAX #29 keeps inside a word.
+fn displayable(c: char) -> bool {
+    c.is_alphanumeric()
+        || unicode_normalization::char::is_combining_mark(c)
+        || matches!(c, '-' | '.' | ':' | ',' | '_')
+}
+
+#[test]
 fn auto_names_never_hold_control_characters() {
     // The printable remains of an escape sequence (`31m`, `0m`, `9`) can be words; the controls never are.
-    let cases: [(&str, Option<&str>); 4] = [
+    let cases: [(&str, Option<&str>); 6] = [
+        ("fix \u{202E}evil\u{202C} \u{2067}bug", Some("fix-evil-bug")),
+        ("\u{FFF9}note\u{FFFB} \u{61C}arabic", Some("note-arabic")),
         (
             "\x1b[31mFix\x1b[0m the \x1b]9;evil\x07 bug",
             Some("31mfix-0m-9-evil"),
@@ -183,7 +249,7 @@ fn auto_names_never_hold_control_characters() {
         let name = auto_name(prompt);
         assert_eq!(name.as_deref(), expected, "{prompt:?}");
         assert!(
-            !name.unwrap_or_default().chars().any(char::is_control),
+            name.unwrap_or_default().chars().all(displayable),
             "{prompt:?}"
         );
     }

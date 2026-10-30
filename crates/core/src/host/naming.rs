@@ -14,6 +14,8 @@
 
 use std::collections::BTreeSet;
 
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ports::worktrees::WorktreeName;
@@ -84,6 +86,15 @@ pub const AUTO_MAX_WORDS: usize = 4;
 /// The most characters an [`auto_name`] has, counted as user-perceived characters (grapheme clusters).
 pub const AUTO_MAX_CHARS: usize = 30;
 
+/// The most bytes an [`auto_name`] has.
+pub const AUTO_MAX_BYTES: usize = 120;
+
+/// The most combining marks an [`auto_name`] keeps after each base character.
+const MAX_MARKS: usize = 2;
+
+/// The punctuation UAX #29 keeps inside a word that an [`auto_name`] keeps too, never at a word's ends.
+const IN_WORD: [char; 4] = ['.', ':', ',', '_'];
+
 /// Words a prompt is full of that say nothing about its task, lowercase and without apostrophes.
 const STOPWORDS: &[&str] = &[
     "a", "about", "all", "also", "am", "an", "and", "any", "are", "arent", "as", "at", "be",
@@ -102,23 +113,38 @@ const STOPWORDS: &[&str] = &[
 /// The display name shepherd gives a session after its first user prompt, or `None` when the prompt has no
 /// meaningful words. Only the display name: the branch keeps the name it was made with.
 ///
-/// Fenced code blocks are dropped: a line whose first non-blank characters are ```` ``` ```` or `~~~`, at any
-/// indentation, opens or closes one. So is every whitespace-separated token with a `/` or `\` in it (paths, URLs).
-/// Apostrophes are removed, so a contraction is one word, then words are the Unicode word segments (UAX #29) with a
-/// letter or digit in them, lowercased. Punctuation, symbols and control characters are never part of one, so a name
-/// never holds a control character, though the printable remains of a terminal escape sequence (`31m` of `ESC [31m`)
-/// can be words. [`STOPWORDS`] are dropped. The name is the first words joined with `-`, up to [`AUTO_MAX_WORDS`] of
-/// them and [`AUTO_MAX_CHARS`] characters: it stops at the first word that doesn't fit, even if a later one would, and
-/// a first word too long on its own is cut, never inside a grapheme cluster.
+/// The prompt is NFC-normalized. Fenced code blocks are dropped: a line whose first non-blank characters are
+/// ```` ``` ```` or `~~~`, at any indentation, opens or closes one. So is every whitespace-separated token with a `/` or
+/// `\` in it (paths, URLs). Apostrophes are removed, so a contraction is one word. Words are the Unicode word segments
+/// (UAX #29), with segments that touch joined (UAX #29 splits unspaced ideographs one by one), lowercased. Inside a
+/// word only letters and digits are kept, each with at most [`MAX_MARKS`] combining marks after it, plus the in-word
+/// punctuation `.`, `:`, `,` and `_`, never at a word's ends. Everything else is dropped: controls, invisible format
+/// characters (bidi controls, joiners, soft hyphens, BOMs, tags), symbols. The printable remains of a terminal escape
+/// sequence (`31m` of `ESC [31m`) can be words. [`STOPWORDS`] are dropped.
+///
+/// The name is the first words joined with `-`, up to [`AUTO_MAX_WORDS`] of them, [`AUTO_MAX_CHARS`] grapheme
+/// clusters and [`AUTO_MAX_BYTES`] bytes: it stops at the first word that doesn't fit, even if a later one would. A
+/// first word too long on its own is cut, never inside a grapheme cluster, and loses any in-word punctuation the cut
+/// left at its end.
 pub fn auto_name(prompt: &str) -> Option<String> {
+    let prompt: String = prompt.nfc().collect();
     let mut name = String::new();
     let mut len = 0;
-    for (n, word) in prompt_words(prompt).take(AUTO_MAX_WORDS).enumerate() {
+    for (n, word) in prompt_words(&prompt).take(AUTO_MAX_WORDS).enumerate() {
         let word_len = word.graphemes(true).count();
         if n == 0 {
-            name.extend(word.graphemes(true).take(AUTO_MAX_CHARS));
-            len = word_len.min(AUTO_MAX_CHARS);
-        } else if len + 1 + word_len <= AUTO_MAX_CHARS {
+            for grapheme in word.graphemes(true) {
+                if len == AUTO_MAX_CHARS || name.len() + grapheme.len() > AUTO_MAX_BYTES {
+                    break;
+                }
+                name.push_str(grapheme);
+                len += 1;
+            }
+            let kept = name.trim_end_matches(IN_WORD).len();
+            name.truncate(kept);
+        } else if len + 1 + word_len <= AUTO_MAX_CHARS
+            && name.len() + 1 + word.len() <= AUTO_MAX_BYTES
+        {
             name.push('-');
             name.push_str(&word);
             len += 1 + word_len;
@@ -148,8 +174,8 @@ fn prompt_words(prompt: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|word| !STOPWORDS.contains(&word.as_str()))
 }
 
-/// The words of one token, lowercased: its word segments, with segments that touch (nothing between them, as UAX #29
-/// leaves each ideograph and kana run of unspaced text) joined into one word.
+/// The words of one token, lowercased and cleaned ([`displayable`]): its word segments, with segments that touch
+/// (nothing between them, as UAX #29 leaves each ideograph and kana run of unspaced text) joined into one word.
 fn token_words(token: &str) -> Vec<String> {
     let mut words: Vec<(usize, String)> = Vec::new();
     for (start, segment) in token.unicode_word_indices() {
@@ -161,5 +187,33 @@ fn token_words(token: &str) -> Vec<String> {
             _ => words.push((start + segment.len(), segment.to_owned())),
         }
     }
-    words.into_iter().map(|(_, w)| w.to_lowercase()).collect()
+    words
+        .into_iter()
+        .map(|(_, w)| displayable(&w.to_lowercase()))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// `word` with only letters and digits (each with at most [`MAX_MARKS`] combining marks) and [`IN_WORD`] punctuation
+/// inside, see [`auto_name`]. Empty if it has no letter or digit.
+fn displayable(word: &str) -> String {
+    let mut out = String::new();
+    // Combining marks still allowed after the last kept character: none before the first base.
+    let mut marks = 0;
+    for c in word.chars() {
+        // Marks first: some (Devanagari vowel signs, Greek ypogegrammeni) are alphabetic too.
+        if is_combining_mark(c) {
+            if marks > 0 {
+                out.push(c);
+                marks -= 1;
+            }
+        } else if c.is_alphanumeric() {
+            out.push(c);
+            marks = MAX_MARKS;
+        } else if IN_WORD.contains(&c) {
+            out.push(c);
+            marks = 0;
+        }
+    }
+    out.trim_matches(IN_WORD).to_owned()
 }
