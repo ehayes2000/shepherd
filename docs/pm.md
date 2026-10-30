@@ -57,6 +57,10 @@ scripts/check.sh                       # on the merged tree, every time
 - Edit files with the Edit tool or a script that reads before it writes. Opening a file for writing truncates it (this
   once emptied plan.md; the gate now fails on empty core docs).
 
+### Smoke run (after each milestone)
+`cargo build --release -p shepherd && python3 scripts/smoke.py "$PWD/target/release/shepherd"` drives the real binary in a
+pty with an isolated temporary HOME (never the user's `~/.shepherd`), and prints PASS/FAIL per step. Extend it as features land.
+
 ### Lessons
 After each verdict, ask "what general cause produced this finding?" and make it a rule in the cheapest place that enforces it:
 a gate check or lint (best), the reviewer checklist, a skill, `CLAUDE.md`, or a decision entry. Anything a reviewer flags twice

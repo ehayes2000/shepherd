@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| (none) | M1 merged; PM smoke run of the real binary in progress | – | – | – |
+| (none) | M1 done; smoke run 12/12 passed | – | – | – |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
