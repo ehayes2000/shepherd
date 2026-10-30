@@ -494,6 +494,7 @@ mod real {
             body: ClientRequest::SessionNew(SessionNew {
                 profile: Some("shell".to_owned()),
                 cwd: None,
+                branch: None,
             }),
         });
         stream.write_all(&request).unwrap();

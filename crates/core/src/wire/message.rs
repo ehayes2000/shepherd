@@ -50,10 +50,11 @@ pub enum Method {
     WorkspaceSelect,
     WorktreeStatus,
     HostUpgrade,
+    WorktreeList,
 }
 
 impl Method {
-    pub const ALL: [Method; 10] = [
+    pub const ALL: [Method; 11] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -64,6 +65,7 @@ impl Method {
         Self::WorkspaceSelect,
         Self::WorktreeStatus,
         Self::HostUpgrade,
+        Self::WorktreeList,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -78,6 +80,7 @@ impl Method {
             Self::WorkspaceSelect => "_shepherd/workspace/select",
             Self::WorktreeStatus => "_shepherd/worktree/status",
             Self::HostUpgrade => "_shepherd/host/upgrade",
+            Self::WorktreeList => "_shepherd/worktree/list",
         }
     }
 
@@ -105,6 +108,7 @@ pub enum ClientRequest {
     WorkspaceSelect(WorkspaceSelect),
     WorktreeStatus(WorktreeCheck),
     HostUpgrade(HostUpgrade),
+    WorktreeList(WorktreeList),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -178,8 +182,14 @@ pub struct Hello {
 pub struct SessionNew {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Where it runs. A session given one gets no new worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// With `cwd`: `cwd` is a managed worktree on this branch (one `_shepherd/worktree/list` gave), and the session
+    /// runs in it as its own, recorded in its `session/created`. Ignored without `cwd`. Absent from clients older than
+    /// the finder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +243,27 @@ pub struct WorktreeStatusOk {
     /// `None` when the worktree is already gone: closing the session removes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<WorktreeStatus>,
+}
+
+/// The current workspace's managed worktrees that no open session runs in. Answered with [`WorktreeListOk`] (empty
+/// with no workspace), or [`WireError::InvalidParams`] saying why they couldn't be listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeList {}
+
+/// The host's answer to `_shepherd/worktree/list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeListOk {
+    #[serde(default)]
+    pub worktrees: Vec<WorktreeInfo>,
+}
+
+/// A managed worktree, as `_shepherd/worktree/list` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: String,
+    /// `None` when its HEAD is detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Resume an exited session's agent where it left off, in the same session. Answered with an ack, or
@@ -361,6 +392,7 @@ impl ClientRequest {
             Self::WorkspaceSelect(_) => Method::WorkspaceSelect,
             Self::WorktreeStatus(_) => Method::WorktreeStatus,
             Self::HostUpgrade(_) => Method::HostUpgrade,
+            Self::WorktreeList(_) => Method::WorktreeList,
         }
     }
 
@@ -376,6 +408,7 @@ impl ClientRequest {
             Self::WorkspaceSelect(p) => json(p),
             Self::WorktreeStatus(p) => json(p),
             Self::HostUpgrade(p) => json(p),
+            Self::WorktreeList(p) => json(p),
         }
     }
 
@@ -393,6 +426,7 @@ impl ClientRequest {
             Method::WorkspaceSelect => Self::WorkspaceSelect(invalid_params(params)?),
             Method::WorktreeStatus => Self::WorktreeStatus(invalid_params(params)?),
             Method::HostUpgrade => Self::HostUpgrade(invalid_params(params)?),
+            Method::WorktreeList => Self::WorktreeList(invalid_params(params)?),
         })
     }
 }
@@ -501,6 +535,7 @@ pub enum HostResult {
     SessionNew(SessionNewOk),
     WorktreeStatus(WorktreeStatusOk),
     Upgrade(UpgradeAnswer),
+    WorktreeList(WorktreeListOk),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -512,6 +547,7 @@ impl HostResult {
             Self::SessionNew(r) => json(r),
             Self::WorktreeStatus(r) => json(r),
             Self::Upgrade(r) => json(r),
+            Self::WorktreeList(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -522,6 +558,7 @@ impl HostResult {
             Method::SessionNew => Self::SessionNew(serde_json::from_value(result)?),
             Method::WorktreeStatus => Self::WorktreeStatus(serde_json::from_value(result)?),
             Method::HostUpgrade => Self::Upgrade(serde_json::from_value(result)?),
+            Method::WorktreeList => Self::WorktreeList(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

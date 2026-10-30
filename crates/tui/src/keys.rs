@@ -7,7 +7,7 @@
 //! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a press of the same button
 //! that went down on the same control ([`Pointer`] remembers it). A left click presses the control; a right click on a
 //! session opens its context menu at the click. Under an open popup, a click outside it dismisses it. The wheel
-//! scrolls the sidebar when no popup is open, and the profile picker or the workspace switcher over it. Only a session
+//! scrolls the sidebar when no popup is open, and the profile picker, the workspace switcher or the finder over it. Only a session
 //! that tracks the mouse gets mouse events in its pane.
 //!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
@@ -23,7 +23,7 @@ use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
 use crate::layout::{Target, hit, layout, pane_size, sidebar_rows};
-use crate::popup;
+use crate::{finder, popup};
 
 /// The prefix key. Configurable later.
 pub const PREFIX: char = 'b';
@@ -99,6 +99,9 @@ pub fn map_event(
                     first_line(text)
                 ))]
             }
+            (Some(Popup::Finder { query }), _) => {
+                vec![Intent::EditFind(format!("{query}{}", first_line(text)))]
+            }
             (Some(_), _) => Vec::new(),
             (None, Focus::Command) => vec![
                 Intent::SetFocus(Focus::Terminal),
@@ -156,6 +159,7 @@ fn map_mouse(
         Some(
             Target::Profile(_)
                 | Target::WorkspaceRow(_)
+                | Target::FinderRow(_)
                 | Target::Popup
                 | Target::Confirm
                 | Target::Dismiss
@@ -172,6 +176,10 @@ fn map_mouse(
         Some(Popup::Workspace { .. }) if over_popup => {
             let shown = popup::switcher_rows(client, window);
             vec![Intent::ScrollSwitcher { by, shown }]
+        }
+        Some(Popup::Finder { .. }) if over_popup => {
+            let shown = finder::rows(client, window);
+            vec![Intent::ScrollFinder { by, shown }]
         }
         _ => Vec::new(),
     };
@@ -209,6 +217,8 @@ fn first_line(text: &str) -> &str {
 /// A left click on `target`.
 fn click(target: Target, client: &Client) -> Vec<Intent> {
     match target {
+        Target::Search => vec![Intent::BeginFind],
+        Target::FinderRow(item) => vec![Intent::FinderChoose(item)],
         Target::Workspace => vec![Intent::BeginWorkspace],
         Target::WorkspaceRow(path) => vec![Intent::PickWorkspace(path)],
         Target::NewSession => vec![Intent::BeginNewSession],
@@ -282,7 +292,8 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
         Popup::Help => Some(Intent::Dismiss),
         Popup::Rename { name, .. } => input_key(key, name, plain, Intent::EditRename),
         Popup::Workspace { path, .. } => input_key(key, path, plain, Intent::EditWorkspacePath),
-        Popup::ConfirmClose { .. } => match key.code {
+        Popup::Finder { query } => input_key(key, query, plain, Intent::EditFind),
+        Popup::ConfirmClose { .. } | Popup::StartInWorktree { .. } => match key.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter if plain => Some(Intent::Confirm),
             KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
             _ => None,

@@ -71,7 +71,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 
 | method | params (sketch) |
 |---|---|
-| `_shepherd/session/created`   | `{ name, workspace, worktree, branch, agent, machine, profile?, cwd? }` (profile and cwd: what resume runs again; a `branch` with no `worktree` and no `cwd`: its worktree is being made, and `worktree/created` gives the cwd) |
+| `_shepherd/session/created`   | `{ name, workspace, worktree, branch, agent, machine, profile?, cwd? }` (profile and cwd: what resume runs again; a `branch` with no `worktree` and no `cwd`: its worktree is being made, and `worktree/created` gives the cwd; a `branch` with a `worktree`: it started in that existing managed worktree, which is its own from then on) |
 | `_shepherd/session/renamed`   | `{ name, auto: bool }` |
 | `_shepherd/session/closed`    | `{ worktree_removed: bool, worktree_kept? }` (`worktree_kept`: why closing kept a worktree it tried to remove) |
 | `_shepherd/session/failed`    | `{ reason }` (it never got a PTY, e.g. its worktree couldn't be made) |

@@ -592,6 +592,7 @@ pub mod builders {
             profile: "shell".to_owned(),
             agent: AgentKind::Shell,
             explicit_cwd: false,
+            worktree_branch: None,
             spawn: shell_spawn(),
             hooks: WorkspaceHooks::default(),
         }
@@ -604,6 +605,7 @@ pub mod builders {
             profile: "claude".to_owned(),
             agent: AgentKind::ClaudeCode,
             explicit_cwd: false,
+            worktree_branch: None,
             spawn: SpawnSpec {
                 command: "claude".to_owned(),
                 ..shell_spawn()

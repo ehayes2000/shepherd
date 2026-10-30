@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::{Client, MenuItem};
+use shepherd_core::client::{Client, FinderItem, MenuItem};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{MIN_COLS, MIN_ROWS};
@@ -52,7 +52,9 @@ pub fn layout(area: Rect) -> Layout {
 /// A control the mouse can click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// The sidebar's workspace, on its first line (`⌂` when collapsed): opens the switcher.
+    /// The sidebar's search field, on its first line (`⌕` when collapsed): opens the finder.
+    Search,
+    /// The sidebar's workspace, on its second line (`⌂` when collapsed): opens the switcher.
     Workspace,
     /// The sidebar's `+ New session` button (`+` when collapsed).
     NewSession,
@@ -72,7 +74,9 @@ pub enum Target {
     Profile(String),
     /// A workspace's row in the open workspace switcher.
     WorkspaceRow(PathBuf),
-    /// The open dialog's button that answers yes: `[Close]`, `[Save]` or `[Open]`.
+    /// A result's row in the open finder.
+    FinderRow(FinderItem),
+    /// The open dialog's button that answers yes: `[Close]`, `[Save]`, `[Open]` or `[Start session]`.
     Confirm,
     /// The open dialog's button that cancels it: `[Cancel]`, or help's `[Close]`.
     Dismiss,
@@ -106,6 +110,9 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     }
     if layout.pane.contains(at) {
         return Some(Target::Terminal);
+    }
+    if sidebar::search_field(layout).contains(at) {
+        return Some(Target::Search);
     }
     if sidebar::workspace_button(client, layout).contains(at) {
         return Some(Target::Workspace);

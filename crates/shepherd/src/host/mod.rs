@@ -16,6 +16,7 @@ pub mod swap;
 mod worker;
 
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -106,6 +107,25 @@ pub fn prepare_root(root: &Path) -> Result<(), HostStartError> {
     private_fs::ensure_private_dir(root).map_err(|e| root_error(root, e))
 }
 
+/// Makes the managed worktrees' root `dir` if it is missing (0700, decision 0010; an existing one is left as it is),
+/// and resolves it (`..`, symlinks), once, before the
+/// `Worktrees` port is built on it: every path the port makes, lists or inspects then has one spelling, the same as
+/// the resolved cwds clients ask for, which is what core compares to tell which worktrees sessions use.
+pub fn resolve_worktrees_root(dir: &Path) -> Result<PathBuf, HostStartError> {
+    let failed = |e: std::io::Error| HostStartError::Root {
+        path: dir.to_path_buf(),
+        reason: e.to_string(),
+    };
+    if !dir.exists() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(dir)
+            .map_err(failed)?;
+    }
+    std::fs::canonicalize(dir).map_err(failed)
+}
+
 /// Opens `<root>/host.log` for appending, creating it `0600`. `root` must already be prepared.
 pub fn open_log_file(root: &Path) -> Result<File, HostStartError> {
     let path = root.join(LOG_FILE);
@@ -153,7 +173,7 @@ fn open_inner(
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
     let settings = settings(root, home, config, shepherd, None);
     let pty = PortablePty::new(tx.pty_sink());
-    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
+    let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
     HostRuntime::start(
         pty, worktrees, commands, link, log, RealEnv, settings, tx, rx,
@@ -213,7 +233,12 @@ fn open_adopted_inner(
     );
     // The path the previous image execed is this one's startup path: `current_exe()` may already name another file.
     let settings = settings(root, home, config, file.exe.clone(), warning);
-    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
+    // Sessions are adopted by now, so a root that can't be resolved doesn't stop the takeover: it is used as it is.
+    let dir = root.join(WORKTREES_DIR);
+    let worktrees = GitWorktrees::new(resolve_worktrees_root(&dir).unwrap_or_else(|error| {
+        tracing::error!(%error, "cannot resolve the worktrees root after updating in place");
+        dir
+    }));
     let commands = ShellCommands::new();
     HostRuntime::adopt(
         pty, worktrees, commands, link, log, RealEnv, settings, tx, rx, adoption,

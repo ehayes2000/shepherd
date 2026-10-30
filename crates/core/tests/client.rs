@@ -1682,6 +1682,7 @@ fn new_session(profile: Option<&str>) -> ClientRequest {
     ClientRequest::SessionNew(SessionNew {
         profile: profile.map(str::to_owned),
         cwd: None,
+        branch: None,
     })
 }
 

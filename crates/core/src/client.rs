@@ -32,8 +32,19 @@
 //! the dialog and the offer go when the link drops, and a hello that finds no reason closes the dialog, so a click
 //! can only ever stop the host it was about.
 //!
+//! Finding (T26): the search field opens the finder ([`Popup::Finder`]), which matches what is typed against every
+//! session and the current workspace's orphan worktrees (managed ones no open session runs in), ranked by
+//! [`finder::rank`]. Opening it asks the host for the orphans ([`Client::orphans`]); an answer for a finder that has
+//! closed since is dropped. Choosing a session selects it; choosing an orphan offers to start a session in it
+//! ([`Popup::StartInWorktree`]), which asks for one with that worktree as its cwd and its branch, so the host makes no
+//! new worktree and records the branch.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
+
+pub mod finder;
+
+pub use finder::{FinderItem, Orphan, Orphans};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -51,7 +62,7 @@ use crate::wire::{
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
     ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename,
     SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
-    WorkspaceSelect, WorktreeCheck,
+    WorkspaceSelect, WorktreeCheck, WorktreeList,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -122,6 +133,19 @@ pub enum Intent {
         by: i32,
         shown: usize,
     },
+    /// Scroll the open finder's results by `by` rows (down for positive), when it shows `shown` at once, from the TUI's
+    /// layout. Ignored when the finder isn't open.
+    ScrollFinder {
+        by: i32,
+        shown: usize,
+    },
+    /// Open the finder (a click on the sidebar's search field), and ask the host for the orphan worktrees.
+    BeginFind,
+    /// Replace the finder's query.
+    EditFind(String),
+    /// Choose one of the open finder's results: select a session, or offer to start one in an orphan worktree. Ignored
+    /// unless it is one of the results.
+    FinderChoose(FinderItem),
     /// Start a session with the default profile.
     NewSession,
     /// The `+ New session` button: open the profile picker, or, with at most one profile, start a session at once.
@@ -152,8 +176,9 @@ pub enum Intent {
     EditWorkspacePath(String),
     /// Select this workspace, from the open switcher's list of those used before. Ignored when the switcher isn't open.
     PickWorkspace(PathBuf),
-    /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path. A close whose worktree
-    /// would lose work keeps the worktree.
+    /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path, choose the finder's
+    /// first result, or start the offered session in a worktree. A close whose worktree would lose work keeps the
+    /// worktree.
     Confirm,
     /// Close the session of the open close confirmation, removing its worktree even though that loses what the
     /// confirmation showed. Ignored unless it showed something removing would lose.
@@ -260,6 +285,14 @@ pub enum Popup {
     RestartHost {
         why: HostOutdated,
     },
+    /// The finder: what has been typed, and the results for it ([`Client::finder`]).
+    Finder {
+        query: String,
+    },
+    /// Start a session in this orphan worktree?
+    StartInWorktree {
+        worktree: Orphan,
+    },
 }
 
 /// Why the restart dialog offers to restart the host (spike T36's table).
@@ -341,6 +374,8 @@ pub struct ClientSession {
     pub warning: Option<String>,
     /// Its worktree, once made.
     pub worktree: Option<PathBuf>,
+    /// Its worktree's branch, see [`HostSession::branch`].
+    pub branch: Option<String>,
     /// It is closing, and its worktree is being removed (or kept).
     pub removing_worktree: bool,
 }
@@ -397,6 +432,13 @@ pub struct Client {
     picker_scroll: usize,
     /// The index of the first workspace the open switcher shows.
     switcher_scroll: usize,
+    /// The index of the first result the open finder shows.
+    finder_scroll: usize,
+    /// The orphan worktrees, while the finder is open, and the request asking for them while it is unanswered.
+    orphans: Option<Orphans>,
+    orphans_request: Option<RequestId>,
+    /// The machine of the connected host, from its hello answer.
+    host_machine: Option<MachineId>,
     notice: Option<Notice>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
@@ -464,6 +506,10 @@ impl Client {
             sidebar_rows: None,
             picker_scroll: 0,
             switcher_scroll: 0,
+            finder_scroll: 0,
+            orphans: None,
+            orphans_request: None,
+            host_machine: None,
             notice: None,
             profiles: Vec::new(),
             default_profile: None,
@@ -561,6 +607,37 @@ impl Client {
     /// The index of the first workspace the open switcher shows, before the TUI fits it to the switcher's height.
     pub fn switcher_scroll(&self) -> usize {
         self.switcher_scroll
+    }
+
+    /// The index of the first result the open finder shows, before the TUI fits it to the finder's height.
+    pub fn finder_scroll(&self) -> usize {
+        self.finder_scroll
+    }
+
+    /// The open finder's results for its query, best first: see [`finder::results`]. Empty when it isn't open.
+    pub fn finder(&self) -> Vec<FinderItem> {
+        let Some(Popup::Finder { query }) = &self.popup else {
+            return Vec::new();
+        };
+        finder::results(
+            query,
+            &self.sessions,
+            self.host_machine.as_ref(),
+            self.orphans.as_ref(),
+        )
+    }
+
+    /// The orphan worktrees, as far as the open finder knows. `None` when it isn't open.
+    pub fn orphans(&self) -> Option<&Orphans> {
+        match self.popup {
+            Some(Popup::Finder { .. }) => self.orphans.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The machine of the connected host, once it has answered the hello.
+    pub fn host_machine(&self) -> Option<&MachineId> {
+        self.host_machine.as_ref()
     }
 
     /// The terminal view's size, once the runtime has reported it.
@@ -737,6 +814,10 @@ impl Client {
                 if dropped.is_some() {
                     self.clear_updating();
                 }
+                // Its answer went with the link.
+                if self.orphans_request.take().is_some() {
+                    self.orphans = Some(Orphans::Failed(NOT_CONNECTED.to_owned()));
+                }
                 // It was about the host that just went: the next hello decides afresh.
                 self.close_restart_dialog();
                 self.restart_offer = None;
@@ -793,6 +874,7 @@ impl Client {
                     self.set_notice(warning.clone());
                 }
                 self.host_warning = ok.warning;
+                self.host_machine = Some(ok.machine.clone());
                 self.set_profiles(ok.profiles, ok.default_profile);
                 self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
@@ -845,6 +927,24 @@ impl Client {
                         },
                         Err(e) => CloseCheck::Failed(refusal(e)),
                         Ok(other) => CloseCheck::Failed(format!("unexpected answer {other:?}")),
+                    });
+                }
+                Vec::new()
+            }
+            (Method::WorktreeList, result) => {
+                if self.orphans_request.take_if(|asked| *asked == id).is_some() {
+                    self.orphans = Some(match result {
+                        Ok(HostResult::WorktreeList(ok)) => Orphans::Listed(
+                            ok.worktrees
+                                .into_iter()
+                                .map(|w| Orphan {
+                                    path: PathBuf::from(w.path),
+                                    branch: w.branch,
+                                })
+                                .collect(),
+                        ),
+                        Err(e) => Orphans::Failed(refusal(e)),
+                        Ok(other) => Orphans::Failed(format!("unexpected answer {other:?}")),
                     });
                 }
                 Vec::new()
@@ -1135,6 +1235,7 @@ impl Client {
                     failed: s.failed,
                     warning: s.warning,
                     worktree: s.worktree,
+                    branch: s.branch,
                     removing_worktree: s.removing_worktree,
                 }
             })
@@ -1325,6 +1426,22 @@ impl Client {
                 }
                 Vec::new()
             }
+            Intent::ScrollFinder { by, shown } => {
+                if matches!(self.popup, Some(Popup::Finder { .. })) {
+                    let max = self.finder().len().saturating_sub(shown);
+                    self.finder_scroll = scrolled(self.finder_scroll.min(max), by, max);
+                }
+                Vec::new()
+            }
+            Intent::BeginFind => self.begin_find(),
+            Intent::EditFind(text) => {
+                if let Some(Popup::Finder { query }) = &mut self.popup {
+                    *query = text;
+                    self.finder_scroll = 0;
+                }
+                Vec::new()
+            }
+            Intent::FinderChoose(item) => self.finder_choose(item),
             Intent::NewSession => self.new_session(None),
             Intent::BeginNewSession => match &self.profiles[..] {
                 [] => self.new_session(None),
@@ -1437,6 +1554,14 @@ impl Client {
                     self.popup = Some(Popup::Workspace { path, error });
                     self.select_workspace(typed)
                 }
+                Some(finder @ Popup::Finder { .. }) => {
+                    self.popup = Some(finder);
+                    match self.finder().into_iter().next() {
+                        Some(first) => self.finder_choose(first),
+                        None => Vec::new(),
+                    }
+                }
+                Some(Popup::StartInWorktree { worktree }) => self.start_in(worktree),
                 // Only a click on its button restarts the host: a key that confirms other dialogs leaves it open.
                 Some(restart @ Popup::RestartHost { .. }) => {
                     self.popup = Some(restart);
@@ -1487,6 +1612,56 @@ impl Client {
             }
             Intent::Quit => vec![ClientCommand::Quit],
         }
+    }
+
+    /// Opens the finder with nothing typed, and asks the host for the orphan worktrees.
+    fn begin_find(&mut self) -> Vec<ClientCommand> {
+        self.popup = Some(Popup::Finder {
+            query: String::new(),
+        });
+        self.finder_scroll = 0;
+        if self.connection != Connection::Ready {
+            self.orphans = Some(Orphans::Failed(NOT_CONNECTED.to_owned()));
+            self.orphans_request = None;
+            return Vec::new();
+        }
+        let (id, ask) = self.request_with_id(ClientRequest::WorktreeList(WorktreeList::default()));
+        self.orphans = Some(Orphans::Loading);
+        self.orphans_request = Some(id);
+        vec![ask]
+    }
+
+    /// Chooses `item`, if it is one of the open finder's results: selects a session and gives it the keys, or offers
+    /// to start a session in an orphan worktree.
+    fn finder_choose(&mut self, item: FinderItem) -> Vec<ClientCommand> {
+        if !self.finder().contains(&item) {
+            return Vec::new();
+        }
+        match item {
+            FinderItem::Session(id) => {
+                self.popup = None;
+                self.focus = Focus::Terminal;
+                self.chosen = true;
+                self.select(Some(id))
+            }
+            FinderItem::Worktree(worktree) => {
+                self.popup = Some(Popup::StartInWorktree { worktree });
+                Vec::new()
+            }
+        }
+    }
+
+    /// Asks the host for a session with the default profile in orphan `worktree`, on its branch.
+    fn start_in(&mut self, worktree: Orphan) -> Vec<ClientCommand> {
+        // Its path came from the wire as text.
+        let Some(cwd) = worktree.path.to_str() else {
+            return Vec::new();
+        };
+        self.user_request(ClientRequest::SessionNew(SessionNew {
+            profile: None,
+            cwd: Some(cwd.to_owned()),
+            branch: worktree.branch,
+        }))
     }
 
     /// Opens the rename popup for `session`, starting from its current name, if it's listed.
@@ -1564,7 +1739,10 @@ impl Client {
 
     /// Starts a session running `profile`, or the host's default.
     fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
-        self.user_request(ClientRequest::SessionNew(SessionNew { profile, cwd: None }))
+        self.user_request(ClientRequest::SessionNew(SessionNew {
+            profile,
+            ..SessionNew::default()
+        }))
     }
 
     /// Asks the host to select workspace `path`. The switcher stays open until it answers.
@@ -1575,7 +1753,7 @@ impl Client {
     /// A request the user asked for. Dropped, with a notice, while not connected.
     fn user_request(&mut self, body: ClientRequest) -> Vec<ClientCommand> {
         if self.connection != Connection::Ready {
-            self.set_notice("not connected to the shepherd host".to_owned());
+            self.set_notice(NOT_CONNECTED.to_owned());
             return Vec::new();
         }
         vec![self.request(body)]
@@ -1592,6 +1770,8 @@ fn refusal(e: WireError) -> String {
     }
 }
 
+/// Why something can't be asked of the host now.
+const NOT_CONNECTED: &str = "not connected to the shepherd host";
 /// What the user is told when the host doesn't know a request's method.
 const UPDATING: &str = "host is older — updating…";
 const UPDATED: &str = "host updated";

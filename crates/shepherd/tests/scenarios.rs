@@ -368,12 +368,12 @@ fn keys_create_and_switch_sessions_and_the_screen_shows_the_selected_one() {
         ("hello".into(), "world".into())
     );
     assert_eq!(text(&view, screen.clone(), 0), "world");
-    // Newest first, under the two header lines: s2 (`shell-2`) on top, s1 below it and selected.
+    // Newest first, under the three header lines: s2 (`shell-2`) on top, s1 below it and selected.
     let buf = view.terminal().backend().buffer().clone();
-    assert!(text(&view, side.clone(), 2).ends_with("shell-2"), "{buf:?}");
-    assert!(text(&view, side.clone(), 4).ends_with("shell-1"), "{buf:?}");
+    assert!(text(&view, side.clone(), 3).ends_with("shell-2"), "{buf:?}");
+    assert!(text(&view, side.clone(), 5).ends_with("shell-1"), "{buf:?}");
     let highlighted = |y: u16| buf[(2, y)].bg != ratatui::style::Color::Reset;
-    assert_eq!((highlighted(2), highlighted(4)), (false, true));
+    assert_eq!((highlighted(3), highlighted(5)), (false, true));
 
     h.keys(&[ctrl('b'), ch('k')]);
     h.draw(&mut view);
@@ -600,6 +600,7 @@ fn clicking_new_session_then_a_profile_starts_a_session_with_that_profile() {
         [SessionNew {
             profile: Some("shell".to_owned()),
             cwd: None,
+            branch: None,
         }]
     );
     assert_eq!(h.host(FakeHost::sessions).len(), 1);
