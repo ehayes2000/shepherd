@@ -9,7 +9,9 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T17 launch Claude sessions | building | task/t17-launch-claude @ a21abbc | 0 | Split: picker → T17b (after T34). PM does real-claude check |
+| F21 collapsed sidebar targets | building | task/f21-collapsed-sidebar @ HEAD | 0 | – |
+| F07 palette in snapshots | building | task/f07-palette-snapshots @ HEAD | 0 | – |
+| T17 launch Claude sessions | in review | task/t17-launch-claude @ dc247bf (on 069e3b6) | 1 | PM-accepted: run files written by runtime (no port); default agent claude; exec-form hooks; names/agent field/startup sweep → F22 |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -151,7 +153,7 @@ acceptance:
 scope: crates/term
 
 ### F07: Carry palette colours and the empty-stack kitty flags in snapshots
-status: todo
+status: in-progress
 depends: F06
 touches: term
 goal: A reattached client draws colours set by programs, and answers kitty queries, the same as the host.
@@ -336,7 +338,7 @@ after `Disconnected`, so they already agree. Outcome: no fake/adapter change; th
 `a_host_that_drops_the_connection_before_answering_is_a_disconnect` now explains the sink copy (it keeps the channel open so
 only the `Disconnected` event can end the test).
 ### F21: Mouse targets in the collapsed sidebar
-status: todo
+status: in-progress
 depends: T34
 touches: tui::sidebar, tui::layout
 goal: In the narrow layout (sidebar collapsed to glyphs) Detach and help have no click target, and rows have no `×`
@@ -347,6 +349,18 @@ acceptance:
 - Popups that close a session also close when the host removes that session meanwhile (seen in T34; applies to keyboard and
   mouse popups). Core table test.
 scope: crates/core (client), crates/tui
+
+### F22: Agent session polish from T17
+status: todo
+depends: T17
+touches: core::host (new session spec), shepherd::host (run files)
+goal: Small gaps left by T17.
+acceptance:
+- Placeholder names follow the profile (`claude-<n>`, not `shell-<n>`), and `session/created.agent` records the agent kind.
+- `wire::SessionNew.cwd` is honored (validated: must be an existing directory; otherwise InvalidParams).
+- Run directories are removed when the PTY exits as well as on close, and stale `<root>/run/*` dirs with no live session
+  are swept at host startup (never following symlinks; never outside `<root>/run`).
+scope: crates/core, crates/shepherd, crates/testkit
 
 ## Out of scope for the initial feature set
 
