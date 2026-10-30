@@ -22,7 +22,7 @@
 //! turns prompts off: `GH_PROMPT_DISABLED=1` (<https://cli.github.com/manual/gh_help_environment>), plus an empty
 //! `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT=0` for the git gh runs to read the repo's remotes. `GH_NO_UPDATE_NOTIFIER`,
 //! `GH_NO_EXTENSION_UPDATE_NOTIFIER`, `GH_SPINNER_DISABLED` and `NO_COLOR` keep it quiet. `GH_REPO` (which would point gh
-//! at another repo than the checkout) and the git variables that would point git elsewhere are removed. gh reads its own
+//! at another repo than the checkout), `CLICOLOR_FORCE` and `GH_FORCE_TTY` (which would colour or format the JSON) and the git variables that would point git elsewhere are removed. gh reads its own
 //! config and credentials as it always does; this port never reads or writes them. A call that runs past its timeout is
 //! killed with its whole process group. Output goes to temp files rather than pipes.
 
@@ -49,9 +49,13 @@ const MAX_OUTPUT: u64 = 8 * 1024 * 1024;
 /// gh's exit code when a command needs authentication.
 const NEEDS_AUTH: i32 = 4;
 
-/// Removed from gh's environment: they would point it, or the git it runs, at something else than the checkout.
+/// Removed from gh's environment: they would point it, or the git it runs, at something else than the checkout, or
+/// make it print something other than plain JSON.
 const REMOVED_ENV: &[&str] = &[
     "GH_REPO",
+    // Would colour `--json` output (or format it for a terminal), which then doesn't parse.
+    "CLICOLOR_FORCE",
+    "GH_FORCE_TTY",
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -363,7 +367,9 @@ printf '%s\n' "$@" > "$dir/args"
 pwd -P > "$dir/cwd"
 echo "$$ $(/bin/ps -o pgid= -p $$)" > "$dir/group"
 if (: < /dev/tty) 2>/dev/null; then echo yes > "$dir/tty"; else echo no > "$dir/tty"; fi
+if [ /dev/fd/0 -ef /dev/null ]; then echo null > "$dir/stdin"; else echo other > "$dir/stdin"; fi
 case "$mode" in
+  flooding) printf '['; /bin/dd if=/dev/zero bs=1048576 count=9 2>/dev/null | /usr/bin/tr '\0' ' '; printf ']'; exit 0 ;;
   signed-out) echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 4 ;;
   failing) echo 'HTTP 502: Bad Gateway' >&2; exit 1 ;;
 esac
@@ -398,7 +404,11 @@ if [ -f "$dir/prs/$head.json" ]; then /bin/cat "$dir/prs/$head.json"; else echo 
             std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
             let fixture = Self {
                 // A generous liveness bound: under parallel load a shell script can take long to start.
-                port: GhForge::new().with_search_path(&bin).with_timeout(LIVENESS),
+                // Nothing of this process's environment reaches the stand-in, which writes what it gets to disk.
+                port: GhForge::new()
+                    .with_search_path(&bin)
+                    .with_inherited_env(Vec::new())
+                    .with_timeout(LIVENESS),
                 tmp,
                 prs: Vec::new(),
             };
@@ -503,19 +513,6 @@ if [ -f "$dir/prs/$head.json" ]; then /bin/cat "$dir/prs/$head.json"; else echo 
         fn hang(&mut self) {
             self.set_mode("hanging");
             self.port = self.port.clone().with_timeout(Duration::from_millis(500));
-        }
-    }
-
-    impl Drop for GhFixture {
-        fn drop(&mut self) {
-            // A hanging stand-in's sleep, if the port failed to kill it.
-            if let Ok(pid) = std::fs::read_to_string(self.dir().join("sleep.pid"))
-                && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
-                && sleep_alive(pid)
-            {
-                // SAFETY: plain syscall, on the sleep our own stand-in started and recorded.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
         }
     }
 
@@ -691,16 +688,43 @@ if [ -f "$dir/prs/$head.json" ]; then /bin/cat "$dir/prs/$head.json"; else echo 
             var("GH_REPO", "someone/else"),
             var("GIT_DIR", "/elsewhere/.git"),
             var("GIT_CONFIG_KEY_0", "core.askPass"),
+            var("CLICOLOR_FORCE", "1"),
+            var("GH_FORCE_TTY", "100%"),
             var("T27_KEPT", "kept"),
         ]);
         f.ask("b").unwrap();
         let env = f.recorded("env");
-        for gone in ["GH_REPO=", "GIT_DIR=", "GIT_CONFIG_KEY_0="] {
+        for gone in [
+            "GH_REPO=",
+            "GIT_DIR=",
+            "GIT_CONFIG_KEY_0=",
+            "CLICOLOR_FORCE=",
+            "GH_FORCE_TTY=",
+        ] {
             assert!(
                 !env.lines().any(|l| l.starts_with(gone)),
                 "{gone} reached gh"
             );
         }
         assert!(env.lines().any(|l| l == "T27_KEPT=kept"), "{env}");
+    }
+
+    #[test]
+    fn gh_reads_nothing_from_stdin() {
+        let f = GhFixture::new();
+        f.ask("b").unwrap();
+        assert_eq!(f.recorded("stdin").trim(), "null");
+    }
+
+    #[test]
+    fn output_past_the_cap_is_an_error_even_if_it_would_parse() {
+        let f = GhFixture::new();
+        // Nine MiB of JSON whitespace around an empty list: it parses, but is more than the port reads.
+        f.set_mode("flooding");
+        let got = f.ask("b");
+        assert!(
+            matches!(&got, Err(ForgeError::Other(why)) if why.contains("too much")),
+            "{got:?}"
+        );
     }
 }

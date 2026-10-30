@@ -161,7 +161,18 @@ pub fn open(
     home: PathBuf,
     login_shell: Option<String>,
 ) -> Result<RealHost, HostStartError> {
-    open_inner(root, home, login_shell)
+    open_with_forge(root, home, login_shell, GhForge::new())
+}
+
+/// [`open`], asking `forge` about pull requests instead of the `gh` on `PATH`: for tests on a real host, which must
+/// never reach the real `gh`.
+pub fn open_with_forge(
+    root: &Path,
+    home: PathBuf,
+    login_shell: Option<String>,
+    forge: GhForge,
+) -> Result<RealHost, HostStartError> {
+    open_inner(root, home, login_shell, forge)
         .inspect_err(|e| tracing::error!(error = %e, "host failed to start"))
 }
 
@@ -169,6 +180,7 @@ fn open_inner(
     root: &Path,
     home: PathBuf,
     login_shell: Option<String>,
+    forge: GhForge,
 ) -> Result<RealHost, HostStartError> {
     prepare_root(root)?;
     let log = JsonlEventLog::open(root).map_err(|e| log_error(root, e))?;
@@ -183,16 +195,7 @@ fn open_inner(
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
     HostRuntime::start(
-        pty,
-        worktrees,
-        commands,
-        GhForge::new(),
-        link,
-        log,
-        RealEnv,
-        settings,
-        tx,
-        rx,
+        pty, worktrees, commands, forge, link, log, RealEnv, settings, tx, rx,
     )
     .map_err(|e| start_error(root, e))
 }

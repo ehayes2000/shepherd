@@ -193,3 +193,27 @@ fn a_closed_session_is_no_longer_polled() {
     s.wait(MINUTE * 10);
     assert_eq!(s.calls(), 0);
 }
+
+#[test]
+fn a_restart_that_records_nothing_still_checks_overdue_sessions_at_once() {
+    let mut s = setup(FakeForge::new());
+    let session = s.session.clone();
+    s.client.input(&session, b"exit\r");
+    s.h.step();
+    assert!(!s.h.runtime().pty().is_running(&session));
+    s.wait(MINUTE);
+    assert_eq!(s.calls(), 1);
+    let entries = |h: &HostHarness| -> usize {
+        let log = h.log();
+        log.logs()
+            .unwrap()
+            .into_iter()
+            .map(|id| log.read(id, Seq::ZERO).unwrap().len())
+            .sum()
+    };
+    let before = entries(&s.h);
+    s.h.restart();
+    // Its PTY had already exited, so the new host appended nothing at start: no append scheduled the check.
+    assert_eq!(entries(&s.h), before, "the restart appended something");
+    assert_eq!(s.calls(), 2, "the restarted host asks at once");
+}

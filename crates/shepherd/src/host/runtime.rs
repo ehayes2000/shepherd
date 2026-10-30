@@ -1460,8 +1460,7 @@ impl<
         if self.quiet_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
             self.tick_quiet();
         }
-        if self.pr_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() && !self.swapping
-        {
+        if self.pr_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
             self.tick_pr();
         }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
