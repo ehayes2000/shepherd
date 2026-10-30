@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
-| F19 drop translator state | building | task/f19-drop-translators @ 64d2a42 | 0 | – |
 | F07 palette in snapshots | fixing (CHANGES) | task/f07-palette-snapshots @ 694310a | 1 | Blocking: kitty_top refresh in expire_sync untested |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T34 | 2 | same-button release rule untested; long-name truncation untested |
 | F21 | 1 | – |
 | T17 | 1 | 4 untested defensive lines in run_files (→ F22) |
+| F19 | PM spot check | – |
 
 ## Milestones
 
@@ -326,7 +326,7 @@ notes: `LaunchError` gains `HostFailed(String)` (additive). The fake launcher ca
 contract case for it if the contract suite covers error variants.
 
 ### F19: Drop hook translator state when a session closes
-status: in-progress
+status: done (b813457)
 depends: T16
 touches: core::agents (Translators), shepherd::host
 goal: `Translators` keeps one translator per session for the life of the host run, even after the session closes.
