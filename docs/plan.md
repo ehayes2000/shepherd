@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T25b cleanup view | building | task/t25b-cleanup @ HEAD | 0 | – |
-| F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ HEAD | 0 | – |
+| T25b cleanup view | building | task/t25b-cleanup @ 7b15652 | 0 | – |
+| F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ 7b15652 | 0 | – |
 | T27 PR status | in review | task/t27-pr-status @ dc0b09d (on 022d04f) | 1 | PM-accepted: gh pr list flags; display choices; Unavailable clears, errors keep; Worker<W,T> |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
