@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T27 PR status | building | task/t27-pr-status @ 62595e5 | 0 | – |
 | F33 hooks concurrent + bounded | building | task/f33-hooks @ 62595e5 | 0 | – |
-| T26 search and open | re-review (round 5) | task/t26-search @ b5a2324 (on ef3d776) | 5 | real-host test via host::open; 0700 dir; replay resolves old paths. Builder's fixture briefly set core.bare=true on the real repo (restored, verified) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T26 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
 | T36b | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
 | T37 | 2 | inherited GIT_ASKPASS could hang uncapped creates; 2-reader FIFO gate hang; restack dropped edits |
 | T36a | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
@@ -747,6 +747,19 @@ acceptance:
 - Make the bound a generous liveness bound (or count progress instead of total time) so the case still fails if backpressure
   breaks; 0 failures in two 24-copy rounds of the whole adapters binary.
 scope: crates/testkit, crates/adapters
+
+### F39: T26 leftovers
+status: todo
+depends: T26
+touches: shepherd::host (replay), shepherd tests
+goal: Small gaps from the T26 final review.
+acceptance:
+- The replay test also covers `session/created`'s `worktree` and `cwd` (adopted / explicit-cwd sessions recorded with a
+  symlinked spelling).
+- A test-only way to give the real host an isolated git environment (HOME, GIT_CONFIG_GLOBAL/NOSYSTEM) so real-host tests
+  never read the user's global git config or hooks.
+- A detached orphan worktree (no branch) can be adopted and owned.
+scope: crates/shepherd, crates/core
 
 ## Out of scope for the initial feature set
 
@@ -1504,7 +1517,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### T26: Search and open
-status: in-progress
+status: done (103ca34)
 depends: T13, T21
 touches: core::client (finder), tui::finder
 goal: Find and jump to any session or worktree quickly.
