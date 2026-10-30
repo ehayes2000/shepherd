@@ -9,9 +9,10 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| (none) | M1 done; smoke run 12/12 passed | – | – | – |
+| (none) | M1 done; smoke run 12/12 passed. User run blocked by v1 `~/.shepherd` (0755) with a silent failure → F18 | – | – | – |
 
-Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
+Next up: F18 and T33 (point-and-click, decision 0014) in parallel, then T34; M2 (T16, T17, F14, T18b, F11) after. T33/T34 touch
+tui and core::client, so they don't run alongside T17's profile picker.
 
 ## Completed task log
 
@@ -41,6 +42,7 @@ Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the P
 |---|---|---|
 | **M0 Foundation** | Workspace scaffolded, gate enforced, two open questions answered | T00–T02 |
 | **M1 Log + host/client skeleton** | ACP++ log, host daemon, and a TUI that creates a session running a shell and swaps between sessions | T03–T13 |
+| **M1.5 Point and click** | Everything in M1 can be done with the mouse: click rows, buttons, menus and dialog buttons (decision 0014) | T33–T34 |
 | **M2 Agents** | Claude Code and Codex run in sessions with live status in the sidebar, and resume after a host restart | T14–T19 |
 | **M3 Workspaces & worktrees** | Every new session gets a managed worktree from the latest origin default branch. Includes naming, cleanup, search, and PR display | T20–T27 |
 | **M4 Multi-machine** | Named machines, peers over iroh, and a single sidebar that drives sessions on any machine | T28–T32 |
@@ -282,6 +284,30 @@ acceptance:
 - Reproduce and find the cause: a git timeout, or a real race. If it's a timeout under extreme load, make the fixture's bounds and
   error reporting robust (print the actual error). If it's a race, fix it. Then 0 failures in 5 rounds of 24 parallel copies.
 scope: crates/adapters, crates/testkit
+
+### F18: Host startup errors reach the user
+status: ready
+depends: T12
+touches: adapters::launcher, core::ports::launcher, core::client, shepherd::client, shepherd::host
+goal: When the auto-launched host can't start (e.g. `~/.shepherd` is 0755), the user sees the host's own error message instead
+of "connecting…" and a bare exit. Found in the user's first run.
+acceptance:
+- The real launcher gives the host a pipe as stderr. The host writes startup errors there (it already prints them via
+  `report`), and once it is serving (socket bound, log open) it redirects its stderr to `/dev/null`, which closes the pipe.
+- `launch` reads that pipe until EOF. EOF with no bytes means the host started: `Ok(())`. Bytes followed by EOF mean it failed:
+  `LaunchError::HostFailed(String)` with the text (trimmed, capped at e.g. 4 KiB). A generous liveness bound (e.g. 10 s) applies,
+  never a measurement; hitting it returns `Ok(())` and the connect retries decide.
+- Adapter tests with stand-in scripts: one prints an error and exits 1 → `HostFailed` with that text; one closes stderr then keeps
+  running → `Ok`; one that never writes and execs `sleep` → `Ok` within the bound. The existing "host outlives the client" test
+  still holds.
+- The client shows `HostFailed`'s message on its error screen and, after restoring the terminal, prints it to stderr and exits
+  non-zero. A core table test for the `LaunchFailed` → notice/quit path; a scenario test with a fake launcher that fails.
+- An end-to-end test: `shepherd` with a temp HOME whose `.shepherd` is 0755 exits non-zero and its stderr contains
+  `chmod 700`. (Never the real `~/.shepherd`.)
+scope: crates/core (port error variant, client), crates/adapters (launcher), crates/shepherd (host stderr handoff, client exit)
+out of scope: changing the 0700 policy (decision 0010); fixing the user's directory automatically.
+notes: `LaunchError` gains `HostFailed(String)` (additive). The fake launcher can be told to fail with `HostFailed`. Add a
+contract case for it if the contract suite covers error variants.
 
 ## Out of scope for the initial feature set
 
@@ -658,6 +684,67 @@ notes: The status glyph shapes and colors are decided in this task and recorded 
 
 ---
 
+## M1.5 Point and click
+
+Decision 0014: every action is reachable with the mouse. The `ctrl-b` bindings from T13 stay as they are.
+
+### T33: Clickable sidebar and terminal focus
+status: ready
+depends: T13
+touches: tui::layout, tui::sidebar, tui::keys (mouse), core::client, shepherd::terminal
+goal: Click a session to switch to it, click a `+ New session` button to make one, click the terminal to type in it.
+acceptance:
+- Mouse capture is on for the whole client lifetime (not only when the session asks for mouse), and still restored on every
+  exit path. Update `terminal.rs` and its tests.
+- The sidebar has a header row with a `+ New session` button. Clicking it (left button, on release inside the same control it
+  was pressed on) emits the same intent as `ctrl-b n`.
+- Left-clicking a session row (either of its 2 lines) selects that session and sets focus to Terminal. Clicking the already
+  selected row only sets focus. Clicking empty sidebar space does nothing.
+- The wheel over the sidebar scrolls the session list when it's longer than the sidebar (scroll offset is client view state in
+  core; selection keeps itself visible). Rows below the fold are reachable by wheel then click.
+- In the terminal pane: if the session has mouse tracking on, events are encoded to it as today. If not, a left click sets
+  focus to Terminal and nothing is sent; the wheel is not sent either (scrollback is out of scope).
+- In the narrow layout (sidebar collapsed to glyphs), clicking a glyph row selects it and the `+` glyph creates a session.
+- The empty-state hint and the help popup say "click + New session" first and mention the keys second. Help mentions
+  shift-drag / option-drag for selecting text.
+- Hit testing is a pure function `hit(layout, &ClientState, col, row) -> Option<Target>` in `tui`, computed from the same
+  layout and scroll offset `render` uses. Tests click the cell where each control is rendered (find it in the `TestBackend`
+  buffer, don't hard-code coordinates) and assert the intent. Include off-by-one tests on row and button boundaries.
+- Snapshots: updated sidebar with the header button, a scrolled list, and the narrow layout.
+- Scenario (client runtime with `TestBackend`): click `+ New session` twice, click the first row, type, and the first session
+  gets the input.
+scope: crates/core (client), crates/tui, crates/shepherd (terminal, client runtime wiring)
+out of scope: context menus, rename/close by mouse, dialog buttons (T34); hover effects (no motion tracking needed);
+drag-reordering; scrollback.
+notes: New intents in `core::client`: `SelectSession(SessionId)` and `ScrollSidebar(i32)`. `NewSession` already exists, so reuse it.
+Press/release: act on `Up(Left)` when the `Down(Left)` hit the same target. Keep the pressed target in tui-side input state
+owned by the client runtime, or in `ClientState` if core needs it; the builder decides and says why in the report.
+
+### T34: Context menu, dialogs with buttons, detach button
+status: todo
+depends: T33
+touches: tui::popup, tui::sidebar, tui::keys (mouse), core::client
+goal: Rename, close and detach with the mouse; every popup can be answered by clicking.
+acceptance:
+- Right-clicking a session row opens a context menu at the click (clamped to the window) with `Rename` and `Close`. Clicking an
+  item runs it. Clicking outside the menu, or Esc, dismisses it.
+- Each row's line 1 shows a `×` at its right edge; clicking it opens the close confirmation for that session (it doesn't
+  select it first).
+- The close confirmation has clickable `[Close]` and `[Cancel]` buttons. Rename has an input plus `[Save]` and `[Cancel]`.
+  Help has `[Close]`. Clicking outside any popup cancels it. Keyboard answers (Enter/Esc/y/n) keep working.
+- A sidebar footer has a `Detach` button (same as `ctrl-b q`) and a `?` button that opens help.
+- Pure hit testing extends T33's `hit` with popup and menu targets; popups take priority over what's under them.
+  Tests click rendered cells, as in T33.
+- Snapshots: context menu open, close confirmation with buttons, rename dialog with buttons, footer.
+- Scenario: right-click a row → Rename → type a name → click `[Save]`, and the sidebar shows the new name; click `×` →
+  `[Close]`, and the session is gone.
+scope: crates/core (client), crates/tui
+out of scope: new hotkeys; hover highlighting; menus for features that don't exist yet.
+notes: Menu and popup state live in `ClientState` (it already holds popup state). New intents: `OpenMenu { session, at }`,
+`MenuChoose(MenuItem)`, `Dismiss`, plus reuse of the existing rename/close/detach intents.
+
+---
+
 ## M2 Agents
 
 ### T14: `Config` port and agent profiles
@@ -727,7 +814,8 @@ acceptance:
 - The host builds the spawn spec from the profile: hooks are injected without touching the user's settings files
   (`--settings` with a generated file under `~/.shepherd/run/<session>/`; verify the mechanism in the current
   Claude Code docs). `SHEPHERD_SESSION` and `SHEPHERD_SOCK` are set.
-- The new-session flow takes a profile name, defaulting to `[defaults] agent`. The TUI new-session popup lists profiles.
+- The new-session flow takes a profile name, defaulting to `[defaults] agent`. Clicking `+ New session` opens a popup listing
+  profiles as clickable rows (decision 0014); clicking one creates the session.
 - Scenario with a fake `claude` that emits recorded hook calls: the sidebar status follows Working → NeedsPermission →
   Working → Idle.
 - A manual check against real `claude` is documented in the report (not a CI test).
@@ -741,7 +829,7 @@ goal: Never miss an agent that's waiting on you.
 acceptance:
 - Unselected sessions entering NeedsPermission, NeedsInput, or newly Idle are marked for attention. Selecting the
   session clears the mark (the client tracks `last_seen_seq`).
-- A prefix-key binding `a` jumps to the oldest session needing attention.
+- Attention rows are visually marked so they can be clicked (decision 0014). No new hotkey.
 - An optional terminal bell or OSC 9 notification on attention, controlled by config `[notify] bell = true`.
 - Snapshot of the sidebar with attention markers.
 scope: crates/core, crates/tui
@@ -787,7 +875,7 @@ touches: core::host, tui
 goal: Exited agent sessions can be resumed where they left off.
 acceptance:
 - `_shepherd/agent/started.agent_session_id` is captured from the first hook.
-- On an Exited session, the prefix key `R` respawns with the resume args for that profile kind (Claude Code's resume
+- On an Exited session, a `Resume` item in the row's context menu (decision 0014) respawns with the resume args for that profile kind (Claude Code's resume
   flag, Codex's resume subcommand; verify them in the docs) in the same cwd. The log continues in the same session.
 - Sessions with no captured agent session ID show resume as unavailable instead of failing.
 scope: crates/core, crates/shepherd, crates/tui
@@ -827,7 +915,7 @@ goal: Choose a workspace (repo) once and have it remembered, visible, and easy t
 acceptance:
 - `_shepherd/workspace/selected` is in the host log. The last selection is the default on the next start.
   `shepherd` run inside a repo with no selection picks that repo.
-- A header or sidebar title shows the current workspace. The prefix key `w` opens a switcher listing the workspaces
+- A header or sidebar title shows the current workspace. Clicking it (decision 0014) opens a switcher listing the workspaces
   used before, with an input for a new path (validated through `Worktrees::default_branch`).
 - Sessions record their workspace. The sidebar shows all sessions and marks those from other workspaces subtly.
   The decision on whether to filter instead is recorded in the task report.
@@ -885,7 +973,7 @@ acceptance:
   automatically. If it is dirty or unpushed, a confirmation lists what would be lost (`remove anyway` / `keep worktree`).
   The outcome is recorded in `session/closed.worktree_removed`.
 - `pre_remove` hooks run before removal.
-- A cleanup view (prefix `C`) lists managed worktrees with no open session and stale sessions (exited, and merged
+- A cleanup view (opened from a `Cleanup` button in the sidebar footer, decision 0014) lists managed worktrees with no open session and stale sessions (exited, and merged
   for more than N days) with status columns, and supports bulk removal of the safe ones.
 - Removal never touches worktrees outside `~/.shepherd/worktrees`. This is tested with a path that tries to escape.
 scope: crates/core, crates/tui
@@ -896,8 +984,8 @@ depends: T13, T21
 touches: core::client (finder), tui::finder
 goal: Find and jump to any session or worktree quickly.
 acceptance:
-- Prefix `/` opens a fuzzy finder over sessions (name, branch, workspace, machine) and managed worktrees with no
-  session. Enter selects a session. On an orphan worktree, Enter offers to start a new session in that worktree.
+- A clickable search field at the top of the sidebar (decision 0014) opens a fuzzy finder over sessions (name, branch, workspace, machine) and managed worktrees with no
+  session. Clicking or Enter selects a session. On an orphan worktree, it offers to start a new session in that worktree.
 - Matching and ranking are pure core functions with unit tests (prefix > word-boundary > subsequence).
 - Snapshots: empty query, a filtered list, and no results.
 scope: crates/core, crates/tui

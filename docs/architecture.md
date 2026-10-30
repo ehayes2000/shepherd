@@ -234,3 +234,17 @@ live. PTY output for a connection starts (snapshot first, then live bytes) only 
 when catch-up completes.
 Consequences: attaching works with any history size. A truly slow client is still disconnected as `SlowConsumer` by the adapter.
 Amends 0011.
+
+### 0014: Point-and-click first; hotkeys are optional (2026-10-29)
+Context: the user's first hands-on run of M1. The product is driven by the mouse, not by memorized prefix keys.
+Decision: every user action (select, new, rename, close, detach, and every later feature: profile pick, resume, workspace
+switch, cleanup, search, attention) must be reachable by clicking visible UI: buttons, rows, context menus, and dialogs with
+clickable buttons. A spec that adds an action names its click target first. Keyboard shortcuts are secondary: the existing
+`ctrl-b` bindings stay, but new tasks don't add hotkeys unless the spec says so (a later task adds them across the board).
+Mechanics: the client keeps mouse capture on all the time. Clicks are hit-tested by a pure function of the same layout `render`
+uses (`tui`), mapped to `Intent`s, and the pure core decides. Mouse events inside the terminal pane go to the session only when
+it has mouse tracking on; otherwise a click there just focuses the pane. Text selection in the pane uses the terminal's own
+bypass (shift-drag in most terminals, option-drag in iTerm2 and Terminal.app); the help popup says so.
+Consequences: snapshot tests show the clickable controls, and each control has a hit-test test that clicks its rendered
+cell. Keyboard-only use keeps working through the existing bindings.
+
