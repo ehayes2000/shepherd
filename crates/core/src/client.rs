@@ -75,7 +75,7 @@ use crate::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HelloOk,
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
     ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename,
-    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
+    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, ViewSize, WireError,
     WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeList, WorktreeRemove,
 };
 
@@ -1746,6 +1746,7 @@ impl Client {
             profile: None,
             cwd: Some(cwd.to_owned()),
             branch: worktree.branch,
+            size: self.view_size(),
         }))
     }
 
@@ -2082,7 +2083,7 @@ impl Client {
     }
 
     /// Asks the host to resume exited `session`, then selects it and sizes it to the view: its new PTY starts at the
-    /// host's initial size, and the host handles the request before the resize. A session that can't be resumed gets
+    /// last size the host knows for it (its initial size if none), and the host handles the request before the resize. A session that can't be resumed gets
     /// a notice saying why instead; a running or unlisted one, nothing.
     fn resume(&mut self, session: SessionId) -> Vec<ClientCommand> {
         let Some(listed) = self.sessions.iter().find(|s| s.id == session) else {
@@ -2114,8 +2115,17 @@ impl Client {
     fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
         self.user_request(ClientRequest::SessionNew(SessionNew {
             profile,
+            size: self.view_size(),
             ..SessionNew::default()
         }))
+    }
+
+    /// The terminal view's size, for a new session's PTY to spawn at.
+    fn view_size(&self) -> Option<ViewSize> {
+        self.size.map(|s| ViewSize {
+            cols: s.cols,
+            rows: s.rows,
+        })
     }
 
     /// Asks the host to select workspace `path`. The switcher stays open until it answers.

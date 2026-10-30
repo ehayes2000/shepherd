@@ -172,6 +172,7 @@ fn a_worktree_the_host_made_under_a_linked_root_is_no_orphan_and_cant_be_adopted
                 profile: Some("shell".to_owned()),
                 cwd: Some(resolved.to_str().unwrap().to_owned()),
                 branch: Some(branch),
+                size: None,
             };
             let refused = c.request(ClientRequest::SessionNew(adopt));
             assert!(

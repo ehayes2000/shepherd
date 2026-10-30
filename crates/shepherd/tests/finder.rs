@@ -146,6 +146,7 @@ fn the_orphan_worktrees_are_listed_and_a_session_started_in_one_runs_there_as_it
         profile: None,
         cwd: Some(old_text.to_owned()),
         branch: Some("old-idea".to_owned()),
+        size: None,
     }));
     s.h.step();
     let msgs = s.client.take();
@@ -231,6 +232,7 @@ fn start_in(s: &mut Setup, path: &Path, branch: &str) -> Result<serde_json::Valu
         profile: None,
         cwd: Some(path.to_str().unwrap().to_owned()),
         branch: Some(branch.to_owned()),
+        size: None,
     }));
     s.h.step();
     response(&s.client.take(), &asked)

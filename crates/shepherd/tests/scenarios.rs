@@ -24,7 +24,7 @@ use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
-use shepherd_core::wire::{BuildId, ExeDigest, SessionNew, UpgradeAnswer};
+use shepherd_core::wire::{BuildId, ExeDigest, SessionNew, UpgradeAnswer, ViewSize};
 use shepherd_term::{PANIC_TRIGGER, Screen};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
@@ -595,12 +595,17 @@ fn clicking_new_session_then_a_profile_starts_a_session_with_that_profile() {
     h.draw(&mut view);
     h.click(find(&view, "shell "));
     let news = h.host(|host| host.session_news().to_vec());
+    let pane = pane_size(WINDOW.0, WINDOW.1);
     assert_eq!(
         news,
         [SessionNew {
             profile: Some("shell".to_owned()),
             cwd: None,
             branch: None,
+            size: Some(ViewSize {
+                cols: pane.cols,
+                rows: pane.rows,
+            }),
         }]
     );
     assert_eq!(h.host(FakeHost::sessions).len(), 1);

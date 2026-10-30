@@ -16,8 +16,8 @@ use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, InputKind, PROTOCOL_VERSION, SessionClose,
-    SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, WireError,
-    WorkspaceSelect,
+    SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe, ViewSize,
+    WireError, WorkspaceSelect,
 };
 use shepherd_testkit::builders::{
     ClientDriver, claude_session_spec, log_entry, notifications, requests, ts,
@@ -572,6 +572,62 @@ fn a_created_session_answered_before_its_log_entry_is_selected_when_it_arrives()
     assert_eq!(selected(&c).as_deref(), Some("s2"));
 }
 
+#[test]
+fn a_new_session_asks_to_spawn_at_the_views_size() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::Resize(PtySize {
+        cols: 100,
+        rows: 30,
+    }));
+    let sent = c.user(Intent::NewSession);
+    assert_eq!(
+        bodies(&sent),
+        [ClientRequest::SessionNew(SessionNew {
+            size: Some(ViewSize {
+                cols: 100,
+                rows: 30
+            }),
+            ..SessionNew::default()
+        })]
+    );
+}
+
+#[test]
+fn a_created_session_selected_once_the_host_answers_is_resized_to_the_view() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::Resize(PtySize { cols: 90, rows: 20 }));
+    c.user(Intent::PrevSession);
+    let sent = c.user(Intent::NewSession);
+    c.host().new_session("s2");
+    c.sync();
+    let answered = c.answer(&sent, Ok(json!({ "session": "s2" })));
+    assert_eq!(notifications(&answered), [&resize("s2", 90, 20)]);
+}
+
+#[test]
+fn a_created_session_selected_when_its_log_entry_arrives_is_resized_to_the_view() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s0"]);
+    c.user(Intent::Resize(PtySize { cols: 90, rows: 20 }));
+    c.user(Intent::PrevSession);
+    let sent = c.user(Intent::NewSession);
+    c.answer(&sent, Ok(json!({ "session": "s2" })));
+    c.host().new_session("s2");
+    let synced = c.sync();
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    assert_eq!(notifications(&synced), [&resize("s2", 90, 20)]);
+}
+
+#[test]
+fn a_new_session_the_selection_follows_to_is_resized_to_the_view() {
+    // No pick yet: the selection follows the top of the list, where the newest session is.
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::Resize(PtySize { cols: 90, rows: 20 }));
+    c.host().new_session("s2");
+    let synced = c.sync();
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    assert_eq!(notifications(&synced), [&resize("s2", 90, 20)]);
+}
+
 // ---------- input and resize ----------
 
 #[test]
@@ -1072,7 +1128,7 @@ fn a_resumed_session_is_selected_and_sized_to_the_view_after_the_resume() {
 
 #[test]
 fn resuming_the_selected_session_resizes_it_again() {
-    // Its new PTY starts at the host's initial size.
+    // Its new PTY starts at the last size the host knows for it, which may not be the view's.
     let mut c = with_exited_claude(Some("abc123"));
     c.user(Intent::Resize(PtySize {
         cols: 100,
@@ -1681,8 +1737,7 @@ fn with_profiles() -> ClientDriver {
 fn new_session(profile: Option<&str>) -> ClientRequest {
     ClientRequest::SessionNew(SessionNew {
         profile: profile.map(str::to_owned),
-        cwd: None,
-        branch: None,
+        ..SessionNew::default()
     })
 }
 

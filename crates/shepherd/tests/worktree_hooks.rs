@@ -127,6 +127,7 @@ impl Setup {
             profile: Some("claude".to_owned()),
             cwd: None,
             branch: None,
+            size: None,
         }))
     }
 

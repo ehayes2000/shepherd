@@ -481,6 +481,11 @@ impl HostHarness {
         self.step();
     }
 
+    /// The network the host listens on, e.g. for a real client runtime to connect over.
+    pub fn network(&self) -> &FakeNetwork {
+        &self.net
+    }
+
     /// Connects a client and steps, so the host has seen it.
     pub fn connect(&mut self) -> FakeClient {
         let client = FakeClient::connect(&self.net);

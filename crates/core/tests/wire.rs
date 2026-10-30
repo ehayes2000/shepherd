@@ -13,7 +13,7 @@ use shepherd_core::wire::{
     ExeDigest, Hello, HelloOk, HookFrame, HostMessage, HostNotification, HostResponse, HostResult,
     HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput,
     Request, RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
-    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
+    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, ViewSize, WireError,
     WorkspaceSelect, WorktreeInfo, WorktreeList, WorktreeListOk, code, decode_client_message,
     decode_host_message, encode_client_notification, encode_host_notification, encode_request,
     encode_response, negotiate,
@@ -63,6 +63,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             profile: Some("claude".into()),
             cwd: Some("/src/shepherd".into()),
             branch: None,
+            size: None,
         }),
         ClientRequest::SessionNew(SessionNew::default()),
         ClientRequest::SessionRename(SessionRename {
@@ -108,6 +109,14 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             profile: None,
             cwd: Some("/wt/shepherd/old-idea".into()),
             branch: Some("old-idea".into()),
+            size: None,
+        }),
+        ClientRequest::SessionNew(SessionNew {
+            size: Some(ViewSize {
+                cols: 120,
+                rows: 40,
+            }),
+            ..SessionNew::default()
         }),
     ]
 }
@@ -234,6 +243,7 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/host/upgrade",
         "_shepherd/worktree/list",
         "_shepherd/session/new",
+        "_shepherd/session/new",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -355,6 +365,7 @@ fn session_new_names_the_branch_of_the_worktree_it_runs_in_only_when_it_has_one(
             profile: None,
             cwd: Some("/wt/app/old".into()),
             branch: Some("old".into()),
+            ..SessionNew::default()
         })
     );
     let encoded = encode_request(&Request {
@@ -368,6 +379,41 @@ fn session_new_names_the_branch_of_the_worktree_it_runs_in_only_when_it_has_one(
         wire_json(&encoded)["params"],
         json!({ "profile": "claude" })
     );
+}
+
+#[test]
+fn session_new_carries_the_clients_view_size_only_when_it_has_one() {
+    let line = request_line(
+        "_shepherd/session/new",
+        json!({ "size": { "cols": 132, "rows": 40 } }),
+    );
+    assert_eq!(
+        request(&line).body,
+        ClientRequest::SessionNew(SessionNew {
+            size: Some(ViewSize {
+                cols: 132,
+                rows: 40
+            }),
+            ..SessionNew::default()
+        })
+    );
+    let sized = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::SessionNew(SessionNew {
+            size: Some(ViewSize { cols: 90, rows: 30 }),
+            ..SessionNew::default()
+        }),
+    });
+    assert_eq!(
+        wire_json(&sized)["params"],
+        json!({ "size": { "cols": 90, "rows": 30 } })
+    );
+    // A client older than F42 sends none, and gets none sent: the host spawns at its default size.
+    let unsized_ = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::SessionNew(SessionNew::default()),
+    });
+    assert_eq!(wire_json(&unsized_)["params"], json!({}));
 }
 
 #[test]

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use shepherd_core::client::{ClientCommand, FinderItem, Focus, Intent, Orphan, Orphans, Popup};
 use shepherd_core::ids::SessionId;
-use shepherd_core::wire::{ClientRequest, SessionNew, WireError};
+use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::{ClientRequest, SessionNew, ViewSize, WireError};
 use shepherd_testkit::builders::{ClientDriver, requests};
 
 fn sid(id: &str) -> SessionId {
@@ -245,9 +246,39 @@ fn starting_a_session_in_a_worktree_asks_for_one_there_on_its_branch() {
             profile: None,
             cwd: Some("/wt/app/old-idea".into()),
             branch: Some("old-idea".into()),
+            size: None,
         })]
     );
     assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn starting_a_session_in_a_worktree_asks_to_spawn_at_the_views_size() {
+    let mut c = named(&[("s1", "docs")]);
+    c.user(Intent::Resize(PtySize {
+        cols: 120,
+        rows: 40,
+    }));
+    find(
+        &mut c,
+        json!([{ "path": "/wt/app/old-idea", "branch": "old-idea" }]),
+    );
+    c.user(Intent::EditFind("old".into()));
+    c.user(Intent::Confirm);
+    let sent = c.user(Intent::Confirm);
+    assert!(
+        matches!(
+            &bodies(&sent)[..],
+            [ClientRequest::SessionNew(SessionNew {
+                size: Some(ViewSize {
+                    cols: 120,
+                    rows: 40
+                }),
+                ..
+            })]
+        ),
+        "{sent:?}"
+    );
 }
 
 #[test]
