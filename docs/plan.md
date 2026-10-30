@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T18b quiet idle fallback | in review | task/t18b-quiet-idle @ bb50fcf (on 8ce4bb4) | 1 | PM-accepted: QuietWatch outside Host; IdleInference with Other; wall-clock Timestamp. Reviewer to judge append-failure hot loop |
 | T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
-| F25 failed worktree create cleanup | building (fresh builder) | task/f25-worktree-fail-cleanup @ HEAD | 0 | First builder silent 2.5 h inside a load round; stopped. Its uncommitted WIP saved as scratchpad/pm-f25-wip.patch (on 62e768e) |
+| F25 failed worktree create cleanup | building (fresh builder) | task/f25-worktree-fail-cleanup @ e58c9a2 | 0 | First builder silent 2.5 h inside a load round; stopped. Its uncommitted WIP saved as scratchpad/pm-f25-wip.patch (on 62e768e) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
