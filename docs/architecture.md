@@ -278,6 +278,9 @@ Context: T24's auto-name slug split words with `char::is_alphanumeric`, which br
 viramas apart (`crème` typed as `cre\u{300}me` became `cre`), and macOS paths are often NFD.
 Decision: core may use `unicode-segmentation` (pure, established; already in the tree via ratatui) for word and grapheme
 segmentation (UAX #29). No hand-rolled Unicode tables.
-Consequences: word splitting matches Unicode's rules; control characters are still dropped because they are never part of a
-word segment.
+Amended after the T24 re-review: UAX #29 keeps invisible format characters (bidi overrides, ZWJ, soft hyphen, BOM, tags)
+inside words and lets one grapheme cluster grow without bound (stacked combining marks). So `unicode-normalization` is
+allowed too: text that becomes a display name is NFC-normalized, and only alphanumeric characters plus a bounded number of
+combining marks per base (`is_combining_mark`) are kept; every other character (all of category Cf/Cc) is dropped.
+Consequences: names are display-safe and bounded; no hand-rolled Unicode tables.
 

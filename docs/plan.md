@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F34 client marks answer keys | building | task/f34-answer-keys @ bce95a9 | 0 | – |
-| T24 auto-naming | re-review | task/t24-auto-naming @ a9e2375 (on a53123f) | 2 | slug rules pinned; unicode-segmentation words with adjacent rejoin; id guard dropped |
+| T24 auto-naming | fixing (round 3) | task/t24-auto-naming @ a9e2375 | 2 | Blocking: format chars (bidi/ZWJ/BOM) survive UAX#29 words; stacked marks unbound. PM: NFC + keep alnum + ≤2 marks/base (decision 0017 amended, unicode-normalization allowed) + byte cap |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | fixing (CHANGES) | task/f28-repo-root @ 15094a9 | 1 | Blocking: bare repo named .git (and --separate-git-dir) gives a root the port rejects → decide by bareness. Minors: fake missing-path, symlink case |
 
@@ -565,6 +565,20 @@ acceptance:
 - The tui tags key input that can answer (Enter, Esc, Ctrl-C, printable) as `kind: answer` (additive) regardless of encoding
   mode; the quiet watch counts `answer` and `paste`. Table tests over key events × keyboard modes (legacy, kitty flags 1/8).
 scope: crates/core, crates/tui
+
+### F35: One display-safe text rule for everything agents and hooks can name
+status: todo
+depends: T24
+touches: tui (render), core (display text)
+goal: Several strings shown in the UI come from untrusted sources: auto names (T24), manual renames from any client, hook
+output tails (T23), failure reasons (T22), git error text. T24 now sanitizes its slug, but there's no single rule at display
+time.
+acceptance:
+- A single pure `display_safe(&str, max) -> String` in core (or tui) used wherever such text is rendered or put in an OSC 9
+  alert: drops Cc and Cf (bidi controls, ZWJ, BOM, tags), caps combining marks per base, caps length by graphemes, NFC.
+  Table tests with Trojan-Source bidi strings, Zalgo, and huge inputs (counted work). Every render/alert site uses it (grep
+  test or a reviewer checklist item).
+scope: crates/core, crates/tui, crates/shepherd
 
 ## Out of scope for the initial feature set
 
