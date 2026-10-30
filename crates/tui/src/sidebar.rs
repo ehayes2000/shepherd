@@ -24,11 +24,11 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::session::Activity;
 
 use crate::layout::{Layout, Target};
+use crate::width::columns;
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
@@ -46,7 +46,7 @@ const CUT: &str = "…";
 
 /// Draws `text` at `x`, `y` in at most `width` columns, ending in [`CUT`] when it doesn't fit.
 fn set_cut(buf: &mut Buffer, x: u16, y: u16, text: &str, width: usize, style: Style) {
-    if Span::raw(text).width() <= width {
+    if columns(text) <= width {
         buf.set_stringn(x, y, text, width, style);
         return;
     }
@@ -111,7 +111,9 @@ fn header_button(layout: &Layout, line: u16, label: &str) -> Rect {
     if inner.width < 2 || inner.height <= line {
         return Rect::default();
     }
-    let width = (label.chars().count() as u16).min(inner.width - 1);
+    let width = u16::try_from(columns(label))
+        .unwrap_or(u16::MAX)
+        .min(inner.width - 1);
     Rect::new(inner.x + 1, inner.y + line, width, 1)
 }
 
@@ -179,7 +181,7 @@ pub(crate) fn footer_buttons(
             (help, Target::Help, HELP),
         ];
     }
-    let width = DETACH.chars().count() as u16;
+    let width = u16::try_from(columns(DETACH)).unwrap_or(u16::MAX);
     if inner.height < HEADER_HEIGHT + 1 || inner.width < width + 6 {
         return Vec::new();
     }
