@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T17 launch Claude sessions | building | task/t17-launch-claude @ a21abbc | 0 | Split: picker → T17b (after T34). PM does real-claude check |
-| F20 fake link sink lifetime | building | task/f20-fake-link-sink @ a21abbc | 0 | – |
 | T34 menus and dialogs | building | task/t34-menus-and-dialogs @ d946ee4 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -327,21 +326,13 @@ acceptance:
   open/close cycles (counted, not measured).
 scope: crates/core, crates/shepherd
 
-### F20: FakeNetwork keeps a connection's sink as long as the real link does
-status: in-progress
-depends: T10, T16
-touches: testkit link fake, contracts::link
-goal: The fake drops a client connection's event sink together with the connection; the real unix-socket link keeps it until
-the link itself is dropped (found in the T16 review). Fakes and adapters must agree.
-acceptance:
-- A link contract case pins the real behavior: after the peer drops the connection, the client still receives
-  `LinkEvent::Disconnected` through its sink, and the sink stays alive until the client drops its link. Runs against both
-  the fake and the real adapter.
-- `FakeNetwork` matches it. Remove the workaround in `crates/shepherd/tests/hooks.rs`
-  (`a_host_that_drops_the_connection_before_answering_is_a_disconnect` keeps its own sink copy) and the test still passes and
-  still fails if `deliver` ignores `Disconnected`.
-scope: crates/testkit, crates/adapters (contract wiring only), crates/shepherd (that one test)
-
+### F20: Hook disconnect test: fake vs real link sink lifetime
+status: done (2c5b3d0)
+depends: T16
+goal: The T16 review thought the fake drops a conn's sink earlier than the real link. The builder showed both drop it right
+after `Disconnected`, so they already agree. Outcome: no fake/adapter change; the misleading comment in
+`a_host_that_drops_the_connection_before_answering_is_a_disconnect` now explains the sink copy (it keeps the channel open so
+only the `Disconnected` event can end the test).
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
