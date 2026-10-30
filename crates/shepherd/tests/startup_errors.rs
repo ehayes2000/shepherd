@@ -6,9 +6,10 @@
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -26,9 +27,81 @@ impl Drop for Reaped {
     }
 }
 
+/// The pids holding `<home>/.shepherd`'s socket or event-log lock open: a host serving there. Found by exact path
+/// with `lsof`, never by process name, since every worktree's test host has the same name.
+fn host_pids(home: &Path) -> Vec<u32> {
+    let root = home.join(".shepherd");
+    let paths: Vec<PathBuf> = [root.join("host.sock"), root.join("lock")]
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let Ok(out) = Command::new("lsof").arg("-t").args(&paths).output() else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .filter(|&pid| pid != std::process::id())
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Sends `signal` to exactly `pid`, then waits (bounded) for it to go away. Returns whether it did.
+fn stop(pid: u32, signal: &str) -> bool {
+    let _ = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .stderr(Stdio::null())
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A temp `HOME`. When dropped, on failure too, stops any host serving in it: a host the client launched is
+/// detached, so nothing else would.
+struct Home(tempfile::TempDir);
+
+impl Home {
+    fn new() -> Self {
+        Self(tempfile::tempdir().unwrap())
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        for pid in host_pids(self.path()) {
+            if !stop(pid, "-TERM") {
+                stop(pid, "-KILL");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_host_that_cannot_start_tells_the_client_why_and_the_client_exits_non_zero() {
-    let home = tempfile::tempdir().unwrap();
+    let home = Home::new();
     let root = home.path().join(".shepherd");
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
@@ -85,7 +158,7 @@ fn a_host_that_cannot_start_tells_the_client_why_and_the_client_exits_non_zero()
 
 #[test]
 fn a_host_that_starts_closes_its_stderr_and_keeps_running() {
-    let home = tempfile::tempdir().unwrap();
+    let home = Home::new();
     let mut host = Reaped(
         Command::new(SHEPHERD)
             .arg("host")
@@ -112,4 +185,6 @@ fn a_host_that_starts_closes_its_stderr_and_keeps_running() {
         "closed before serving"
     );
     assert!(host.0.try_wait().unwrap().is_none(), "the host exited");
+    // What `Home` stops on drop finds exactly this host.
+    assert_eq!(host_pids(home.path()), [host.0.id()]);
 }

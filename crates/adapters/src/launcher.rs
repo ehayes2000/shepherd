@@ -15,6 +15,10 @@
 //! returns that as [`LaunchError::HostFailed`]. A host that starts calls [`release_stderr`] once it is serving,
 //! which closes the pipe with nothing written. A host that does neither within [`STARTUP_TIMEOUT`] is left to the
 //! client's connect retries.
+//!
+//! The rule this rests on: until it calls [`release_stderr`], the host writes nothing to stderr except its fatal
+//! startup error. Any byte written before that (a warning, a progress line) makes `launch` report
+//! [`LaunchError::HostFailed`] once the pipe closes, even if the host is serving.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -162,6 +166,7 @@ fn startup_report(mut stderr: ChildStderr, timeout: Duration) -> Result<(), Laun
 
 /// The host's half of the startup handshake: once it is serving, it points its stderr at `/dev/null`, which closes
 /// the pipe `launch` is reading and tells it the host started. Nothing the host prints after that reaches anyone.
+/// Before it, the host must write nothing to stderr but its fatal startup error (see the module docs).
 pub fn release_stderr() -> io::Result<()> {
     let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
     // SAFETY: plain syscall on a descriptor this function owns and the process's stderr.
