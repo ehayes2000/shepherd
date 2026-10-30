@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
+| T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
 | F25 failed worktree create cleanup | in review | task/f25-worktree-fail-cleanup @ 7764841 (on 49fb064) | 1 | Fresh builder finished saved WIP; load 24/24 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
