@@ -518,7 +518,7 @@ impl Worktrees for GitWorktrees {
                     Ok(()) => WorktreeError::Timeout("worktree add".to_owned()),
                     Err(cleanup) => WorktreeError::Other(format!(
                         "git worktree add timed out, and cleaning up failed: {cleanup}. \
-                         Remove {} and branch {branch} by hand",
+                         Remove {} and branch {branch}, and any stale lock git names, by hand",
                         path.display()
                     )),
                 });
@@ -1091,14 +1091,10 @@ mod tests {
     #[test]
     fn a_slow_git_call_is_a_typed_timeout() {
         let f = GitFixture::new();
-        hook(&f, "post-checkout", "sleep 900");
-        let port = port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(Duration::from_secs(2));
+        blocking_hook(&f, "");
         let started = Instant::now();
-        let result = port.create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
-        assert!(
-            matches!(result, Err(WorktreeError::Timeout(_))),
-            "{result:?}"
-        );
+        let result = slow_port(&f).create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
+        assert_eq!(result, Err(WorktreeError::Timeout("worktree add".into())));
         assert!(
             started.elapsed() < Duration::from_secs(300),
             "took {:?}",
