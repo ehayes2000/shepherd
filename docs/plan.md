@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T27 PR status | in review | task/t27-pr-status @ dc0b09d (on 022d04f) | 1 | PM-accepted: gh pr list flags; display choices; Unavailable clears, errors keep; Worker<W,T> |
-| F33 hooks concurrent + bounded | re-review | task/f33-hooks @ a7a7808 (on 022d04f) | 2 | no hooks after shutdown; TimedOut vs Cancelled; tail cap test; EPERM-aware group wait; Commands::new_run; close mid-hook → T25 inspection |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F33 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | T26 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
 | T36b | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
 | T37 | 2 | inherited GIT_ASKPASS could hang uncapped creates; 2-reader FIFO gate hang; restack dropped edits |
@@ -551,7 +551,7 @@ acceptance:
 scope: crates/adapters
 
 ### F33: Hooks don't queue behind each other or outlive the host
-status: in-progress
+status: done (5cf8a10)
 depends: T23
 touches: adapters::commands, shepherd::host
 goal: From the T23 review: one shared `hooks` worker means session B's post-create hooks wait behind session A's (up to the
@@ -763,6 +763,8 @@ acceptance:
 - A test-only way to give the real host an isolated git environment (HOME, GIT_CONFIG_GLOBAL/NOSYSTEM) so real-host tests
   never read the user's global git config or hooks.
 - A detached orphan worktree (no branch) can be adopted and owned.
+- From F33: `next_hook` calls `Commands::new_run()` before `run_alone`; a failed thread spawn leaks that id forever — call
+  `new_run` after a successful spawn or forget the id on the error path.
 scope: crates/shepherd, crates/core
 
 ### F40: Launcher test stand-ins can leak

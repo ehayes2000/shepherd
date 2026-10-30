@@ -78,6 +78,9 @@ deliberate exception: it is drawn faithfully by the emulator.
 
 ## Ports
 
+Test exception (F33): an adapter may test a private bounded-memory helper directly when counting its work is the only
+deterministic proof (e.g. `Tail::held()`, the cancel-before-spawn seam in `commands.rs`).
+
 A port is a trait in `shepherd-core::ports`. It describes a capability in domain terms, such as
 `Worktrees::create(&RepoRef, &BranchSpec)`, not `git_worktree_add(args)`. Each port comes with:
 
