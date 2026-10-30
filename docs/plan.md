@@ -18,7 +18,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | building | task/f45-standin-load @ 33fd53a | 0 |  |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | F43 Tab next to wide chars stored as a '\t' spacer | [terminal](features/terminal.md) | building | task/f43-tab-spacer @ 33fd53a | 0 |  |
-| F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | fixing | task/f37-worktree-leftovers @ b0867bd | 3 | approved r3; merge broke on F42's SessionNew.size; rebasing + --no-deref + absent-ref test |
+| F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | merging | task/f37-worktree-leftovers @ e8ae243 | 3 | approved r3; rebased over F42; --no-deref + absent-ref test (PM spot check) |
 
 ## Ready to start
 
