@@ -42,7 +42,9 @@
 //! [`HostCommand::RunHook`] off the runtime thread whose result comes back as [`HostEvent::HookFinished`] and is
 //! recorded in `worktree/hook`. The first that fails (non-zero exit, timeout, signal, couldn't run) stops the rest and
 //! marks the session with a warning, and the PTY spawns either way once the hooks are done. A session closed meanwhile
-//! records the result it was waiting for and runs and spawns nothing more.
+//! records the result it was waiting for and runs and spawns nothing more; closing it cancels the hook running
+//! ([`HostCommand::CancelHook`]), whose result comes back as cancelled, and deals with its worktree like any close
+//! (below). The runtime inspects it only once the cancelled hook is gone.
 //!
 //! Auto-naming: a session keeps the name it was created with (the runtime always asks for the placeholder,
 //! `<profile>-<n>`) until its first user prompt (a `session/prompt` that isn't a continuation) is in its log. Once the
@@ -418,6 +420,11 @@ pub enum HostCommand {
     CancelWorktree {
         session: SessionId,
     },
+    /// Stop session `session`'s running hook, if it has one (`Commands::cancel`): its whole process group is killed.
+    /// Never waits: the hook's answer comes back as usual once the group is gone, as cancelled.
+    CancelHook {
+        session: SessionId,
+    },
     /// Run a post-create hook with the `Commands` port, and feed the result back as [`HostEvent::HookFinished`] with
     /// the same `session`, `command`, `rest` (the hooks after it) and `spawn` (what to spawn once they are done). Runs
     /// off the runtime thread, like [`HostCommand::ProbeWorkspace`].
@@ -429,7 +436,9 @@ pub enum HostCommand {
     },
     /// Find out whether `path` is one of `repo`'s managed worktrees (`Worktrees::list_managed`), and if so its status,
     /// and feed the answer back as [`HostEvent::WorktreeInspected`] with the same `session`, `path` and `purpose`.
-    /// Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    /// Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`]. A close's inspection ([`Inspect::Close`]) of a
+    /// session whose hook is running (cancelled by that close) starts only once the hook has answered, so it sees
+    /// what the hook left.
     InspectWorktree {
         session: SessionId,
         repo: RepoRef,
@@ -534,10 +543,10 @@ struct Entry {
 }
 
 impl Entry {
-    /// Its worktree, if it has one closing could remove: made, with its post-create hooks done.
+    /// Its worktree, if it has one closing could remove: made (its post-create hooks may still be running).
     fn removable_worktree(&self) -> Option<&(PathBuf, String)> {
         match self.phase {
-            Phase::Starting | Phase::Hooks { .. } => None,
+            Phase::Starting => None,
             _ => self.worktree.as_ref(),
         }
     }
@@ -623,7 +632,8 @@ impl Host {
                     Phase::Failed(reason) => Some(reason.clone()),
                     _ => None,
                 },
-                creating_worktree: matches!(e.phase, Phase::Starting | Phase::Hooks { .. }),
+                creating_worktree: matches!(e.phase, Phase::Starting | Phase::Hooks { .. })
+                    && !e.removing,
                 warning: e.warning.clone(),
                 worktree: e.worktree.as_ref().map(|(path, _)| path.clone()),
                 branch: match &e.worktree {
@@ -1004,6 +1014,9 @@ impl Host {
             Phase::Starting => commands.push(HostCommand::CancelWorktree {
                 session: session.clone(),
             }),
+            Phase::Hooks { .. } => commands.push(HostCommand::CancelHook {
+                session: session.clone(),
+            }),
             _ => {}
         }
         let confirmed = match worktree {
@@ -1282,7 +1295,7 @@ impl Host {
         let recorded = hook_record(&command, result);
         let succeeded = hook_failure(&recorded).is_none();
         let mut commands = vec![append(&session, ShepherdFrame::WorktreeHook(recorded))];
-        if entry.closed {
+        if entry.closed || entry.removing {
             return commands;
         }
         if succeeded && !rest.hooks.is_empty() {
@@ -1590,6 +1603,7 @@ fn hook_record(command: &CommandSpec, result: Result<CommandOutput, CommandError
                     tail,
                     Some(format!("timed out after {}s", command.timeout.as_secs())),
                 ),
+                CommandExit::Cancelled => (None, tail, Some("cancelled".to_owned())),
             }
         }
         Err(error) => (None, String::new(), Some(error.to_string())),

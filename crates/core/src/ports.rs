@@ -9,7 +9,9 @@ pub mod link;
 pub mod pty;
 pub mod worktrees;
 
-pub use commands::{CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL};
+pub use commands::{
+    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL, RunId,
+};
 pub use config::{ConfigError, ConfigSource, RawConfig};
 pub use event_log::{EventLog, LogError, LogId};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};

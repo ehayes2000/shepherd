@@ -3,8 +3,8 @@
 //! loop's channel as an event (e.g. [`RuntimeEvent::Worktrees`]), which the loop hands to core like any other.
 //!
 //! One thread per port, taking calls in the order they were submitted, so results come back in that order too. A call
-//! that may run for long and doesn't need that order (creating a worktree) can instead run on a thread of its own
-//! ([`Worker::run_alone`]), so it never holds up the others: herdr's model, one thread per operation.
+//! that may run for long and doesn't need that order (creating a worktree, a hook) can instead run on a thread of its
+//! own ([`Worker::run_alone`]), so it never holds up the others: herdr's model, one thread per operation.
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};

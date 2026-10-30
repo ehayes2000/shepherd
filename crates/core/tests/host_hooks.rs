@@ -8,15 +8,16 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ResumeUnavailable,
+    Host, HostCommand, HostEvent, Inspect, Inspection, NewSessionSpec, PostCreate, PreRemove,
+    ResumeUnavailable,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::SpawnSpec;
 use shepherd_core::ports::{
     BaseUsed, BranchName, CommandError, CommandExit, CommandOutput, CommandSpec, Created,
-    OUTPUT_TAIL, WorktreePath,
+    OUTPUT_TAIL, RepoRef, WorktreePath, WorktreeStatus,
 };
-use shepherd_core::wire::InputKind;
+use shepherd_core::wire::{CloseWorktree, InputKind};
 use shepherd_testkit::builders::{HostDriver, shell_session_spec, shell_spawn};
 
 const WORKTREE: &str = "/wt/app/shell-1";
@@ -319,7 +320,156 @@ fn a_session_closed_while_its_hooks_run_records_the_result_and_runs_and_spawns_n
             json!({ "hook": "a", "exit_code": 0, "output_tail": "ok" })
         )]
     );
+    // Still closing: its worktree is dealt with like any closing session's.
+    let listed = &host.host().sessions()[0];
+    assert!(listed.removing_worktree);
+    assert!(!listed.creating_worktree);
+    assert_eq!(listed.resume, Err(ResumeUnavailable::Closing));
+}
+
+/// F33: the hook would otherwise go on running (up to its timeout) for a session nobody wants any more. The close then
+/// deals with the worktree like any close (T25): the runtime inspects it once the cancelled hook is gone.
+#[test]
+fn closing_a_session_while_its_hooks_run_cancels_the_running_hook_and_inspects_its_worktree() {
+    let (mut host, _) = worktree_made(&["a", "b"]);
+    let pre_remove = WorkspaceHooks {
+        post_create: Vec::new(),
+        pre_remove: vec!["make clean".to_owned()],
+        timeout: TIMEOUT,
+    };
+    let commands = host.close_with("s1", CloseWorktree::IfSafe, pre_remove);
+    assert_eq!(
+        commands[..3],
+        [
+            HostCommand::CancelHook { session: sid("s1") },
+            append(
+                "s1",
+                "_shepherd/worktree/removing",
+                json!({ "path": WORKTREE, "pre_remove": ["make clean"] })
+            ),
+            HostCommand::InspectWorktree {
+                session: sid("s1"),
+                repo: RepoRef::new("/src/app"),
+                path: WorktreePath::new(WORKTREE),
+                purpose: Inspect::Close {
+                    confirmed: None,
+                    hooks: PreRemove {
+                        hooks: vec!["make clean".to_owned()],
+                        timeout: TIMEOUT,
+                    },
+                },
+            },
+        ]
+    );
+    assert!(!commands.iter().any(|c| matches!(
+        c,
+        HostCommand::KillPty { .. } | HostCommand::CancelWorktree { .. }
+    )));
+}
+
+/// A half-run hook usually leaves untracked files: the worktree is kept, and the close says why.
+#[test]
+fn a_session_closed_mid_hook_keeps_a_worktree_the_hook_left_files_in_and_says_why() {
+    let (mut host, _) = worktree_made(&["a", "b"]);
+    host.close("s1");
+    let cancelled = Ok(CommandOutput {
+        exit: CommandExit::Cancelled,
+        tail: Vec::new(),
+    });
+    finished(&mut host, "a", &["b"], cancelled);
+    let dirty = WorktreeStatus {
+        dirty: true,
+        ahead: 0,
+        pushed: false,
+        merged_into_default: true,
+    };
+    let commands = host.handle(HostEvent::WorktreeInspected {
+        session: sid("s1"),
+        path: WorktreePath::new(WORKTREE),
+        purpose: Inspect::Close {
+            confirmed: None,
+            hooks: PreRemove {
+                hooks: Vec::new(),
+                timeout: TIMEOUT,
+            },
+        },
+        result: Ok(Inspection::Listed {
+            status: Ok(dirty),
+            exists: true,
+        }),
+    });
+    assert_eq!(
+        commands,
+        [append(
+            "s1",
+            "_shepherd/session/closed",
+            json!({
+                "worktree_removed": false,
+                "worktree_kept": "it has uncommitted changes"
+            })
+        )]
+    );
     assert!(host.host().sessions().is_empty());
+}
+
+/// A cancelled hook that left nothing behind: the worktree is removed, as for any close that loses nothing.
+#[test]
+fn a_session_closed_mid_hook_removes_a_worktree_that_loses_nothing() {
+    let (mut host, _) = worktree_made(&["a"]);
+    host.close("s1");
+    let cancelled = Ok(CommandOutput {
+        exit: CommandExit::Cancelled,
+        tail: Vec::new(),
+    });
+    finished(&mut host, "a", &[], cancelled);
+    let clean = WorktreeStatus {
+        dirty: false,
+        ahead: 0,
+        pushed: false,
+        merged_into_default: true,
+    };
+    let commands = host.handle(HostEvent::WorktreeInspected {
+        session: sid("s1"),
+        path: WorktreePath::new(WORKTREE),
+        purpose: Inspect::Close {
+            confirmed: None,
+            hooks: PreRemove {
+                hooks: Vec::new(),
+                timeout: TIMEOUT,
+            },
+        },
+        result: Ok(Inspection::Listed {
+            status: Ok(clean),
+            exists: true,
+        }),
+    });
+    assert_eq!(
+        commands,
+        [HostCommand::RemoveWorktree {
+            session: sid("s1"),
+            path: WorktreePath::new(WORKTREE),
+            force: false,
+        }]
+    );
+}
+
+#[test]
+fn a_cancelled_hook_is_recorded_as_cancelled_with_its_output() {
+    let (mut host, _) = worktree_made(&["a", "b"]);
+    host.close("s1");
+    let cancelled = Ok(CommandOutput {
+        exit: CommandExit::Cancelled,
+        tail: b"installing".to_vec(),
+    });
+    let commands = finished(&mut host, "a", &["b"], cancelled);
+    assert_eq!(
+        commands,
+        vec![append(
+            "s1",
+            "_shepherd/worktree/hook",
+            json!({ "hook": "a", "output_tail": "installing", "error": "cancelled" })
+        )]
+    );
 }
 
 #[test]

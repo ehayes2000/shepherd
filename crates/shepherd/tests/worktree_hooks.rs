@@ -1,5 +1,5 @@
 //! A new worktree runs its workspace's post-create hooks before the agent starts (T23): a host runtime on all-fake
-//! ports, with the fake `Commands` port running the hooks on its own worker thread. As in `session_worktrees.rs`, the
+//! ports, with the fake `Commands` port running each hook on a thread of its own (F33). As in `session_worktrees.rs`, the
 //! workspace and each worktree are real directories in a tempdir, made by the test where git would make them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -50,6 +50,7 @@ struct Setup {
     app: PathBuf,
     root: PathBuf,
     commands: FakeCommands,
+    worktrees: FakeWorktrees,
     claude: Arc<Mutex<Vec<(PathBuf, bool)>>>,
     h: HostHarness,
     client: FakeClient,
@@ -86,7 +87,7 @@ impl Setup {
         let claude = Arc::default();
         let mut h = HostHarness::builder()
             .program("claude", recording_claude(&claude))
-            .worktrees(worktrees)
+            .worktrees(worktrees.clone())
             .commands(commands.clone())
             .config(config)
             .start();
@@ -107,6 +108,7 @@ impl Setup {
             app,
             root,
             commands,
+            worktrees,
             claude,
             h,
             client,
@@ -279,11 +281,149 @@ fn a_session_closed_while_a_hook_runs_runs_no_more_hooks_and_never_spawns() {
         [
             "_shepherd/session/created",
             "_shepherd/worktree/created",
-            "_shepherd/session/closed",
+            "_shepherd/worktree/removing",
             "_shepherd/worktree/hook",
+            "_shepherd/session/closed",
         ]
     );
     assert!(!s.h.runtime().pty().is_running(&id));
     assert!(s.claude.lock().unwrap().is_empty());
     assert_eq!(s.h.runtime().pending_run_files(), 0);
+}
+
+/// F33: hooks shared one worker thread, so a session's hooks waited behind another's, up to their timeout.
+#[test]
+fn hooks_of_two_sessions_run_at_the_same_time() {
+    let mut s = Setup::new(&["setup-a"]);
+    let first_path = s.make_worktree_dir("claude-1");
+    let second_path = s.make_worktree_dir("claude-2");
+    let (first, first_hold) = s.start_with_first_hook_held();
+    // The second session's hook reaches the port while the first's is still held.
+    let (second, second_hold) = s.start_with_first_hook_held();
+    assert_eq!(
+        s.commands.running(),
+        2,
+        "both hooks are in the port at once"
+    );
+
+    second_hold.release();
+    assert!(s.h.runtime_mut().run_next(LIMIT));
+    assert!(s.h.runtime().pty().is_running(&second));
+    assert!(!s.h.runtime().pty().is_running(&first), "still in its hook");
+    first_hold.release();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().pty().is_running(&first));
+    assert_eq!(
+        *s.claude.lock().unwrap(),
+        [(second_path, true), (first_path, true)]
+    );
+}
+
+/// F33: a closed session's hook went on running, up to its timeout.
+#[test]
+fn closing_a_session_cancels_its_running_hook() {
+    let mut s = Setup::new(&["setup-a", "setup-b"]);
+    s.make_worktree_dir("claude-1");
+    let (id, hold) = s.start_with_first_hook_held();
+    s.client.request(ClientRequest::SessionClose(SessionClose {
+        session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+    }));
+    s.h.poll();
+    assert!(hold.wait_cancelled(LIMIT), "the hook was left running");
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+
+    assert_eq!(s.commands.running(), 0);
+    let runs: Vec<String> = s.commands.runs().into_iter().map(|r| r.script).collect();
+    assert_eq!(runs, ["setup-a"]);
+    let frames = frames(&s.h, &id);
+    let n = frames.len();
+    assert!(
+        matches!(&frames[n - 2], ShepherdFrame::WorktreeHook(hook)
+            if hook.hook == "setup-a" && hook.error.as_deref() == Some("cancelled")),
+        "{frames:?}"
+    );
+    // The cancelled hook left nothing: the worktree is removed, as any close that loses nothing removes it.
+    assert!(
+        matches!(&frames[n - 1], ShepherdFrame::SessionClosed(closed) if closed.worktree_removed),
+        "{frames:?}"
+    );
+    assert!(!s.h.runtime().pty().is_running(&id));
+    assert!(s.claude.lock().unwrap().is_empty());
+    assert_eq!(s.h.runtime().pending_run_files(), 0);
+}
+
+/// F33: a hook still running when the host stopped outlived it (it runs in a session of its own).
+#[test]
+fn shutting_the_host_down_cancels_running_hooks_and_waits_for_them() {
+    let mut s = Setup::new(&["setup-a"]);
+    s.make_worktree_dir("claude-1");
+    s.make_worktree_dir("claude-2");
+    let (_, first) = s.start_with_first_hook_held();
+    let (_, second) = s.start_with_first_hook_held();
+    s.h.runtime()
+        .sender()
+        .send(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.poll();
+    assert!(first.wait_cancelled(LIMIT), "a hook was left running");
+    assert!(second.wait_cancelled(LIMIT), "a hook was left running");
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        s.commands.running(),
+        0,
+        "the host stopped before its hooks did"
+    );
+    // Nothing was started after them.
+    assert!(s.claude.lock().unwrap().is_empty());
+}
+
+/// F33 (PM): a session closed mid-hook goes through the normal close. Its worktree is inspected only once the cancelled
+/// hook is gone, so what the half-run hook left (here: uncommitted files, written as it dies) keeps the worktree, and the
+/// close says why.
+#[test]
+fn a_session_closed_mid_hook_keeps_a_worktree_the_dying_hook_left_files_in() {
+    let mut s = Setup::new(&["setup-a"]);
+    let path = s.make_worktree_dir("claude-1");
+    let (dying_tx, dying) = std::sync::mpsc::channel::<()>();
+    let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+    let finish_rx = Mutex::new(finish_rx);
+    let worktrees = s.worktrees.clone();
+    let left_in = path.clone();
+    s.commands.add_script("setup-a", move |c| {
+        c.wait_for_cancel();
+        dying_tx.send(()).unwrap();
+        // Still dying when the test lets it go: it writes into the worktree before it is gone.
+        finish_rx.lock().unwrap().recv_timeout(LIMIT).unwrap();
+        worktrees.set_dirty(&left_in, true);
+    });
+    let req = s.new_claude_session();
+    s.h.poll();
+    let mut waited = Duration::ZERO;
+    while s.commands.running() == 0 {
+        assert!(waited < LIMIT, "the hook never reached the port");
+        s.h.runtime_mut().run_next(STEP);
+        waited += STEP;
+    }
+    let id = new_session_id(&s.client.take(), &req);
+    s.client.request(ClientRequest::SessionClose(SessionClose {
+        session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+    }));
+    s.h.poll();
+    dying
+        .recv_timeout(LIMIT)
+        .expect("the hook was never cancelled");
+    finish.send(()).unwrap();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+
+    let frames = frames(&s.h, &id);
+    assert!(
+        matches!(frames.last(), Some(ShepherdFrame::SessionClosed(closed))
+            if !closed.worktree_removed
+                && closed.worktree_kept.as_deref() == Some("it has uncommitted changes")),
+        "{frames:?}"
+    );
+    assert!(path.is_dir(), "the worktree was removed");
+    assert!(s.claude.lock().unwrap().is_empty());
 }

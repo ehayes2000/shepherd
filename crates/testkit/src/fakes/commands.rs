@@ -5,21 +5,26 @@
 //! scenarios use real worktree directories with it as they do with the PTY's cwd check.
 //!
 //! Clones share state, so a test can keep a handle while the code under test owns another.
-//! [`FakeCommands::hold_next`] makes the next call block until the test releases it, to stand in for a long hook.
+//! [`FakeCommands::hold_next`] makes the next call block until the test releases it (or the code under test cancels
+//! it), to stand in for a long hook. Calls run at the same time on different threads, as the real port's do.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use shepherd_core::ports::{
-    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL,
+    CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL, RunId,
 };
 
+use super::hold::Gate;
 pub use super::hold::Hold;
 use super::hold::HoldSlot;
 
 /// A scripted command's view of its run: what it was given, and what it does.
 pub struct ScriptedCommand<'a> {
     spec: &'a CommandSpec,
+    fake: &'a FakeCommands,
+    gate: &'a Gate,
     output: Vec<u8>,
     end: End,
     forks: bool,
@@ -31,6 +36,7 @@ enum End {
     Signal(i32),
     /// Never finishes on its own: it runs into its timeout.
     Hang,
+    Cancelled,
 }
 
 impl ScriptedCommand<'_> {
@@ -48,8 +54,13 @@ impl ScriptedCommand<'_> {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Writes `bytes`. Only the tail is kept, as the real port keeps it.
     pub fn print(&mut self, bytes: impl AsRef<[u8]>) {
         self.output.extend_from_slice(bytes.as_ref());
+        if self.output.len() > 2 * OUTPUT_TAIL {
+            let cut = self.output.len() - OUTPUT_TAIL;
+            self.output.drain(..cut);
+        }
     }
 
     /// Exits with `code` after its output. Commands that call none of `exit`, `signal` or `hang` exit 0.
@@ -67,9 +78,19 @@ impl ScriptedCommand<'_> {
         self.end = End::Hang;
     }
 
-    /// It starts a background child, which outlives it unless the timeout kills its group.
+    /// It never finishes on its own: blocks until the run is cancelled, which kills it and everything it forked. A
+    /// run not cancelled within a generous liveness bound panics.
+    pub fn wait_for_cancel(&mut self) {
+        if self.gate.wait("FakeCommands") {
+            self.end = End::Cancelled;
+        }
+    }
+
+    /// It starts a background child, which outlives it unless its group is killed (by its timeout or a cancel).
     pub fn fork_child(&mut self) {
         self.forks = true;
+        self.fake.lock().child_alive = Some(true);
+        self.fake.changed.notify_all();
     }
 }
 
@@ -82,11 +103,27 @@ struct State {
     fail_next: Option<CommandError>,
     /// Whether the last background child a script forked is alive. `None` before any did.
     child_alive: Option<bool>,
+    /// Calls in progress.
+    running: usize,
+}
+
+/// The runs a cancel can reach. Kept apart from `state`, so a held call holds no lock a cancel needs.
+#[derive(Default)]
+struct Flights {
+    /// The last id given out.
+    last: u64,
+    /// Ids given out whose run hasn't started, and whether each was cancelled.
+    pending: HashMap<RunId, bool>,
+    /// Each run in progress, and the gate it waits at while held or waiting for a cancel.
+    running: HashMap<RunId, Arc<Gate>>,
 }
 
 #[derive(Clone, Default)]
 pub struct FakeCommands {
     state: Arc<Mutex<State>>,
+    /// Signalled when `state.child_alive` changes.
+    changed: Arc<Condvar>,
+    flights: Arc<Mutex<Flights>>,
     hold: HoldSlot,
 }
 
@@ -119,15 +156,21 @@ impl FakeCommands {
         self.lock().fail_next = Some(error);
     }
 
-    /// The next call blocks, before it does anything, until the returned [`Hold`] is released or dropped. Calls after
-    /// it are not held. A call held for longer than a generous liveness bound panics.
+    /// The next call blocks, before it does anything, until the returned [`Hold`] is released or dropped, or the run is
+    /// cancelled (then it runs nothing and returns [`CommandExit::Cancelled`]). Calls after it are not held. A call
+    /// held for longer than a generous liveness bound panics.
     pub fn hold_next(&self) -> Hold {
         self.hold.arm()
     }
 
-    /// Every command that ran (or was asked to and failed), in order.
+    /// Every command that ran (or was asked to and failed, or was cancelled), in order.
     pub fn runs(&self) -> Vec<CommandSpec> {
         self.lock().runs.clone()
+    }
+
+    /// How many calls are in progress (held ones included).
+    pub fn running(&self) -> usize {
+        self.lock().running
     }
 
     /// Whether the last background child a script forked is still alive. `None` if none ever forked.
@@ -135,14 +178,30 @@ impl FakeCommands {
         self.lock().child_alive
     }
 
+    /// Blocks until some script has forked a background child, up to `limit` (a liveness bound). Whether one has.
+    pub fn wait_child_forked(&self, limit: Duration) -> bool {
+        let state = self.lock();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, limit, |s| s.child_alive.is_none())
+            .unwrap_or_else(PoisonError::into_inner);
+        state.child_alive.is_some()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
 
-impl Commands for FakeCommands {
-    fn run(&self, command: &CommandSpec) -> Result<CommandOutput, CommandError> {
-        self.hold.wait_if_held("FakeCommands");
+    fn flights(&self) -> MutexGuard<'_, Flights> {
+        self.flights.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `command`, waiting at `gate` first if it is `held`.
+    fn run_at(&self, gate: &Gate, held: bool, command: &CommandSpec) -> RunResult {
+        if held && gate.wait("FakeCommands") {
+            self.lock().runs.push(command.clone());
+            return Ok(cancelled());
+        }
         let script = {
             let mut s = self.lock();
             s.runs.push(command.clone());
@@ -156,6 +215,8 @@ impl Commands for FakeCommands {
         }
         let mut run = ScriptedCommand {
             spec: command,
+            fake: self,
+            gate,
             output: Vec::new(),
             end: End::Exit(0),
             forks: false,
@@ -171,16 +232,69 @@ impl Commands for FakeCommands {
             End::Exit(code) => CommandExit::Code(code),
             End::Signal(signal) => CommandExit::Signal(signal),
             End::Hang => CommandExit::TimedOut,
+            End::Cancelled => CommandExit::Cancelled,
         };
-        if run.forks {
-            // The timeout kills the whole group, children included.
-            self.lock().child_alive = Some(exit != CommandExit::TimedOut);
+        if run.forks && matches!(exit, CommandExit::TimedOut | CommandExit::Cancelled) {
+            // The timeout or the cancel kills the whole group, children included.
+            self.lock().child_alive = Some(false);
+            self.changed.notify_all();
         }
         let start = run.output.len().saturating_sub(OUTPUT_TAIL);
         Ok(CommandOutput {
             exit,
             tail: run.output.split_off(start),
         })
+    }
+}
+
+type RunResult = Result<CommandOutput, CommandError>;
+
+fn cancelled() -> CommandOutput {
+    CommandOutput {
+        exit: CommandExit::Cancelled,
+        tail: Vec::new(),
+    }
+}
+
+impl Commands for FakeCommands {
+    fn run(&self, id: RunId, command: &CommandSpec) -> RunResult {
+        let held = self.hold.take();
+        let gate = {
+            let mut flights = self.flights();
+            if flights.pending.remove(&id) == Some(true) {
+                drop(flights);
+                self.lock().runs.push(command.clone());
+                return Ok(cancelled());
+            }
+            let gate = held.clone().unwrap_or_default();
+            flights.running.insert(id, gate.clone());
+            gate
+        };
+        self.lock().running += 1;
+        let result = self.run_at(&gate, held.is_some(), command);
+        self.flights().running.remove(&id);
+        self.lock().running -= 1;
+        result
+    }
+
+    fn new_run(&self) -> RunId {
+        let mut flights = self.flights();
+        flights.last += 1;
+        let id = RunId(flights.last);
+        flights.pending.insert(id, false);
+        id
+    }
+
+    /// A held call, or one waiting for its cancel, stops waiting at once. Any other running call is past the point
+    /// where a cancel could reach it (the fake's scripts take no time), so a cancel then does nothing, as it does for
+    /// an id whose run has returned.
+    fn cancel(&self, id: RunId) {
+        let mut flights = self.flights();
+        if let Some(gate) = flights.running.get(&id) {
+            gate.cancel();
+        } else if let Some(cancelled) = flights.pending.get_mut(&id) {
+            *cancelled = true;
+        }
     }
 }
 
@@ -191,8 +305,8 @@ mod tests {
 
     use super::*;
     use crate::contracts::commands::{
-        COUNT_LINES, CommandsFixture, ENV_AND_CWD, ENV_VAR, FORK_AND_EXIT, FORK_AND_HANG,
-        KILLED_BY_SIGNAL, PRINT_AND_EXIT, READS_STDIN,
+        CHATTY, COUNT_LINES, CommandsFixture, ENV_AND_CWD, ENV_VAR, FORK_AND_EXIT, FORK_AND_HANG,
+        FORK_AND_WAIT, KILLED_BY_SIGNAL, PRINT_AND_EXIT, READS_STDIN,
     };
 
     /// The contract's scripts, scripted.
@@ -224,6 +338,15 @@ mod tests {
                 c.hang();
             })
             .with_script(FORK_AND_EXIT, |c| c.fork_child())
+            .with_script(FORK_AND_WAIT, |c| {
+                c.print("started\n");
+                c.fork_child();
+                c.wait_for_cancel();
+            })
+            .with_script(CHATTY, |c| {
+                c.print(b"0123456789abcde\n".repeat(8 * 1024 * 1024 / 16));
+                c.print("end");
+            })
     }
 
     pub struct FakeFixture {
@@ -258,6 +381,15 @@ mod tests {
         fn forked_child_alive(&self) -> Option<bool> {
             self.fake.child_alive()
         }
+
+        fn wait_for_child(&self, limit: Duration) -> bool {
+            self.fake.wait_child_forked(limit)
+        }
+
+        /// The fake runs no processes: a group it "killed" is gone at once.
+        fn shell_group_gone(&self) -> bool {
+            true
+        }
     }
 
     mod contract {
@@ -278,7 +410,10 @@ mod tests {
     #[test]
     fn an_unknown_script_is_a_missing_command() {
         let f = FakeFixture::new();
-        let out = f.fake.run(&spec("frobnicate", f.dir.clone())).unwrap();
+        let out = f
+            .fake
+            .run(f.fake.new_run(), &spec("frobnicate", f.dir.clone()))
+            .unwrap();
         assert_eq!(out.exit, CommandExit::Code(127));
         assert_eq!(out.tail, b"sh: frobnicate: command not found\n");
     }
@@ -289,10 +424,13 @@ mod tests {
         f.fake.fail_next(CommandError::Failed("no fork".into()));
         let first = spec(PRINT_AND_EXIT, f.dir.clone());
         assert_eq!(
-            f.fake.run(&first),
+            f.fake.run(f.fake.new_run(), &first),
             Err(CommandError::Failed("no fork".into()))
         );
-        assert_eq!(f.fake.run(&first).unwrap().exit, CommandExit::Code(3));
+        assert_eq!(
+            f.fake.run(f.fake.new_run(), &first).unwrap().exit,
+            CommandExit::Code(3)
+        );
         assert_eq!(f.fake.runs(), vec![first.clone(), first]);
     }
 
@@ -302,10 +440,29 @@ mod tests {
         let hold = f.fake.hold_next();
         let fake = f.fake.clone();
         let s = spec(PRINT_AND_EXIT, f.dir.clone());
-        let call = std::thread::spawn(move || fake.run(&s));
+        let id = f.fake.new_run();
+        let call = std::thread::spawn(move || fake.run(id, &s));
         assert!(hold.wait_entered(Duration::from_secs(10)));
         assert!(!call.is_finished());
+        assert_eq!(f.fake.running(), 1);
         hold.release();
         assert_eq!(call.join().unwrap().unwrap().exit, CommandExit::Code(3));
+        assert_eq!(f.fake.running(), 0);
+    }
+
+    #[test]
+    fn a_held_call_that_is_cancelled_runs_nothing() {
+        let f = FakeFixture::new();
+        let hold = f.fake.hold_next();
+        let fake = f.fake.clone();
+        let s = spec(FORK_AND_EXIT, f.dir.clone());
+        let id = f.fake.new_run();
+        let call = std::thread::spawn(move || fake.run(id, &s));
+        assert!(hold.wait_entered(Duration::from_secs(10)));
+        f.fake.cancel(id);
+        assert!(hold.wait_cancelled(Duration::from_secs(10)));
+        let out = call.join().unwrap().unwrap();
+        assert_eq!(out.exit, CommandExit::Cancelled);
+        assert_eq!(f.fake.child_alive(), None);
     }
 }
