@@ -646,6 +646,7 @@ pub mod contracts {
     pub mod launcher;
     pub mod link;
     pub mod pty;
+    pub mod pty_handoff;
     pub mod worktrees;
 }
 

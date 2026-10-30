@@ -5,6 +5,7 @@ pub mod codex;
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::acpp::FrameDraft;
@@ -15,7 +16,8 @@ use self::claude::ClaudeTranslation;
 use self::codex::CodexTranslation;
 
 /// One session's translation state, by agent kind.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "agent", content = "state", rename_all = "kebab-case")]
 enum Translation {
     Claude(ClaudeTranslation),
     Codex(CodexTranslation),
@@ -55,9 +57,49 @@ pub struct Translators {
     created: u64,
 }
 
+/// [`Translators`] as the host carries them across its exec (decision 0018): each session's translator serialized on
+/// its own, so one the new build can't read is dropped without losing the others.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CarriedTranslators {
+    sessions: BTreeMap<SessionId, Value>,
+    created: u64,
+}
+
 impl Translators {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Every translator, for the host's exec to carry.
+    pub fn carry(&self) -> CarriedTranslators {
+        CarriedTranslators {
+            sessions: self
+                .sessions
+                .iter()
+                .filter_map(|(id, t)| Some((id.clone(), serde_json::to_value(t).ok()?)))
+                .collect(),
+            created: self.created,
+        }
+    }
+
+    /// The translators an earlier image carried, and the sessions whose translator didn't parse and was dropped. A
+    /// dropped one is created afresh on the session's next hook, with this host run's seed, so ids stay unique.
+    pub fn restore(carried: CarriedTranslators) -> (Self, Vec<SessionId>) {
+        let mut dropped = Vec::new();
+        let mut sessions = BTreeMap::new();
+        for (id, value) in carried.sessions {
+            match serde_json::from_value(value) {
+                Ok(translation) => {
+                    sessions.insert(id, translation);
+                }
+                Err(_) => dropped.push(id),
+            }
+        }
+        let restored = Self {
+            sessions,
+            created: carried.created,
+        };
+        (restored, dropped)
     }
 
     /// Whether hooks from `agent` can be translated.

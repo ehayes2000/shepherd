@@ -171,3 +171,36 @@ fn translators_that_follow_each_other_in_one_session_never_share_an_id() {
     unique.dedup();
     assert_eq!(unique.len(), 3, "{ids:?}");
 }
+
+// ---------- carried across the host's exec ----------
+
+#[test]
+fn carried_translators_pick_up_where_they_left_off() {
+    let mut t = Translators::new();
+    let opened = request_id(&translate(&mut t, "s1", &prompt())).expect("a prompt request");
+
+    let carried = serde_json::to_value(t.carry()).expect("carried translators serialize");
+    let carried = serde_json::from_value(carried).expect("and parse back");
+    let (mut restored, dropped) = Translators::restore(carried);
+
+    assert!(dropped.is_empty(), "{dropped:?}");
+    assert_eq!(restored, t);
+    let answered =
+        response_id(&translate(&mut restored, "s1", &stop())).expect("a prompt response");
+    assert_eq!(opened, answered);
+}
+
+#[test]
+fn a_carried_translator_that_does_not_parse_is_dropped_and_the_rest_restored() {
+    let mut t = Translators::new();
+    translate(&mut t, "s1", &prompt());
+    translate(&mut t, "s2", &prompt());
+    let mut carried = serde_json::to_value(t.carry()).expect("serialize");
+    carried["sessions"]["s2"] = json!({ "agent": "from-a-newer-build", "state": 7 });
+
+    let (restored, dropped) =
+        Translators::restore(serde_json::from_value(carried).expect("still parses as a whole"));
+
+    assert_eq!(dropped, vec![sid("s2")]);
+    assert_eq!(restored.len(), 1);
+}

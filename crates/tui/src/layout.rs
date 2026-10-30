@@ -84,6 +84,8 @@ pub enum Target {
     RestartHost,
     /// The sidebar footer's `Restart host`, while the host should be restarted: reopens the restart dialog.
     OfferRestart,
+    /// The sidebar footer's `Host warning`, while the host warns about something: shows it again.
+    ShowHostWarning,
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

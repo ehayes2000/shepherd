@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -81,14 +81,52 @@ impl From<std::io::Error> for UnixLinkError {
 }
 
 /// The host end: accepts clients and emits `Connected` for each.
+///
+/// For the host's exec (decision 0018) the listener can be [handed over](UnixListenLink::hand_over): the link stops
+/// accepting and gives up its descriptor, so connects wait in the listen backlog, which survives the exec, until the
+/// new image [adopts](UnixListenLink::adopt) it. A handed-over link never closes the listener or removes the socket
+/// file, unless it [takes it back](UnixListenLink::take_back).
 pub struct UnixListenLink {
     conns: Conns,
     path: PathBuf,
     /// The socket file's `(dev, ino)`, so `Drop` removes only the file this link created.
     file_id: (u64, u64),
-    /// Shut down by `Drop` to wake the accept thread.
+    sink: Arc<dyn LinkEventSink>,
+    listener: Listening,
+}
+
+enum Listening {
+    Accepting(Acceptor),
+    /// Handed over: the descriptor is someone else's until taken back.
+    HandedOver(RawFd),
+}
+
+/// The accept thread, which gives the listener back when it stops.
+struct Acceptor {
+    /// Shut down to wake the accept thread.
     wake: UnixStream,
-    accept: Option<JoinHandle<()>>,
+    thread: JoinHandle<UnixListener>,
+}
+
+impl Acceptor {
+    fn start(
+        listener: UnixListener,
+        conns: Conns,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        let (wake, wake_rx) = UnixStream::pair()?;
+        let thread = thread::Builder::new()
+            .name("link-accept".into())
+            .spawn(move || accept(listener, wake_rx, conns, sink))?;
+        Ok(Self { wake, thread })
+    }
+
+    /// Stops accepting. `None` if the thread panicked, taking the listener with it.
+    fn stop(self) -> Option<UnixListener> {
+        let _ = self.wake.shutdown(Shutdown::Both);
+        self.thread.join().ok()
+    }
 }
 
 impl UnixListenLink {
@@ -109,27 +147,80 @@ impl UnixListenLink {
             }
             other => other?,
         };
-        let file_id = match make_private(&path, &listener) {
+        let file_id = match make_private(&path) {
             Ok(id) => id,
             Err(e) => {
                 let _ = std::fs::remove_file(&path);
                 return Err(e.into());
             }
         };
+        Self::serve(path, file_id, listener, sink)
+    }
 
+    /// Accepts on `listener`, a descriptor of the socket listening at `path` that a previous image of this process
+    /// handed over and carried across its exec. Clients that connected meanwhile are accepted first. A descriptor of
+    /// anything else is refused with [`UnixLinkError::Io`].
+    pub fn adopt(
+        path: impl AsRef<Path>,
+        listener: OwnedFd,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> Result<Self, UnixLinkError> {
+        let path = path.as_ref().to_path_buf();
+        let listener = UnixListener::from(listener);
+        let bound = listener.local_addr()?;
+        if bound.as_pathname() != Some(path.as_path()) {
+            return Err(UnixLinkError::Io(format!(
+                "the carried listener is not bound to {}",
+                path.display()
+            )));
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.file_type().is_socket() {
+            return Err(UnixLinkError::NotASocket(path));
+        }
+        Self::serve(path, (meta.dev(), meta.ino()), listener, sink)
+    }
+
+    fn serve(
+        path: PathBuf,
+        file_id: (u64, u64),
+        listener: UnixListener,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> Result<Self, UnixLinkError> {
         let conns = Conns::default();
-        let (wake, wake_rx) = UnixStream::pair()?;
-        let accept_conns = conns.clone();
-        let accept = thread::Builder::new()
-            .name("link-accept".into())
-            .spawn(move || accept(listener, wake_rx, accept_conns, sink))?;
+        let acceptor = Acceptor::start(listener, conns.clone(), sink.clone())?;
         Ok(Self {
             conns,
             path,
             file_id,
-            wake,
-            accept: Some(accept),
+            sink,
+            listener: Listening::Accepting(acceptor),
         })
+    }
+
+    /// Stops accepting and gives up the listener's descriptor (still `CLOEXEC`), for the host's exec to carry. Conns
+    /// already accepted are untouched. Connects from now on wait in the backlog.
+    pub fn hand_over(&mut self) -> Result<RawFd, UnixLinkError> {
+        let fd = match std::mem::replace(&mut self.listener, Listening::HandedOver(-1)) {
+            Listening::HandedOver(fd) => fd,
+            Listening::Accepting(acceptor) => acceptor
+                .stop()
+                .ok_or_else(|| UnixLinkError::Io("the accept thread panicked".into()))?
+                .into_raw_fd(),
+        };
+        self.listener = Listening::HandedOver(fd);
+        Ok(fd)
+    }
+
+    /// Undoes [`hand_over`](Self::hand_over): accepts again, the backlog first.
+    pub fn take_back(&mut self) -> Result<(), UnixLinkError> {
+        if let Listening::HandedOver(fd) = self.listener {
+            // SAFETY: handed over by this link and, the handover called off, ours again.
+            let listener = UnixListener::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            let acceptor = Acceptor::start(listener, self.conns.clone(), self.sink.clone())?;
+            self.listener = Listening::Accepting(acceptor);
+        }
+        Ok(())
     }
 }
 
@@ -145,11 +236,9 @@ fn ensure_private_dir(path: &Path) -> Result<(), UnixLinkError> {
     })
 }
 
-/// Sets the freshly bound socket to `0600` and makes the listener non-blocking for the accept loop. Returns the
-/// socket file's identity.
-fn make_private(path: &Path, listener: &UnixListener) -> std::io::Result<(u64, u64)> {
+/// Sets the freshly bound socket to `0600`. Returns the socket file's identity.
+fn make_private(path: &Path) -> std::io::Result<(u64, u64)> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
     let meta = std::fs::symlink_metadata(path)?;
     Ok((meta.dev(), meta.ino()))
 }
@@ -169,13 +258,17 @@ impl Link for UnixListenLink {
 
 impl Drop for UnixListenLink {
     fn drop(&mut self) {
-        let _ = self.wake.shutdown(Shutdown::Both);
-        // Once joined, the listener is closed and no conn can be added behind `drop_all`.
-        if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
-        }
-        let ours = std::fs::symlink_metadata(&self.path)
-            .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.file_id);
+        let handed_over = match std::mem::replace(&mut self.listener, Listening::HandedOver(-1)) {
+            // Once stopped and dropped, the listener is closed and no conn can be added behind `drop_all`.
+            Listening::Accepting(acceptor) => {
+                drop(acceptor.stop());
+                false
+            }
+            Listening::HandedOver(_) => true,
+        };
+        let ours = !handed_over
+            && std::fs::symlink_metadata(&self.path)
+                .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.file_id);
         if ours {
             let _ = std::fs::remove_file(&self.path);
         }
@@ -248,8 +341,14 @@ fn replace_stale(path: &Path) -> Result<(), UnixLinkError> {
     }
 }
 
-/// Accepts clients until `wake` becomes readable (the link was dropped). `listener` is non-blocking.
-fn accept(listener: UnixListener, wake: UnixStream, conns: Conns, sink: Arc<dyn LinkEventSink>) {
+/// Accepts clients until `wake` becomes readable (the link stops accepting), then gives the listener back.
+/// `listener` is non-blocking.
+fn accept(
+    listener: UnixListener,
+    wake: UnixStream,
+    conns: Conns,
+    sink: Arc<dyn LinkEventSink>,
+) -> UnixListener {
     let mut backoff = false;
     loop {
         let woken = if backoff {
@@ -260,7 +359,7 @@ fn accept(listener: UnixListener, wake: UnixStream, conns: Conns, sink: Arc<dyn 
             poll_readable(&[wake.as_raw_fd(), listener.as_raw_fd()], None)[0]
         };
         if woken {
-            return;
+            return listener;
         }
         match listener.accept() {
             Ok((stream, _)) => {
@@ -802,6 +901,70 @@ mod tests {
         let (host, _events) = bind(&path).unwrap();
         drop(host);
         assert!(!path.exists());
+    }
+
+    /// Waits for the first line on any conn.
+    fn first_line(events: &Events) -> Vec<u8> {
+        let seen = events.wait_for(
+            |e| matches!(e, LinkEvent::Line { .. }),
+            Duration::from_secs(10),
+        );
+        match seen.last() {
+            Some(LinkEvent::Line { line, .. }) => line.clone(),
+            other => panic!("expected a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_connect_during_the_hand_over_is_accepted_by_the_adopter() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let (mut old, _old_events) = bind(&path).unwrap();
+        let listener = old.hand_over().unwrap();
+
+        // In the backlog: nobody is accepting.
+        let mut client = UnixStream::connect(&path).unwrap();
+        client.write_all(b"during\n").unwrap();
+        // Exec never runs the old link's Drop; a handed-over link that is dropped mustn't unlink the socket either.
+        drop(old);
+        assert!(path.exists());
+
+        let (sink, events) = Events::channel();
+        // SAFETY: handed over to us, and nothing else owns it now.
+        let listener = unsafe { OwnedFd::from_raw_fd(listener) };
+        let _new = UnixListenLink::adopt(&path, listener, sink).unwrap();
+        // Had the old link accepted it, dropping the old link would have closed it.
+        assert_eq!(first_line(&events), b"during");
+    }
+
+    #[test]
+    fn a_link_that_takes_its_listener_back_accepts_again() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let (mut host, events) = bind(&path).unwrap();
+        host.hand_over().unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client.write_all(b"queued\n").unwrap();
+
+        host.take_back().unwrap();
+        assert_eq!(first_line(&events), b"queued");
+        drop(host);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn adopting_a_socket_bound_elsewhere_is_refused() {
+        let dir = short_tempdir();
+        // A real host socket at the path, so only the descriptor is wrong.
+        let path = dir.path().join("host.sock");
+        let (_host, _host_events) = bind(&path).unwrap();
+        let other = UnixListener::bind(dir.path().join("other.sock")).unwrap();
+        let (sink, _events) = Events::channel();
+        let adopted = UnixListenLink::adopt(&path, OwnedFd::from(other), sink);
+        assert!(
+            matches!(&adopted.err(), Some(UnixLinkError::Io(why)) if why.contains("not bound to")),
+            "refused for the wrong reason"
+        );
     }
 
     #[test]

@@ -62,6 +62,7 @@
 pub mod launch;
 pub mod naming;
 pub mod quiet;
+pub mod upgrade;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

@@ -12,14 +12,17 @@
 mod env;
 mod run_files;
 mod runtime;
+pub mod swap;
 mod worker;
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::build::{InstalledExe, build_of};
+use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
     GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError,
@@ -30,9 +33,10 @@ use shepherd_core::ports::{ConfigSource, LogError, LogId};
 
 pub use env::{Env, RealEnv};
 pub use runtime::{
-    CATCH_UP_BATCH, CATCH_UP_TICK, HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER,
-    MAX_CATCH_UP_TICK, RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE,
-    STALL_TIMEOUT, StartError, runtime_channel,
+    AdoptedSession, Adoption, CATCH_UP_BATCH, CATCH_UP_TICK, CarriedSession, HostRuntime,
+    INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER, MAX_CATCH_UP_TICK, PreflightRunner, RuntimeEvent,
+    RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError, SwapPlan,
+    adopt_sessions, runtime_channel,
 };
 
 /// The host runtime on the real adapters.
@@ -47,6 +51,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const RUN_DIR: &str = "run";
 /// Managed worktrees go in `<root>/worktrees/<repo>/<name>`.
 pub const WORKTREES_DIR: &str = "worktrees";
+/// How long the upgrade preflight (`<shepherd> handoff-check`) may run: a bound on a broken binary, not a timing.
+pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
 
 /// Why the host couldn't start. Each message says what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -81,6 +87,8 @@ pub enum HostStartError {
     Executable(String),
     #[error("cannot start a host thread: {0}")]
     Thread(String),
+    #[error("cannot take over from the previous host image: {0}")]
+    Adopt(String),
 }
 
 fn root_error(root: &Path, e: PrivateFsError) -> HostStartError {
@@ -140,6 +148,81 @@ fn open_inner(
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
+    let config = load_config(root, login_shell)?;
+    let shepherd =
+        std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
+    let settings = settings(root, home, config, shepherd, None);
+    let pty = PortablePty::new(tx.pty_sink());
+    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
+    let commands = ShellCommands::new();
+    HostRuntime::start(
+        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx,
+    )
+    .map_err(|e| start_error(root, e))
+}
+
+/// Builds the host's next image from the handoff file at `handoff`, which the previous image wrote just before it
+/// re-execed this process (see [`swap`]): it adopts the log's lock, then the listener, then the PTYs, and only then
+/// folds the logs. Once a session is adopted, nothing the user can get wrong stops it: a config that can't be used
+/// (edited since the preflight checked it) is replaced with the defaults, and every client is told so in its hello.
+pub fn open_adopted(
+    root: &Path,
+    home: PathBuf,
+    login_shell: Option<String>,
+    handoff: &Path,
+) -> Result<RealHost, HostStartError> {
+    open_adopted_inner(root, home, login_shell, handoff)
+        .inspect_err(|e| tracing::error!(error = %e, "host failed to take over"))
+}
+
+fn open_adopted_inner(
+    root: &Path,
+    home: PathBuf,
+    login_shell: Option<String>,
+    handoff: &Path,
+) -> Result<RealHost, HostStartError> {
+    let file = swap::read(root, handoff).map_err(HostStartError::Adopt)?;
+    // SAFETY: carried by the previous image for this one alone, and taken once each.
+    let (lock, listener) = unsafe { (swap::own(file.lock), swap::own(file.listener)) };
+    let log = JsonlEventLog::adopt(root, lock).map_err(|e| log_error(root, e))?;
+    let (tx, rx) = runtime_channel();
+    let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
+        .map_err(HostStartError::Socket)?;
+    let (config, warning) = match load_config(root, login_shell.clone()) {
+        Ok(config) => (config, None),
+        Err(error) => {
+            tracing::error!(%error, "cannot use the config after updating in place; running with the defaults");
+            let defaults =
+                Config::resolve(None, login_shell).map_err(|error| HostStartError::Config {
+                    path: root.join(CONFIG_FILE),
+                    error,
+                })?;
+            let warning = format!(
+                "the host updated itself but couldn't use its config, so it runs with the defaults: {error}. \
+                 Fix it, then restart the host"
+            );
+            (defaults, Some(warning))
+        }
+    };
+    let mut pty = PortablePty::new(tx.pty_sink());
+    let adoption = adopt_sessions(&mut pty, file.plan());
+    tracing::info!(
+        carried = file.sessions.len(),
+        adopted = adoption.sessions.len(),
+        "took over from the previous host image"
+    );
+    // The path the previous image execed is this one's startup path: `current_exe()` may already name another file.
+    let settings = settings(root, home, config, file.exe.clone(), warning);
+    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
+    let commands = ShellCommands::new();
+    HostRuntime::adopt(
+        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx, adoption,
+    )
+    .map_err(|e| start_error(root, e))
+}
+
+/// The config under `root`, resolved with the user's login shell.
+pub fn load_config(root: &Path, login_shell: Option<String>) -> Result<Config, HostStartError> {
     let config_path = root.join(CONFIG_FILE);
     let config_error = |error| HostStartError::Config {
         path: config_path.clone(),
@@ -148,9 +231,18 @@ fn open_inner(
     let raw = TomlConfigSource::new(&config_path)
         .load()
         .map_err(config_error)?;
-    let config = Config::resolve(raw, login_shell).map_err(config_error)?;
-    let shepherd =
-        std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
+    Config::resolve(raw, login_shell).map_err(config_error)
+}
+
+/// The runtime's settings under `root`: `config`, and the build at `shepherd`, the path this host started from.
+/// `warning` is for every client's hello.
+fn settings(
+    root: &Path,
+    home: PathBuf,
+    config: Config,
+    shepherd: PathBuf,
+    warning: Option<String>,
+) -> RuntimeSettings {
     // A host that can't read its own executable says no build: clients take it for an older host.
     // Hashed once: the first hello finds the same file there and reuses the digest.
     let mut installed = InstalledExe::new(&shepherd);
@@ -158,9 +250,7 @@ fn open_inner(
     if build.is_none() {
         tracing::warn!(path = %shepherd.display(), "cannot read this executable's build");
     }
-    let pty = PortablePty::new(tx.pty_sink());
-    let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
-    let settings = RuntimeSettings {
+    RuntimeSettings {
         config,
         home,
         run_root: root.join(RUN_DIR),
@@ -168,15 +258,16 @@ fn open_inner(
         installed,
         shepherd,
         socket: root.join(SOCKET_FILE),
-    };
-    let commands = ShellCommands::new();
-    HostRuntime::start(
-        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx,
-    )
-    .map_err(|e| match e {
+        preflight: PreflightRunner::new(|exe| handoff::preflight(exe, PREFLIGHT_BOUND)),
+        warning,
+    }
+}
+
+fn start_error(root: &Path, e: StartError) -> HostStartError {
+    match e {
         StartError::Log(e) => log_error(root, e),
         StartError::Worker(e) => HostStartError::Thread(e.to_string()),
-    })
+    }
 }
 
 fn log_error(root: &Path, error: LogError) -> HostStartError {
@@ -202,9 +293,14 @@ fn log_path(root: &Path, log: &LogId) -> PathBuf {
     }
 }
 
-/// `shepherd host`: logs to `~/.shepherd/host.log`, runs until SIGTERM or SIGINT, then shuts down cleanly.
+/// `shepherd host`: logs to `~/.shepherd/host.log`, runs until SIGTERM or SIGINT, then shuts down cleanly. With
+/// `--adopt <file>`, it is the next image of a host that re-execed itself to update in place, and takes over from it.
 pub fn main() -> ExitCode {
-    match run_default() {
+    let adopt = match std::env::args().nth(2).as_deref() {
+        Some("--adopt") => std::env::args().nth(3).map(PathBuf::from),
+        _ => None,
+    };
+    match run_default(adopt.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             report(&e);
@@ -220,7 +316,7 @@ fn report(e: &HostStartError) {
     eprintln!("shepherd host: {e}");
 }
 
-fn run_default() -> Result<(), HostStartError> {
+fn run_default(adopt: Option<&Path>) -> Result<(), HostStartError> {
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
@@ -236,14 +332,22 @@ fn run_default() -> Result<(), HostStartError> {
     // Only fails if a subscriber is already set, which nothing else in this process does.
     let _ = tracing::subscriber::set_global_default(file_subscriber(file));
 
-    let mut host = open(&root, home, shell)?;
+    let mut host = match adopt {
+        None => open(&root, home, shell)?,
+        Some(handoff) => open_adopted(&root, home, shell, handoff)?,
+    };
     forward_signals(host.sender());
     tracing::info!(root = %root.display(), "host started");
     // Serving, with the log open: tell a launching client so, by closing the stderr it reads.
     if let Err(error) = shepherd_adapters::launcher::release_stderr() {
         tracing::warn!(%error, "cannot release stderr");
     }
-    host.run();
+    // The path this host started from, not `current_exe()` now: the file there may have been replaced.
+    let exe = host.settings().shepherd.clone();
+    while let Some(plan) = host.run() {
+        let why = swap::exec(&mut host, plan, &root, &exe);
+        host.swap_failed(why);
+    }
     tracing::info!("host stopped");
     Ok(())
 }

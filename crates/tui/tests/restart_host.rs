@@ -12,9 +12,11 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
 use shepherd_core::ids::MachineId;
-use shepherd_core::wire::{BuildId, ExeDigest, PROTOCOL_VERSION, WireError};
+use shepherd_core::wire::{
+    BuildId, ClientRequest, ExeDigest, PROTOCOL_VERSION, UpgradeAnswer, WireError,
+};
 use shepherd_term::Modes;
-use shepherd_testkit::builders::ClientDriver;
+use shepherd_testkit::builders::{ClientDriver, requests};
 use shepherd_tui::{Pointer, Screens, Target, hit, layout, map_event, render};
 
 const WIDE: Rect = Rect::new(0, 0, 80, 24);
@@ -33,6 +35,15 @@ fn digest_json(byte: u8) -> Value {
 /// A client of build 1 whose hello is answered with `answer`, then (if the hello succeeded) caught up with a host
 /// running `fix-login` and `docs`, and an exited `old`.
 fn answered(answer: Result<Value, WireError>) -> ClientDriver {
+    answered_upgrading(answer, None)
+}
+
+/// [`answered`], with the request to update itself, if the hello made one, answered with `upgrade` (`None`: left
+/// unanswered).
+fn answered_upgrading(
+    answer: Result<Value, WireError>,
+    upgrade: Option<UpgradeAnswer>,
+) -> ClientDriver {
     let mut c =
         ClientDriver::from_client(Client::new(MachineId::new("m_client")).with_build(build(1)));
     c.handle(ClientEvent::Start);
@@ -40,7 +51,17 @@ fn answered(answer: Result<Value, WireError>) -> ClientDriver {
         at: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
     });
     let ok = answer.is_ok();
-    let subscribe = c.answer(&hello, answer);
+    let sent = c.answer(&hello, answer);
+    let (asked, subscribe): (Vec<ClientCommand>, Vec<ClientCommand>) =
+        sent.into_iter().partition(|cmd| {
+            requests(std::slice::from_ref(cmd))
+                .iter()
+                .any(|r| matches!(r.body, ClientRequest::HostUpgrade(_)))
+        });
+    if let Some(upgrade) = upgrade {
+        let result = serde_json::to_value(upgrade).unwrap_or_else(|e| panic!("{e}"));
+        c.answer(&asked, Ok(result));
+    }
     if ok {
         for (id, name) in [("s1", "old"), ("s2", "fix-login"), ("s3", "docs")] {
             c.host().new_session(id);
@@ -143,8 +164,31 @@ fn restart_dialog_for_a_host_older_than_builds() {
 }
 
 #[test]
-fn restart_dialog_for_a_stale_host() {
-    insta::assert_snapshot!(text(&buffer(&answered(hello_ok(Some(2), Some(1))), WIDE)));
+fn restart_dialog_for_a_stale_host_that_cannot_update_itself() {
+    let unavailable = UpgradeAnswer::Unavailable {
+        reason: "overwritten in place? reinstall it".into(),
+    };
+    let c = answered_upgrading(hello_ok(Some(2), Some(1)), Some(unavailable));
+    insta::assert_snapshot!(text(&buffer(&c, WIDE)));
+}
+
+#[test]
+fn notice_while_a_stale_host_updates_itself() {
+    let c = answered_upgrading(hello_ok(Some(2), Some(1)), Some(UpgradeAnswer::Accepted));
+    insta::assert_snapshot!(text(&buffer(&c, WIDE)));
+}
+
+#[test]
+fn notice_once_the_host_has_updated_itself() {
+    let mut c = answered_upgrading(hello_ok(Some(2), Some(1)), Some(UpgradeAnswer::Accepted));
+    // The host re-execs: the link drops, and the reconnect finds the installed build.
+    c.handle(ClientEvent::Disconnected);
+    let hello = c.handle(ClientEvent::Connected {
+        at: Timestamp::parse("2026-10-29T12:00:01.000Z").unwrap_or_else(|e| panic!("{e}")),
+    });
+    let subscribe = c.answer(&hello, hello_ok(Some(1), Some(1)));
+    c.answer(&subscribe, Ok(json!({})));
+    insta::assert_snapshot!(text(&buffer(&c, WIDE)));
 }
 
 #[test]
@@ -267,4 +311,41 @@ fn a_long_notice_takes_as_many_lines_as_its_words_wrap_to() {
             format!(" {}", words[0])
         ]
     );
+}
+
+// ---------- a host that warned (T36b: its config couldn't be used after it updated) ----------
+
+const WARNING: &str = "the host couldn't use its config and runs with the defaults";
+
+/// A host that warned in its hello answer, whose notice has timed out since.
+fn warned() -> ClientDriver {
+    let mut answer = hello_ok(Some(1), Some(1)).unwrap_or_else(|e| panic!("{e}"));
+    answer["warning"] = json!(WARNING);
+    let mut c = answered(Ok(answer));
+    for at in ["2026-10-29T12:00:01.000Z", "2026-10-29T12:01:00.000Z"] {
+        c.handle(ClientEvent::Tick {
+            at: Timestamp::parse(at).unwrap_or_else(|e| panic!("{e}")),
+        });
+    }
+    assert_eq!(c.client().notice(), None);
+    c
+}
+
+#[test]
+fn footer_while_the_host_warns() {
+    insta::assert_snapshot!(text(&buffer(&warned(), WIDE)));
+}
+
+#[test]
+fn the_footers_host_warning_shows_the_warning_again() {
+    let mut c = warned();
+    let buf = buffer(&c, WIDE);
+    let footer = at(&buf, " Host warning  Detach");
+    let button = Position::new(footer.x + 1, footer.y);
+    assert_eq!(
+        hit(&layout(WIDE), c.client(), button.x, button.y),
+        Some(Target::ShowHostWarning)
+    );
+    assert_eq!(click(&mut c, button), []);
+    assert_eq!(c.client().notice(), Some(WARNING));
 }

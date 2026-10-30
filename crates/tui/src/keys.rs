@@ -226,6 +226,7 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::KeepWorktree => vec![Intent::CloseKeepingWorktree],
         Target::RestartHost => vec![Intent::RestartHost],
         Target::OfferRestart => vec![Intent::OfferRestart],
+        Target::ShowHostWarning => vec![Intent::ShowHostWarning],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::Popup => Vec::new(),

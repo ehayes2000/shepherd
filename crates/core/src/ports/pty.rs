@@ -78,3 +78,31 @@ pub trait Pty {
     /// Acknowledging more than is outstanding is not an error; the excess is dropped, never banked.
     fn ack(&mut self, session: &SessionId, bytes: usize) -> Result<(), PtyError>;
 }
+
+/// Handing a [`Pty`]'s running sessions to another instance of it, so they outlive the instance (and the process
+/// image) that spawned them: the host re-execs itself in place and adopts its PTYs (decision 0018).
+///
+/// [`export`](PtyHandoff::export) quiesces every live session and gives a [`Token`](PtyHandoff::Token) for each.
+/// From then on the exporting instance reads, reaps and signals none of them, and treats them as unknown
+/// ([`PtyError::UnknownSession`]); output they write meanwhile waits in the kernel for the adopter. Each token is then
+/// either [`adopt`](PtyHandoff::adopt)ed by a fresh instance, which serves the session from then on exactly as if it
+/// had spawned it (writes, resizes, kill, credit, and its one `Exited` with the exit code), or, if the handoff is called
+/// off, [`resume`](PtyHandoff::resume) gives every exported session back to the exporter, unchanged.
+pub trait PtyHandoff: Pty {
+    /// Everything an adopter needs to take one session over.
+    type Token: std::fmt::Debug + Send;
+
+    /// Quiesces every live session and returns a token for each. Output read before the call has been sent to the
+    /// sink when it returns. A session that exits meanwhile isn't exported: its `Exited` is sent as usual. On error
+    /// nothing is exported (the sessions already quiesced are resumed).
+    fn export(&mut self) -> Result<Vec<(SessionId, Self::Token)>, PtyError>;
+
+    /// Calls off the last export: the exported sessions are served again as before it, and their tokens are void.
+    fn resume(&mut self);
+
+    /// Takes over an exported session as `session`. A session that can't be adopted (its terminal is gone, the token
+    /// is unusable, or `session` is already live: [`PtyError::AlreadyExists`]) is killed, process group and all, so
+    /// nothing is left running unattended, and the error says why; it gets no `Exited`. The one exception is a token
+    /// whose process isn't a child of the adopter: whoever it is, it isn't signalled, and the error says so.
+    fn adopt(&mut self, session: SessionId, token: Self::Token) -> Result<(), PtyError>;
+}
