@@ -315,7 +315,14 @@ fn a_session_whose_worktree_is_still_being_made_closes_at_once() {
     host.select_workspace(REPO);
     host.new_session("s1");
     let commands = host.close_with("s1", remove_anyway(), hooks(&["make clean"]));
-    assert_eq!(commands[0], closed(false, None));
+    // The create is cancelled (T37): the port removes what it made, so nothing is inspected or removed here.
+    assert_eq!(
+        commands[..2],
+        [
+            HostCommand::CancelWorktree { session: sid("s1") },
+            closed(false, None)
+        ]
+    );
 }
 
 #[test]

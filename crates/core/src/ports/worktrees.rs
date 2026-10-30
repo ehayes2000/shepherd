@@ -4,8 +4,10 @@
 //! `<repo-name>` comes from the repo's common git dir (see [`repo_name_from_common_dir`]), so every checkout of one
 //! repo (its main checkout and each of its worktrees) maps to the same directory.
 //!
-//! The trait is synchronous. Every git call is bounded by a timeout; a fetch that times out counts as a failed fetch,
-//! anything else that times out is [`WorktreeError::Timeout`].
+//! The trait is synchronous. Every git call but the checkout [`Worktrees::create`] makes is bounded by a timeout; a
+//! fetch that times out counts as a failed fetch, anything else that times out is [`WorktreeError::Timeout`]. The
+//! checkout has no time cap (a big repo's checkout, with git-lfs, can take many minutes), so a create that should stop
+//! is stopped with [`Worktrees::cancel_create`]. No git call waits on a person: a credential prompt fails.
 //!
 //! # Terms
 //!
@@ -256,6 +258,9 @@ pub enum WorktreeError {
     /// A git call other than fetch ran past its timeout.
     #[error("git {0} timed out")]
     Timeout(String),
+    /// [`Worktrees::cancel_create`] stopped the create.
+    #[error("creating the worktree was cancelled")]
+    Cancelled,
     #[error("{0}")]
     Other(String),
 }
@@ -274,17 +279,26 @@ pub trait Worktrees {
     /// until it is pushed. [`WorktreeError::RepoNameTaken`] if another repo with the same name already has worktrees
     /// under the root.
     ///
-    /// If making the worktree times out (e.g. a slow `post-checkout` hook), the half-made worktree and its new branch
-    /// are removed before returning [`WorktreeError::Timeout`], so a retry with the same name can succeed. If that
-    /// cleanup fails too, the error is [`WorktreeError::Other`], saying the create timed out, why cleanup failed, and
-    /// that the directory and branch must be removed by hand. That includes finding a directory at the worktree's path
-    /// that git doesn't list as a worktree: it may not be ours, so it is left alone.
+    /// Making the worktree (the checkout, and the user's `post-checkout` hook) has no time cap. If it fails or is
+    /// cancelled ([`Worktrees::cancel_create`]), the half-made worktree and its new branch are removed before returning
+    /// the error ([`WorktreeError::Cancelled`] for a cancel), so a retry with the same name can succeed. If that cleanup
+    /// fails too, the error is [`WorktreeError::Other`], saying what happened, why cleanup failed, and that the
+    /// directory and branch must be removed by hand. That includes finding a directory at the worktree's path that git
+    /// doesn't list as a worktree: it may not be ours, so it is left alone.
+    ///
+    /// Creates may run at the same time, on different threads.
     fn create(
         &self,
         repo: &RepoRef,
         name: &WorktreeName,
         base: BaseSpec,
     ) -> Result<Created, WorktreeError>;
+
+    /// Stops the [`Worktrees::create`] of `name` in `repo` (the same `repo` it was called with) that is running, or if
+    /// none is, the next one to start. That create returns [`WorktreeError::Cancelled`] once whatever it was running
+    /// has stopped and what it made is removed, as for a failed create. A create that has already returned is not
+    /// undone. Never waits on git.
+    fn cancel_create(&self, repo: &RepoRef, name: &WorktreeName);
 
     /// The repo's worktrees under `<root>/<repo-name>/`, at the same paths [`Worktrees::create`] returned. The main
     /// checkout and worktrees elsewhere are not listed.

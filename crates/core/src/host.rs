@@ -21,8 +21,10 @@
 //! [`HostCommand::CreateWorktree`] runs off the runtime thread. The result comes back as [`HostEvent::WorktreeCreated`]:
 //! the worktree is recorded in `worktree/created`, whose path is the session's cwd from then on (resume uses it), and
 //! the PTY spawns there. A failure is recorded as `session/failed`, and the session stays listed with the reason and no
-//! PTY. A result for a session closed meanwhile is recorded the same way but spawns nothing; a created worktree is left
-//! in place for cleanup to find through its record.
+//! PTY. Closing a session whose worktree is still being made cancels the create ([`HostCommand::CancelWorktree`]),
+//! which kills its git and removes what it made. A result for a session closed meanwhile (the cancelled create's, or
+//! one that finished first) is recorded the same way but spawns nothing; a created worktree is left in place for
+//! cleanup to find through its record.
 //!
 //! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
 //! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a
@@ -385,6 +387,12 @@ pub enum HostCommand {
         base: BaseSpec,
         spawn: SpawnSpec,
         hooks: PostCreate,
+    },
+    /// Stop the [`HostCommand::CreateWorktree`] still running for `session` (`Worktrees::cancel_create`): its git is
+    /// killed and what it made removed, and its answer comes back as usual, as [`WorktreeError::Cancelled`]. Never
+    /// waits on git.
+    CancelWorktree {
+        session: SessionId,
     },
     /// Run a post-create hook with the `Commands` port, and feed the result back as [`HostEvent::HookFinished`] with
     /// the same `session`, `command`, `rest` (the hooks after it) and `spawn` (what to spawn once they are done). Runs
@@ -883,8 +891,9 @@ impl Host {
         }
     }
 
-    /// Closes open session `session`: kills its PTY, then closes it at once, or, if it has a worktree to remove,
-    /// records that and inspects the worktree first.
+    /// Closes open session `session`: kills its PTY (or cancels the create of a worktree still being made, whose
+    /// cleanup is the port's), then closes it at once, or, if it has a worktree to remove, records that and inspects
+    /// the worktree first.
     fn close(
         &self,
         reply: ReplyTo,
@@ -896,10 +905,14 @@ impl Host {
             return vec![unknown_session(reply, session)];
         };
         let mut commands = Vec::new();
-        if entry.phase == Phase::Running {
-            commands.push(HostCommand::KillPty {
+        match entry.phase {
+            Phase::Running => commands.push(HostCommand::KillPty {
                 session: session.clone(),
-            });
+            }),
+            Phase::Starting => commands.push(HostCommand::CancelWorktree {
+                session: session.clone(),
+            }),
+            _ => {}
         }
         let confirmed = match worktree {
             CloseWorktree::Remove { confirmed } => Some(confirmed),

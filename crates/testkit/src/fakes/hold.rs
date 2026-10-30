@@ -8,8 +8,9 @@ use std::time::Duration;
 /// (or code that blocks the thread meant to release it) fails instead of hanging.
 const HOLD_LIMIT: Duration = Duration::from_secs(10);
 
+/// Where a held call waits. Released by the test, or cancelled by the code under test (e.g. `cancel_create`).
 #[derive(Debug, Default)]
-struct Gate {
+pub(crate) struct Gate {
     state: Mutex<GateState>,
     changed: Condvar,
 }
@@ -18,11 +19,35 @@ struct Gate {
 struct GateState {
     entered: bool,
     released: bool,
+    cancelled: bool,
 }
 
 impl Gate {
     fn lock(&self) -> MutexGuard<'_, GateState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until the gate is released or cancelled, and says whether it was cancelled. `fake` names the fake in the
+    /// panic of a call never released.
+    pub(crate) fn wait(&self, fake: &str) -> bool {
+        let mut state = self.lock();
+        state.entered = true;
+        self.changed.notify_all();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, HOLD_LIMIT, |s| !s.released && !s.cancelled)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            state.released || state.cancelled,
+            "a held {fake} call was never released (is the thread that should release it blocked on it?)"
+        );
+        state.cancelled
+    }
+
+    /// Lets the call waiting at the gate (or about to) go on, as cancelled.
+    pub(crate) fn cancel(&self) {
+        self.lock().cancelled = true;
+        self.changed.notify_all();
     }
 }
 
@@ -40,6 +65,18 @@ impl Hold {
             .wait_timeout_while(state, limit, |s| !s.entered)
             .unwrap_or_else(PoisonError::into_inner);
         state.entered
+    }
+
+    /// Blocks until the held call was cancelled (e.g. by `cancel_create`), up to `limit` (a liveness bound). Whether
+    /// it was.
+    pub fn wait_cancelled(&self, limit: Duration) -> bool {
+        let state = self.0.lock();
+        let (state, _) = self
+            .0
+            .changed
+            .wait_timeout_while(state, limit, |s| !s.cancelled)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.cancelled
     }
 
     pub fn release(self) {}
@@ -65,21 +102,15 @@ impl HoldSlot {
         Hold(gate)
     }
 
+    /// Disarms the armed gate, if any, for the caller to wait at.
+    pub(crate) fn take(&self) -> Option<Arc<Gate>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
     /// Waits at the armed gate, if any, disarming it. `fake` names the fake in the panic of a call never released.
     pub(crate) fn wait_if_held(&self, fake: &str) {
-        let Some(gate) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() else {
-            return;
-        };
-        let mut state = gate.lock();
-        state.entered = true;
-        gate.changed.notify_all();
-        let (state, _) = gate
-            .changed
-            .wait_timeout_while(state, HOLD_LIMIT, |s| !s.released)
-            .unwrap_or_else(PoisonError::into_inner);
-        assert!(
-            state.released,
-            "a held {fake} call was never released (is the thread that should release it blocked on it?)"
-        );
+        if let Some(gate) = self.take() {
+            gate.wait(fake);
+        }
     }
 }

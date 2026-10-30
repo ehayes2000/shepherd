@@ -4,11 +4,17 @@
 //!
 //! Each git process starts a new session (`setsid`), so it has no controlling terminal and neither do its children:
 //! ssh can't open `/dev/tty` to ask for a passphrase or host key. Stdin is closed, and the environment turns off the
-//! prompts that don't need a terminal: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential Manager) and
-//! `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
-//! ssh included. Output goes to temp files rather than pipes, so a background process left behind by a hook can't hold
-//! a call open. A `worktree add` killed this way is undone: its worktree and new branch are removed (see
-//! [`Worktrees::create`]). So is one that fails any other way, e.g. a `post-checkout` hook that exits non-zero.
+//! prompts that don't need a terminal: an empty `GIT_ASKPASS` (which also overrides `core.askPass` and `SSH_ASKPASS`,
+//! so an editor's askpass helper never runs), `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` (Git Credential
+//! Manager) and `SSH_ASKPASS_REQUIRE=never`. A process that runs past its timeout is killed with its whole process group, hooks and
+//! ssh included. `worktree add` has no timeout (a big checkout, with git-lfs, takes as long as it takes); it is killed
+//! the same way only by [`Worktrees::cancel_create`]. Output goes to temp files rather than pipes, so a background
+//! process left behind by a hook can't hold a call open. A `worktree add` killed by a cancel is undone: its worktree
+//! and new branch are removed (see [`Worktrees::create`]). So is one that fails any other way, e.g. a `post-checkout`
+//! hook that exits non-zero.
+//!
+//! Each create runs on its caller's thread, so creates for different sessions run at the same time. Their checks, fetch
+//! and branch creation take turns (concurrent fetches into one repo race on ref locks); their checkouts don't.
 //!
 //! The new branch is made atomically with `update-ref` before the add, which fails if the branch exists, so cleanup
 //! never touches a branch `create` didn't make, and deletes it only while it still points where `create` put it.
@@ -35,6 +41,7 @@
 //! Left to the user on purpose: hooks (`core.hooksPath`, `post-checkout` on `worktree add`), ssh and credential
 //! settings. Nothing here pushes, so `push.default` doesn't matter.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -42,7 +49,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::worktrees::{
@@ -53,7 +60,9 @@ use shepherd_core::ports::{
     WorktreePath, WorktreeStatus, Worktrees,
 };
 
-/// For every git call except fetch. Generous, because `worktree add` checks out files and runs the user's hooks.
+/// For every git call except fetch and `worktree add`: short metadata calls (rev-parse, show-ref, update-ref, worktree
+/// list, ...), so generous. `worktree add` has no time cap: it checks out files (a big repo's checkout with git-lfs
+/// smudging can take many minutes) and runs the user's hooks; [`Worktrees::cancel_create`] stops it.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -86,11 +95,68 @@ pub struct GitWorktrees {
     isolated_env: Option<Vec<(OsString, OsString)>>,
     git_timeout: Duration,
     fetch_timeout: Duration,
-    /// For the git calls that undo a timed-out `worktree add`. Separate from `git_timeout`, so cleanup still has room
-    /// when that timeout was set short.
+    /// For the git calls that undo a failed or cancelled `worktree add`. Separate from `git_timeout`, so cleanup still
+    /// has room when that timeout was set short.
     cleanup_timeout: Duration,
-    /// Serializes fetch + `worktree add`: concurrent fetches into one repo race on ref locks.
+    /// Serializes the creates' checks, fetch and branch creation: concurrent fetches into one repo race on ref locks.
+    /// Released before `worktree add`, so checkouts run at the same time.
     create_lock: Mutex<()>,
+    /// Creates running, and creates cancelled before they started, for [`Worktrees::cancel_create`].
+    creates: Mutex<HashMap<CreateKey, InFlight>>,
+}
+
+/// A create's repo (as the caller named it) and worktree name: what [`Worktrees::cancel_create`] names.
+type CreateKey = (PathBuf, String);
+
+/// A create [`GitWorktrees::creates`] knows of.
+#[derive(Debug, Default)]
+struct InFlight {
+    /// `false`: cancelled before it started, so the next create of it is cancelled.
+    running: bool,
+    cancelled: bool,
+    /// The process group of the git call it is waiting on, while that git is unreaped (so the id can't be reused).
+    pgid: Option<u32>,
+}
+
+/// A running create, registered in [`GitWorktrees::creates`] until it is dropped.
+struct CreateCall<'a> {
+    creates: &'a Mutex<HashMap<CreateKey, InFlight>>,
+    key: CreateKey,
+}
+
+impl CreateCall<'_> {
+    fn cancelled(&self) -> bool {
+        lock(self.creates)
+            .get(&self.key)
+            .is_some_and(|c| c.cancelled)
+    }
+
+    /// Records that git runs as process group `pgid`. Whether the create is already cancelled, so the caller kills it.
+    fn spawned(&self, pgid: u32) -> bool {
+        let mut creates = lock(self.creates);
+        let Some(call) = creates.get_mut(&self.key) else {
+            return false;
+        };
+        call.pgid = Some(pgid);
+        call.cancelled
+    }
+
+    /// Forgets git's process group: called once git has exited, before it is reaped.
+    fn exited(&self) {
+        if let Some(call) = lock(self.creates).get_mut(&self.key) {
+            call.pgid = None;
+        }
+    }
+}
+
+impl Drop for CreateCall<'_> {
+    fn drop(&mut self) {
+        lock(self.creates).remove(&self.key);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl GitWorktrees {
@@ -103,6 +169,7 @@ impl GitWorktrees {
             fetch_timeout: FETCH_TIMEOUT,
             cleanup_timeout: GIT_TIMEOUT,
             create_lock: Mutex::new(()),
+            creates: Mutex::default(),
         }
     }
 
@@ -119,13 +186,14 @@ impl GitWorktrees {
         self
     }
 
-    /// The timeout for every other git call. One that runs past it is [`WorktreeError::Timeout`].
+    /// The timeout for every other git call but `worktree add`, which has none. One that runs past it is
+    /// [`WorktreeError::Timeout`].
     pub fn with_git_timeout(mut self, timeout: Duration) -> Self {
         self.git_timeout = timeout;
         self
     }
 
-    /// The timeout for the git calls that clean up after a timed-out `worktree add`.
+    /// The timeout for the git calls that clean up after a failed or cancelled `worktree add`.
     pub fn with_cleanup_timeout(mut self, timeout: Duration) -> Self {
         self.cleanup_timeout = timeout;
         self
@@ -140,6 +208,18 @@ impl GitWorktrees {
         dir: &Path,
         args: &[S],
         timeout: Duration,
+    ) -> Result<String, Failure> {
+        self.run(dir, args, Some(timeout), None)
+    }
+
+    /// Runs git in `dir`, killing it (its whole process group) once `timeout` passes, if there is one, or once `call`
+    /// is cancelled, if it belongs to a create. Either way the group is gone when this returns.
+    fn run<S: AsRef<OsStr>>(
+        &self,
+        dir: &Path,
+        args: &[S],
+        timeout: Option<Duration>,
+        call: Option<&CreateCall>,
     ) -> Result<String, Failure> {
         let io = |e: io::Error| Failure::Io(e.to_string());
         let mut stdout = tempfile::tempfile().map_err(io)?;
@@ -172,6 +252,9 @@ impl GitWorktrees {
             }
         }
         command
+            // Empty, not unset: git then skips `core.askPass` and `SSH_ASKPASS` too, and with terminal prompts off
+            // fails instead of asking.
+            .env("GIT_ASKPASS", "")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GCM_INTERACTIVE", "never")
             .env("SSH_ASKPASS_REQUIRE", "never")
@@ -199,8 +282,17 @@ impl GitWorktrees {
             let _ = child.wait();
             return Err(io(e));
         }
-        let (timed_out, kill) = match exited.recv_timeout(timeout) {
-            // git was killed (e.g. by its own hook), so nothing stopped its children: kill them as for a timeout.
+        // A cancel kills the group from here on (or now, if it came first), until git has exited.
+        if call.is_some_and(|c| c.spawned(pid)) {
+            kill_group(pid);
+        }
+        let waited_for = match timeout {
+            Some(timeout) => exited.recv_timeout(timeout),
+            None => exited.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let (timed_out, kill) = match waited_for {
+            // git was killed (by a cancel, or e.g. by its own hook), so nothing stopped its children: kill them as for
+            // a timeout.
             Ok(how) => (false, how.is_ok_and(killed_by_signal)),
             Err(RecvTimeoutError::Disconnected) => (false, false),
             Err(RecvTimeoutError::Timeout) => {
@@ -210,6 +302,11 @@ impl GitWorktrees {
                 (true, true)
             }
         };
+        // git has exited, and is still unreaped: a cancel from now on mustn't kill its group id.
+        if let Some(call) = call {
+            call.exited();
+        }
+        let cancelled = kill && call.is_some_and(CreateCall::cancelled);
         if kill {
             kill_group(pid);
         }
@@ -223,6 +320,7 @@ impl GitWorktrees {
         match waited {
             Err(e) => Err(Failure::Io(e.to_string())),
             Ok(_) if timed_out => Err(Failure::Timeout),
+            Ok(_) if cancelled => Err(Failure::Cancelled),
             Ok(status) if status.success() => String::from_utf8(read_all(&mut stdout).map_err(io)?)
                 .map_err(|e| Failure::Io(e.to_string())),
             Ok(status) => Err(Failure::Exit {
@@ -236,17 +334,50 @@ impl GitWorktrees {
 
     /// Makes `branch` at `oid`, atomically: if the branch exists, e.g. made by another process since `create` checked
     /// (say, during the fetch), this fails without touching it and there is nothing to clean up.
+    /// Registers a create of `name` in `repo` for [`Worktrees::cancel_create`], unless one was cancelled before it
+    /// started ([`WorktreeError::Cancelled`], consuming that cancel) or one is already running.
+    fn start_create(
+        &self,
+        repo: &RepoRef,
+        name: &WorktreeName,
+    ) -> Result<CreateCall<'_>, WorktreeError> {
+        let key = (repo.as_path().to_owned(), name.as_str().to_owned());
+        let mut creates = lock(&self.creates);
+        match creates.get(&key) {
+            Some(InFlight { running: false, .. }) => {
+                creates.remove(&key);
+                return Err(WorktreeError::Cancelled);
+            }
+            Some(_) => {
+                return Err(WorktreeError::Other(format!(
+                    "{name} is already being created"
+                )));
+            }
+            None => {}
+        }
+        let running = InFlight {
+            running: true,
+            ..InFlight::default()
+        };
+        creates.insert(key.clone(), running);
+        Ok(CreateCall {
+            creates: &self.creates,
+            key,
+        })
+    }
+
     fn create_branch(
         &self,
         dir: &Path,
         common: &Path,
         branch: &BranchName,
         oid: &str,
+        call: &CreateCall,
     ) -> Result<(), WorktreeError> {
         let full_ref = format!("refs/heads/{branch}");
         // The empty old value means "must not exist yet".
         let args = ["-c", NO_REF_LOCK_WAIT, "update-ref", &full_ref, oid, ""];
-        match self.git(dir, &args) {
+        match self.run(dir, &args, Some(self.git_timeout), Some(call)) {
             Ok(_) => Ok(()),
             Err(Failure::Exit { code: Some(_), .. }) if self.ref_exists(dir, &full_ref)? => {
                 Err(WorktreeError::BranchExists(branch.clone()))
@@ -258,9 +389,9 @@ impl GitWorktrees {
                     "can't create branch {branch}: git update-ref: {failure}"
                 )))
             }
-            // Killed, so it may have died holding the branch's lock, which would block any retry. It never waits for
-            // a lock (`NO_REF_LOCK_WAIT`), so a lock there now is one it took, not another process's it was waiting
-            // on.
+            // Killed (timed out, cancelled, or by a signal), so it may have died holding the branch's lock, which would
+            // block any retry. It never waits for a lock (`NO_REF_LOCK_WAIT`), so a lock there now is one it took, not
+            // another process's it was waiting on.
             Err(failure) => {
                 let lock = common.join("refs/heads").join(format!("{branch}.lock"));
                 match std::fs::remove_file(&lock) {
@@ -630,16 +761,19 @@ impl Worktrees for GitWorktrees {
         base: BaseSpec,
     ) -> Result<Created, WorktreeError> {
         let BaseSpec::OriginDefault = base;
+        let call = self.start_create(repo, name)?;
+        let stop_if_cancelled = || match call.cancelled() {
+            true => Err(WorktreeError::Cancelled),
+            false => Ok(()),
+        };
         let dir = repo.as_path();
         let common = self.common_dir(dir)?;
         let repo_dir = self.root.join(name_of(&common)?);
         let branch = name.branch();
         let path = repo_dir.join(name.as_str());
 
-        let _guard = self
-            .create_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let guard = lock(&self.create_lock);
+        stop_if_cancelled()?;
         if self.taken_by_another_repo(&repo_dir, &common) {
             return Err(WorktreeError::RepoNameTaken { path: repo_dir });
         }
@@ -653,7 +787,7 @@ impl Worktrees for GitWorktrees {
                 path.display()
             )));
         }
-        let fetch = self.git_within(
+        let fetch = self.run(
             dir,
             &[
                 "fetch",
@@ -665,7 +799,8 @@ impl Worktrees for GitWorktrees {
                 "origin",
                 &format!("+refs/heads/{default}:refs/remotes/origin/{default}"),
             ],
-            self.fetch_timeout,
+            Some(self.fetch_timeout),
+            Some(&call),
         );
         let (start, base) = match fetch {
             Ok(_) => (
@@ -674,6 +809,7 @@ impl Worktrees for GitWorktrees {
                     branch: BranchName::new(&default),
                 },
             ),
+            Err(Failure::Cancelled) => return Err(WorktreeError::Cancelled),
             Err(failure) => {
                 let fetch_error = failure.describe(self.fetch_timeout);
                 let branch = BranchName::new(&default);
@@ -717,7 +853,22 @@ impl Worktrees for GitWorktrees {
         let registered_before = self
             .registered(&common, &path)
             .map_err(WorktreeError::Other)?;
-        self.create_branch(dir, &common, &branch, base_oid)?;
+        stop_if_cancelled()?;
+        self.create_branch(dir, &common, &branch, base_oid, &call)?;
+        // The checkout runs alongside other creates' (its worktree and branch are its own), with no time cap.
+        drop(guard);
+        let made = NewBranch {
+            name: &branch,
+            oid: base_oid,
+        };
+        if call.cancelled() {
+            let ours = Leftovers {
+                worktree: false,
+                branch_lock: false,
+            };
+            let error = WorktreeError::Cancelled;
+            return Err(self.undo_failed_add(&common, &path, made, ours, "was cancelled", error));
+        }
         let args: [&OsStr; 8] = [
             "-c".as_ref(),
             NO_REF_LOCK_WAIT.as_ref(),
@@ -728,7 +879,13 @@ impl Worktrees for GitWorktrees {
             path.as_os_str(),
             branch.as_str().as_ref(),
         ];
-        let failure = match self.git(dir, &args) {
+        // A git that exits on its own releases its locks, so a lock of the new branch left after that belongs to
+        // another git process. One killed by a cancel or a signal may have died holding it: the add updates the
+        // branch (to where it already points) as it checks it out. It never waits for another process's lock
+        // (`NO_REF_LOCK_WAIT`), so it can't have been killed while waiting on one.
+        let (failure, killed) = match self.run(dir, &args, None, Some(&call)) {
+            // Cancelled just as it finished on its own: undone all the same, as a cancelled create makes nothing.
+            Ok(_) if call.cancelled() => (Failure::Cancelled, false),
             Ok(_) => {
                 return Ok(Created {
                     path: WorktreePath::new(path),
@@ -736,32 +893,39 @@ impl Worktrees for GitWorktrees {
                     base,
                 });
             }
-            Err(failure) => failure,
+            Err(failure) => {
+                let killed = matches!(
+                    failure,
+                    Failure::Timeout | Failure::Cancelled | Failure::Exit { code: None, .. }
+                );
+                (failure, killed)
+            }
         };
-        // A git that exits on its own releases its locks, so a lock of the new branch left after that belongs to
-        // another git process. One killed by a timeout or a signal may have died holding it: the add updates the
-        // branch (to where it already points) as it checks it out. It never waits for another process's lock
-        // (`NO_REF_LOCK_WAIT`), so it can't have been killed while waiting on one.
         let ours = Leftovers {
             worktree: !registered_before,
-            branch_lock: matches!(failure, Failure::Timeout | Failure::Exit { code: None, .. }),
+            branch_lock: killed,
         };
         let (what, error) = match failure {
-            Failure::Timeout => (
-                "timed out".to_owned(),
-                WorktreeError::Timeout("worktree add".to_owned()),
-            ),
+            Failure::Cancelled => ("was cancelled".to_owned(), WorktreeError::Cancelled),
             other => {
                 let failure = other.describe(self.git_timeout);
                 let error = WorktreeError::Other(format!("git worktree add: {failure}"));
                 (format!("failed ({failure})"), error)
             }
         };
-        let made = NewBranch {
-            name: &branch,
-            oid: base_oid,
-        };
         Err(self.undo_failed_add(&common, &path, made, ours, &what, error))
+    }
+
+    /// Kills the git call the create is waiting on, if any (its own thread then waits for the group to be gone and
+    /// cleans up); a create between git calls stops before its next one.
+    fn cancel_create(&self, repo: &RepoRef, name: &WorktreeName) {
+        let key = (repo.as_path().to_owned(), name.as_str().to_owned());
+        let mut creates = lock(&self.creates);
+        let call = creates.entry(key).or_default();
+        call.cancelled = true;
+        if let Some(pgid) = call.pgid {
+            kill_group(pgid);
+        }
     }
 
     fn list_managed(&self, repo: &RepoRef) -> Result<Vec<Worktree>, WorktreeError> {
@@ -873,7 +1037,12 @@ fn name_of(common: &Path) -> Result<String, WorktreeError> {
 enum Failure {
     Io(String),
     Timeout,
-    Exit { code: Option<i32>, stderr: String },
+    /// Killed because its create was cancelled.
+    Cancelled,
+    Exit {
+        code: Option<i32>,
+        stderr: String,
+    },
 }
 
 impl Failure {
@@ -881,6 +1050,7 @@ impl Failure {
         match self {
             Self::Io(e) => format!("can't run git: {e}"),
             Self::Timeout => format!("timed out after {timeout:?}"),
+            Self::Cancelled => "cancelled".to_owned(),
             Self::Exit {
                 code: Some(code),
                 stderr,
@@ -892,6 +1062,7 @@ impl Failure {
     fn into_error(self, op: &str) -> WorktreeError {
         match self {
             Self::Timeout => WorktreeError::Timeout(op.to_owned()),
+            Self::Cancelled => WorktreeError::Cancelled,
             other => WorktreeError::Other(format!("git {op}: {}", other.describe(Duration::ZERO))),
         }
     }
@@ -1007,15 +1178,15 @@ mod tests {
 
     use portable_pty::{CommandBuilder, native_pty_system};
     use shepherd_core::ports::{
-        BaseSpec, BaseUsed, BranchName, RepoRef, WorktreeError, WorktreeName, WorktreePath,
-        Worktrees,
+        BaseSpec, BaseUsed, BranchName, Created, RepoRef, WorktreeError, WorktreeName,
+        WorktreePath, Worktrees,
     };
     use shepherd_testkit::contracts::worktrees::{
-        DEFAULT, FsWorktreesFixture, NESTED, REPO_NAME, SUBDIR, WorktreesFixture,
+        DEFAULT, FsWorktreesFixture, HeldCreate, NESTED, REPO_NAME, SUBDIR, WorktreesFixture,
     };
     use tempfile::TempDir;
 
-    use super::GitWorktrees;
+    use super::{Failure, GitWorktrees};
 
     /// `<tmp>/seed` (someone else's clone, used to push to origin), `<tmp>/origin.git`, `<tmp>/app` (the clone under
     /// test), `<tmp>/root` (the managed root), `<tmp>/home`. Git never sees the user's config.
@@ -1238,6 +1409,111 @@ mod tests {
 
         fn resolved(&self, path: &Path) -> PathBuf {
             std::fs::canonicalize(path).unwrap()
+        }
+
+        fn hold_next_create(&self) -> Box<dyn HeldCreate + '_> {
+            Box::new(HeldHook::install(self, ""))
+        }
+    }
+
+    fn mkfifo(path: &Path) {
+        let status = Command::new("mkfifo").arg(path).status().unwrap();
+        assert!(status.success());
+    }
+
+    /// Reads `fifo` to its end on a helper thread, up to `limit` (a liveness bound): whether it said `entered`. A writer
+    /// that never comes leaves the helper blocked until the test process exits, not the test.
+    fn read_entered(fifo: &Path, limit: Duration) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo = fifo.to_owned();
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            let ok = std::fs::File::open(&fifo)
+                .and_then(|mut fifo| fifo.read_to_string(&mut said))
+                .is_ok();
+            let _ = tx.send(ok && said.trim() == "entered");
+        });
+        rx.recv_timeout(limit).unwrap_or(false)
+    }
+
+    /// A FIFO hooks wait at. A hook opens it (`exec 3< <path>`, which returns at once because this holds a write end)
+    /// before it says it has started, then reads one byte from it ([`Gate::WAIT`]).
+    ///
+    /// The release is a byte per waiting hook, which stays in the FIFO for every hook that has it open, not the end of
+    /// the FIFO: on macOS, a read that starts after the last writer closed may block forever, and a hook can say it
+    /// started just before its read starts.
+    struct Gate {
+        path: PathBuf,
+        writer: std::fs::File,
+    }
+
+    impl Gate {
+        /// The shell line that makes a hook wait at the gate, on the fd 3 its `exec` opened.
+        const WAIT: &str = "dd bs=1 count=1 <&3 > /dev/null 2>&1";
+
+        fn new(path: PathBuf) -> Self {
+            mkfifo(&path);
+            // Read-write, so opening it doesn't wait for a reader.
+            let writer = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            Self { path, writer }
+        }
+
+        /// Lets every hook waiting at the gate (up to 64) go on.
+        fn release(mut self) {
+            use std::io::Write;
+            let _ = self.writer.write_all(&[b'x'; 64]);
+        }
+    }
+
+    /// A `post-checkout` hook (run after git registered the worktree and made its branch) that runs a setup script,
+    /// takes its place at a [`Gate`], says it has started on another FIFO, then waits at the gate. Every create that
+    /// runs the hook while it is installed is held. Dropping it releases the gate and uninstalls the hook.
+    struct HeldHook<'a> {
+        f: &'a GitFixture,
+        entered: PathBuf,
+        gate: Option<Gate>,
+    }
+
+    impl<'a> HeldHook<'a> {
+        fn install(f: &'a GitFixture, setup: &str) -> Self {
+            let n = f.counter.fetch_add(1, Ordering::Relaxed);
+            let entered = f.tmp().join(format!("entered-{n}.fifo"));
+            mkfifo(&entered);
+            let gate = Gate::new(f.tmp().join(format!("gate-{n}.fifo")));
+            hook(
+                f,
+                "post-checkout",
+                &format!(
+                    "{setup}\nexec 3< '{}'\necho entered > '{}'\n{}",
+                    gate.path.display(),
+                    entered.display(),
+                    Gate::WAIT
+                ),
+            );
+            Self {
+                f,
+                entered,
+                gate: Some(gate),
+            }
+        }
+    }
+
+    impl HeldCreate for HeldHook<'_> {
+        fn wait_entered(&self, limit: Duration) -> bool {
+            read_entered(&self.entered, limit)
+        }
+    }
+
+    impl Drop for HeldHook<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.f.app().join(".git/hooks/post-checkout"));
+            if let Some(gate) = self.gate.take() {
+                gate.release();
+            }
         }
     }
 
@@ -1475,41 +1751,155 @@ mod tests {
         assert_eq!(f.head(created.path.as_path()), f.origin_tip());
     }
 
-    #[test]
-    fn a_slow_git_call_is_a_typed_timeout() {
-        let f = GitFixture::new();
-        blocking_hook(&f, "");
-        let started = Instant::now();
-        let result = slow_port(&f).create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
-        assert_eq!(result, Err(WorktreeError::Timeout("worktree add".into())));
-        assert!(
-            started.elapsed() < Duration::from_secs(300),
-            "took {:?}",
-            started.elapsed()
-        );
-    }
+    /// The bound on short git calls in the tests that need one to fire: comfortably more than a metadata call takes
+    /// under load. Only that bound firing is timing-dependent.
+    const SHORT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// The `worktree add` bound in the timed-out-create tests: comfortably more than a checkout takes under load. The
-    /// hook never returns, so only this timeout firing is timing-dependent.
-    const ADD_TIMEOUT: Duration = Duration::from_secs(30);
-
-    /// A port whose `worktree add` (and every other non-fetch call) times out after [`ADD_TIMEOUT`]. Cleanup keeps
-    /// the generous test timeout.
+    /// A port whose short calls (everything but fetch and `worktree add`) time out after [`SHORT_TIMEOUT`]. Cleanup
+    /// keeps the generous test timeout.
     fn slow_port(f: &GitFixture) -> GitWorktrees {
-        port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(ADD_TIMEOUT)
+        port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(SHORT_TIMEOUT)
     }
 
-    /// Installs a `post-checkout` hook that runs `setup`, then blocks forever reading a FIFO nobody writes.
-    /// `post-checkout` runs after git has registered the worktree and made its branch.
-    fn blocking_hook(f: &GitFixture, setup: &str) {
-        let fifo = f.tmp().join("never.fifo");
-        let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
-        assert!(status.success());
+    /// A liveness bound for a held create to reach its hook, never a measurement.
+    const HELD_LIMIT: Duration = Duration::from_secs(600);
+
+    type Answer = std::sync::mpsc::Receiver<Result<Created, WorktreeError>>;
+
+    /// The answer of a create started with its own channel, within [`HELD_LIMIT`] (a liveness bound). If it doesn't
+    /// come, `release` runs first (so the create's thread can finish and the scope end), then this panics.
+    fn answer(answer: &Answer, release: impl FnOnce()) -> Result<Created, WorktreeError> {
+        answer.recv_timeout(HELD_LIMIT).unwrap_or_else(|_| {
+            release();
+            panic!("the create never answered");
+        })
+    }
+
+    /// Fails unless `entered` (a held hook said it started); `release` runs first, as for [`answer`].
+    fn assert_entered(entered: bool, release: impl FnOnce(), what: &str) {
+        if !entered {
+            release();
+            panic!("{what}");
+        }
+    }
+
+    /// Creates `n` with a `post-checkout` hook that runs `setup` and then blocks; once the hook is running, cancels
+    /// the create from another thread, and returns what the create returned. A cancel that doesn't stop the create
+    /// fails the test (after releasing the hook), never hangs it.
+    fn cancelled_create(f: &GitFixture, n: &str, setup: &str) -> Result<Created, WorktreeError> {
+        let held = HeldHook::install(f, setup);
+        let repo = &f.repo();
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.spawn(move || tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault)));
+            let entered = held.wait_entered(HELD_LIMIT);
+            let mut held = Some(held);
+            assert_entered(entered, || drop(held.take()), "the hook never ran");
+            f.port.cancel_create(repo, &name(n));
+            answer(&rx, || drop(held.take()))
+        })
+    }
+
+    /// `worktree add` held in its hook outlives the bound on every other git call, and isn't killed. The witness: a
+    /// short call made on the same port after the hook started runs into that bound first.
+    #[test]
+    fn worktree_add_has_no_time_cap() {
+        let f = GitFixture::new();
+        let held = HeldHook::install(&f, "");
+        let port = &slow_port(&f);
+        let repo = &f.repo();
+        let created = std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.spawn(move || tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)));
+            let entered = held.wait_entered(HELD_LIMIT);
+            let mut held = Some(held);
+            assert_entered(entered, || drop(held.take()), "the hook never ran");
+            let witness = port.git(&f.app(), &["-c", "alias.nap=!sleep 900", "nap"]);
+            let still_held = rx.try_recv().is_err();
+            drop(held.take());
+            assert!(matches!(witness, Err(Failure::Timeout)), "{witness:?}");
+            assert!(still_held, "the add finished while its hook was held");
+            answer(&rx, || {})
+        });
+        let created = created.unwrap();
+        assert!(created.path.as_path().is_dir());
+        assert!(branch_exists(&f, "long"));
+    }
+
+    /// The hook and its `sleep` are in git's process group: a cancel kills them all, and waits for them to be gone.
+    #[test]
+    fn a_cancelled_create_leaves_no_hook_running() {
+        let f = GitFixture::new();
+        let pid_file = f.tmp().join("hook.pids");
+        let setup = format!("sleep 900 &\necho \"$$ $!\" > '{}'", pid_file.display());
+        let result = cancelled_create(&f, "orphans", &setup);
+        assert_eq!(result, Err(WorktreeError::Cancelled));
+        let pids: Vec<libc::pid_t> = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        let alive: Vec<_> = pids.iter().copied().filter(|&pid| running(pid)).collect();
+        for &pid in &alive {
+            // SAFETY: plain syscall on a pid the hook reported.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert_eq!(pids.len(), 2, "{pids:?}");
+        assert!(alive.is_empty(), "still running: {alive:?}");
+        assert_nothing_left(&f, "orphans");
+    }
+
+    /// Two creates in one repo check out at the same time: the second gets to its hook while the first is held in its
+    /// own. Each hook says it started on a FIFO named after its worktree, so neither can answer for the other.
+    #[test]
+    fn creates_in_one_repo_check_out_at_the_same_time() {
+        let f = GitFixture::new();
+        let tmp = f.tmp();
+        let fifo = |n: &str| tmp.join(format!("{n}.fifo"));
+        mkfifo(&fifo("entered-first"));
+        mkfifo(&fifo("entered-second"));
+        let gate = Gate::new(fifo("gate"));
         hook(
-            f,
+            &f,
             "post-checkout",
-            &format!("{setup}\ncat '{}' > /dev/null", fifo.display()),
+            &format!(
+                "exec 3< '{gate}'\n\
+                 echo entered > '{tmp}/entered-'\"$(basename \"$PWD\")\"'.fifo'\n\
+                 {wait}",
+                gate = gate.path.display(),
+                tmp = tmp.display(),
+                wait = Gate::WAIT
+            ),
         );
+        let repo = &f.repo();
+        let port = &f.port;
+        let (first, second) = std::thread::scope(|s| {
+            let start = |n: &'static str| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.spawn(move || tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)));
+                rx
+            };
+            let mut gate = Some(gate);
+            let first = start("first");
+            let entered = read_entered(&fifo("entered-first"), HELD_LIMIT);
+            assert_entered(
+                entered,
+                || gate.take().into_iter().for_each(Gate::release),
+                "the first hook never ran",
+            );
+            let second = start("second");
+            let entered = read_entered(&fifo("entered-second"), HELD_LIMIT);
+            let first_held = first.try_recv().is_err();
+            gate.take().into_iter().for_each(Gate::release);
+            assert!(entered, "the second create waited for the first");
+            assert!(
+                first_held,
+                "the first create finished while its hook was held"
+            );
+            (answer(&first, || {}), answer(&second, || {}))
+        });
+        assert!(first.is_ok(), "{first:?}");
+        assert!(second.is_ok(), "{second:?}");
     }
 
     fn branch_exists(f: &GitFixture, branch: &str) -> bool {
@@ -1544,23 +1934,21 @@ mod tests {
     }
 
     #[test]
-    fn a_timed_out_create_leaves_nothing_behind_and_can_be_retried() {
+    fn a_cancelled_create_leaves_nothing_behind_and_can_be_retried() {
         let f = GitFixture::new();
-        blocking_hook(&f, "");
-        let result = slow_port(&f).create(&f.repo(), &name("slow"), BaseSpec::OriginDefault);
-        assert_eq!(result, Err(WorktreeError::Timeout("worktree add".into())));
+        let result = cancelled_create(&f, "slow", "");
+        assert_eq!(result, Err(WorktreeError::Cancelled));
         assert_nothing_left(&f, "slow");
         retry_succeeds(&f, "slow");
     }
 
     /// What an add killed while it makes the branch leaves behind.
     #[test]
-    fn a_timed_out_create_removes_the_new_branchs_stale_lock() {
+    fn a_cancelled_create_removes_the_new_branchs_stale_lock() {
         let f = GitFixture::new();
         let lock = f.app().join(".git/refs/heads/locked.lock");
-        blocking_hook(&f, &format!("touch '{}'", lock.display()));
-        let result = slow_port(&f).create(&f.repo(), &name("locked"), BaseSpec::OriginDefault);
-        assert_eq!(result, Err(WorktreeError::Timeout("worktree add".into())));
+        let result = cancelled_create(&f, "locked", &format!("touch '{}'", lock.display()));
+        assert_eq!(result, Err(WorktreeError::Cancelled));
         assert!(!lock.exists());
         assert_nothing_left(&f, "locked");
         retry_succeeds(&f, "locked");
@@ -1568,14 +1956,14 @@ mod tests {
 
     /// Without its `.git` file (as when the add is killed before writing it) git refuses to remove the worktree.
     #[test]
-    fn a_timed_out_create_deletes_a_worktree_git_refuses_to_remove() {
+    fn a_cancelled_create_deletes_a_worktree_git_refuses_to_remove() {
         let f = GitFixture::new();
         let keep = create(&f, "keep");
         let keep_head = f.head(keep.as_path());
         let path = worktree_path(&f, "broken");
-        blocking_hook(&f, &format!("rm '{}'", path.join(".git").display()));
-        let result = slow_port(&f).create(&f.repo(), &name("broken"), BaseSpec::OriginDefault);
-        assert_eq!(result, Err(WorktreeError::Timeout("worktree add".into())));
+        let setup = format!("rm '{}'", path.join(".git").display());
+        let result = cancelled_create(&f, "broken", &setup);
+        assert_eq!(result, Err(WorktreeError::Cancelled));
         assert_nothing_left(&f, "broken");
 
         assert_eq!(f.head(keep.as_path()), keep_head);
@@ -1588,25 +1976,22 @@ mod tests {
 
     /// Another process replaced the half-made worktree with its own directory, which git doesn't know.
     #[test]
-    fn a_timed_out_create_leaves_a_directory_git_does_not_list_alone() {
+    fn a_cancelled_create_leaves_a_directory_git_does_not_list_alone() {
         let f = GitFixture::new();
         let path = worktree_path(&f, "taken");
         let admin = f.app().join(".git").join("worktrees").join("taken");
         let theirs = path.join("theirs.txt");
-        blocking_hook(
-            &f,
-            &format!(
-                "rm -rf '{admin}' '{path}'\nmkdir '{path}'\ntouch '{theirs}'",
-                admin = admin.display(),
-                path = path.display(),
-                theirs = theirs.display(),
-            ),
+        let setup = format!(
+            "rm -rf '{admin}' '{path}'\nmkdir '{path}'\ntouch '{theirs}'",
+            admin = admin.display(),
+            path = path.display(),
+            theirs = theirs.display(),
         );
-        let result = slow_port(&f).create(&f.repo(), &name("taken"), BaseSpec::OriginDefault);
+        let result = cancelled_create(&f, "taken", &setup);
         let Err(WorktreeError::Other(message)) = &result else {
             panic!("{result:?}");
         };
-        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("was cancelled"), "{message}");
         assert!(message.contains("wasn't created by shepherd"), "{message}");
         assert!(message.contains("left alone"), "{message}");
         assert!(!message.contains("by hand"), "{message}");
@@ -1616,15 +2001,14 @@ mod tests {
 
     /// `packed-refs.lock` (not ours to remove) makes deleting the new branch fail.
     #[test]
-    fn a_timed_out_create_whose_cleanup_fails_says_so() {
+    fn a_cancelled_create_whose_cleanup_fails_says_so() {
         let f = GitFixture::new();
         let lock = f.app().join(".git/packed-refs.lock");
-        blocking_hook(&f, &format!("touch '{}'", lock.display()));
-        let result = slow_port(&f).create(&f.repo(), &name("stuck"), BaseSpec::OriginDefault);
+        let result = cancelled_create(&f, "stuck", &format!("touch '{}'", lock.display()));
         let Err(WorktreeError::Other(message)) = &result else {
             panic!("{result:?}");
         };
-        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("was cancelled"), "{message}");
         assert!(message.contains("can't delete branch stuck"), "{message}");
     }
 
@@ -1701,12 +2085,15 @@ mod tests {
                 lock = lock.display()
             ),
         );
-        let result = slow_port(&f).create(&f.repo(), &name("held"), BaseSpec::OriginDefault);
+        // A short cleanup bound: cleanup's delete waiting on the foreign lock would time out, not hang.
+        let port = slow_port(&f).with_cleanup_timeout(SHORT_TIMEOUT);
+        let result = port.create(&f.repo(), &name("held"), BaseSpec::OriginDefault);
         let Err(WorktreeError::Other(message)) = &result else {
             panic!("{result:?}");
         };
         assert!(message.contains("worktree add failed"), "{message}");
         assert!(message.contains("can't delete branch held"), "{message}");
+        assert!(!message.contains("timed out"), "{message}");
         assert!(lock.exists(), "{message}");
         assert!(!worktree_path(&f, "held").exists(), "{message}");
     }
@@ -1851,17 +2238,17 @@ mod tests {
         assert!(!worktree_path(&f, "moved").exists());
     }
 
-    /// The same after a timeout.
+    /// The same after a cancel.
     #[test]
-    fn a_timed_out_create_leaves_a_branch_someone_moved_alone() {
+    fn a_cancelled_create_leaves_a_branch_someone_moved_alone() {
         let f = GitFixture::new();
         f.advance_origin();
-        blocking_hook(&f, "git update-ref -m theirs refs/heads/moved HEAD~1");
-        let result = slow_port(&f).create(&f.repo(), &name("moved"), BaseSpec::OriginDefault);
+        let setup = "git update-ref -m theirs refs/heads/moved HEAD~1";
+        let result = cancelled_create(&f, "moved", setup);
         let Err(WorktreeError::Other(message)) = &result else {
             panic!("{result:?}");
         };
-        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("was cancelled"), "{message}");
         assert!(message.contains("left alone"), "{message}");
         let theirs = f.git(&f.app(), &["rev-parse", &format!("origin/{DEFAULT}~1")]);
         assert_eq!(f.git(&f.app(), &["rev-parse", "refs/heads/moved"]), theirs);
@@ -1913,6 +2300,69 @@ mod tests {
         assert!(message.contains("worktree add failed"), "{message}");
         assert!(message.contains("can't delete branch stuck"), "{message}");
         assert!(lock.exists());
+    }
+
+    /// An HTTP origin on localhost that answers every request with `401`, so git asks for credentials. Each connection
+    /// is answered on a thread of its own; the listener lives until the test process exits.
+    fn origin_asking_for_credentials() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/x.git", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(&stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).is_ok_and(|n| n > 0) && line != "\r\n" {
+                        line.clear();
+                    }
+                    let _ = (&stream).write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
+                          Content-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+        url
+    }
+
+    /// The user's askpass helpers (`GIT_ASKPASS`, `core.askPass`, `SSH_ASKPASS`, e.g. an editor's) would ask a person
+    /// with no terminal to ask on, and with no cap on a create could wait forever. Git never runs them: the fetch fails
+    /// at once and the create falls back to the last fetched origin default.
+    #[test]
+    fn a_credential_prompt_never_runs_the_users_askpass() {
+        let f = GitFixture::new();
+        let ran = f.tmp().join("askpass.ran");
+        let askpass = f.tmp().join("askpass.sh");
+        std::fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho secret\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&askpass, Permissions::from_mode(0o755)).unwrap();
+        let askpass_arg = askpass.to_str().unwrap();
+        f.git(&f.app(), &["config", "core.askPass", askpass_arg]);
+        let url = origin_asking_for_credentials();
+        f.git(&f.app(), &["remote", "set-url", "origin", &url]);
+        let mut vars = env(f.tmp().as_path());
+        vars.push(("GIT_ASKPASS".into(), askpass.clone().into()));
+        vars.push(("SSH_ASKPASS".into(), askpass.clone().into()));
+        let port = GitWorktrees::new(f.root())
+            .with_isolated_env(vars)
+            .with_git_timeout(TEST_TIMEOUT)
+            .with_fetch_timeout(TEST_TIMEOUT)
+            .with_cleanup_timeout(TEST_TIMEOUT);
+        let created = port
+            .create(&f.repo(), &name("asked"), BaseSpec::OriginDefault)
+            .unwrap();
+        let BaseUsed::Stale { fetch_error, .. } = &created.base else {
+            panic!("{:?}", created.base);
+        };
+        assert!(!ran.exists(), "askpass ran: {fetch_error}");
+        assert!(!fetch_error.contains("timed out"), "{fetch_error}");
     }
 
     /// The background `sleep` keeps git's stdout and stderr open long after git exits.

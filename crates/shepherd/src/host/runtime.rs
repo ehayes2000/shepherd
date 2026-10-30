@@ -18,9 +18,13 @@
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
 //! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
-//!   A command that needs it (a workspace probe, a new session's worktree) is submitted there and the loop carries
-//!   on; the result comes back as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still
-//!   matters. Closing a session inspects and removes its worktree the same way. The `Commands` port (a worktree's
+//!   A command that needs it (a workspace probe) is submitted there and the loop carries on; the result comes back as
+//!   [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still matters. Closing a session inspects
+//!   and removes its worktree the same way. A new session's worktree create runs on a thread of its own instead
+//!   ([`Worker::run_alone`]), since its checkout has no time cap: creates for different sessions run at the same time,
+//!   and none holds up the worker. Closing a session whose create is running cancels it (`Worktrees::cancel_create`,
+//!   which never waits on git), and the create's answer comes back as usual; shutting the host down cancels every
+//!   running create. The `Commands` port (a worktree's
 //!   post-create and pre-remove hooks) runs on a worker of its own the same way, its results coming back as
 //!   [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
@@ -56,7 +60,7 @@ use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
     MAX_QUEUED, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError,
-    WorktreePath, Worktrees,
+    WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -282,6 +286,8 @@ pub struct HostRuntime<P, W, C, L, E, V> {
     pending_run_files: HashMap<SessionId, Vec<RunFile>>,
     /// Sessions whose worktree is being created or whose hooks are running, with the run files their spawn will write.
     awaiting_worktree: HashMap<SessionId, Vec<RunFile>>,
+    /// Sessions whose worktree create is running, with what it was called with, for `Worktrees::cancel_create`.
+    creating: HashMap<SessionId, (RepoRef, WorktreeName)>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -292,8 +298,8 @@ pub struct HostRuntime<P, W, C, L, E, V> {
 
 impl<
     P: Pty,
-    W: Worktrees + Send + 'static,
-    C: Commands + Send + 'static,
+    W: Worktrees + Send + Sync + 'static,
+    C: Commands + Send + Sync + 'static,
     L: Link,
     E: EventLog,
     V: Env,
@@ -349,6 +355,7 @@ impl<
             hook_seed: None,
             pending_run_files: HashMap::new(),
             awaiting_worktree: HashMap::new(),
+            creating: HashMap::new(),
             shutdown_by: None,
             finished: false,
             quiet,
@@ -693,22 +700,34 @@ impl<
                             "creating worktree {name} failed unexpectedly"
                         ))),
                     };
+                    self.creating
+                        .insert(session.clone(), (repo.clone(), name.clone()));
+                    let thread = format!("worktree-create-{name}");
                     let call = move |worktrees: &W| HostEvent::WorktreeCreated {
                         result: worktrees.create(&repo, &name, base),
                         session,
                         spawn,
                         hooks,
                     };
-                    match self.worktrees.submit(call, panicked) {
+                    // On a thread of its own: a checkout has no time cap, and must not hold up other sessions' creates
+                    // or the worker's other calls.
+                    match self.worktrees.run_alone(&thread, call, panicked) {
                         Ok(()) => self.worktree_calls += 1,
                         Err(unanswered) => {
-                            tracing::error!("the worktrees thread is gone");
                             // Nothing will spawn: its run files go with the failure.
                             if let HostEvent::WorktreeCreated { session, .. } = &*unanswered {
                                 self.awaiting_worktree.remove(session);
+                                self.creating.remove(session);
                             }
                             follow_up.push_back(*unanswered);
                         }
+                    }
+                }
+                HostCommand::CancelWorktree { session } => {
+                    // Never waits on git: the create's own thread waits for its git to be gone and cleans up, then
+                    // answers as usual.
+                    if let Some((repo, name)) = self.creating.get(&session) {
+                        self.worktrees.port().cancel_create(repo, name);
                     }
                 }
                 HostCommand::RunHook {
@@ -848,6 +867,9 @@ impl<
     /// Hands a session's worktree or hook result (`event`) to core, with the run files that waited for it ready for its
     /// spawn. If core runs another hook instead, they go on waiting with it.
     fn worktree_created(&mut self, session: SessionId, event: HostEvent) {
+        if matches!(event, HostEvent::WorktreeCreated { .. }) {
+            self.creating.remove(&session);
+        }
         let files = self.awaiting_worktree.remove(&session).unwrap_or_default();
         if !files.is_empty() {
             self.pending_run_files.insert(session.clone(), files);
@@ -1552,6 +1574,11 @@ impl<
             return;
         }
         self.shutdown_by = Some(self.env.instant() + SHUTDOWN_GRACE);
+        // A create has no time cap: one left running would outlive the host. Its answer, if it comes before the loop
+        // stops, is dropped like any other.
+        for (repo, name) in self.creating.values() {
+            self.worktrees.port().cancel_create(repo, name);
+        }
         let live: Vec<SessionId> = self.screens.keys().cloned().collect();
         for session in live {
             if let Err(error) = self.pty.kill(&session) {
