@@ -806,3 +806,17 @@ the preflight validates `config.toml`, and after adoption a broken config falls 
 warning instead of killing sessions; adoption kills only processes `waitid` proves are our children and closes only carried
 terminals; a SIGTERM between Accepted and exec is dropped (the new image then runs the installed build anyway).
 
+### 0019: Machines peer over iroh; the host owns the endpoint (2026-10-30)
+Context: spike T28 (section above): iroh 1.4.1 fits `Link` unchanged; direct ≈ unix-socket latency, relayed ≈ 26–30 ms
+median per keystroke echo; two endpoints with one key stall each other. Decision:
+- Each host binds one iroh endpoint (iroh 1.x, `presets::N0`, n0's public relays) with the machine identity in
+  `~/.shepherd/identity.key` (0600, O_EXCL). `MachineId` is its node ID.
+- Machines pair with a single-use, expiring ticket (`shepherd pair` / `shepherd join`), token compared in constant time.
+  Trust is the allowlist of node IDs folded from `_shepherd/peer/trusted` (revoked by `peer/removed`), owned by core and
+  enforced by the adapter in iroh's `after_handshake` hook before any `Connected`.
+- Clients never bind an endpoint: they reach a remote host through `_shepherd/tunnel { machine }` on their local host,
+  which splices lines both ways with read-pausing flow control. The wire protocol stays end to end.
+- `Link` gains `peer(conn) -> Option<PeerId>` and `DisconnectReason::Refused` (both additive).
+Consequences: tokio enters `shepherd-adapters` only, one current-thread runtime thread per process (amends 0011: core and the
+runtime stay synchronous). T29–T32 follow the spike's proposals (now accepted). pkarr/DNS discovery, relay throughput and
+catch-up, and real NATs/Linux are verified in T30/T31.
