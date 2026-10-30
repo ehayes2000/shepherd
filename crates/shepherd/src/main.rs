@@ -6,6 +6,11 @@ fn main() -> ExitCode {
     let result = match std::env::args().nth(1).as_deref() {
         None => client(),
         Some("host") => return shepherd::host::main(),
+        Some("hook") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::hook::main(&args);
+            return ExitCode::SUCCESS;
+        }
         Some(other) => Err(format!("unknown command `{other}`")),
     };
     match result {

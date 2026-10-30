@@ -6,10 +6,14 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use crate::acpp::{
     AgentExited, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated, SessionRenamed,
     ShepherdFrame, Source, SourceKind, Timestamp,
 };
+use crate::agents::Translators;
+use crate::config::AgentKind;
 use crate::ids::SessionId;
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::wire::{HostResult, SessionNewOk, WireError};
@@ -67,6 +71,13 @@ pub enum HostEvent {
         session: SessionId,
         size: PtySize,
     },
+    /// `shepherd hook` sent a hook payload from an agent running in `session`.
+    Hook {
+        reply: ReplyTo,
+        session: SessionId,
+        agent: AgentKind,
+        payload: Value,
+    },
     /// A session's PTY process ended. `code` is `None` when a signal ended it.
     PtyExited {
         session: SessionId,
@@ -93,6 +104,13 @@ pub enum HostCommand {
     },
     KillPty {
         session: SessionId,
+    },
+    /// Translate a hook payload with the session's translator in [`Translators`], then seal, append and apply
+    /// each frame it gives, as for [`HostCommand::Append`].
+    TranslateHook {
+        session: SessionId,
+        agent: AgentKind,
+        payload: Value,
     },
     /// Answer the client request `to`.
     Reply {
@@ -226,6 +244,31 @@ impl Host {
                 commands.push(append(&session, closed));
                 commands.push(ack(reply));
                 commands
+            }
+            HostEvent::Hook {
+                reply,
+                session,
+                agent,
+                payload,
+            } => {
+                if self.open(&session).is_none() {
+                    return vec![unknown_session(reply, session)];
+                }
+                if !Translators::supports(agent) {
+                    let error = WireError::InvalidParams(format!(
+                        "no hook translator for {}",
+                        agent.as_str()
+                    ));
+                    return vec![reply_err(reply, error)];
+                }
+                vec![
+                    HostCommand::TranslateHook {
+                        session,
+                        agent,
+                        payload,
+                    },
+                    ack(reply),
+                ]
             }
             // Input, resize and exits for a session that isn't running are dropped: notifications are never
             // answered, and a PTY exits once.

@@ -360,20 +360,6 @@ fn a_bad_notification_is_never_answered() {
     assert!(client.take().is_empty());
 }
 
-#[test]
-fn hook_frames_are_refused_until_the_host_handles_them() {
-    let mut h = HostHarness::new();
-    let mut client = h.connect();
-    client.send_raw(br#"{"jsonrpc":"2.0","id":7,"method":"_shepherd/hook/frame","params":{"draft":{"frame":{"jsonrpc":"2.0","method":"x"},"source":{"kind":"hook"},"dir":"internal","session":null}}}"#);
-    h.step();
-    let msgs = client.take();
-    assert!(matches!(
-        response(&msgs, &7.into()),
-        Err(WireError::MethodNotFound(_))
-    ));
-    assert!(h.log().logs().unwrap().is_empty());
-}
-
 // ---------- subscriptions and fan-out ----------
 
 #[test]
