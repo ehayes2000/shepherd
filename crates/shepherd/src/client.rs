@@ -1,18 +1,28 @@
-//! The client runtime: runs [`Client`] against a [`Link`] and a [`HostLauncher`], and keeps a terminal
-//! [`Screen`] per session fed with its PTY output. Rendering and keys are the TUI's (T13), which pushes intents
-//! through [`ClientRuntime::intents`].
+//! The client runtime: runs [`Client`] against a [`Link`] and a [`HostLauncher`], keeps a terminal [`Screen`] per
+//! session fed with its PTY output, and draws the TUI.
 //!
 //! Everything arrives on one unbounded channel: link events (from the link's own threads, through a sink that never
-//! blocks) and user intents. [`ClientRuntime::pump`] handles what is queued without blocking, which is how scenario
-//! tests drive it step by step. [`ClientRuntime::run`] is the real loop: it blocks on the channel and ticks the client
-//! every [`TICK`] with the clock's time, so connect retries fire.
+//! blocks), user intents, terminal events (keys, mouse, paste, focus, resize; mapped by [`shepherd_tui::map_event`]),
+//! and shutdown requests from signals. [`ClientRuntime::pump`] handles what is queued without blocking, which is how
+//! scenario tests drive it step by step. [`ClientRuntime::run_with`] is the real loop: it blocks on the channel, ticks
+//! the client every [`TICK`] with the clock's time so connect retries fire, and redraws a [`View`] once per batch of
+//! inputs, so a flood of output isn't drawn message by message.
+//!
+//! [`run`] is `shepherd` itself: the real terminal (see [`crate::terminal`]) and the local host's socket.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
+
+use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::crossterm::event::Event;
+use ratatui::layout::Rect;
+use shepherd_term::MouseTracking;
+use shepherd_tui::{Screens, from_legacy_terminal, map_event};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
@@ -25,8 +35,12 @@ use shepherd_core::wire::{
 };
 use shepherd_term::Screen;
 
+use crate::terminal::{CrosstermSetup, TerminalSetup, install_panic_hook, with_terminal};
+
 /// How often [`ClientRuntime::run`] ticks the client.
 pub const TICK: Duration = Duration::from_millis(50);
+/// The most queued inputs [`ClientRuntime::run_with`] handles before it draws, so a flood still shows progress.
+pub const MAX_BATCH: usize = 1024;
 /// The screen size before the TUI reports the view's.
 const DEFAULT_SIZE: (u16, u16) = (80, 24);
 
@@ -38,12 +52,15 @@ pub type Connector<L> =
 pub enum ClientError {
     /// The client gave up. The message is for the user.
     Fatal(String),
+    /// The terminal couldn't be set up, read or drawn on.
+    Terminal(String),
 }
 
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fatal(why) => f.write_str(why),
+            Self::Terminal(why) => write!(f, "terminal: {why}"),
         }
     }
 }
@@ -58,6 +75,12 @@ enum Input {
         event: LinkEvent,
     },
     User(Intent),
+    /// Something the user did in the terminal.
+    Terminal(Event),
+    /// The terminal can't be read any more.
+    TerminalFailed(String),
+    /// Quit, as if the user detached (a signal).
+    Shutdown,
 }
 
 /// Forwards one link's events, tagged with its generation, so events from an earlier link are told apart.
@@ -84,6 +107,86 @@ impl IntentSender {
     }
 }
 
+/// Pushes terminal events and shutdown requests into a running client, from any thread.
+#[derive(Clone)]
+pub struct EventSender(Sender<Input>);
+
+impl EventSender {
+    /// Returns false once the runtime is gone.
+    pub fn terminal(&self, event: Event) -> bool {
+        self.0.send(Input::Terminal(event)).is_ok()
+    }
+
+    /// The terminal can't be read: the client stops with [`ClientError::Terminal`].
+    pub fn terminal_failed(&self, why: String) -> bool {
+        self.0.send(Input::TerminalFailed(why)).is_ok()
+    }
+
+    /// Asks the client to quit. Sessions keep running on the host.
+    pub fn shutdown(&self) -> bool {
+        self.0.send(Input::Shutdown).is_ok()
+    }
+}
+
+/// Where the client is drawn.
+pub trait View {
+    /// The window's `(cols, rows)`.
+    fn size(&mut self) -> io::Result<(u16, u16)>;
+    fn draw(&mut self, client: &Client, screens: &Screens) -> io::Result<()>;
+}
+
+/// Draws with ratatui on `B`, and captures the mouse while the selected session has mouse reporting on.
+pub struct TerminalView<B: Backend> {
+    terminal: ratatui::Terminal<B>,
+    setup: Arc<dyn TerminalSetup>,
+    mouse: bool,
+}
+
+impl<B: Backend> TerminalView<B> {
+    pub fn new(terminal: ratatui::Terminal<B>, setup: Arc<dyn TerminalSetup>) -> Self {
+        Self {
+            terminal,
+            setup,
+            mouse: false,
+        }
+    }
+
+    pub fn terminal(&self) -> &ratatui::Terminal<B> {
+        &self.terminal
+    }
+}
+
+impl<B: Backend> View for TerminalView<B> {
+    fn size(&mut self) -> io::Result<(u16, u16)> {
+        let size = self
+            .terminal
+            .size()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok((size.width, size.height))
+    }
+
+    fn draw(&mut self, client: &Client, screens: &Screens) -> io::Result<()> {
+        self.terminal
+            .draw(|frame| shepherd_tui::render(client, screens, frame))
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let mouse = selected_screen(client, screens)
+            .is_some_and(|s| s.modes().mouse.tracking != MouseTracking::Off);
+        if mouse != self.mouse {
+            self.setup.set_mouse_capture(mouse)?;
+            self.mouse = mouse;
+        }
+        Ok(())
+    }
+}
+
+fn selected_screen<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
+    screens.get(client.selected()?)
+}
+
+fn terminal_error(e: impl fmt::Display) -> ClientError {
+    ClientError::Terminal(e.to_string())
+}
+
 pub struct ClientRuntime<L, C, H> {
     client: Client,
     connect: C,
@@ -93,7 +196,13 @@ pub struct ClientRuntime<L, C, H> {
     generation: u64,
     tx: Sender<Input>,
     rx: Receiver<Input>,
-    screens: BTreeMap<SessionId, Screen>,
+    screens: Screens,
+    /// The window's `(cols, rows)`, from the last resize.
+    window: (u16, u16),
+    /// Why the terminal stopped working, if it did.
+    terminal_failed: Option<String>,
+    /// The outer terminal reports keys unambiguously (kitty keyboard protocol).
+    keyboard_enhanced: bool,
     done: bool,
 }
 
@@ -120,7 +229,10 @@ where
             generation: 0,
             tx,
             rx,
-            screens: BTreeMap::new(),
+            screens: Screens::new(),
+            window: DEFAULT_SIZE,
+            terminal_failed: None,
+            keyboard_enhanced: false,
             done: false,
         }
     }
@@ -134,8 +246,17 @@ where
         self.screens.get(session)
     }
 
+    /// Every session's terminal.
+    pub fn screens(&self) -> &Screens {
+        &self.screens
+    }
+
     pub fn intents(&self) -> IntentSender {
         IntentSender(self.tx.clone())
+    }
+
+    pub fn events(&self) -> EventSender {
+        EventSender(self.tx.clone())
     }
 
     /// The client has quit, or given up.
@@ -163,8 +284,13 @@ where
 
     /// Handles everything queued so far, without blocking. Returns how many inputs there were.
     pub fn pump(&mut self) -> usize {
+        self.drain(usize::MAX)
+    }
+
+    /// Handles up to `max` queued inputs, without blocking. Returns how many there were.
+    fn drain(&mut self, max: usize) -> usize {
         let mut handled = 0;
-        while !self.done {
+        while !self.done && handled < max {
             let Ok(input) = self.rx.try_recv() else {
                 break;
             };
@@ -174,21 +300,96 @@ where
         handled
     }
 
-    /// Starts the client and runs it until it quits. Fails with the client's message if it gives up.
+    /// Handles everything queued so far, without blocking, and draws `view` if there was anything. Returns whether
+    /// it drew.
+    pub fn pump_frame(&mut self, view: &mut dyn View) -> io::Result<bool> {
+        let handled = self.pump();
+        if handled > 0 {
+            view.draw(&self.client, &self.screens)?;
+        }
+        Ok(handled > 0)
+    }
+
+    /// Whether the outer terminal reports keys unambiguously. Until it does, keys are read as a legacy terminal
+    /// sends them (see [`from_legacy_terminal`]).
+    pub fn set_keyboard_enhanced(&mut self, on: bool) {
+        self.keyboard_enhanced = on;
+    }
+
+    /// A terminal event: what it means is decided by the TUI from the client's state and the selected session's
+    /// input modes.
+    pub fn terminal_event(&mut self, event: Event) {
+        let event = match event {
+            Event::Key(key) if !self.keyboard_enhanced => Event::Key(from_legacy_terminal(key)),
+            Event::Resize(cols, rows) => {
+                self.window = (cols, rows);
+                event
+            }
+            event => event,
+        };
+        let modes = selected_screen(&self.client, &self.screens)
+            .map(Screen::modes)
+            .unwrap_or_default();
+        let window = Rect::new(0, 0, self.window.0, self.window.1);
+        for intent in map_event(&event, &self.client, &modes, window) {
+            self.user(intent);
+        }
+    }
+
+    /// Starts the client and runs it, with nothing drawn, until it quits. Fails with the client's message if it
+    /// gives up.
     pub fn run(&mut self) -> Result<(), ClientError> {
+        self.run_loop(None)
+    }
+
+    /// Starts the client and runs it until it quits, drawing it on `view`.
+    pub fn run_with(&mut self, view: &mut dyn View) -> Result<(), ClientError> {
+        self.run_loop(Some(view))
+    }
+
+    fn run_loop(&mut self, mut view: Option<&mut dyn View>) -> Result<(), ClientError> {
         self.start();
+        if let Some(view) = view.as_deref_mut() {
+            let (cols, rows) = view.size().map_err(terminal_error)?;
+            self.terminal_event(Event::Resize(cols, rows));
+            if !self.done {
+                view.draw(&self.client, &self.screens)
+                    .map_err(terminal_error)?;
+            }
+        }
         let mut last_tick = Instant::now();
         while !self.done {
-            match self.rx.recv_timeout(TICK) {
-                Ok(input) => self.input(input),
+            let mut changed = false;
+            match self
+                .rx
+                .recv_timeout(TICK.saturating_sub(last_tick.elapsed()))
+            {
+                Ok(input) => {
+                    self.input(input);
+                    changed = true;
+                    // Everything else already queued is drawn with it.
+                    self.drain(MAX_BATCH - 1);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 // The runtime holds a sender itself.
                 Err(RecvTimeoutError::Disconnected) => unreachable!("the runtime's own sender"),
             }
             if !self.done && last_tick.elapsed() >= TICK {
                 last_tick = Instant::now();
+                let before = self.client.connection().clone();
                 self.tick();
+                changed |= *self.client.connection() != before;
             }
+            if let Some(view) = view.as_deref_mut()
+                && changed
+                && !self.done
+            {
+                view.draw(&self.client, &self.screens)
+                    .map_err(terminal_error)?;
+            }
+        }
+        if let Some(why) = &self.terminal_failed {
+            return Err(ClientError::Terminal(why.clone()));
         }
         match self.client.fatal() {
             Some(why) => Err(ClientError::Fatal(why.to_owned())),
@@ -199,6 +400,12 @@ where
     fn input(&mut self, input: Input) {
         match input {
             Input::User(intent) => self.user(intent),
+            Input::Terminal(event) => self.terminal_event(event),
+            Input::TerminalFailed(why) => {
+                self.terminal_failed = Some(why);
+                self.user(Intent::Quit);
+            }
+            Input::Shutdown => self.user(Intent::Quit),
             Input::Link { generation, .. } if generation != self.generation => {}
             Input::Link { event, .. } => match event {
                 LinkEvent::Line { line, .. } => {
@@ -307,7 +514,8 @@ where
     }
 }
 
-/// Runs the client against the local host's socket at `socket`, launching `shepherd host` if nothing listens.
+/// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
+/// `shepherd host` if nothing listens. The terminal is restored however this ends.
 pub fn run(socket: &Path) -> Result<(), ClientError> {
     let launcher = ProcessHostLauncher::shepherd_host()
         .map_err(|e| ClientError::Fatal(format!("can't find the shepherd executable: {e}")))?;
@@ -317,7 +525,62 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
     let machine = MachineId::new("local");
     let start = Instant::now();
     let clock = monotonic(jiff::Timestamp::now(), move || start.elapsed());
-    ClientRuntime::new(machine, connect, launcher, clock).run()
+    let mut runtime = ClientRuntime::new(machine, connect, launcher, clock);
+    let events = runtime.events();
+    forward_signals(events.clone()).map_err(terminal_error)?;
+    let backend =
+        ratatui::Terminal::new(CrosstermBackend::new(io::stdout())).map_err(terminal_error)?;
+    let setup: Arc<dyn TerminalSetup> = Arc::new(CrosstermSetup);
+    with_terminal(setup.clone(), |restorer| {
+        let on_panic = events.clone();
+        install_panic_hook(restorer.clone(), move || {
+            on_panic.shutdown();
+        });
+        runtime.set_keyboard_enhanced(restorer.keyboard_enhanced());
+        read_terminal_events(events)?;
+        runtime.run_with(&mut TerminalView::new(backend, setup))
+    })
+    .map_err(terminal_error)?
+}
+
+/// Turns SIGTERM, SIGHUP and SIGINT into [`EventSender::shutdown`], so the client quits through its normal path and
+/// the terminal is restored.
+pub fn forward_signals(events: EventSender) -> io::Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP, SIGINT])?;
+    std::thread::Builder::new()
+        .name("client-signals".into())
+        .spawn(move || {
+            for _ in signals.forever() {
+                if !events.shutdown() {
+                    return;
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Reads the real terminal's events on a thread, into the runtime's channel.
+fn read_terminal_events(events: EventSender) -> Result<(), ClientError> {
+    std::thread::Builder::new()
+        .name("client-terminal".into())
+        .spawn(move || {
+            loop {
+                match ratatui::crossterm::event::read() {
+                    Ok(event) => {
+                        if !events.terminal(event) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        events.terminal_failed(e.to_string());
+                        return;
+                    }
+                }
+            }
+        })
+        .map(drop)
+        .map_err(terminal_error)
 }
 
 /// A clock for core that never goes backwards: the wall time `anchor` read once, plus the monotonic time

@@ -10,6 +10,8 @@ shepherd-tui.workspace = true
 shepherd-term.workspace = true
 shepherd-adapters.workspace = true
 jiff.workspace = true
+ratatui.workspace = true
+signal-hook = "0.3"
 
 [dev-dependencies]
 shepherd-testkit.workspace = true

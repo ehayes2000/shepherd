@@ -11,8 +11,8 @@ use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, Link, LinkEvent};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, HostNotification, HostResponse, HostResult,
-    LogEntry, PtyOutput, Request, decode_client_message, encode_host_notification, encode_response,
-    negotiate,
+    LogEntry, PtyOutput, Request, SessionResize, decode_client_message, encode_host_notification,
+    encode_response, negotiate,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::contracts::link::ChannelSink;
@@ -26,6 +26,8 @@ pub struct FakeHost {
     sessions: u64,
     /// Every input the host was sent, in order.
     inputs: Vec<(SessionId, Vec<u8>)>,
+    /// Every resize the host was sent, in order.
+    resizes: Vec<SessionResize>,
 }
 
 impl FakeHost {
@@ -42,11 +44,26 @@ impl FakeHost {
             subscribers: Vec::new(),
             sessions: 0,
             inputs: Vec::new(),
+            resizes: Vec::new(),
         }
     }
 
     pub fn inputs(&self) -> &[(SessionId, Vec<u8>)] {
         &self.inputs
+    }
+
+    pub fn resizes(&self) -> &[SessionResize] {
+        &self.resizes
+    }
+
+    /// The open sessions' ids.
+    pub fn sessions(&self) -> Vec<SessionId> {
+        self.driver
+            .host()
+            .sessions()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
     }
 
     /// Handles every event queued so far. Returns how many there were.
@@ -74,7 +91,9 @@ impl FakeHost {
                 self.inputs.push((input.session, input.data));
                 self.broadcast(&HostNotification::PtyOutput(echo));
             }
-            Ok(ClientMessage::Notification(ClientNotification::SessionResize(_))) => {}
+            Ok(ClientMessage::Notification(ClientNotification::SessionResize(resize))) => {
+                self.resizes.push(resize);
+            }
             Err(e) => {
                 if let Some(response) = e.into_response() {
                     self.send(conn, &encode_response(&response));

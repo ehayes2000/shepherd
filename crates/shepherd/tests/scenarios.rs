@@ -3,21 +3,34 @@
 
 mod support {
     pub mod fake_host;
+    pub mod fake_terminal;
 }
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use shepherd::client::{ClientError, ClientRuntime, Connector};
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
+use shepherd::client::{
+    ClientError, ClientRuntime, Connector, EventSender, MAX_BATCH, TerminalView, View,
+    forward_signals,
+};
+use shepherd::terminal::{TerminalSetup, with_terminal};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{
-    Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, RETRY_INTERVAL,
+    Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, RETRY_INTERVAL,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
+use shepherd_core::ports::pty::PtySize;
 use shepherd_term::Screen;
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
+use shepherd_tui::{Screens, layout, pane_size};
 use support::fake_host::FakeHost;
+use support::fake_terminal::FakeTerminal;
 
 /// A host slot the fake launcher fills.
 type HostSlot = Arc<Mutex<Option<FakeHost>>>;
@@ -48,26 +61,29 @@ impl Harness {
         let net = FakeNetwork::new();
         let host: HostSlot = Arc::default();
         let launcher = make(net.clone(), host.clone());
-        let connect_net = net.clone();
         let now = Arc::new(Mutex::new(
             "2026-10-29T12:00:00Z"
                 .parse::<jiff::Timestamp>()
                 .unwrap_or_else(|e| panic!("{e}")),
         ));
-        let clock = {
-            let now = now.clone();
-            move || Timestamp::parse(lock(&now).to_string()).unwrap_or_else(|e| panic!("{e}"))
-        };
-        let connect: Connector<FakeLink> =
-            Box::new(move |sink| connect_net.connect(sink).map_err(|e| e.to_string()));
-        let runtime =
-            ClientRuntime::new(MachineId::new("m_client"), connect, launcher.clone(), clock);
+        let runtime = client_runtime(&net, &launcher, &now);
         Self {
             net,
             host,
             launcher,
             now,
             runtime,
+        }
+    }
+
+    /// A second client on the same network and host, as starting `shepherd` again would make.
+    fn reattach(&self) -> Self {
+        Self {
+            net: self.net.clone(),
+            host: self.host.clone(),
+            launcher: self.launcher.clone(),
+            now: self.now.clone(),
+            runtime: client_runtime(&self.net, &self.launcher, &self.now),
         }
     }
 
@@ -120,6 +136,21 @@ impl Harness {
             })
             .unwrap_or_default()
     }
+}
+
+fn client_runtime(
+    net: &FakeNetwork,
+    launcher: &FakeHostLauncher,
+    now: &Arc<Mutex<jiff::Timestamp>>,
+) -> ClientRuntime<FakeLink, Connector<FakeLink>, FakeHostLauncher> {
+    let clock = {
+        let now = now.clone();
+        move || Timestamp::parse(lock(&now).to_string()).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let connect_net = net.clone();
+    let connect: Connector<FakeLink> =
+        Box::new(move |sink| connect_net.connect(sink).map_err(|e| e.to_string()));
+    ClientRuntime::new(MachineId::new("m_client"), connect, launcher.clone(), clock)
 }
 
 fn first_line(screen: &Screen) -> String {
@@ -219,4 +250,518 @@ fn a_host_slow_to_answer_hello_is_retried_and_the_old_links_events_are_ignored()
     h.user(Intent::NewSession);
     h.user(Intent::Input(b"hi".to_vec()));
     assert_eq!(h.inputs(), [("s1".into(), "hi".into())]);
+}
+
+// ---------- the TUI ----------
+
+const WINDOW: (u16, u16) = (100, 30);
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+fn ch(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+fn test_view(terminal: &Arc<FakeTerminal>) -> TerminalView<TestBackend> {
+    let backend =
+        ratatui::Terminal::new(TestBackend::new(WINDOW.0, WINDOW.1)).unwrap_or_else(|e| match e {});
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    TerminalView::new(backend, setup)
+}
+
+/// The text of columns `x` of row `y` in the view's last frame, trailing blanks trimmed.
+fn text(view: &TerminalView<TestBackend>, x: std::ops::Range<u16>, y: u16) -> String {
+    let buf = view.terminal().backend().buffer();
+    x.map(|x| buf[(x, y)].symbol().to_owned())
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+impl Harness {
+    /// Started, with the host launched and the hello answered, in a [`WINDOW`]-sized terminal.
+    fn ready() -> Self {
+        let mut h = Self::new();
+        h.runtime.start();
+        h.settle();
+        h.wait_retry();
+        assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+        h.term(Event::Resize(WINDOW.0, WINDOW.1));
+        h
+    }
+
+    fn term(&mut self, event: Event) {
+        assert!(self.runtime.events().terminal(event));
+        self.settle();
+    }
+
+    fn keys(&mut self, keys: &[KeyEvent]) {
+        for key in keys {
+            self.term(Event::Key(*key));
+        }
+    }
+
+    fn typed(&mut self, text: &str) {
+        for c in text.chars() {
+            self.term(Event::Key(ch(c)));
+        }
+    }
+
+    fn draw(&mut self, view: &mut TerminalView<TestBackend>) {
+        view.draw(self.runtime.client(), self.runtime.screens())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    fn host<R>(&self, f: impl FnOnce(&FakeHost) -> R) -> R {
+        f(lock(&self.host)
+            .as_ref()
+            .unwrap_or_else(|| panic!("no host")))
+    }
+
+    /// Everything typed into `session`, joined.
+    fn typed_into(&self, session: &str) -> String {
+        self.inputs()
+            .into_iter()
+            .filter(|(s, _)| s == session)
+            .map(|(_, t)| t)
+            .collect()
+    }
+}
+
+#[test]
+fn keys_create_and_switch_sessions_and_the_screen_shows_the_selected_one() {
+    let mut h = Harness::ready();
+    let terminal = FakeTerminal::new();
+    let mut view = test_view(&terminal);
+    let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
+    let side = 0..pane.x - 1;
+    let screen = pane.x..pane.right();
+
+    h.keys(&[ctrl('b'), ch('n'), ctrl('b'), ch('n')]);
+    h.typed("hello");
+    h.keys(&[ctrl('b'), ch('j')]);
+    h.typed("world");
+    h.draw(&mut view);
+
+    assert_eq!(
+        (h.typed_into("s2"), h.typed_into("s1")),
+        ("hello".into(), "world".into())
+    );
+    assert_eq!(text(&view, screen.clone(), 0), "world");
+    // Newest first: s2 (`shell-2`) on top, s1 below it and selected.
+    let buf = view.terminal().backend().buffer().clone();
+    assert!(text(&view, side.clone(), 1).ends_with("shell-2"), "{buf:?}");
+    assert!(text(&view, side.clone(), 3).ends_with("shell-1"), "{buf:?}");
+    let highlighted = |y: u16| buf[(2, y)].bg != ratatui::style::Color::Reset;
+    assert_eq!((highlighted(1), highlighted(3)), (false, true));
+
+    h.keys(&[ctrl('b'), ch('k')]);
+    h.draw(&mut view);
+    assert_eq!(text(&view, screen, 0), "hello");
+}
+
+#[test]
+fn the_selected_session_is_resized_to_the_pane_not_the_window() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n')]);
+    // The session prints before the resize, so the client already has its screen.
+    h.typed("x");
+    assert!(h.runtime.screen(&SessionId::new("s1")).is_some());
+    h.term(Event::Resize(120, 40));
+    let pane = pane_size(120, 40);
+    let last = h.host(|host| host.resizes().last().cloned());
+    let last = last.unwrap_or_else(|| panic!("no resize sent"));
+    assert_eq!(
+        (last.session.as_str(), last.cols, last.rows),
+        ("s1", pane.cols, pane.rows)
+    );
+    // The client's own screen of the session is resized to match.
+    let screen = h.runtime.screen(&SessionId::new("s1")).map(Screen::size);
+    assert_eq!(screen, Some((pane.cols, pane.rows)));
+}
+
+#[test]
+fn a_flood_of_output_is_drawn_once() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n')]);
+    // 50 echoes queue up in the client before it gets to run.
+    for _ in 0..50 {
+        h.runtime.user(Intent::Input(b"x".to_vec()));
+    }
+    lock(&h.host).as_mut().map(FakeHost::pump);
+    let mut view = CountingView::default();
+    let drew = h.runtime.pump_frame(&mut view);
+    assert!(matches!(drew, Ok(true)), "{drew:?}");
+    assert_eq!(view.draws, 1);
+    assert_eq!(h.screen("s1"), "x".repeat(50));
+    // Nothing new: no redraw.
+    let drew = h.runtime.pump_frame(&mut view);
+    assert!(matches!(drew, Ok(false)), "{drew:?}");
+    assert_eq!(view.draws, 1);
+}
+
+#[test]
+fn the_running_loop_draws_queued_input_as_one_batch() {
+    /// Asks the client to quit at its second draw.
+    struct QuitOnSecondDraw {
+        draws: usize,
+        events: EventSender,
+    }
+    impl View for QuitOnSecondDraw {
+        fn size(&mut self) -> std::io::Result<(u16, u16)> {
+            Ok(WINDOW)
+        }
+        fn draw(&mut self, _: &Client, _: &Screens) -> std::io::Result<()> {
+            self.draws += 1;
+            if self.draws == 2 {
+                self.events.shutdown();
+            }
+            Ok(())
+        }
+    }
+    // No host answers; the keys just need handling.
+    let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
+    let events = h.runtime.events();
+    for _ in 0..50 {
+        events.terminal(Event::Key(ch('x')));
+    }
+    let mut view = QuitOnSecondDraw { draws: 0, events };
+    let result = h.runtime.run_with(&mut view);
+    assert_eq!(result, Ok(()));
+    // The first frame, then all 50 keys in one.
+    assert_eq!(view.draws, 2);
+}
+
+#[derive(Default)]
+struct CountingView {
+    draws: usize,
+}
+
+impl View for CountingView {
+    fn size(&mut self) -> std::io::Result<(u16, u16)> {
+        Ok(WINDOW)
+    }
+
+    fn draw(&mut self, _: &Client, _: &Screens) -> std::io::Result<()> {
+        self.draws += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn mouse_goes_to_a_session_that_turned_mouse_mode_on() {
+    let mut h = Harness::ready();
+    let terminal = FakeTerminal::new();
+    let mut view = test_view(&terminal);
+    h.keys(&[ctrl('b'), ch('n')]);
+    h.draw(&mut view);
+    assert!(terminal.calls().is_empty(), "no capture until asked");
+
+    // The fake host echoes input, so this turns on SGR mouse reporting in the session's terminal.
+    h.user(Intent::Input(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+    h.draw(&mut view);
+    assert_eq!(terminal.calls(), ["mouse on"]);
+
+    let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
+    h.term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: pane.x + 2,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    let last = h.inputs().last().cloned();
+    assert_eq!(last, Some(("s1".into(), "\x1b[<64;3;2M".into())));
+
+    // Selecting a session without mouse mode gives the mouse back to the outer terminal.
+    h.keys(&[ctrl('b'), ch('n')]);
+    h.draw(&mut view);
+    assert_eq!(terminal.calls(), ["mouse on", "mouse off"]);
+}
+
+#[test]
+fn q_detaches_and_starting_again_reattaches_to_the_running_sessions() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n'), ctrl('b'), ch('n')]);
+    h.keys(&[ctrl('b'), ch('q')]);
+    assert!(h.runtime.done());
+    assert_eq!(h.host(FakeHost::sessions).len(), 2, "sessions keep running");
+
+    let mut again = h.reattach();
+    again.runtime.start();
+    again.settle();
+    assert_eq!(again.runtime.client().connection(), &Connection::Ready);
+    assert_eq!(again.runtime.client().sessions().len(), 2);
+}
+
+#[test]
+fn mouse_follows_the_layout_after_the_window_crosses_the_collapse_width() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n')]);
+    h.user(Intent::Input(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+    // Narrow enough to collapse the sidebar: the pane moves left.
+    h.term(Event::Resize(50, 30));
+    let pane = layout(Rect::new(0, 0, 50, 30)).pane;
+    h.term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.x + 2,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    let last = h.inputs().last().cloned();
+    assert_eq!(last, Some(("s1".into(), "\x1b[<0;3;2M".into())));
+}
+
+#[test]
+fn shift_enter_reaches_a_kitty_session_as_its_own_key_and_a_legacy_one_as_alt_enter() {
+    let mut h = Harness::ready();
+    let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+    h.keys(&[ctrl('b'), ch('n')]);
+    // The fake host echoes input, so this pushes kitty keyboard flag 1 in s1's terminal.
+    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.keys(&[shift_enter]);
+    assert_eq!(
+        h.inputs().last().cloned(),
+        Some(("s1".into(), "\x1b[13;2u".into()))
+    );
+
+    h.keys(&[ctrl('b'), ch('n'), shift_enter]);
+    assert_eq!(
+        h.inputs().last().cloned(),
+        Some(("s2".into(), "\x1b\r".into()))
+    );
+}
+
+#[test]
+fn ctrl_backslash_from_a_legacy_outer_terminal_reaches_the_session() {
+    let mut h = Harness::ready();
+    // What crossterm reports for byte 0x1C when the outer terminal doesn't report keys unambiguously.
+    let reported = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
+    h.keys(&[ctrl('b'), ch('n'), reported]);
+    assert_eq!(
+        h.inputs().last().cloned(),
+        Some(("s1".into(), "\x1c".into()))
+    );
+    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.keys(&[reported]);
+    assert_eq!(
+        h.inputs().last().cloned(),
+        Some(("s1".into(), "\x1b[92;5u".into()))
+    );
+}
+
+#[test]
+fn ctrl_and_a_digit_from_an_enhanced_outer_terminal_stay_a_digit() {
+    let mut h = Harness::ready();
+    h.runtime.set_keyboard_enhanced(true);
+    let ctrl_4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL);
+    h.keys(&[ctrl('b'), ch('n')]);
+    h.user(Intent::Input(b"\x1b[>1u".to_vec()));
+    h.keys(&[ctrl_4]);
+    assert_eq!(
+        h.inputs().last().cloned(),
+        Some(("s1".into(), "\x1b[52;5u".into()))
+    );
+}
+
+#[test]
+fn a_tick_that_changes_the_connection_redraws() {
+    /// Moves the clock past the retry at its first draw, records the connect attempt at each draw, and quits at
+    /// the second.
+    struct Recorder {
+        now: Arc<Mutex<jiff::Timestamp>>,
+        events: EventSender,
+        attempts: Vec<u32>,
+    }
+    impl View for Recorder {
+        fn size(&mut self) -> std::io::Result<(u16, u16)> {
+            Ok(WINDOW)
+        }
+        fn draw(&mut self, client: &Client, _: &Screens) -> std::io::Result<()> {
+            let attempt = match client.connection() {
+                Connection::Waiting { attempt, .. } | Connection::Connecting { attempt } => {
+                    *attempt
+                }
+                _ => 0,
+            };
+            self.attempts.push(attempt);
+            if self.attempts.len() == 1 {
+                let mut now = lock(&self.now);
+                *now = now
+                    .checked_add(RETRY_INTERVAL)
+                    .unwrap_or_else(|e| panic!("{e}"));
+            } else {
+                self.events.shutdown();
+            }
+            Ok(())
+        }
+    }
+    // No host ever listens: each retry is a tick that changes nothing but the connection state. If the retry is
+    // never drawn, the clock stops the run after 40 reads instead of letting it hang.
+    let now = Arc::new(Mutex::new(
+        "2026-10-29T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap_or_else(|e| panic!("{e}")),
+    ));
+    let stop: Arc<Mutex<Option<EventSender>>> = Arc::default();
+    let clock = {
+        let (now, stop) = (now.clone(), stop.clone());
+        let mut reads = 0;
+        move || {
+            reads += 1;
+            if reads > 40
+                && let Some(events) = lock(&stop).as_ref()
+            {
+                events.shutdown();
+            }
+            Timestamp::parse(lock(&now).to_string()).unwrap_or_else(|e| panic!("{e}"))
+        }
+    };
+    let net = FakeNetwork::new();
+    let connect: Connector<FakeLink> =
+        Box::new(move |sink| net.connect(sink).map_err(|e| e.to_string()));
+    let mut runtime = ClientRuntime::new(
+        MachineId::new("m_client"),
+        connect,
+        FakeHostLauncher::new(),
+        clock,
+    );
+    *lock(&stop) = Some(runtime.events());
+    let mut view = Recorder {
+        now,
+        events: runtime.events(),
+        attempts: Vec::new(),
+    };
+    assert_eq!(runtime.run_with(&mut view), Ok(()));
+    assert_eq!(view.attempts, [1, 2], "the retry was drawn");
+}
+
+#[test]
+fn a_flood_longer_than_a_batch_is_drawn_part_way() {
+    /// Records the client's view size at its second draw, then quits.
+    struct Recorder {
+        events: EventSender,
+        draws: usize,
+        size_at_second: Option<PtySize>,
+    }
+    impl View for Recorder {
+        fn size(&mut self) -> std::io::Result<(u16, u16)> {
+            Ok(WINDOW)
+        }
+        fn draw(&mut self, client: &Client, _: &Screens) -> std::io::Result<()> {
+            self.draws += 1;
+            if self.draws == 2 {
+                self.size_at_second = client.size();
+                self.events.shutdown();
+            }
+            Ok(())
+        }
+    }
+    let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
+    let events = h.runtime.events();
+    let width = |k: usize| 100 + u16::try_from(k).unwrap_or_else(|e| panic!("{e}"));
+    for k in 0..MAX_BATCH + 10 {
+        events.terminal(Event::Resize(width(k), 30));
+    }
+    let mut view = Recorder {
+        events,
+        draws: 0,
+        size_at_second: None,
+    };
+    assert_eq!(h.runtime.run_with(&mut view), Ok(()));
+    // The second frame came after exactly one batch, not after the whole flood.
+    assert_eq!(
+        view.size_at_second,
+        Some(pane_size(width(MAX_BATCH - 1), 30))
+    );
+}
+
+// ---------- restoring the terminal ----------
+
+/// What a terminal that supports the kitty keyboard protocol goes through, start to finish.
+const RESTORED: [&str; 4] = ["enter", "push keyboard", "pop keyboard", "leave"];
+
+#[test]
+fn quitting_restores_the_terminal() {
+    let mut h = Harness::new();
+    let terminal = FakeTerminal::enhanced();
+    let mut view = test_view(&terminal);
+    let events = h.runtime.events();
+    events.terminal(Event::Key(ctrl('b')));
+    events.terminal(Event::Key(ch('q')));
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
+    assert_eq!(result.ok(), Some(Ok(())));
+    assert_eq!(terminal.calls(), RESTORED);
+}
+
+#[test]
+fn a_fatal_error_restores_the_terminal() {
+    let mut h = Harness::with_launcher(|_, _| {
+        FakeHostLauncher::new().failing(LaunchError::SpawnFailed("no such file".into()))
+    });
+    let terminal = FakeTerminal::enhanced();
+    let mut view = test_view(&terminal);
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
+    assert!(
+        matches!(result, Ok(Err(ClientError::Fatal(_)))),
+        "{result:?}"
+    );
+    assert_eq!(terminal.calls(), RESTORED);
+}
+
+#[test]
+fn a_panic_while_drawing_restores_the_terminal() {
+    struct Exploding;
+    impl View for Exploding {
+        fn size(&mut self) -> std::io::Result<(u16, u16)> {
+            Ok(WINDOW)
+        }
+        fn draw(&mut self, _: &Client, _: &Screens) -> std::io::Result<()> {
+            panic!("drawing failed");
+        }
+    }
+    let mut h = Harness::new();
+    let terminal = FakeTerminal::enhanced();
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_terminal(setup, |_| h.runtime.run_with(&mut Exploding))
+    }));
+    assert!(result.is_err());
+    assert_eq!(terminal.calls(), RESTORED);
+}
+
+#[test]
+fn a_terminal_that_cannot_be_read_stops_the_client_with_an_error_and_restores_it() {
+    let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
+    let terminal = FakeTerminal::enhanced();
+    let mut view = test_view(&terminal);
+    h.runtime.events().terminal_failed("stdin closed".into());
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
+    assert_eq!(
+        result.ok(),
+        Some(Err(ClientError::Terminal("stdin closed".into())))
+    );
+    assert_eq!(terminal.calls(), RESTORED);
+}
+
+#[test]
+fn sighup_sigterm_and_sigint_each_quit_the_client_so_the_terminal_is_restored() {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    // One test for all three: a raised signal reaches every client forwarding signals in this process.
+    for signal in [SIGHUP, SIGTERM, SIGINT] {
+        // No host ever answers, so only the signal can end the run.
+        let mut h = Harness::with_launcher(|_, _| FakeHostLauncher::new());
+        let terminal = FakeTerminal::enhanced();
+        let mut view = test_view(&terminal);
+        forward_signals(h.runtime.events()).unwrap_or_else(|e| panic!("{e}"));
+        signal_hook::low_level::raise(signal).unwrap_or_else(|e| panic!("{e}"));
+        let setup: Arc<dyn TerminalSetup> = terminal.clone();
+        let result = with_terminal(setup, |_| h.runtime.run_with(&mut view));
+        assert_eq!(result.ok(), Some(Ok(())), "signal {signal}");
+        assert_eq!(terminal.calls(), RESTORED, "signal {signal}");
+    }
 }

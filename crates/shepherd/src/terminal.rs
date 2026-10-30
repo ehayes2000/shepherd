@@ -1,0 +1,176 @@
+//! Setting up the user's terminal for the TUI, and putting it back however the TUI ends.
+//!
+//! [`TerminalSetup`] is the seam: [`CrosstermSetup`] does it for real (raw mode, the alternate screen, bracketed paste,
+//! focus reports, kitty keyboard flags where the terminal supports them, and mouse capture while the selected session
+//! wants the mouse), and tests record calls instead. [`TerminalGuard`] restores the terminal when dropped, so a normal
+//! return, an error and a panic that unwinds all restore it, keyboard flags included. [`install_panic_hook`] restores
+//! it before the panic message is printed, so the message lands on the normal screen where the user can read it, and
+//! stops the client loop, so a panic on another thread doesn't leave it drawing. Signals (SIGTERM, SIGHUP, SIGINT) quit
+//! the client loop, which then returns through the guard (see [`crate::client::forward_signals`]).
+
+use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
+};
+use ratatui::crossterm::{cursor, execute};
+
+/// What the TUI does to the user's terminal.
+pub trait TerminalSetup: Send + Sync {
+    /// Takes the terminal over. On failure, [`TerminalSetup::leave`] is still called, to undo what was done.
+    fn enter(&self) -> io::Result<()>;
+    /// After `enter`: asks the terminal to report keys unambiguously (kitty keyboard protocol: disambiguate escape
+    /// codes and alternate keys), so Shift+Enter, ctrl-i against Tab, and Esc against alt reach us as themselves.
+    /// Returns whether it did; a terminal without support is left alone.
+    fn push_keyboard(&self) -> io::Result<bool>;
+    /// Undoes a [`TerminalSetup::push_keyboard`] that returned true. Called before `leave`, while still on the
+    /// alternate screen, whose flag stack the push went on.
+    fn pop_keyboard(&self) -> io::Result<()>;
+    /// Puts everything [`TerminalSetup::enter`] and [`TerminalSetup::set_mouse_capture`] changed back. Must be safe
+    /// to call after a partial `enter`.
+    fn leave(&self) -> io::Result<()>;
+    /// Whether mouse events come to us (and so to the selected session) or stay with the outer terminal, for
+    /// selecting text.
+    fn set_mouse_capture(&self, on: bool) -> io::Result<()>;
+}
+
+/// Restores the terminal once: later calls do nothing. Cheap to clone and share with a panic hook.
+#[derive(Clone)]
+pub struct Restorer {
+    setup: Arc<dyn TerminalSetup>,
+    active: Arc<AtomicBool>,
+    /// Keyboard flags were pushed and not yet popped.
+    keyboard: Arc<AtomicBool>,
+}
+
+impl Restorer {
+    pub fn restore(&self) {
+        if self.active.swap(false, Ordering::SeqCst) {
+            // Nothing better to do if the terminal is gone (e.g. after SIGHUP).
+            if self.keyboard.swap(false, Ordering::SeqCst) {
+                let _ = self.setup.pop_keyboard();
+            }
+            let _ = self.setup.leave();
+        }
+    }
+
+    /// The terminal reports keys unambiguously (see [`TerminalSetup::push_keyboard`]).
+    pub fn keyboard_enhanced(&self) -> bool {
+        self.keyboard.load(Ordering::SeqCst)
+    }
+}
+
+/// The terminal, taken over. Dropping it restores the terminal.
+pub struct TerminalGuard {
+    restorer: Restorer,
+}
+
+impl TerminalGuard {
+    /// Takes the terminal over. If that fails partway, what was done is undone before returning the error. A terminal
+    /// that can't be asked for unambiguous keys is still used, with legacy keys.
+    pub fn enter(setup: Arc<dyn TerminalSetup>) -> io::Result<Self> {
+        let restorer = Restorer {
+            setup,
+            active: Arc::new(AtomicBool::new(true)),
+            keyboard: Arc::new(AtomicBool::new(false)),
+        };
+        if let Err(e) = restorer.setup.enter() {
+            restorer.restore();
+            return Err(e);
+        }
+        let pushed = restorer.setup.push_keyboard().unwrap_or(false);
+        restorer.keyboard.store(pushed, Ordering::SeqCst);
+        Ok(Self { restorer })
+    }
+
+    pub fn restorer(&self) -> &Restorer {
+        &self.restorer
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restorer.restore();
+    }
+}
+
+/// Runs `body` with the terminal taken over, and restores it however `body` ends: a return, an error it returns,
+/// or a panic.
+pub fn with_terminal<R>(
+    setup: Arc<dyn TerminalSetup>,
+    body: impl FnOnce(&Restorer) -> R,
+) -> io::Result<R> {
+    let guard = TerminalGuard::enter(setup)?;
+    Ok(body(guard.restorer()))
+}
+
+/// At the start of any panic, on any thread: restores the terminal, runs the hook that was installed before (which
+/// prints the message), then calls `on_panic` (the client passes its shutdown, so its loop stops drawing).
+pub fn install_panic_hook(restorer: Restorer, on_panic: impl Fn() + Send + Sync + 'static) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restorer.restore();
+        previous(info);
+        on_panic();
+    }));
+}
+
+/// The real terminal, through crossterm, on stdout.
+pub struct CrosstermSetup;
+
+impl TerminalSetup for CrosstermSetup {
+    fn enter(&self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableFocusChange
+        )
+    }
+
+    fn push_keyboard(&self) -> io::Result<bool> {
+        if !supports_keyboard_enhancement()? {
+            return Ok(false);
+        }
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+        execute!(io::stdout(), PushKeyboardEnhancementFlags(flags))?;
+        Ok(true)
+    }
+
+    fn pop_keyboard(&self) -> io::Result<()> {
+        execute!(io::stdout(), PopKeyboardEnhancementFlags)
+    }
+
+    fn leave(&self) -> io::Result<()> {
+        // Every step runs even if one fails; the first error is reported.
+        let mut out = io::stdout();
+        let steps = [
+            execute!(out, DisableMouseCapture),
+            execute!(out, DisableFocusChange),
+            execute!(out, DisableBracketedPaste),
+            execute!(out, LeaveAlternateScreen),
+            execute!(out, cursor::Show),
+            disable_raw_mode(),
+            out.flush(),
+        ];
+        steps.into_iter().collect()
+    }
+
+    fn set_mouse_capture(&self, on: bool) -> io::Result<()> {
+        if on {
+            execute!(io::stdout(), EnableMouseCapture)
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)
+        }
+    }
+}

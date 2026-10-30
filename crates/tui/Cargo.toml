@@ -12,6 +12,7 @@ ratatui.workspace = true
 [dev-dependencies]
 shepherd-testkit.workspace = true
 insta.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
