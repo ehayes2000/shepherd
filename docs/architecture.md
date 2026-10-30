@@ -283,4 +283,6 @@ inside words and lets one grapheme cluster grow without bound (stacked combining
 allowed too: text that becomes a display name is NFC-normalized, and only alphanumeric characters plus a bounded number of
 combining marks per base (`is_combining_mark`) are kept; every other character (all of category Cf/Cc) is dropped.
 Consequences: names are display-safe and bounded; no hand-rolled Unicode tables.
+Second amendment (F35): `unicode-properties` (unicode-rs, no deps) is allowed in core for exact general-category checks, so
+`display_safe` can drop every Cc/Cf character while keeping spaces, punctuation and symbols in error text and paths.
 

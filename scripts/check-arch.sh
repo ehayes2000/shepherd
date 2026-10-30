@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # External crates shepherd-core may use (normal deps only).
-CORE_ALLOWED="serde serde_json thiserror jiff base64 sha2 toml unicode-segmentation unicode-normalization"
+CORE_ALLOWED="serde serde_json thiserror jiff base64 sha2 toml unicode-segmentation unicode-normalization unicode-properties"
 # External crates shepherd-tui may use beyond core's allowlist.
 TUI_ALLOWED="ratatui crossterm unicode-width"
 # External crates shepherd-term may use.
