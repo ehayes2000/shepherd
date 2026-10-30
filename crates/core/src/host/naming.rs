@@ -14,6 +14,8 @@
 
 use std::collections::BTreeSet;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::ports::worktrees::WorktreeName;
 
 /// The longest [`WorktreeName`].
@@ -79,7 +81,7 @@ fn trim(s: &str) -> &str {
 /// The most words an [`auto_name`] has.
 pub const AUTO_MAX_WORDS: usize = 4;
 
-/// The most characters an [`auto_name`] has.
+/// The most characters an [`auto_name`] has, counted as user-perceived characters (grapheme clusters).
 pub const AUTO_MAX_CHARS: usize = 30;
 
 /// Words a prompt is full of that say nothing about its task, lowercase and without apostrophes.
@@ -100,19 +102,26 @@ const STOPWORDS: &[&str] = &[
 /// The display name shepherd gives a session after its first user prompt, or `None` when the prompt has no
 /// meaningful words. Only the display name: the branch keeps the name it was made with.
 ///
-/// Fenced code blocks (between lines starting with ```` ``` ```` or `~~~`) are dropped, and so is every
-/// whitespace-separated token with a `/` or `\` in it (paths, URLs). Apostrophes are removed, so a contraction is one
-/// word, then words are the runs of Unicode letters and digits, lowercased. [`STOPWORDS`] are dropped. The name is the
-/// first words joined with `-`, up to [`AUTO_MAX_WORDS`] of them and [`AUTO_MAX_CHARS`] characters: it stops at the
-/// first word that doesn't fit, and a first word too long on its own is cut.
+/// Fenced code blocks are dropped: a line whose first non-blank characters are ```` ``` ```` or `~~~`, at any
+/// indentation, opens or closes one. So is every whitespace-separated token with a `/` or `\` in it (paths, URLs).
+/// Apostrophes are removed, so a contraction is one word, then words are the Unicode word segments (UAX #29) with a
+/// letter or digit in them, lowercased. Punctuation, symbols and control characters are never part of one, so a name
+/// never holds a control character, though the printable remains of a terminal escape sequence (`31m` of `ESC [31m`)
+/// can be words. [`STOPWORDS`] are dropped. The name is the first words joined with `-`, up to [`AUTO_MAX_WORDS`] of
+/// them and [`AUTO_MAX_CHARS`] characters: it stops at the first word that doesn't fit, even if a later one would, and
+/// a first word too long on its own is cut, never inside a grapheme cluster.
 pub fn auto_name(prompt: &str) -> Option<String> {
     let mut name = String::new();
+    let mut len = 0;
     for (n, word) in prompt_words(prompt).take(AUTO_MAX_WORDS).enumerate() {
+        let word_len = word.graphemes(true).count();
         if n == 0 {
-            name.extend(word.chars().take(AUTO_MAX_CHARS));
-        } else if name.chars().count() + 1 + word.chars().count() <= AUTO_MAX_CHARS {
+            name.extend(word.graphemes(true).take(AUTO_MAX_CHARS));
+            len = word_len.min(AUTO_MAX_CHARS);
+        } else if len + 1 + word_len <= AUTO_MAX_CHARS {
             name.push('-');
             name.push_str(&word);
+            len += 1 + word_len;
         } else {
             break;
         }
@@ -135,13 +144,22 @@ fn prompt_words(prompt: &str) -> impl Iterator<Item = String> + '_ {
         })
         .flat_map(str::split_whitespace)
         .filter(|token| !token.contains(['/', '\\']))
-        .flat_map(|token| {
-            token
-                .replace(['\'', '\u{2019}'], "")
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| !w.is_empty())
-                .map(str::to_lowercase)
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|token| token_words(&token.replace(['\'', '\u{2019}'], "")))
         .filter(|word| !STOPWORDS.contains(&word.as_str()))
+}
+
+/// The words of one token, lowercased: its word segments, with segments that touch (nothing between them, as UAX #29
+/// leaves each ideograph and kana run of unspaced text) joined into one word.
+fn token_words(token: &str) -> Vec<String> {
+    let mut words: Vec<(usize, String)> = Vec::new();
+    for (start, segment) in token.unicode_word_indices() {
+        match words.last_mut() {
+            Some((end, word)) if *end == start => {
+                word.push_str(segment);
+                *end += segment.len();
+            }
+            _ => words.push((start + segment.len(), segment.to_owned())),
+        }
+    }
+    words.into_iter().map(|(_, w)| w.to_lowercase()).collect()
 }

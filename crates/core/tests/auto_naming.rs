@@ -84,8 +84,8 @@ fn auto_names_are_the_first_meaningful_words_of_the_prompt() {
         ),
         ("see https://example.com/issue/42 for the bug", "see-bug"),
         ("C:\\Users\\me broke", "broke"),
-        // Inline code is words; fenced code blocks are dropped.
-        ("rename `foo_bar` to baz", "rename-foo-bar-baz"),
+        // Inline code is words (a snake_case identifier is one word, UAX #29); fenced code blocks are dropped.
+        ("rename `foo_bar` to baz", "rename-foo_bar-baz"),
         (
             "Why does this fail?\n```rust\nfn main() { panic!() }\n```\nthe parser crashes",
             "fail-parser-crashes",
@@ -105,6 +105,87 @@ fn auto_names_are_the_first_meaningful_words_of_the_prompt() {
     ];
     for (prompt, expected) in cases {
         assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
+fn auto_names_are_cut_at_30_characters_between_words() {
+    let cases: [(&str, &str); 3] = [
+        // Exactly 30 fits.
+        (
+            "aaaaaaaaaa bbbbbbbbbb cccccccc",
+            "aaaaaaaaaa-bbbbbbbbbb-cccccccc",
+        ),
+        // 31 doesn't: the last word goes.
+        ("aaaaaaaaaa bbbbbbbbbb ccccccccc", "aaaaaaaaaa-bbbbbbbbbb"),
+        // It stops at the first word that doesn't fit, though a shorter later one would, and fewer than 4 words.
+        (
+            "fix internationalization subsystem ui",
+            "fix-internationalization",
+        ),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
+fn indented_fences_still_drop_their_code() {
+    let cases: [(&str, &str); 2] = [
+        (
+            "Fix this:\n    ```\n    let x = 1;\n    ```\n  then deploy",
+            "fix-deploy",
+        ),
+        ("Rename it\n  ~~~\n  old code\n  ~~~\n", "rename"),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
+fn words_follow_unicode_segmentation_and_cuts_keep_graphemes_whole() {
+    let nfd_cut = format!("{}e\u{301}z", "a".repeat(29));
+    let nfd_cut_expected = format!("{}e\u{301}", "a".repeat(29));
+    let cases: [(&str, &str); 3] = [
+        // Decomposed accents stay in their word.
+        (
+            "cre\u{300}me bru\u{302}le\u{301}e",
+            "cre\u{300}me-bru\u{302}le\u{301}e",
+        ),
+        // So do Devanagari vowel signs and viramas.
+        ("नमस्ते दुनिया", "नमस्ते-दुनिया"),
+        // 30 grapheme clusters, the last a decomposed `é`: the cut doesn't strip its accent.
+        (&nfd_cut, &nfd_cut_expected),
+    ];
+    for (prompt, expected) in cases {
+        assert_eq!(auto_name(prompt).as_deref(), Some(expected), "{prompt:?}");
+    }
+}
+
+#[test]
+fn auto_names_never_hold_control_characters() {
+    // The printable remains of an escape sequence (`31m`, `0m`, `9`) can be words; the controls never are.
+    let cases: [(&str, Option<&str>); 4] = [
+        (
+            "\x1b[31mFix\x1b[0m the \x1b]9;evil\x07 bug",
+            Some("31mfix-0m-9-evil"),
+        ),
+        // The OSC ends in `ESC \`, so its token is a path; `hello` is a stopword.
+        ("\x1b]0;t\x1b\\ hello", None),
+        ("\x1b]0;title\x07 deploy", Some("0-title-deploy")),
+        (
+            "tab\there\u{0}nul\u{7f}del\r\nnext",
+            Some("tab-nul-del-next"),
+        ),
+    ];
+    for (prompt, expected) in cases {
+        let name = auto_name(prompt);
+        assert_eq!(name.as_deref(), expected, "{prompt:?}");
+        assert!(
+            !name.unwrap_or_default().chars().any(char::is_control),
+            "{prompt:?}"
+        );
     }
 }
 
@@ -142,6 +223,45 @@ fn the_first_user_prompt_auto_renames_the_session() {
     let cmds = host.user_prompt("s1", "Fix the login redirect bug");
     assert_eq!(cmds, vec![auto_renamed("s1", "fix-login-redirect-bug")]);
     assert_eq!(names(host.host()), ["fix-login-redirect-bug"]);
+}
+
+/// Appends a hook-sourced `session/prompt` frame with these `params` (and `id`, if any) to session `id`'s log.
+fn raw_prompt(host: &mut HostDriver, session: &str, request: Option<&str>, params: Value) {
+    let mut frame = json!({ "jsonrpc": "2.0", "method": "session/prompt", "params": params });
+    if let Some(request) = request {
+        frame["id"] = json!(request);
+    }
+    let source = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    host.append(Some(session), source, frame);
+}
+
+#[test]
+fn a_prompts_text_blocks_are_joined_by_newlines_and_other_blocks_skipped() {
+    let mut host = claude_session();
+    let params = json!({
+        "sessionId": "c1",
+        "prompt": [
+            { "type": "text", "text": "Fix the" },
+            { "type": "image", "mimeType": "image/png", "data": "AAAA" },
+            { "type": "text", "text": "login bug" },
+        ],
+    });
+    raw_prompt(&mut host, "s1", Some("p1"), params);
+    assert_eq!(
+        host.hook_translated("s1"),
+        vec![auto_renamed("s1", "fix-login-bug")]
+    );
+}
+
+#[test]
+fn a_prompt_without_a_request_id_is_not_the_first_user_prompt() {
+    let mut host = claude_session();
+    let params =
+        json!({ "sessionId": "c1", "prompt": [{ "type": "text", "text": "Deploy staging" }] });
+    raw_prompt(&mut host, "s1", None, params);
+    assert_eq!(host.hook_translated("s1"), vec![]);
+    let cmds = host.user_prompt("s1", "Fix the login redirect bug");
+    assert_eq!(cmds, vec![auto_renamed("s1", "fix-login-redirect-bug")]);
 }
 
 #[test]

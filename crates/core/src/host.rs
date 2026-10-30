@@ -896,8 +896,8 @@ impl Host {
         let message = match env.frame() {
             Frame::Shepherd(message) => message,
             Frame::Acp(message) => {
-                if let (AcpFrame::Prompt(prompt), Some(_), Some(id)) =
-                    (message.body(), message.id(), env.session())
+                // Only a request parses as a prompt: a `session/prompt` without an id is no prompt at all.
+                if let (AcpFrame::Prompt(prompt), Some(id)) = (message.body(), env.session())
                     && !env.frame().is_continuation()
                     && let Some(entry) = self.sessions.get_mut(id)
                     && !entry.prompted
