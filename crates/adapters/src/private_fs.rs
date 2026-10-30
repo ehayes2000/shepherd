@@ -7,6 +7,8 @@
 //!   [`PrivateFsError::Insecure`] and left alone. A symlink at the final part of the path is
 //!   [`PrivateFsError::Symlink`] and is never followed, for a directory, a file being created or an existing file
 //!   being opened ([`open_existing_private_file`]). Symlinks in the parents are fine (macOS's `/tmp` is one).
+//! - An existing file must be a regular file, or it is [`PrivateFsError::WrongType`]. It is opened non-blocking
+//!   and checked through the descriptor, so a FIFO planted where a file goes can't hang the open.
 //! - Paths are normalised first, so a trailing `/` (which makes the OS resolve `link/` through the link) or a
 //!   trailing `/.` can't get a symlink past the check.
 //! - There is no check-then-create gap: the final part is created with a plain `mkdir` (or `O_CREAT|O_EXCL`), and
@@ -18,6 +20,7 @@
 
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -88,6 +91,12 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PrivateFsError> {
             .create(parent)
             .map_err(|e| io_err(parent, e))?;
     }
+    create_final_dir(dir)
+}
+
+/// Creates the final part of `dir` exactly `0700`, or, if something is already there, checks it like any
+/// existing dir and never chmods it.
+fn create_final_dir(dir: &Path) -> Result<(), PrivateFsError> {
     match fs::DirBuilder::new().mode(DIR_MODE).create(dir) {
         Ok(()) => {
             // Ours: set the exact mode through a descriptor that can't have been swapped for a symlink.
@@ -141,11 +150,14 @@ pub fn create_or_open_private_file(
 
 /// Opens an existing `path` with `opts` (which must not create it), refusing a symlink at its final part, and
 /// checking through the open descriptor that it is a regular file that group and others can't access.
+///
+/// It opens with `O_NONBLOCK`, so a FIFO planted at `path` can't block the open, and clears it again
+/// once the descriptor is known to be a regular file.
 pub fn open_existing_private_file(path: &Path, opts: &OpenOptions) -> Result<File, PrivateFsError> {
     let path = &normalize(path);
     let file = opts
         .clone()
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .map_err(|e| open_err(path, e))?;
     let meta = file.metadata().map_err(|e| io_err(path, e))?;
@@ -153,32 +165,50 @@ pub fn open_existing_private_file(path: &Path, opts: &OpenOptions) -> Result<Fil
         return Err(PrivateFsError::WrongType(path.to_path_buf()));
     }
     check_private(path, &meta)?;
+    clear_nonblock(&file).map_err(|e| io_err(path, e))?;
     Ok(file)
 }
 
-/// `O_NOFOLLOW` reports a symlink as `ELOOP`.
+fn clear_nonblock(file: &File) -> io::Result<()> {
+    let fd = file.as_raw_fd();
+    // SAFETY: F_GETFL and F_SETFL on a descriptor `file` owns for the duration of the calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `O_NOFOLLOW` reports a symlink as `ELOOP`. With `O_NONBLOCK`, opening a FIFO for writing with no reader is
+/// `ENXIO`: not a regular file.
 fn open_err(path: &Path, e: io::Error) -> PrivateFsError {
-    if e.raw_os_error() == Some(libc::ELOOP) {
-        PrivateFsError::Symlink(path.to_path_buf())
-    } else {
-        io_err(path, e)
+    match e.raw_os_error() {
+        Some(libc::ELOOP) => PrivateFsError::Symlink(path.to_path_buf()),
+        Some(libc::ENXIO) => PrivateFsError::WrongType(path.to_path_buf()),
+        _ => io_err(path, e),
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
     use std::path::Path;
     use std::process::Command;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::thread;
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
     use super::{
-        PrivateFsError, create_or_open_private_file, ensure_private_dir, open_existing_private_file,
+        PrivateFsError, create_final_dir, create_or_open_private_file, ensure_private_dir,
+        open_existing_private_file,
     };
 
     fn private_tempdir() -> TempDir {
@@ -518,5 +548,116 @@ mod tests {
             }
         }
         assert_eq!(fs::read(&target).unwrap(), b"precious");
+    }
+
+    /// Makes a FIFO at `path`, chmodded 0600 so only its kind can make it unacceptable.
+    pub(crate) fn private_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        chmod(path, 0o600);
+    }
+
+    /// Runs `f` on another thread and returns its result, failing (not hanging) if it doesn't finish within a
+    /// generous liveness bound. This is not a timing assertion: a blocked `open` would never finish at all.
+    pub(crate) fn within_liveness_bound<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(30))
+            .unwrap_or_else(|e| panic!("blocked instead of returning: {e}"))
+    }
+
+    /// Opening a FIFO blocks until the other end opens, so a FIFO planted where a private file goes must be
+    /// refused without ever waiting on it, for reading and for appending.
+    #[test]
+    fn a_fifo_is_wrong_type_and_opening_it_never_blocks() {
+        let dir = private_tempdir();
+        let fifo = dir.path().join("f");
+        private_fifo(&fifo);
+
+        let mut read = OpenOptions::new();
+        read.read(true);
+        let mut append = OpenOptions::new();
+        append.append(true);
+        for opts in [read, append] {
+            let path = fifo.clone();
+            let opened =
+                within_liveness_bound(move || open_existing_private_file(&path, &opts).map(|_| ()));
+            assert_eq!(opened, Err(PrivateFsError::WrongType(fifo.clone())));
+        }
+    }
+
+    /// A reader already on the FIFO makes the non-blocking open succeed; the fstat check still refuses it.
+    #[test]
+    fn a_fifo_with_a_reader_is_still_wrong_type() {
+        let dir = private_tempdir();
+        let fifo = dir.path().join("f");
+        private_fifo(&fifo);
+        let _reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
+
+        let path = fifo.clone();
+        let opened = within_liveness_bound(move || {
+            create_or_open_private_file(&path, OpenOptions::new().append(true)).map(|_| ())
+        });
+        assert_eq!(opened, Err(PrivateFsError::WrongType(fifo)));
+    }
+
+    /// The file that is returned is blocking again: `O_NONBLOCK` is only for the open.
+    #[test]
+    fn an_opened_private_file_is_not_left_non_blocking() {
+        use std::os::fd::AsRawFd;
+        let dir = private_tempdir();
+        let path = dir.path().join("f");
+        fs::write(&path, b"").unwrap();
+        chmod(&path, 0o600);
+
+        let file = open_existing_private_file(&path, OpenOptions::new().read(true)).unwrap();
+        // SAFETY: F_GETFL on a descriptor we own.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    /// The `mkdir` lost a race: what's there is someone else's, so it is checked and never chmodded.
+    #[test]
+    fn losing_the_mkdir_race_to_an_open_dir_is_insecure_and_leaves_it_alone() {
+        let dir = private_tempdir();
+        let theirs = dir.path().join("d");
+        fs::create_dir(&theirs).unwrap();
+        chmod(&theirs, 0o755);
+
+        assert_eq!(
+            create_final_dir(&theirs),
+            Err(PrivateFsError::Insecure {
+                path: theirs.clone(),
+                mode: 0o755
+            })
+        );
+        assert_eq!(mode(&theirs), 0o755);
+    }
+
+    #[test]
+    fn losing_the_mkdir_race_to_a_symlink_refuses_it_and_leaves_its_target_alone() {
+        let dir = private_tempdir();
+        let target = dir.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        chmod(&target, 0o755);
+        let link = dir.path().join("d");
+        symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            create_final_dir(&link),
+            Err(PrivateFsError::Symlink(link.clone()))
+        );
+        assert_eq!(mode(&target), 0o755);
+        assert_eq!(fs::read_link(&link).unwrap(), target);
     }
 }
