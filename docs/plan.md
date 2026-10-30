@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T17 launch Claude sessions | building | task/t17-launch-claude @ HEAD | 0 | Split: picker → T17b (after T34). PM does real-claude check |
-| F20 fake link sink lifetime | building | task/f20-fake-link-sink @ HEAD | 0 | – |
+| T17 launch Claude sessions | building | task/t17-launch-claude @ a21abbc | 0 | Split: picker → T17b (after T34). PM does real-claude check |
+| F20 fake link sink lifetime | building | task/f20-fake-link-sink @ a21abbc | 0 | – |
 | T34 menus and dialogs | building | task/t34-menus-and-dialogs @ d946ee4 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
