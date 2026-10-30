@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T19 Codex | re-review | task/t19-codex @ 3684c76 (on 6e6f7d9) | 2 | All 8 findings addressed, mutation-verified by builder. Decision 0016 |
 | F08 worktree create timeout cleanup | fixing (CHANGES) | task/f08-worktree-timeout @ 065762e | 1 | Load flakes (new tests 40%, T20 test regressed); separate cleanup timeout; FIFO-blocked hook; stale ref lock; fallback untested; TOCTOU on dir delete |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T19 | 2 | translator matching/resets/kind replacement untested; seed reuse across replaced translators |
 | T18 | 2 | C1 strip untested; session name could form a ConEmu OSC 9 subcommand |
 | F22 | 2 | hook-sourced agent/exited could delete a live session's run files (untested guard) |
 | F23 | 2 | sync-timeout path unguarded; pop count, guard-flag reset untested; missing_trait_methods lint added |
@@ -1009,7 +1009,7 @@ acceptance:
 scope: crates/core, crates/shepherd
 
 ### T19: Codex integration
-status: in-progress
+status: done (27ddd29)
 depends: T14, T16, T17
 touches: core::agents::codex, core::host (spawn spec)
 goal: Codex sessions with status, matching what Claude Code gets wherever Codex exposes the data.
@@ -1026,7 +1026,7 @@ you found, and build fixtures from documented payload shapes. Follow T17's struc
 report options rather than editing user config. The PM does the real-codex check after merge.
 
 ### T19b: Resume after restart
-status: todo
+status: ready
 depends: T17, T19
 touches: core::host, tui
 goal: Exited agent sessions can be resumed where they left off.
