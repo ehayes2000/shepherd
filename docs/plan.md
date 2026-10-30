@@ -9,10 +9,10 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T28 spike iroh peering | building | task/t28-iroh-spike @ HEAD | 0 | docs only |
-| F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ HEAD | 0 | ZWJ item still awaits user |
-| F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ HEAD | 0 | – |
-| F41 T27/T25b test gaps | building | task/f41-test-gaps @ HEAD | 0 | – |
+| T28 spike iroh peering | building | task/t28-iroh-spike @ 72ebea3 | 0 | docs only |
+| F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ 72ebea3 | 0 | ZWJ item still awaits user |
+| F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
+| F41 T27/T25b test gaps | building | task/f41-test-gaps @ 72ebea3 | 0 | – |
 | F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
