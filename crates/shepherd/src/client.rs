@@ -33,10 +33,10 @@ use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEvent, LinkEventSink};
+use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEvent, LinkEventSink, TerminateError};
 use shepherd_core::wire::{
-    ClientMessage, HostMessage, HostNotification, decode_host_message, encode_client_notification,
-    encode_request,
+    BuildId, ClientMessage, HostMessage, HostNotification, decode_host_message,
+    encode_client_notification, encode_request,
 };
 use shepherd_term::Screen;
 
@@ -297,6 +297,12 @@ where
     /// Tells the host, in each hello, that the client started in `cwd`. Call before [`ClientRuntime::start`].
     pub fn set_cwd(&mut self, cwd: impl Into<String>) {
         self.client = self.client.clone().with_cwd(cwd);
+    }
+
+    /// Tells the host, in each hello, that the client runs `build`, and compares the host's with it. Call before
+    /// [`ClientRuntime::start`].
+    pub fn set_build(&mut self, build: BuildId) {
+        self.client = self.client.clone().with_build(build);
     }
 
     /// The terminal of `session`, once it has printed anything.
@@ -610,6 +616,13 @@ where
                         error: e.to_string(),
                     })
             }
+            // A host already gone needs no stopping: the reconnect finds out.
+            ClientCommand::TerminateHost => match self.launcher.terminate() {
+                Ok(()) | Err(TerminateError::NotRunning) => None,
+                Err(e) => Some(ClientEvent::TerminateFailed {
+                    error: e.to_string(),
+                }),
+            },
             ClientCommand::Connect => {
                 self.generation += 1;
                 let sink = Arc::new(Sink {
@@ -647,7 +660,7 @@ where
 /// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
 /// `shepherd host` if nothing listens. The terminal is restored however this ends.
 pub fn run(socket: &Path) -> Result<(), ClientError> {
-    let launcher = ProcessHostLauncher::shepherd_host()
+    let launcher = ProcessHostLauncher::shepherd_host(socket)
         .map_err(|e| ClientError::Fatal(format!("can't find the shepherd executable: {e}")))?;
     let socket = socket.to_path_buf();
     let connect: Connector<UnixConnectLink> =
@@ -662,6 +675,11 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
         .and_then(|d| d.into_os_string().into_string().ok())
     {
         runtime.set_cwd(cwd);
+    }
+    // A client that can't read its own executable compares no builds.
+    match std::env::current_exe().and_then(|exe| crate::build::build_id(&exe)) {
+        Ok(build) => runtime.set_build(build),
+        Err(error) => tracing::warn!(%error, "cannot read this executable's build"),
     }
     let events = runtime.events();
     forward_signals(events.clone()).map_err(terminal_error)?;

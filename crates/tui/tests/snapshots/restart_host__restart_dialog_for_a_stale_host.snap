@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/restart_host.rs
+expression: "text(&buffer(&answered(hello_ok(Some(2), Some(1))), WIDE))"
+---
+ ⌂ choose a workspace  │
+ + New session         │
+ ◌ docs               ×│
+   local · —           │
+ ◌ fix-login          ×│
+   local · —           │
+ ✕ old                ×│
+   local · —           │
+                       │
+                ┌ restart the host ────────────────────────────┐
+                │The shepherd host runs an older build than    │
+                │the one installed. Restart it?                │
+                │2 running sessions will stop.                 │
+                │                    [Restart host]  [Not now] │
+                └──────────────────────────────────────────────┘
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ Restart host  Detach ?│

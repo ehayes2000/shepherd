@@ -298,6 +298,16 @@ fn every_popup() -> Vec<(&'static str, ClientDriver)> {
     scrolled.user(Intent::BeginWorkspace);
     scrolled.user(Intent::ScrollSwitcher { by: 3, shown: 5 });
     popups.push(("workspace switcher scrolled, with a long path", scrolled));
+    // A client that knows its build, connected to a host that says none.
+    let build = shepherd_core::wire::BuildId {
+        version: "0.1.0".into(),
+        digest: shepherd_core::wire::ExeDigest::from_bytes([1; 32]),
+    };
+    let mut restart = ClientDriver::from_client(
+        Client::new(shepherd_core::ids::MachineId::new("m_client")).with_build(build),
+    );
+    restart.connect();
+    popups.push(("restart dialog", restart));
     popups
 }
 

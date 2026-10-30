@@ -65,6 +65,7 @@ fn hello(client: &mut FakeClient, cwd: Option<&Path>) -> shepherd_core::acpp::Re
         version: PROTOCOL_VERSION,
         machine: MachineId::new("laptop"),
         cwd: cwd.map(|c| c.to_str().expect("utf-8 path").to_owned()),
+        build: None,
     }))
 }
 
@@ -208,6 +209,7 @@ fn a_hello_the_host_refuses_selects_nothing_from_its_cwd() {
         version: PROTOCOL_VERSION + 1,
         machine: MachineId::new("laptop"),
         cwd: Some(d.app.to_str().unwrap().to_owned()),
+        build: None,
     }));
     h.step();
     assert!(matches!(

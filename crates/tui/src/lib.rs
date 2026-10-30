@@ -59,6 +59,7 @@ pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
         None if client.sessions().is_empty() => empty(client, layout.pane, buf),
         None => {}
     }
+    sidebar::wide_notice(client, &layout, buf);
     let popup_cursor = popup::render(client, frame.area(), frame.buffer_mut());
     let cursor = match (client.popup(), cursor_session(client, screens)) {
         (Some(_), _) => popup_cursor,
@@ -123,6 +124,13 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
             ),
         ],
         Connection::Failed(why) => vec![draw::line(shown(why), Style::new().fg(Color::Red))],
+        Connection::Incompatible => vec![
+            draw::line(
+                shown("The shepherd host speaks another protocol version."),
+                Style::new().fg(Color::Yellow),
+            ),
+            draw::line(shown("Click Restart host to restart it."), gray),
+        ],
         _ => vec![draw::line(shown("Connecting to the shepherd host…"), gray)],
     };
     let height = (lines.len() as u16).min(pane.height);

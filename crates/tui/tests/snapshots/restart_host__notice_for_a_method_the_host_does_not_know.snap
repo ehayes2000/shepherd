@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/restart_host.rs
+expression: "text(&buffer(&c, WIDE))"
+---
+ ⌂ choose a workspace  │
+ + New session         │
+ ◌ docs               ×│
+   local · —           │
+ ◌ fix-login          ×│
+   local · —           │
+ ✕ old                ×│
+   local · —           │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ the shepherd host is older than this client: restart it to use this

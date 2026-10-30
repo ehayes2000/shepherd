@@ -17,13 +17,14 @@ use shepherd::client::{
 use shepherd::terminal::{TerminalSetup, with_terminal};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{
-    Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, NOTICE_TIMEOUT, RETRY_INTERVAL,
+    Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, NOTICE_TIMEOUT, Popup,
+    RETRY_INTERVAL,
 };
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
-use shepherd_core::wire::SessionNew;
+use shepherd_core::wire::{BuildId, ExeDigest, SessionNew};
 use shepherd_term::{PANIC_TRIGGER, Screen};
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
@@ -1125,4 +1126,109 @@ fn the_selected_sessions_cursor_shape_reaches_the_real_terminal() {
     h.user(Intent::ShowHelp);
     draw(&h, &mut view);
     assert_eq!(written(USERS_OWN), 1);
+}
+
+// ---------- a host of another build (T36a) ----------
+
+fn build(byte: u8) -> BuildId {
+    BuildId {
+        version: "0.1.0".into(),
+        digest: ExeDigest::from_bytes([byte; 32]),
+    }
+}
+
+/// A client of build B finds a host still running build A, while B is what's installed: it offers to restart the host,
+/// and only a click on `[Restart host]` does. The host stops, the reconnect launches the installed build in its place,
+/// and that one matches.
+#[test]
+fn a_stale_host_is_restarted_when_the_user_clicks_restart_and_the_reconnect_relaunches_it() {
+    let (a, b) = (build(0xa), build(0xb));
+    let mut h = Harness::with_launcher(|net, host| {
+        let stopped = host.clone();
+        let mut launched = 0;
+        let installed = b.digest;
+        let (a, b) = (a.clone(), b.clone());
+        FakeHostLauncher::new()
+            .on_launch(move || {
+                launched += 1;
+                let running = if launched == 1 { a.clone() } else { b.clone() };
+                *lock(&host) = Some(FakeHost::start(&net).with_build(running, installed));
+            })
+            // The host shuts down: its listener and every connection go.
+            .on_terminate(move || drop(lock(&stopped).take()))
+    });
+    h.runtime.set_build(b.clone());
+    h.runtime.start();
+    h.settle();
+    h.wait_retry();
+    h.term(Event::Resize(WINDOW.0, WINDOW.1));
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+    assert!(
+        matches!(h.runtime.client().popup(), Some(Popup::RestartHost { .. })),
+        "{:?}",
+        h.runtime.client().popup()
+    );
+    assert_eq!(h.launcher.terminations(), 0, "never without a click");
+
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "[Restart host]"));
+    assert_eq!(h.launcher.terminations(), 1);
+    // The link dropped with the host: the client reconnects, finds nothing, and launches the installed build.
+    h.wait_retry();
+    assert_eq!(h.launcher.launches(), 2);
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
+    assert_eq!(h.runtime.client().popup(), None);
+    assert_eq!(
+        h.host(|host| host.hello_cwds().len()),
+        1,
+        "the new host's hello"
+    );
+}
+
+/// The host was gone by the time the user clicked: nothing to stop is not a failure, so no "could not restart".
+#[test]
+fn restarting_a_host_that_is_already_gone_says_nothing_failed() {
+    let (a, b) = (build(0xa), build(0xb));
+    // A host started by someone else; the launcher knows of none running, so its terminate answers NotRunning.
+    let mut h = Harness::with_launcher(|net, host| {
+        *lock(&host) = Some(FakeHost::start(&net).with_build(a, b.digest));
+        FakeHostLauncher::new()
+    });
+    h.runtime.set_build(b);
+    h.runtime.start();
+    h.settle();
+    h.term(Event::Resize(WINDOW.0, WINDOW.1));
+    assert!(matches!(
+        h.runtime.client().popup(),
+        Some(Popup::RestartHost { .. })
+    ));
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "[Restart host]"));
+    assert_eq!(h.launcher.terminations(), 0);
+    let notice = h.runtime.client().notice().unwrap_or_default().to_owned();
+    assert!(!notice.contains("could not restart"), "{notice}");
+}
+
+#[test]
+fn not_now_leaves_the_stale_host_running() {
+    let (a, b) = (build(0xa), build(0xb));
+    let mut h = Harness::with_launcher(|net, host| {
+        let installed = b.digest;
+        FakeHostLauncher::new().on_launch(move || {
+            *lock(&host) = Some(FakeHost::start(&net).with_build(a.clone(), installed));
+        })
+    });
+    h.runtime.set_build(b);
+    h.runtime.start();
+    h.settle();
+    h.wait_retry();
+    h.term(Event::Resize(WINDOW.0, WINDOW.1));
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "[Not now]"));
+    assert_eq!(h.runtime.client().popup(), None);
+    assert_eq!((h.launcher.terminations(), h.launcher.launches()), (0, 1));
+    assert_eq!(h.runtime.client().connection(), &Connection::Ready);
 }

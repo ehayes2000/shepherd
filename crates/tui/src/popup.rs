@@ -1,5 +1,5 @@
 //! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, the
-//! profile picker for a new session, and the workspace switcher.
+//! profile picker for a new session, the workspace switcher, and the offer to restart an outdated host.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
@@ -11,7 +11,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget};
-use shepherd_core::client::{Cell, Client, CloseCheck, MenuEntry, MenuItem, Popup};
+use shepherd_core::client::{Cell, Client, CloseCheck, HostOutdated, MenuEntry, MenuItem, Popup};
 use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
@@ -57,6 +57,8 @@ const DELETED_FILES: &str = "  · uncommitted, untracked and ignored files";
 /// Its hint when removing the worktree would lose work: confirming keeps it.
 const AT_RISK_HINT: &str = "enter keeps the worktree · esc cancels";
 const HELP_WIDTH: u16 = 56;
+/// The restart dialog's width, its border included.
+const RESTART_DIALOG_WIDTH: u16 = 48;
 
 /// The profile picker's line above its rows.
 const PICK_PROMPT: &str = "Which agent should the session run?";
@@ -124,7 +126,45 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
         Popup::Menu { at, .. } => menu(&client.menu(), *at, window),
         Popup::PickProfile => pick_profile(client, window),
         Popup::Workspace { .. } => switcher(client, window),
+        Popup::RestartHost { why } => {
+            let height = u16::try_from(restart_lines(*why, None).len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(3);
+            dialog(
+                centered(window, RESTART_DIALOG_WIDTH, height),
+                &[
+                    ("[Restart host]", Target::RestartHost),
+                    ("[Not now]", Target::Dismiss),
+                ],
+            )
+        }
     })
+}
+
+/// The restart dialog's lines above its buttons: why the host should be restarted, and how many sessions that stops
+/// (`to_stop`, when the client knows).
+fn restart_lines(why: HostOutdated, to_stop: Option<usize>) -> Vec<Line<'static>> {
+    let (first, second) = match why {
+        HostOutdated::Older => (
+            "The shepherd host is older than this window",
+            "and can't update itself. Restart it?",
+        ),
+        HostOutdated::Stale => (
+            "The shepherd host runs an older build than",
+            "the one installed. Restart it?",
+        ),
+    };
+    let stopped = match to_stop {
+        None => "Its running sessions will stop.".to_owned(),
+        Some(0) => "No sessions are running.".to_owned(),
+        Some(1) => "1 running session will stop.".to_owned(),
+        Some(n) => format!("{n} running sessions will stop."),
+    };
+    vec![
+        draw::line(shown(first), Style::new()),
+        draw::line(shown(second), Style::new()),
+        draw::line(shown(&stopped), Style::new().fg(Color::Yellow)),
+    ]
 }
 
 /// A dialog in `area` with `buttons` right-aligned on its last line, a column in from the border.
@@ -346,6 +386,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::Menu { .. } => "",
         Popup::PickProfile => " new session ",
         Popup::Workspace { .. } => " workspace ",
+        Popup::RestartHost { .. } => " restart the host ",
     };
     frame(placed.area, title, buf);
     let inside = inner(placed.area);
@@ -380,6 +421,10 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::Menu { .. } => None,
         Popup::Workspace { path, error } => {
             switcher_body(client, path, error.as_deref(), body, buf)
+        }
+        Popup::RestartHost { why } => {
+            draw::paragraph(restart_lines(*why, client.sessions_to_stop())).render(body, buf);
+            None
         }
     };
     let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);

@@ -11,8 +11,9 @@
 //! yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
-//! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width, else a
-//! reconnecting note or a hint for help with the `Detach` and `?` buttons on the right.
+//! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
+//! for it is drawn across the window's last lines instead), else a reconnecting note or a hint for help with the
+//! `Detach` and `?` buttons on the right.
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
@@ -26,6 +27,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Clear, Widget, Wrap};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::display::DisplayText;
 use shepherd_core::session::Activity;
@@ -33,6 +35,9 @@ use shepherd_core::session::Activity;
 use crate::draw::{self, shown};
 use crate::layout::{Layout, Target};
 use crate::width::columns;
+
+/// The most lines a notice too long for the footer takes at the bottom of the window.
+const MAX_NOTICE_LINES: u16 = 3;
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
@@ -126,6 +131,8 @@ pub(crate) fn new_session_button(layout: &Layout) -> Rect {
 /// A row's close button, drawn as `×`.
 const CLOSE: &str = "×";
 const DETACH: &str = "Detach";
+/// The footer.s button that reopens the restart dialog, while the host should be restarted.
+const RESTART: &str = "Restart host";
 const HELP: &str = "?";
 /// The collapsed sidebar's `Detach` button.
 const DETACH_COLLAPSED: &str = "⏏";
@@ -144,7 +151,8 @@ pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
     Rect::new(row.right() - 1, row.y, 1, 1)
 }
 
-/// The footer's buttons, left to right: `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
+/// The footer's buttons, left to right: `Restart host` while the host should be restarted ([`Client::restart_offer`],
+/// full sidebar only), `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
 /// glyph column: `⏏` just above `?` on the last line. Not shown while the prefix is pending, when the footer shows
 /// it instead, nor in the full sidebar while a notice shows, which then has the whole footer.
 pub(crate) fn footer_buttons(
@@ -179,7 +187,14 @@ pub(crate) fn footer_buttons(
     let y = inner.bottom() - 1;
     let help = Rect::new(inner.right() - 1, y, 1, 1);
     let detach = Rect::new(help.x - 1 - width, y, width, 1);
-    vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)]
+    let mut buttons = vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)];
+    let restart = u16::try_from(columns(RESTART)).unwrap_or(u16::MAX);
+    // A blank column between it and `Detach`.
+    if client.restart_offer().is_some() && detach.x > inner.x + 1 + restart {
+        let at = Rect::new(inner.x + 1, y, restart, 1);
+        buttons.insert(0, (at, Target::OfferRestart, RESTART));
+    }
+    buttons
 }
 
 /// The session rows, between the header and the footer.
@@ -400,6 +415,38 @@ fn rows(
         }
         draw(session, is_selected, line, buf);
     }
+}
+
+/// A notice too long for the full sidebar's footer: drawn across the window's last lines instead (as many as it
+/// takes, up to [`MAX_NOTICE_LINES`]), over the footer and the pane. Not while the prefix is pending (the footer
+/// shows that), nor beside the collapsed sidebar, which keeps its buttons and shows no notice.
+pub(crate) fn wide_notice(client: &Client, layout: &Layout, buf: &mut Buffer) {
+    let Some(notice) = client.notice().map(shown) else {
+        return;
+    };
+    let window = layout.sidebar.union(layout.pane);
+    if client.focus() == Focus::Command || window.width < 2 || window.height == 0 {
+        return;
+    }
+    let room = usize::from(inner(layout).width.saturating_sub(1));
+    if layout.collapsed || columns(notice.as_str()) <= room {
+        return;
+    }
+    // A blank column on the left, like the footer.
+    let width = window.width - 1;
+    let paragraph = draw::paragraph(vec![draw::line(notice, Style::new().fg(ATTENTION))])
+        .wrap(Wrap { trim: true });
+    // As many lines as the wrapped text takes: wrapped on a scratch buffer first, so word breaks count.
+    let mut scratch = Buffer::empty(Rect::new(0, 0, width, MAX_NOTICE_LINES));
+    paragraph.clone().render(scratch.area, &mut scratch);
+    let used = (0..MAX_NOTICE_LINES)
+        .rev()
+        .find(|&y| (0..width).any(|x| scratch[(x, y)].symbol() != " "))
+        .map_or(1, |y| y + 1);
+    let height = used.min(window.height);
+    let area = Rect::new(window.x, window.bottom() - height, window.width, height);
+    Clear.render(area, buf);
+    paragraph.render(Rect::new(area.x + 1, area.y, width, height), buf);
 }
 
 fn footer(client: &Client, area: Rect, buf: &mut Buffer) {

@@ -13,9 +13,10 @@ use shepherd_core::host::HostCommand;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, Link, LinkEvent};
 use shepherd_core::wire::{
-    ClientMessage, ClientNotification, ClientRequest, HelloOk, HostNotification, HostResponse,
-    HostResult, LogEntry, Notify, ProfileInfo, PtyOutput, Request, SessionNew, SessionResize,
-    decode_client_message, encode_host_notification, encode_response, negotiate,
+    BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HelloOk,
+    HostNotification, HostResponse, HostResult, LogEntry, Notify, ProfileInfo, PtyOutput, Request,
+    SessionNew, SessionResize, decode_client_message, encode_host_notification, encode_response,
+    negotiate,
 };
 use shepherd_testkit::builders::{HostDriver, claude_resume_spec};
 use shepherd_testkit::contracts::link::ChannelSink;
@@ -40,6 +41,10 @@ pub struct FakeHost {
     default_profile: Option<String>,
     /// Every session/new it was sent, in order.
     session_news: Vec<SessionNew>,
+    /// The build its hello answer says it runs, and what it says is installed at its path. None by default, like a
+    /// host older than builds.
+    build: Option<BuildId>,
+    installed: Option<ExeDigest>,
 }
 
 impl FakeHost {
@@ -62,6 +67,17 @@ impl FakeHost {
             profiles: Vec::new(),
             default_profile: None,
             session_news: Vec::new(),
+            build: None,
+            installed: None,
+        }
+    }
+
+    /// One whose hello answer says it runs `build`, with `installed` at its path.
+    pub fn with_build(self, build: BuildId, installed: ExeDigest) -> Self {
+        Self {
+            build: Some(build),
+            installed: Some(installed),
+            ..self
         }
     }
 
@@ -167,6 +183,8 @@ impl FakeHost {
                         notify: Notify { bell: self.bell },
                         profiles: self.profiles.clone(),
                         default_profile: self.default_profile.clone(),
+                        build: self.build.clone(),
+                        installed: self.installed,
                         ..ok
                     })
                 })

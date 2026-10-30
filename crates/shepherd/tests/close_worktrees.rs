@@ -89,6 +89,7 @@ impl Setup {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("laptop"),
             cwd: Some(app.to_str().unwrap().to_owned()),
+            build: None,
         }));
         h.step();
         client.subscribe_all();

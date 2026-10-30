@@ -1,6 +1,7 @@
 //! The `HostLauncher` contract. Launchers are built through a [`LauncherFixture`]: the fake's counts launches, the
 //! process adapter's starts a stand-in program that reports to the fixture when it runs. That the launched process
-//! outlives the launcher and has no controlling terminal is tested next to the adapter.
+//! outlives the launcher and has no controlling terminal is tested next to the adapter. [`HostLauncher::terminate`] is
+//! run against a host the fixture started itself: for the process adapter, a stand-in listening on the socket.
 //!
 //! Run it with [`launcher_contract!`](crate::launcher_contract), which expands to one `#[test]` per case.
 
@@ -20,6 +21,8 @@ macro_rules! launcher_contract {
             each_launch_starts_its_own_host,
             launch_that_cannot_start_the_host_is_an_error,
             a_host_that_fails_to_start_is_an_error_with_its_message,
+            terminate_stops_the_running_host,
+            terminate_with_no_host_running_is_not_running,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -36,7 +39,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use shepherd_core::ports::{HostLauncher, LaunchError};
+use shepherd_core::ports::{HostLauncher, LaunchError, TerminateError};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -52,6 +55,13 @@ pub trait LauncherFixture {
     fn failing_host(&mut self, message: &str) -> Self::Launcher;
     /// Waits until `n` more hosts have started. Panics if they don't within `timeout`.
     fn wait_started(&mut self, n: usize, timeout: Duration);
+    /// A launcher whose host the fixture has already started (not through `launch`), and which is serving.
+    fn running(&mut self) -> Self::Launcher;
+    /// A launcher with no host running.
+    fn idle(&mut self) -> Self::Launcher;
+    /// Waits until the host [`LauncherFixture::running`] started has been told to stop. Panics if it isn't within
+    /// `timeout`.
+    fn wait_terminated(&mut self, timeout: Duration);
 }
 
 /// Launches on another thread, so a `launch` that blocks fails the case instead of hanging it.
@@ -103,4 +113,16 @@ pub fn a_host_that_fails_to_start_is_an_error_with_its_message<F: LauncherFixtur
         launch(&launcher),
         Err(LaunchError::HostFailed(message.to_owned()))
     );
+}
+
+/// Terminating a host the launcher didn't start (a host older than this client, say) tells it to stop.
+pub fn terminate_stops_the_running_host<F: LauncherFixture>(mut f: F) {
+    let launcher = f.running();
+    assert_eq!(launcher.terminate(), Ok(()));
+    f.wait_terminated(TIMEOUT);
+}
+
+pub fn terminate_with_no_host_running_is_not_running<F: LauncherFixture>(mut f: F) {
+    let launcher = f.idle();
+    assert_eq!(launcher.terminate(), Err(TerminateError::NotRunning));
 }

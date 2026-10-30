@@ -4,10 +4,12 @@
 //! a [`Decoder`]. Which messages get answered, and how, is documented on the `message` items below.
 
 pub mod base64;
+mod build;
 mod codec;
 mod error;
 mod message;
 
+pub use build::{BuildId, DigestHasher, ExeDigest};
 pub use codec::{Decoder, LineTooLong, MAX_LINE};
 pub use error::{WireError, code};
 pub use message::{
