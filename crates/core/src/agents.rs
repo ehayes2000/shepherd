@@ -1,6 +1,7 @@
 //! Pure translation of agent hook payloads into ACP++ frames. See "Synthesized frames" in `docs/acpp.md`.
 
 pub mod claude;
+pub mod codex;
 
 use std::collections::BTreeMap;
 
@@ -11,11 +12,32 @@ use crate::config::AgentKind;
 use crate::ids::SessionId;
 
 use self::claude::ClaudeTranslation;
+use self::codex::CodexTranslation;
 
 /// One session's translation state, by agent kind.
 #[derive(Debug, Clone, PartialEq)]
 enum Translation {
     Claude(ClaudeTranslation),
+    Codex(CodexTranslation),
+}
+
+impl Translation {
+    fn new(agent: AgentKind, session: &SessionId, seed: String) -> Option<Self> {
+        match agent {
+            AgentKind::ClaudeCode => {
+                Some(Self::Claude(ClaudeTranslation::new(session.clone(), seed)))
+            }
+            AgentKind::Codex => Some(Self::Codex(CodexTranslation::new(session.clone(), seed))),
+            AgentKind::Shell => None,
+        }
+    }
+
+    fn agent(&self) -> AgentKind {
+        match self {
+            Self::Claude(_) => AgentKind::ClaudeCode,
+            Self::Codex(_) => AgentKind::Codex,
+        }
+    }
 }
 
 /// The translation state of every session that has sent a hook, which the host keeps between `_shepherd/hook/frame`
@@ -38,13 +60,14 @@ impl Translators {
     /// Whether hooks from `agent` can be translated.
     pub fn supports(agent: AgentKind) -> bool {
         match agent {
-            AgentKind::ClaudeCode => true,
-            AgentKind::Codex | AgentKind::Shell => false,
+            AgentKind::ClaudeCode | AgentKind::Codex => true,
+            AgentKind::Shell => false,
         }
     }
 
     /// Translates one hook payload from `agent` in `session` into the frames to append. `seed` is called only when
-    /// the session has no translator for `agent` yet. An agent kind without a translator gives no frames.
+    /// the session has no translator for `agent` yet (a translator for another agent kind is replaced). An agent
+    /// kind without a translator gives no frames.
     pub fn translate(
         &mut self,
         session: &SessionId,
@@ -52,15 +75,16 @@ impl Translators {
         payload: &Value,
         seed: impl FnOnce() -> String,
     ) -> Vec<FrameDraft> {
-        match agent {
-            AgentKind::ClaudeCode => {
-                let translation = self.sessions.entry(session.clone()).or_insert_with(|| {
-                    Translation::Claude(ClaudeTranslation::new(session.clone(), seed()))
-                });
-                let Translation::Claude(state) = translation;
-                claude::translate(state, payload)
-            }
-            AgentKind::Codex | AgentKind::Shell => Vec::new(),
+        if self.sessions.get(session).map(Translation::agent) != Some(agent) {
+            let Some(fresh) = Translation::new(agent, session, seed()) else {
+                return Vec::new();
+            };
+            self.sessions.insert(session.clone(), fresh);
+        }
+        match self.sessions.get_mut(session) {
+            Some(Translation::Claude(state)) => claude::translate(state, payload),
+            Some(Translation::Codex(state)) => codex::translate(state, payload),
+            None => Vec::new(),
         }
     }
 

@@ -6,13 +6,20 @@
 //! [`SETTINGS_FILE`] that `claude` loads with `--settings <file>`. Claude Code puts `--settings` above the user,
 //! project and local settings files and merges hooks across all of them, so the user's own hooks keep running
 //! (<https://code.claude.com/docs/en/settings>, <https://code.claude.com/docs/en/hooks>, read 2026-10-29).
+//!
+//! A Codex session gets shepherd's hooks the same way, as one config override: `codex -c hooks=<inline table>`.
+//! Codex parses each `-c` value as TOML into its session-flags config layer, which sits above the user's and
+//! project's config, and loads hooks from every layer, so the user's own hooks keep running and `~/.codex` is never
+//! touched (`codex-rs/utils/cli/src/config_override.rs`, `codex-rs/hooks/src/engine/discovery.rs`, rust-v0.166.0).
+//! The same table carries the trust state for exactly those hooks (see [`codex::hooks_config`], decision 0016).
+//! Codex runs a hook command with `$SHELL -lc`, so the `shepherd` path is single-quoted.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::agents::claude;
+use crate::agents::{claude, codex};
 use crate::config::{AgentKind, AgentProfile};
 use crate::ids::SessionId;
 use crate::ports::pty::{PtySize, SpawnSpec};
@@ -59,6 +66,10 @@ pub enum LaunchError {
     /// A path that must go into an argument, an environment variable or the settings JSON isn't UTF-8.
     #[error("{} is not valid UTF-8", .0.display())]
     NotUtf8(PathBuf),
+    /// The `shepherd` path has a character that single quotes don't make literal in every shell Codex might run
+    /// hooks with: `'`, or `\`, which fish reads as an escape inside single quotes.
+    #[error("{} can't be quoted for the shell", .0.display())]
+    NotShellSafe(PathBuf),
 }
 
 /// What `profile` runs in the session `ctx` describes.
@@ -77,7 +88,16 @@ pub fn plan(profile: &AgentProfile, ctx: &LaunchContext) -> Result<Launch, Launc
             };
             (args, vec![file])
         }
-        AgentKind::Codex | AgentKind::Shell => (Vec::new(), Vec::new()),
+        AgentKind::Codex => {
+            let command = format!(
+                "{} hook {}",
+                shell_quote(&ctx.shepherd)?,
+                AgentKind::Codex.as_str()
+            );
+            let hooks = toml::Value::Table(codex::hooks_config(&command));
+            (vec!["-c".to_owned(), format!("hooks={hooks}")], Vec::new())
+        }
+        AgentKind::Shell => (Vec::new(), Vec::new()),
     };
     args.extend(profile.args.iter().cloned());
 
@@ -112,6 +132,15 @@ fn claude_settings(shepherd: &str) -> Vec<u8> {
         .unwrap_or_else(|e| unreachable!("a JSON value always serializes: {e}"));
     contents.push(b'\n');
     contents
+}
+
+/// `path` in single quotes, which `sh`, `bash`, `zsh` and `fish` all read literally when it holds no `'` and no `\`.
+fn shell_quote(path: &Path) -> Result<String, LaunchError> {
+    let text = utf8(path)?;
+    if text.contains(['\'', '\\']) {
+        return Err(LaunchError::NotShellSafe(path.to_path_buf()));
+    }
+    Ok(format!("'{text}'"))
 }
 
 fn utf8(path: &Path) -> Result<&str, LaunchError> {

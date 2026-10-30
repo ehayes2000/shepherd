@@ -83,6 +83,7 @@ fn the_seed_is_asked_once_per_session_and_prefixes_its_ids() {
 #[test]
 fn only_agent_kinds_with_a_translator_produce_frames() {
     assert!(Translators::supports(AgentKind::ClaudeCode));
+    assert!(Translators::supports(AgentKind::Codex));
     assert!(!Translators::supports(AgentKind::Shell));
     let mut t = Translators::new();
     assert!(
@@ -113,4 +114,23 @@ fn an_agent_kind_without_a_translator_leaves_no_state() {
     let mut t = Translators::new();
     t.translate(&sid("s1"), AgentKind::Shell, &prompt(), String::new);
     assert!(t.is_empty());
+}
+
+#[test]
+fn codex_hooks_pair_a_prompt_with_its_stop_across_calls() {
+    let mut t = Translators::new();
+    let codex_prompt =
+        json!({ "hook_event_name": "UserPromptSubmit", "session_id": "x1", "prompt": "hi" });
+    let drafts = t.translate(&sid("s1"), AgentKind::Codex, &codex_prompt, || {
+        "seed".to_owned()
+    });
+    assert!(
+        drafts
+            .iter()
+            .all(|d| d.source.agent.as_deref() == Some("codex"))
+    );
+    let opened = request_id(&drafts).expect("a prompt request");
+    let stop = json!({ "hook_event_name": "Stop", "session_id": "x1" });
+    let answered = t.translate(&sid("s1"), AgentKind::Codex, &stop, String::new);
+    assert_eq!(response_id(&answered), Some(opened));
 }

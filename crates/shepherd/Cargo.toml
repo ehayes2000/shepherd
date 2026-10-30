@@ -23,6 +23,7 @@ shepherd-term = { workspace = true, features = ["panic-trigger"] }
 shepherd-testkit.workspace = true
 tempfile.workspace = true
 portable-pty.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
