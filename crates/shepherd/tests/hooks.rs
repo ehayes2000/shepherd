@@ -14,10 +14,10 @@ use shepherd_core::acpp::acp::AcpFrame;
 use shepherd_core::acpp::{Frame, RequestId, Seq};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{EventLog, LogId};
+use shepherd_core::ports::{EventLog, LinkEvent, LinkEventSink, LogId};
 use shepherd_core::session::{Activity, SessionState};
 use shepherd_core::wire::{ClientRequest, HookFrame, WireError};
-use shepherd_testkit::fakes::link::FakeNetwork;
+use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::ProgramInput;
 use support::{HostHarness, Program, SHELL, new_session_id, response};
 
@@ -197,6 +197,106 @@ fn delivering_with_no_host_fails_without_waiting() {
         matches!(result, Err(HookError::Unreachable(_))),
         "{result:?}"
     );
+}
+
+/// Forwards a fake host link's events into a channel the test may or may not read.
+struct ChannelSink(Mutex<std::sync::mpsc::Sender<LinkEvent>>);
+
+impl LinkEventSink for ChannelSink {
+    fn send(&self, event: LinkEvent) {
+        let _ = self.0.lock().unwrap().send(event);
+    }
+}
+
+/// A host that accepts connections and reads lines, and never answers on its own.
+fn silent_host(net: &FakeNetwork) -> (FakeLink, std::sync::mpsc::Receiver<LinkEvent>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let link = net.listen(Arc::new(ChannelSink(Mutex::new(tx)))).unwrap();
+    (link, rx)
+}
+
+fn deliver_on(net: &FakeNetwork, frame: HookFrame, timeout: Duration) -> Result<(), HookError> {
+    let net = net.clone();
+    hook::deliver(
+        Box::new(move |sink| net.connect(sink).map_err(|e| e.to_string())),
+        frame,
+        timeout,
+    )
+}
+
+#[test]
+fn a_host_that_never_answers_times_the_hook_out() {
+    let net = FakeNetwork::new();
+    let (_host, _events) = silent_host(&net);
+    // On its own thread, so a hook that ignores its timeout fails the test (after GENEROUS) instead of hanging it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(deliver_on(
+            &net,
+            claude_hook(&SessionId::new("s_1"), stop()),
+            Duration::from_millis(10),
+        ));
+    });
+    let result = rx
+        .recv_timeout(GENEROUS)
+        .expect("the hook gave up waiting for the host");
+    assert_eq!(result, Err(HookError::Timeout));
+}
+
+#[test]
+fn a_host_that_drops_the_connection_before_answering_is_a_disconnect() {
+    let net = FakeNetwork::new();
+    let (host, events) = silent_host(&net);
+    // The fake network drops a conn's sinks with it; a socket link keeps its sink until the link is dropped. Hold
+    // a copy, as that link would, so the hook learns of the drop from the `Disconnected` event alone.
+    let kept: Arc<Mutex<Option<Arc<dyn LinkEventSink>>>> = Arc::default();
+    let hook = {
+        let (net, kept) = (net.clone(), kept.clone());
+        std::thread::spawn(move || {
+            hook::deliver(
+                Box::new(move |sink: Arc<dyn LinkEventSink>| {
+                    *kept.lock().unwrap() = Some(sink.clone());
+                    net.connect(sink).map_err(|e| e.to_string())
+                }),
+                claude_hook(&SessionId::new("s_1"), stop()),
+                GENEROUS,
+            )
+        })
+    };
+    // Once the hook's request has arrived, the host goes away without answering.
+    loop {
+        match events
+            .recv_timeout(GENEROUS)
+            .expect("the hook connects and sends")
+        {
+            LinkEvent::Line { .. } => break,
+            _ => continue,
+        }
+    }
+    drop(host);
+    assert_eq!(hook.join().unwrap(), Err(HookError::Disconnected));
+}
+
+#[test]
+fn a_hook_the_host_refuses_is_reported_as_refused() {
+    let net = FakeNetwork::new();
+    let mut h = HostHarness::builder().network(net.clone()).start();
+    let hook = {
+        let net = net.clone();
+        std::thread::spawn(move || {
+            deliver_on(
+                &net,
+                claude_hook(&SessionId::new("s_nope"), stop()),
+                GENEROUS,
+            )
+        })
+    };
+    while !hook.is_finished() {
+        h.step();
+        std::thread::yield_now();
+    }
+    let result = hook.join().unwrap();
+    assert!(matches!(result, Err(HookError::Refused(_))), "{result:?}");
 }
 
 #[test]

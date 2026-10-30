@@ -4,7 +4,10 @@
 //!
 //! It must never get in the agent's way: it always exits 0 and prints nothing, whatever goes wrong (no session, an
 //! unknown agent, no host). It waits for the host's answer, so hooks the agent runs one after another reach the
-//! log in order, but never longer than [`REPLY_TIMEOUT`].
+//! log in order.
+//!
+//! What is bounded: only the wait for the host's answer, by [`REPLY_TIMEOUT`]. Reading stdin (until the agent closes
+//! it) and connecting to the socket are not bounded; a connect to a live host whose accept backlog is full can block.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -59,7 +62,8 @@ pub fn hook_frame(agent: &str, session: Option<&str>, stdin: &[u8]) -> Option<Ho
 /// Opens a link to the host, sending its events to the sink.
 pub type Connect<L> = dyn FnOnce(Arc<dyn LinkEventSink>) -> Result<(L, ConnId), String>;
 
-/// Sends `frame` to the host over a link from `connect`, and waits up to `timeout` for its answer.
+/// Sends `frame` to the host over a link from `connect`, and waits up to `timeout` for its answer. `connect` itself
+/// is not bounded by `timeout`.
 pub fn deliver<L: Link>(
     connect: Box<Connect<L>>,
     frame: HookFrame,
