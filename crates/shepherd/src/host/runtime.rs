@@ -17,6 +17,9 @@
 //!   live PTY output too. Appends only happen on this thread, so there is no gap and no duplicate.
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
+//! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
+//!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
+//!   (a failure to write them fails the spawn), and the directory is removed when its `session/closed` is appended.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -26,14 +29,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use shepherd_core::acpp::{Envelope, FrameDraft, RequestId, Seq, Stamp};
+use shepherd_core::acpp::{Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, Stamp};
 use shepherd_core::agents::Translators;
 use shepherd_core::config::{AgentKind, Config};
+use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
-    PtyEventSink, PtySize, SpawnSpec,
+    PtyEventSink, PtySize,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -42,6 +46,7 @@ use shepherd_core::wire::{
 use shepherd_term::Screen;
 
 use super::env::Env;
+use super::run_files;
 
 /// The machine id every entry is stamped with until machines get names (T29).
 pub const LOCAL_MACHINE: &str = "local";
@@ -131,6 +136,12 @@ pub struct RuntimeSettings {
     pub config: Config,
     /// Where new sessions start.
     pub home: PathBuf,
+    /// Each session's run files go in `<run_root>/<session>/` (`~/.shepherd/run`).
+    pub run_root: PathBuf,
+    /// The running `shepherd` executable, absolute: what agents' hooks run.
+    pub shepherd: PathBuf,
+    /// The host socket, for `shepherd hook`.
+    pub socket: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -213,6 +224,8 @@ pub struct HostRuntime<P, L, E, V> {
     translators: Translators,
     /// Seeds every translator this host run creates; made on the first hook.
     hook_seed: Option<String>,
+    /// Run files of sessions being created, written just before their PTY is spawned.
+    pending_run_files: HashMap<SessionId, Vec<RunFile>>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -253,6 +266,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             next_reply: 0,
             translators: Translators::new(),
             hook_seed: None,
+            pending_run_files: HashMap::new(),
             shutdown_by: None,
             finished: false,
         };
@@ -421,7 +435,12 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 }
                 HostCommand::SpawnPty { session, spec } => {
                     let size = spec.size;
-                    match self.pty.spawn(session.clone(), spec) {
+                    let spawned = self.write_run_files(&session).and_then(|()| {
+                        self.pty
+                            .spawn(session.clone(), spec)
+                            .map_err(|e| e.to_string())
+                    });
+                    match spawned {
                         Ok(()) => {
                             self.screens
                                 .insert(session, Screen::new(size.cols, size.rows));
@@ -496,6 +515,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let log = LogId::of(&draft);
         let envelope = self.log.append(log.clone(), draft, stamp)?;
         self.host.apply(&envelope);
+        self.remove_run_files_if_closed(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
             .conns
@@ -661,18 +681,28 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                     payload,
                 });
             }
-            ClientRequest::SessionNew(_) => {
+            ClientRequest::SessionNew(new) => {
                 let reply = self.reply_to(conn, id);
+                let session = self.env.new_session_id();
+                let launch = match self.plan_launch(&session, new.profile.as_deref()) {
+                    Ok(launch) => launch,
+                    Err(error) => return self.reply(reply, Err(error)),
+                };
+                if !launch.files.is_empty() {
+                    self.pending_run_files.insert(session.clone(), launch.files);
+                }
                 let event = HostEvent::NewSession {
                     reply,
-                    id: self.env.new_session_id(),
+                    id: session.clone(),
                     at: self.env.now(),
                     spec: NewSessionSpec {
                         name: None,
-                        spawn: self.shell_spawn(),
+                        spawn: launch.spawn,
                     },
                 };
                 self.dispatch(event);
+                // Left over only if core refused the session and nothing was spawned.
+                self.pending_run_files.remove(&session);
             }
             ClientRequest::SessionRename(rename) => {
                 let reply = self.reply_to(conn, id);
@@ -692,23 +722,47 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         }
     }
 
-    /// What a new M1 session runs: the `shell` profile, in the home directory, at [`INITIAL_SIZE`].
-    fn shell_spawn(&self) -> SpawnSpec {
-        let (command, args, env) = match self.settings.config.profile("shell") {
-            Some(p) => (
-                p.command.clone(),
-                p.args.clone(),
-                p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            ),
-            // `Config` always has the built-in `shell` profile; this only keeps the lookup total.
-            None => ("sh".to_owned(), Vec::new(), Vec::new()),
-        };
-        SpawnSpec {
-            command,
-            args,
+    /// What a new session runs: the named profile, else `[defaults] agent`, in the home directory, at
+    /// [`INITIAL_SIZE`].
+    fn plan_launch(
+        &self,
+        session: &SessionId,
+        profile: Option<&str>,
+    ) -> Result<launch::Launch, WireError> {
+        let config = &self.settings.config;
+        let profile = config.profile_or_default(profile).ok_or_else(|| {
+            WireError::InvalidParams(format!("unknown profile `{}`", profile.unwrap_or_default()))
+        })?;
+        let ctx = LaunchContext {
+            session: session.clone(),
             cwd: self.settings.home.clone(),
-            env,
             size: INITIAL_SIZE,
+            run_dir: run_files::session_dir(&self.settings.run_root, session),
+            shepherd: self.settings.shepherd.clone(),
+            socket: self.settings.socket.clone(),
+        };
+        launch::plan(profile, &ctx).map_err(|e| WireError::Internal(e.to_string()))
+    }
+
+    /// Writes the run files waiting for `session`'s spawn, if any.
+    fn write_run_files(&mut self, session: &SessionId) -> Result<(), String> {
+        let Some(files) = self.pending_run_files.remove(session) else {
+            return Ok(());
+        };
+        run_files::write(&self.settings.run_root, session, &files)
+            .map_err(|e| format!("cannot write run files: {e}"))
+    }
+
+    /// Removes a session's run files once its `session/closed` is in the log.
+    fn remove_run_files_if_closed(&self, envelope: &Envelope) {
+        let (Some(session), Frame::Shepherd(message)) = (envelope.session(), envelope.frame())
+        else {
+            return;
+        };
+        if let ShepherdFrame::SessionClosed(_) = message.body()
+            && let Err(error) = run_files::remove(&self.settings.run_root, session)
+        {
+            tracing::warn!(%session, %error, "cannot remove run files");
         }
     }
 

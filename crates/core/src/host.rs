@@ -4,6 +4,8 @@
 //! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
 //! seals, appends, and hands back to [`Host::apply`].
 
+pub mod launch;
+
 use std::collections::BTreeMap;
 
 use serde_json::Value;

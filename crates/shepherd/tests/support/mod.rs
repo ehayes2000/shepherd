@@ -7,13 +7,14 @@ pub mod fake_host;
 /// A scripted terminal for TUI scenarios (T13).
 pub mod fake_terminal;
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use shepherd::host::{Env, HostRuntime, RuntimeEvent, RuntimeSettings, runtime_channel};
 use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
-use shepherd_core::config::Config;
+use shepherd_core::config::{Config, RawConfig, RawDefaults};
 use shepherd_core::host::Host;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink};
@@ -30,6 +31,24 @@ use shepherd_testkit::fakes::pty::{FakePty, ProgramInput, ScriptedProcess};
 pub const SHELL: &str = "/bin/fake-sh";
 /// The home directory new sessions start in.
 pub const HOME: &str = "/home/test";
+/// The `shepherd` executable the host writes into agents' hook settings.
+pub const SHEPHERD_EXE: &str = "/opt/shepherd/bin/shepherd";
+/// The host socket the host tells agents about.
+pub const SOCKET: &str = "/home/test/.shepherd/host.sock";
+/// A run root for runtimes that never launch an agent with run files: nothing can create it.
+const NO_RUN_ROOT: &str = "/nonexistent/shepherd-run";
+
+/// The harness's config: the defaults, except that new sessions without a profile run the `shell` profile, so
+/// scenarios don't need a fake `claude`.
+pub fn shell_default_config() -> RawConfig {
+    RawConfig {
+        defaults: Some(RawDefaults {
+            agent: Some("shell".to_owned()),
+            env: None,
+        }),
+        ..RawConfig::default()
+    }
+}
 
 /// A deterministic [`Env`]: session ids `s_t1`, `s_t2`, ..., entry ids `e1`, `e2`, ..., timestamps 1 ms apart from
 /// `2026-10-29T12:00:00.000Z`, and a monotonic clock that only moves through [`Clock::advance`].
@@ -138,6 +157,7 @@ pub struct HarnessBuilder {
     log: FakeEventLog,
     env: TestEnv,
     net: FakeNetwork,
+    config: RawConfig,
 }
 
 impl HarnessBuilder {
@@ -159,22 +179,44 @@ impl HarnessBuilder {
         self
     }
 
+    /// Resolves this config instead of [`shell_default_config`].
+    pub fn config(mut self, config: RawConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn start(self) -> HostHarness {
         let HarnessBuilder {
             programs,
             log,
             env,
             net,
+            config,
         } = self;
-        let runtime = build_runtime(&net, &programs, log, env.clone());
+        let dir = tempfile::tempdir().expect("tempdir for run files");
+        let settings = settings(config, dir.path().join("run"));
+        let runtime = build_runtime(&net, &programs, log, env.clone(), settings.clone());
         let mut harness = HostHarness {
             runtime: Some(runtime),
             net,
             programs,
             env,
+            settings,
+            _dir: dir,
         };
         harness.step();
         harness
+    }
+}
+
+/// Runtime settings for tests: `config` resolved with [`SHELL`], sessions in [`HOME`], run files under `run_root`.
+pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
+    RuntimeSettings {
+        config: Config::resolve(Some(config), Some(SHELL.to_owned())).expect("test config"),
+        home: HOME.into(),
+        run_root,
+        shepherd: SHEPHERD_EXE.into(),
+        socket: SOCKET.into(),
     }
 }
 
@@ -183,8 +225,9 @@ fn build_runtime(
     programs: &[(String, Program)],
     log: FakeEventLog,
     env: TestEnv,
+    settings: RuntimeSettings,
 ) -> Runtime {
-    runtime_with(net, programs, log, env, |sink| sink)
+    runtime_in(net, programs, log, env, |sink| sink, settings)
 }
 
 /// A host runtime on fakes with any `EventLog` (e.g. a wrapper that counts reads), listening on `net`, its link's
@@ -197,6 +240,18 @@ pub fn runtime_with<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
 ) -> HostRuntime<FakePty, FakeLink, E, TestEnv> {
+    let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
+    runtime_in(net, programs, log, env, link_sink, settings)
+}
+
+fn runtime_in<E: EventLog>(
+    net: &FakeNetwork,
+    programs: &[(String, Program)],
+    log: E,
+    env: TestEnv,
+    link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
+    settings: RuntimeSettings,
+) -> HostRuntime<FakePty, FakeLink, E, TestEnv> {
     let (tx, rx) = runtime_channel();
     let mut pty = FakePty::new(tx.pty_sink());
     for (command, program) in programs {
@@ -206,10 +261,6 @@ pub fn runtime_with<E: EventLog>(
     let link = net
         .listen(link_sink(tx.link_sink()))
         .expect("fake host listens");
-    let settings = RuntimeSettings {
-        config: Config::resolve(None, Some(SHELL.to_owned())).expect("default config"),
-        home: HOME.into(),
-    };
     HostRuntime::start(pty, link, log, env, settings, tx, rx).expect("host runtime starts")
 }
 
@@ -220,6 +271,9 @@ pub struct HostHarness {
     net: FakeNetwork,
     programs: Vec<(String, Program)>,
     env: TestEnv,
+    settings: RuntimeSettings,
+    /// Holds the run root; removed with the harness.
+    _dir: tempfile::TempDir,
 }
 
 impl HostHarness {
@@ -229,6 +283,7 @@ impl HostHarness {
             log: FakeEventLog::new(),
             env: TestEnv::new(),
             net: FakeNetwork::new(),
+            config: shell_default_config(),
         }
     }
 
@@ -255,6 +310,12 @@ impl HostHarness {
 
     pub fn clock(&self) -> Clock {
         self.env.clock()
+    }
+
+    /// Where the host keeps each session's run files, in `<run_root>/<session>/`. Created by the host when it
+    /// first needs it.
+    pub fn run_root(&self) -> &Path {
+        &self.settings.run_root
     }
 
     /// Runs the loop until no event is pending and no deadline is due.
@@ -287,7 +348,13 @@ impl HostHarness {
     pub fn restart(&mut self) {
         let old = self.runtime.take().expect("runtime");
         let log = old.into_log();
-        let runtime = build_runtime(&self.net, &self.programs, log, self.env.clone());
+        let runtime = build_runtime(
+            &self.net,
+            &self.programs,
+            log,
+            self.env.clone(),
+            self.settings.clone(),
+        );
         self.runtime = Some(runtime);
         self.step();
     }

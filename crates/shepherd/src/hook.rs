@@ -26,10 +26,9 @@ use shepherd_core::wire::{
 
 /// The longest `shepherd hook` waits for the host's answer before giving up.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
-/// The session the agent runs in.
-pub const SESSION_VAR: &str = "SHEPHERD_SESSION";
-/// The host socket, when it isn't `~/.shepherd/host.sock`.
-pub const SOCKET_VAR: &str = "SHEPHERD_SOCK";
+/// The session the agent runs in, and the host socket (when unset, `~/.shepherd/host.sock`). The host sets both
+/// when it launches a session.
+pub use shepherd_core::host::launch::{SESSION_VAR, SOCKET_VAR};
 
 /// Why a hook wasn't delivered. Only tests look: `shepherd hook` exits 0 regardless.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
