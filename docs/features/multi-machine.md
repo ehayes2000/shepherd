@@ -10,7 +10,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
-| T29 | Machine identity and names | building | task/t29-machine-identity @ HEAD | 0 | notes added |
+| T29 | Machine identity and names | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | T30 | Pairing and trusted peers | todo |  |  |  |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
