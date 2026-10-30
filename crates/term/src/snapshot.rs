@@ -39,7 +39,8 @@ impl Pen {
     }
 }
 
-pub(crate) fn ansi<T>(term: &Term<T>) -> Vec<u8> {
+/// `kitty_top` is the top of the active screen's kitty keyboard stack, 0 when it is empty.
+pub(crate) fn ansi<T>(term: &Term<T>, kitty_top: u8) -> Vec<u8> {
     let mut out = Writer {
         buf: Vec::new(),
         pen: Pen::of(&Cell::default()),
@@ -48,6 +49,7 @@ pub(crate) fn ansi<T>(term: &Term<T>) -> Vec<u8> {
 
     // RIS, so the target starts from the same blank state whether it is fresh or not.
     out.raw("\x1bc");
+    palette(&mut out, term);
     if mode.contains(TermMode::ALT_SCREEN) {
         out.raw("\x1b[?1049h");
     }
@@ -60,7 +62,7 @@ pub(crate) fn ansi<T>(term: &Term<T>) -> Vec<u8> {
     saved_cursor(&mut out, term);
     cursor(&mut out, term);
     out.pen(&Pen::of(&term.grid().cursor.template));
-    modes(&mut out, term);
+    modes(&mut out, term, kitty_top);
     out.buf
 }
 
@@ -392,12 +394,42 @@ fn clamped<T, C>(term: &Term<T>, cursor: &Cursor<C>) -> (usize, usize) {
     (row, col)
 }
 
-fn modes<T>(out: &mut Writer, term: &Term<T>) {
-    let mode = *term.mode();
-    let kitty = kitty_flags(mode);
-    if kitty != 0 {
-        out.fmt(format_args!("\x1b[>{kitty}u"));
+/// Colours set with OSC 4 / 10 / 11 / 12. RIS keeps them, so the target's own are reset first.
+fn palette<T>(out: &mut Writer, term: &Term<T>) {
+    out.raw("\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+    let colors = term.colors();
+    for index in 0..=NamedColor::Cursor as usize {
+        let Some(c) = colors[index] else {
+            continue;
+        };
+        if index < 256 {
+            out.fmt(format_args!("\x1b]4;{index}"));
+        } else {
+            // Foreground, background and cursor are OSC 10, 11 and 12.
+            out.fmt(format_args!(
+                "\x1b]{}",
+                10 + index - NamedColor::Foreground as usize
+            ));
+        }
+        out.fmt(format_args!(";rgb:{:02x}/{:02x}/{:02x}\x07", c.r, c.g, c.b));
     }
+}
+
+/// Pushes the top of the kitty keyboard stack, then sets the active flags over it if they differ, since
+/// `CSI = flags u` changes only the active flags.
+fn kitty(out: &mut Writer, mode: TermMode, top: u8) {
+    let active = kitty_flags(mode);
+    if top != 0 {
+        out.fmt(format_args!("\x1b[>{top}u"));
+    }
+    if active != top {
+        out.fmt(format_args!("\x1b[={active};1u"));
+    }
+}
+
+fn modes<T>(out: &mut Writer, term: &Term<T>, kitty_top: u8) {
+    let mode = *term.mode();
+    kitty(out, mode, kitty_top);
     for (bit, set) in [
         (TermMode::MOUSE_REPORT_CLICK, "\x1b[?1000h"),
         (TermMode::MOUSE_DRAG, "\x1b[?1002h"),

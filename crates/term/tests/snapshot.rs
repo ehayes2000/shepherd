@@ -150,6 +150,86 @@ fn kitty_keyboard_stack_survives_the_round_trip() {
     assert_eq!(copy.modes().kitty_keyboard, 0);
 }
 
+/// Feeds `query` to `screen` and returns its replies.
+fn answer(screen: &mut Screen, query: &[u8]) -> String {
+    screen.take_replies();
+    screen.feed(query);
+    String::from_utf8_lossy(&screen.take_replies()).into_owned()
+}
+
+const KITTY_QUERY: &[u8] = b"\x1b[?u";
+
+#[test]
+fn kitty_flags_set_on_an_empty_stack_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[=3;1u");
+    let mut copy = copy_of(&screen);
+    assert_eq!(copy.modes(), screen.modes());
+    assert_eq!(answer(&mut screen, KITTY_QUERY), "\x1b[?0u");
+    assert_eq!(answer(&mut copy, KITTY_QUERY), "\x1b[?0u");
+}
+
+#[test]
+fn kitty_flags_set_over_a_pushed_entry_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[>1u\x1b[=6;2u");
+    let mut copy = copy_of(&screen);
+    assert_eq!(copy.modes(), screen.modes());
+    assert_eq!(copy.modes().kitty_keyboard, 7);
+    assert_eq!(answer(&mut screen, KITTY_QUERY), "\x1b[?1u");
+    assert_eq!(answer(&mut copy, KITTY_QUERY), "\x1b[?1u");
+}
+
+#[test]
+fn kitty_flags_cleared_over_a_pushed_entry_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b[>5u\x1b[=0;1u");
+    let mut copy = copy_of(&screen);
+    assert_eq!(copy.modes(), screen.modes());
+    assert_eq!(copy.modes().kitty_keyboard, 0);
+    assert_eq!(answer(&mut screen, KITTY_QUERY), "\x1b[?5u");
+    assert_eq!(answer(&mut copy, KITTY_QUERY), "\x1b[?5u");
+}
+
+const COLOR_QUERIES: &[u8] =
+    b"\x1b]4;1;?\x07\x1b]4;255;?\x07\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07";
+
+#[test]
+fn colours_set_with_osc_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b]4;1;rgb:aa/bb/cc;255;#123456\x07\x1b]10;rgb:01/02/03\x1b\\");
+    screen.feed(b"\x1b]11;rgb:fe/dc/ba\x07\x1b]12;rgb:11/22/33\x07");
+    let mut copy = copy_of(&screen);
+    let expected = "\x1b]4;1;rgb:aaaa/bbbb/cccc\x07\x1b]4;255;rgb:1212/3434/5656\x07\
+                    \x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:fefe/dcdc/baba\x07\
+                    \x1b]12;rgb:1111/2222/3333\x07";
+    assert_eq!(answer(&mut screen, COLOR_QUERIES), expected);
+    assert_eq!(answer(&mut copy, COLOR_QUERIES), expected);
+}
+
+#[test]
+fn colours_reset_with_osc_are_reported_alike() {
+    let mut screen = Screen::new(10, 3);
+    screen.feed(b"\x1b]4;1;rgb:aa/bb/cc\x07\x1b]10;rgb:01/02/03\x07\x1b]104;1\x07\x1b]110\x07");
+    let mut copy = copy_of(&screen);
+    assert_eq!(
+        answer(&mut copy, COLOR_QUERIES),
+        answer(&mut screen, COLOR_QUERIES)
+    );
+}
+
+#[test]
+fn a_snapshot_resets_colours_a_used_screen_had_set() {
+    let mut original = Screen::new(10, 3);
+    original.feed(b"\x1b]4;2;rgb:aa/bb/cc\x07");
+    let mut used = Screen::new(10, 3);
+    used.feed(b"\x1b]4;1;rgb:01/02/03;255;rgb:04/05/06\x07");
+    used.feed(b"\x1b]10;rgb:07/08/09\x07\x1b]11;rgb:0a/0b/0c\x07\x1b]12;rgb:0d/0e/0f\x07");
+    used.feed(&original.snapshot_ansi());
+    let queries = [COLOR_QUERIES, b"\x1b]4;2;?\x07"].concat();
+    assert_eq!(answer(&mut used, &queries), answer(&mut original, &queries));
+}
+
 #[test]
 fn leaving_the_alt_screen_after_a_round_trip_matches_modes() {
     assert_same_after(

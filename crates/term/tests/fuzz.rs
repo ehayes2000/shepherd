@@ -21,8 +21,8 @@ const TOKENS: &[&str] = &[
     "\x1b[?1049h", "\x1b[?1049l", "\x1b[?1047h", "\x1b[?2026h", "\x1b[?2026l", "\x1b[2;4r", "\x1b[r", "\x1b[3g",
     "\x1bH", "\x1b(0", "\x1b(B", "q", "\x0e", "\x0f", "\x1bc", "\x1b[3J",
     // Input modes.
-    "\x1b[>7u", "\x1b[<u", "\x1b[>1u", "\x1b[=3;1u", "\x1b[?1h", "\x1b[?1l", "\x1b[?1000h", "\x1b[?1002h",
-    "\x1b[?1003h", "\x1b[?1003l", "\x1b[?1005h", "\x1b[?1006h", "\x1b[?2004h", "\x1b[?2004l", "\x1b[?1004h",
+    "\x1b[>7u", "\x1b[<u", "\x1b[>1u", "\x1b[=3;1u", "\x1b[=6;2u", "\x1b[=1;3u", "\x1b[?1h", "\x1b[?1l",
+    "\x1b[?1000h", "\x1b[?1002h", "\x1b[?1003h", "\x1b[?1003l", "\x1b[?1005h", "\x1b[?1006h", "\x1b[?2004h", "\x1b[?2004l", "\x1b[?1004h",
     "\x1b=", "\x1b>",
     // Other modes.
     "\x1b[?6h", "\x1b[?6l", "\x1b[?7l", "\x1b[?7h", "\x1b[4h", "\x1b[4l", "\x1b[20h", "\x1b[20l", "\x1b[?25l",
@@ -32,20 +32,21 @@ const TOKENS: &[&str] = &[
     "\x1b[58:2::9:8:7m", "\x1b[1;2;3;4;5;6;7;8;9m", "\x1b[22m", "\x1b[44m", "\x1b[97;101m",
     // Queries.
     "\x1b[c", "\x1b[>c", "\x1b[6n", "\x1b[5n", "\x1b]10;?\x07", "\x1b]11;?\x1b\\", "\x1b[?2026$p", "\x1b[14t",
-    "\x1b[18t", "\x1b[?u",
+    "\x1b[18t", "\x1b[?u", "\x1b]4;1;?\x07", "\x1b]4;200;?\x1b\\", "\x1b]12;?\x07",
     // Title and colour setting.
-    "\x1b]0;title\x07", "\x1b]11;rgb:12/34/56\x07",
+    "\x1b]0;title\x07", "\x1b]11;rgb:12/34/56\x07", "\x1b]10;#abc\x07", "\x1b]12;rgb:9/8/7\x07",
+    "\x1b]4;1;rgb:aa/bb/cc;200;#102030\x07", "\x1b]104;1\x07", "\x1b]104\x07", "\x1b]110\x07", "\x1b]111\x07",
+    "\x1b]112\x07",
 ];
 
 /// Tokens touching state `snapshot_ansi` doesn't carry over: scroll region, tab stops, charset, REP's last
-/// character, the kitty stack (flags set with an empty stack are reported as 0, but the copy re-pushes them), the
-/// primary screen, the saved cursor's pending wrap, and colours set with OSC (which change replies). Left out of the
-/// output fed after the snapshot, and the copy is only expected to keep following the original when none of them
-/// came before it either.
+/// character, the kitty stack below its top (which a pop brings back), the primary screen, and the saved cursor's
+/// pending wrap. Left out of the output fed after the snapshot, and the copy is only expected to keep following the
+/// original when none of them came before it either.
 #[rustfmt::skip]
 const GAPS: &[&str] = &[
     "\x1b[2;4r", "\x1b[r", "\x1b[3g", "\x1bH", "\x1b(0", "\x1b(B", "\x0e", "\x0f", "\x1b[3b", "\x1b[<u", "\x1b[?1049l",
-    "\x1b8", "\x1b]11;rgb:12/34/56\x07", "\x1b[=3;1u",
+    "\x1b8",
 ];
 
 /// Tokens that may follow a snapshot.
