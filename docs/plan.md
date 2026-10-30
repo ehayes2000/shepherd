@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T21 workspaces | building | task/t21-workspaces @ HEAD | 0 | – |
+| F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ HEAD | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -412,7 +414,7 @@ acceptance:
 scope: crates/tui, crates/shepherd (tests/support fake host)
 
 ### F25: Clean up after a failed worktree create
-status: todo
+status: in-progress
 depends: F08
 touches: adapters::worktrees
 goal: A `post-checkout` hook that exits non-zero (or any non-timeout failure of `worktree add`) can leave the worktree and
@@ -1066,7 +1068,7 @@ especially), returning a typed error. Path safety: `remove` refuses any path out
 `..` escapes and symlinks.
 
 ### T21: Workspaces
-status: todo
+status: in-progress
 depends: T06, T13
 touches: core::host (workspace), core::client, tui::header
 goal: Choose a workspace (repo) once and have it remembered, visible, and easy to swap.
@@ -1077,7 +1079,17 @@ acceptance:
   used before, with an input for a new path (validated through `Worktrees::default_branch`).
 - Sessions record their workspace. The sidebar shows all sessions and marks those from other workspaces subtly.
   The decision on whether to filter instead is recorded in the task report.
-scope: crates/core, crates/tui
+- New sessions record the current workspace in `session/created` (additive `workspace` field) and, until T22 adds worktrees,
+  start in the workspace root when the request has no `cwd`.
+scope: crates/core, crates/tui, crates/shepherd (host runtime wiring), crates/testkit
+notes: The `Worktrees` port (T20) isn't wired into the host runtime yet: add it as a runtime generic like `Pty`, with the
+real git adapter in `host::open` and the fake in the harness. Workspace selection is host state (one per host, folded from the
+log). The client sends its own cwd in hello (additive `cwd` field); if the host has no selection yet and that cwd is inside a
+git repo (`Worktrees::default_branch` / repo root succeeds), the host selects that repo. The workspace is shown on a sidebar
+header line above `+ New session`; clicking it opens a popup: clickable rows for previously used workspaces, a path input with
+an `[Open]` button, and `[Cancel]` (T33/T34 patterns, hit tests click rendered cells). An invalid path shows the error in the
+popup and selects nothing. Paths are stored canonicalized (no `..`, symlinks resolved) and compared as paths, not strings.
+New wire request `_shepherd/workspace/select { path }`.
 
 ### T22: New session creates a worktree
 status: todo
