@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T36b host hot-swap by re-exec | building | task/t36b-hotswap @ 18410d7 | 0 | PtyHandoff port approved; rebases after T37 |
-| T37 worktree no cap + concurrent + cancel | re-review | task/t37-worktree-nocap @ f358a59 (on f3b54d4) | 2 | GIT_ASKPASS cleared; per-waiter gate release; bounded joins; shutdown cancels creates. Builder: round-1 restack dropped edits (now included) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T37 | 2 | inherited GIT_ASKPASS could hang uncapped creates; 2-reader FIFO gate hang; restack dropped edits |
 | T36a | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | F35 | 1 | idempotence claim false (unbounded clusters), clippy ban gaps (title_top, List, &str Widget) → F36 |
 | F32 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
@@ -617,7 +617,7 @@ herdr (github.com/herdrdev/herdr) has a unix-only "live handoff" (`PlatformCapab
 src/persist.rs, src/update.rs): read it first; it's likely prior art for (a)/(b).
 
 ### T37: Worktree creation has no time cap, runs concurrently, and cancels on close
-status: in-progress (user priority: now)
+status: done (850906b)
 depends: T22, F27, F32
 touches: adapters::worktrees, shepherd::host (worker), core::host (close while creating)
 goal: On the user's real repo (macro: large, git-lfs) a new session stuck on "creating worktree…": the 120 s GIT_TIMEOUT
@@ -730,6 +730,8 @@ acceptance:
 - After a fetch that was killed (timeout/cancel) with `core.filesRefLockTimeout=0` pinned, remove only the remote-tracking ref
   locks that fetch could have held, and only if git died holding them (same rules as F32's branch lock). Test with a hook or
   a fake remote that hangs mid-fetch; a foreign lock is never removed.
+- From the T37 review: host shutdown cancels creates but doesn't wait for their cleanup; delay `finish` until no create is
+  running (bounded) so a cancelled-at-shutdown create never leaves an unrecorded worktree/branch.
 scope: crates/adapters
 
 ## Out of scope for the initial feature set
