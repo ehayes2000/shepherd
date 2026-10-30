@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| F30 truncation by display width | in review | task/f30-display-width @ 0adec4c | 1 | PM-accepted: width.rs helpers on Span::width; no new dep |
 | F14 pty backpressure | in review (fresh reviewer) | task/f14-pty-backpressure @ 2c48b2e (on e396325) | 1 | Rebased; builder load 24/24 adapters + host_pacing. Earlier accepts stand |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F30 | 2 | width-0 cut returned 1 column; added helper property table |
 | F29 | 1 | cut/cut_left count chars not columns (→ F30) |
 | T22 | 2 | worktree spawn cwd unchecked → cwd check made structural in SpawnPty; run-file cleanup untested |
 | F24 | 2 | picker panicked in 0/1-row windows → every-popup tiny-window test |
@@ -493,7 +493,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F30: Truncation measures display width
-status: in-progress
+status: done (faa7403)
 depends: F29
 touches: tui::popup, tui::sidebar
 goal: `cut` (picker, F24) and `cut_left` (switcher, F29), and any other truncation in the tui, count characters, not terminal
