@@ -11,19 +11,24 @@ use crate::wire::{BuildId, ExeDigest, UpgradeAnswer};
 /// version it can read.
 pub const HANDOFF_VERSION: u32 = 1;
 
-/// What `shepherd handoff-check` prints, as one JSON line: the build it is, and the handoff versions it can adopt.
+/// What `shepherd handoff-check` prints, as one JSON line: the build it is, the handoff versions it can adopt, and
+/// whether it can read the host's config (the new image would start with it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffCheck {
     pub build: BuildId,
     pub handoff_versions: Vec<u32>,
+    /// Why the config can't be used, if it can't. Absent from builds that don't check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 impl HandoffCheck {
-    /// This build's answer, for `shepherd handoff-check`.
-    pub fn of(build: BuildId) -> Self {
+    /// This build's answer, for `shepherd handoff-check`: `config_error` is why it can't use the config, if it can't.
+    pub fn of(build: BuildId, config_error: Option<String>) -> Self {
         Self {
             build,
             handoff_versions: vec![HANDOFF_VERSION],
+            config_error,
         }
     }
 }
@@ -102,20 +107,19 @@ pub fn decide(facts: &UpgradeFacts) -> UpgradeStep {
     }
 }
 
+/// Why `work` makes the host busy, naming each kind there is, or `None` if there is none.
 fn busy(work: Work) -> Option<String> {
-    match work {
-        Work {
-            port_calls: 0,
-            run_files: 0,
-        } => None,
-        Work {
-            port_calls: 0,
-            run_files,
-        } => Some(format!("{run_files} session(s) are starting")),
-        Work { port_calls, .. } => Some(format!(
-            "{port_calls} worktree or hook operation(s) are running"
-        )),
+    let mut parts = Vec::new();
+    if work.run_files > 0 {
+        parts.push(format!("{} session(s) are starting", work.run_files));
     }
+    if work.port_calls > 0 {
+        parts.push(format!(
+            "{} worktree or hook operation(s) are running",
+            work.port_calls
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// Whether the preflight shows the installed build can adopt what this one hands off, or why not.
@@ -126,7 +130,9 @@ fn can_hand_off(preflight: &Preflight) -> Result<(), String> {
             let check: HandoffCheck = serde_json::from_slice(line).map_err(|e| {
                 format!("cannot read the installed shepherd's handoff-check answer: {e}")
             })?;
-            if check.handoff_versions.contains(&HANDOFF_VERSION) {
+            if let Some(error) = check.config_error {
+                Err(format!("fix your config first: {error}"))
+            } else if check.handoff_versions.contains(&HANDOFF_VERSION) {
                 Ok(())
             } else {
                 Err(format!(

@@ -29,13 +29,24 @@ fn client() -> Result<(), String> {
     shepherd::client::run(&socket).map_err(|e| e.to_string())
 }
 
-/// `shepherd handoff-check`: one JSON line saying which build this is and which handoff formats it can take over
-/// from. The host runs it from its startup path before it re-execs that path to update in place (decision 0018); a
-/// binary without it answers "unknown command" and exits 1, which counts as "can't hand off".
+/// `shepherd handoff-check`: one JSON line saying which build this is, which handoff formats it can take over from,
+/// and why it can't use the host's config (`$HOME/.shepherd/config.toml`), if it can't. The host runs it from its
+/// startup path before it re-execs that path to update in place (decision 0018); a binary without it answers
+/// "unknown command" and exits 1, which counts as "can't hand off".
 fn handoff_check() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let build = shepherd::build::build_id(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
-    let check = shepherd_core::host::upgrade::HandoffCheck::of(build);
+    let config_error = match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        None => Some("$HOME is not set".to_owned()),
+        Some(home) => {
+            let root = PathBuf::from(home).join(".shepherd");
+            let shell = std::env::var("SHELL").ok();
+            shepherd::host::load_config(&root, shell)
+                .err()
+                .map(|e| e.to_string())
+        }
+    };
+    let check = shepherd_core::host::upgrade::HandoffCheck::of(build, config_error);
     let line = serde_json::to_string(&check).map_err(|e| e.to_string())?;
     writeln!(std::io::stdout(), "{line}").map_err(|e| e.to_string())
 }

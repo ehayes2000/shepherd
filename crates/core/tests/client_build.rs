@@ -540,3 +540,14 @@ fn a_workspace_switch_the_host_does_not_know_says_the_host_is_older_in_the_switc
         })
     );
 }
+
+#[test]
+fn a_warning_in_the_hello_answer_is_shown_as_a_notice() {
+    let mut answer = hello_ok(Some(1), Some(1));
+    answer["warning"] = json!("the host couldn't read its config and runs with the defaults");
+    let c = answered(Ok(answer));
+    assert_eq!(
+        c.client().notice(),
+        Some("the host couldn't read its config and runs with the defaults")
+    );
+}

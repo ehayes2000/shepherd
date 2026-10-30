@@ -778,6 +778,9 @@ impl Client {
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
                 let update = self.check_build(&ok);
+                if let Some(warning) = ok.warning {
+                    self.set_notice(warning);
+                }
                 self.set_profiles(ok.profiles, ok.default_profile);
                 self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;

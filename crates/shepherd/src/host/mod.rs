@@ -148,7 +148,10 @@ fn open_inner(
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
-    let settings = settings(root, home, login_shell)?;
+    let config = load_config(root, login_shell)?;
+    let shepherd =
+        std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
+    let settings = settings(root, home, config, shepherd, None);
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
     let commands = ShellCommands::new();
@@ -160,7 +163,8 @@ fn open_inner(
 
 /// Builds the host's next image from the handoff file at `handoff`, which the previous image wrote just before it
 /// re-execed this process (see [`swap`]): it adopts the log's lock, then the listener, then the PTYs, and only then
-/// folds the logs.
+/// folds the logs. Once a session is adopted, nothing the user can get wrong stops it: a config that can't be used
+/// (edited since the preflight checked it) is replaced with the defaults, and every client is told so in its hello.
 pub fn open_adopted(
     root: &Path,
     home: PathBuf,
@@ -177,13 +181,29 @@ fn open_adopted_inner(
     login_shell: Option<String>,
     handoff: &Path,
 ) -> Result<RealHost, HostStartError> {
-    let file = swap::read(handoff).map_err(HostStartError::Adopt)?;
+    let file = swap::read(root, handoff).map_err(HostStartError::Adopt)?;
     // SAFETY: carried by the previous image for this one alone, and taken once each.
     let (lock, listener) = unsafe { (swap::own(file.lock), swap::own(file.listener)) };
     let log = JsonlEventLog::adopt(root, lock).map_err(|e| log_error(root, e))?;
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
         .map_err(HostStartError::Socket)?;
+    let (config, warning) = match load_config(root, login_shell.clone()) {
+        Ok(config) => (config, None),
+        Err(error) => {
+            tracing::error!(%error, "cannot use the config after updating in place; running with the defaults");
+            let defaults =
+                Config::resolve(None, login_shell).map_err(|error| HostStartError::Config {
+                    path: root.join(CONFIG_FILE),
+                    error,
+                })?;
+            let warning = format!(
+                "the host updated itself but couldn't use its config, so it runs with the defaults: {error}. \
+                 Fix it, then restart the host"
+            );
+            (defaults, Some(warning))
+        }
+    };
     let mut pty = PortablePty::new(tx.pty_sink());
     let adoption = adopt_sessions(&mut pty, file.plan());
     tracing::info!(
@@ -191,7 +211,8 @@ fn open_adopted_inner(
         adopted = adoption.sessions.len(),
         "took over from the previous host image"
     );
-    let settings = settings(root, home, login_shell)?;
+    // The path the previous image execed is this one's startup path: `current_exe()` may already name another file.
+    let settings = settings(root, home, config, file.exe.clone(), warning);
     let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
     let commands = ShellCommands::new();
     HostRuntime::adopt(
@@ -200,12 +221,8 @@ fn open_adopted_inner(
     .map_err(|e| start_error(root, e))
 }
 
-/// The runtime's settings under `root`: the config, and this executable's path and build.
-fn settings(
-    root: &Path,
-    home: PathBuf,
-    login_shell: Option<String>,
-) -> Result<RuntimeSettings, HostStartError> {
+/// The config under `root`, resolved with the user's login shell.
+pub fn load_config(root: &Path, login_shell: Option<String>) -> Result<Config, HostStartError> {
     let config_path = root.join(CONFIG_FILE);
     let config_error = |error| HostStartError::Config {
         path: config_path.clone(),
@@ -214,9 +231,18 @@ fn settings(
     let raw = TomlConfigSource::new(&config_path)
         .load()
         .map_err(config_error)?;
-    let config = Config::resolve(raw, login_shell).map_err(config_error)?;
-    let shepherd =
-        std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
+    Config::resolve(raw, login_shell).map_err(config_error)
+}
+
+/// The runtime's settings under `root`: `config`, and the build at `shepherd`, the path this host started from.
+/// `warning` is for every client's hello.
+fn settings(
+    root: &Path,
+    home: PathBuf,
+    config: Config,
+    shepherd: PathBuf,
+    warning: Option<String>,
+) -> RuntimeSettings {
     // A host that can't read its own executable says no build: clients take it for an older host.
     // Hashed once: the first hello finds the same file there and reuses the digest.
     let mut installed = InstalledExe::new(&shepherd);
@@ -224,7 +250,7 @@ fn settings(
     if build.is_none() {
         tracing::warn!(path = %shepherd.display(), "cannot read this executable's build");
     }
-    Ok(RuntimeSettings {
+    RuntimeSettings {
         config,
         home,
         run_root: root.join(RUN_DIR),
@@ -233,7 +259,8 @@ fn settings(
         shepherd,
         socket: root.join(SOCKET_FILE),
         preflight: PreflightRunner::new(|exe| handoff::preflight(exe, PREFLIGHT_BOUND)),
-    })
+        warning,
+    }
 }
 
 fn start_error(root: &Path, e: StartError) -> HostStartError {

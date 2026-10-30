@@ -437,20 +437,24 @@ impl PtyHandoff for PortablePty {
     fn adopt(&mut self, session: SessionId, token: PtyToken) -> Result<(), PtyError> {
         let sessions_handle = self.sessions.clone();
         let mut sessions = lock(&sessions_handle);
-        if sessions.contains_key(&session) || self.exported.contains_key(&session) {
-            refuse(token);
-            return Err(PtyError::AlreadyExists);
-        }
         let pid = match libc::pid_t::try_from(token.pid) {
             Ok(pid) if pid > 0 => pid,
             _ => {
-                close_open(&token.fds());
+                close_terminals(&token.fds());
                 return Err(io_error(format!("pid {} is not a process", token.pid)));
             }
         };
-        let checked = check_adoptable(pid, &token);
-        if let Err(e) = checked {
-            refuse(token);
+        // Only a child of ours is ever signalled: a pid that isn't may be anyone's by now.
+        if let Err(e) = our_child(pid) {
+            close_terminals(&token.fds());
+            return Err(io_error(e));
+        }
+        if sessions.contains_key(&session) || self.exported.contains_key(&session) {
+            refuse(pid, &token);
+            return Err(PtyError::AlreadyExists);
+        }
+        if let Err(e) = check_terminals(&token) {
+            refuse(pid, &token);
             return Err(io_error(e));
         }
         // SAFETY: checked open above; the token hands us their ownership.
@@ -669,18 +673,32 @@ impl Pump {
     }
 }
 
-/// Whether a token's descriptors are open and its pid is our own child (exited or not, without reaping it).
-fn check_adoptable(pid: libc::pid_t, token: &PtyToken) -> Result<(), String> {
+/// Whether a token's descriptors are two distinct open terminals.
+fn check_terminals(token: &PtyToken) -> Result<(), String> {
+    if token.master == token.slave {
+        return Err(format!(
+            "master and slave are both descriptor {}",
+            token.master
+        ));
+    }
     for (what, fd) in [("master", token.master), ("slave", token.slave)] {
-        // SAFETY: plain syscall; only reads the descriptor's flags.
-        if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
-            return Err(format!("the {what} descriptor {fd} is not open"));
-        }
-        // SAFETY: plain syscall.
-        if unsafe { libc::isatty(fd) } != 1 {
-            return Err(format!("the {what} descriptor {fd} is not a terminal"));
+        if !is_terminal(fd) {
+            return Err(format!(
+                "the {what} descriptor {fd} is not an open terminal"
+            ));
         }
     }
+    Ok(())
+}
+
+/// Whether `fd` is an open terminal.
+fn is_terminal(fd: RawFd) -> bool {
+    // SAFETY: plain syscall; fails harmlessly on a descriptor that isn't open.
+    fd >= 0 && unsafe { libc::isatty(fd) } == 1
+}
+
+/// Whether `pid` is our own child (exited or not, without reaping it).
+fn our_child(pid: libc::pid_t) -> Result<(), String> {
     // SAFETY: an all-zero siginfo_t is a valid out-parameter.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
@@ -693,16 +711,11 @@ fn check_adoptable(pid: libc::pid_t, token: &PtyToken) -> Result<(), String> {
     Ok(())
 }
 
-/// A token that won't be adopted: closes those of its descriptors that are open (one that isn't was never ours to
-/// close: its number may belong to something else by now) and kills its process group, so nothing is left running
-/// unattended.
-fn refuse(token: PtyToken) {
-    close_open(&token.fds());
-    if let Ok(pid) = libc::pid_t::try_from(token.pid)
-        && pid > 0
-    {
-        kill_and_reap(pid);
-    }
+/// A token of our child `pid` that won't be adopted: closes those of its descriptors that are terminals, and kills
+/// its process group, so nothing is left running unattended.
+fn refuse(pid: libc::pid_t, token: &PtyToken) {
+    close_terminals(&token.fds());
+    kill_and_reap(pid);
 }
 
 /// Kills `pid`'s process group, and reaps `pid` in the background if it is our child: on macOS a dying child can
@@ -719,15 +732,12 @@ fn kill_and_reap(pid: libc::pid_t) {
         });
 }
 
-/// Closes those of a token's descriptors that are open.
-fn close_open(fds: &[RawFd]) {
-    let open: Vec<RawFd> = fds
-        .iter()
-        .copied()
-        // SAFETY: plain syscall; only reads the descriptor's flags.
-        .filter(|&fd| fd >= 0 && unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1)
-        .collect();
-    close_fds(&open);
+/// Closes those of a refused token's descriptors that are terminals, each once. Only a terminal can be a carried
+/// master or slave: any other descriptor (the log's lock, the listener, a file the new image opened) is never closed.
+fn close_terminals(fds: &[RawFd]) {
+    let mut terminals: Vec<RawFd> = fds.iter().copied().filter(|&fd| is_terminal(fd)).collect();
+    terminals.dedup();
+    close_fds(&terminals);
 }
 
 /// Closes descriptors this port owns.
@@ -819,6 +829,102 @@ mod tests {
             std::thread::yield_now();
         }
         false
+    }
+
+    /// A process that is no child of ours, leading a process group of its own: what a stale or forged token's pid
+    /// could name. Killed by its pid when dropped.
+    struct Stranger(u32);
+
+    impl Stranger {
+        fn start() -> Self {
+            let out = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "perl -e 'use POSIX; setsid(); sleep 600' </dev/null >/dev/null 2>&1 & echo $!",
+                ])
+                .output()
+                .unwrap();
+            Self(
+                String::from_utf8(out.stdout)
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap(),
+            )
+        }
+
+        fn alive(&self) -> bool {
+            // SAFETY: plain syscall; signal 0 only checks the pid exists.
+            unsafe { libc::kill(libc::pid_t::try_from(self.0).unwrap(), 0) == 0 }
+        }
+    }
+
+    impl Drop for Stranger {
+        fn drop(&mut self) {
+            // SAFETY: plain syscall on the pid this test started.
+            unsafe { libc::kill(libc::pid_t::try_from(self.0).unwrap(), libc::SIGKILL) };
+        }
+    }
+
+    /// A real token's terminals, exported from a live session of `pty`.
+    fn exported(pty: &mut PortablePty, rx: &mpsc::Receiver<PtyEvent>) -> super::PtyToken {
+        pty.spawn(
+            SessionId::new("real"),
+            spec("sh", &["-c", "echo ready; cat"]),
+        )
+        .unwrap();
+        while !matches!(rx.recv().unwrap(), PtyEvent::Output { .. }) {}
+        pty.export().unwrap().remove(0).1
+    }
+
+    #[test]
+    fn a_token_whose_pid_is_not_our_child_is_refused_without_signalling_it() {
+        let (tx, rx) = mpsc::channel();
+        let mut old = PortablePty::new(Arc::new(ChannelSink(tx.clone())));
+        let real = exported(&mut old, &rx);
+        let stranger = Stranger::start();
+        assert!(stranger.alive());
+        // Terminals of its own: adopting takes the token's descriptors, and the exporter resumes with the real ones.
+        let token = super::PtyToken {
+            pid: stranger.0,
+            master: std::os::fd::IntoRawFd::into_raw_fd(super::dup_cloexec(real.master).unwrap()),
+            slave: std::os::fd::IntoRawFd::into_raw_fd(super::dup_cloexec(real.slave).unwrap()),
+        };
+
+        let mut new = PortablePty::new(Arc::new(ChannelSink(tx)));
+        assert!(matches!(
+            new.adopt(SessionId::new("forged"), token),
+            Err(PtyError::Io(_))
+        ));
+        assert!(stranger.alive(), "a process that isn't ours was signalled");
+        old.resume();
+    }
+
+    #[test]
+    fn a_token_naming_descriptors_that_are_not_terminals_leaves_them_open() {
+        let (tx, rx) = mpsc::channel();
+        let mut old = PortablePty::new(Arc::new(ChannelSink(tx.clone())));
+        let real = exported(&mut old, &rx);
+        // Like the log's lock: open, ours, and no terminal.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = std::fs::File::create(dir.path().join("lock")).unwrap();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&lock);
+        let token = super::PtyToken {
+            master: fd,
+            slave: fd,
+            ..real
+        };
+
+        let mut new = PortablePty::new(Arc::new(ChannelSink(tx)));
+        assert!(new.adopt(SessionId::new("bad"), token).is_err());
+        // SAFETY: plain syscall; only reads the descriptor's flags.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) },
+            -1,
+            "the lock was closed"
+        );
+        drop(lock);
+        old.resume();
     }
 
     #[test]

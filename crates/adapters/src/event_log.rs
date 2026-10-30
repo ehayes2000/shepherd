@@ -812,11 +812,16 @@ mod tests {
     #[test]
     fn adopting_a_descriptor_that_is_not_the_lock_is_refused() {
         let dir = private_tempdir();
+        // A real store, so its lock file is there to compare with.
+        drop(JsonlEventLog::open(dir.path()).unwrap());
         let other = File::create(dir.path().join("not-the-lock")).unwrap();
         let err = JsonlEventLog::adopt(dir.path(), OwnedFd::from(other))
             .err()
             .expect("refused");
-        assert!(matches!(err, LogError::Io(_)), "{err:?}");
+        assert!(
+            matches!(&err, LogError::Io(why) if why.contains("the carried lock is not")),
+            "{err:?}"
+        );
     }
 
     /// A child forked while the store is open shares the lock's file description until it execs. Dropping the

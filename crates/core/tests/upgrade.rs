@@ -29,6 +29,7 @@ fn check_output(versions: &[u32]) -> Vec<u8> {
             digest: digest(2),
         },
         handoff_versions: versions.to_vec(),
+        config_error: None,
     };
     let mut line = serde_json::to_vec(&check).unwrap_or_else(|e| panic!("{e}"));
     line.push(b'\n');
@@ -109,6 +110,53 @@ fn sessions_waiting_to_spawn_are_busy() {
         decide(&facts),
         UpgradeStep::Answer(UpgradeAnswer::Busy { .. })
     ));
+}
+
+#[test]
+fn an_installed_build_that_cannot_read_the_config_says_fix_your_config() {
+    let check = HandoffCheck {
+        build: BuildId {
+            version: "0.1.0".into(),
+            digest: digest(2),
+        },
+        handoff_versions: vec![HANDOFF_VERSION],
+        config_error: Some("config.toml: unknown field `agnet`".into()),
+    };
+    let facts = preflighted(Preflight::Exited {
+        code: 0,
+        stdout: serde_json::to_vec(&check).unwrap_or_else(|e| panic!("{e}")),
+    });
+    let reason = unavailable(decide(&facts));
+    assert!(reason.contains("fix your config"), "{reason}");
+    assert!(reason.contains("agnet"), "{reason}");
+}
+
+#[test]
+fn a_check_from_a_build_that_does_not_check_the_config_still_parses() {
+    let line = br#"{"build":{"version":"0.1.0","digest":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="},"handoff_versions":[1]}"#;
+    let facts = preflighted(Preflight::Exited {
+        code: 0,
+        stdout: line.to_vec(),
+    });
+    assert_eq!(decide(&facts), UpgradeStep::Answer(UpgradeAnswer::Accepted));
+}
+
+#[test]
+fn work_of_both_kinds_is_named_in_the_busy_reason() {
+    let facts = UpgradeFacts {
+        work: Work {
+            port_calls: 1,
+            run_files: 1,
+        },
+        ..stale()
+    };
+    match decide(&facts) {
+        UpgradeStep::Answer(UpgradeAnswer::Busy { reason }) => {
+            assert!(reason.contains("starting"), "{reason}");
+            assert!(reason.contains("running"), "{reason}");
+        }
+        other => panic!("expected busy, got {other:?}"),
+    }
 }
 
 #[test]

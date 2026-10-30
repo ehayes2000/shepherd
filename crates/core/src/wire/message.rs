@@ -420,6 +420,10 @@ pub struct HelloOk {
     /// `None` from a host older than builds, or when that file can't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<ExeDigest>,
+    /// Something the user should know about the host, e.g. that it couldn't read its config when it updated itself in
+    /// place and runs with the defaults. Absent when there is nothing, and from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `notify` in [`HelloOk`].
@@ -459,6 +463,11 @@ impl HelloOk {
             installed,
             ..self
         }
+    }
+
+    /// This answer, with `warning` for the user, if any.
+    pub fn with_warning(self, warning: Option<String>) -> Self {
+        Self { warning, ..self }
     }
 
     /// This answer, carrying `config`'s `[notify]` settings.
@@ -648,6 +657,7 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
         notify: Notify::default(),
         build: None,
         installed: None,
+        warning: None,
     })
 }
 

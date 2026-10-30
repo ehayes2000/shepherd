@@ -193,7 +193,7 @@ pub fn adopting_a_live_id_again_is_already_exists<P: PtyHandoff>(
         new.pty.adopt(s.clone(), token),
         Err(PtyError::AlreadyExists)
     );
-    // The refused one is killed, and the adopted one is untouched.
+    // The adopted one is untouched. (That the refused one is killed is for each adapter to show: see `pty.rs`.)
     new.pty.write(&s, b"first\n").unwrap();
     new.wait_for_output(&s, "first");
 }

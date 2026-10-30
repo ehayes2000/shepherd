@@ -955,11 +955,16 @@ mod tests {
     #[test]
     fn adopting_a_socket_bound_elsewhere_is_refused() {
         let dir = short_tempdir();
+        // A real host socket at the path, so only the descriptor is wrong.
+        let path = dir.path().join("host.sock");
+        let (_host, _host_events) = bind(&path).unwrap();
         let other = UnixListener::bind(dir.path().join("other.sock")).unwrap();
         let (sink, _events) = Events::channel();
-        let adopted =
-            UnixListenLink::adopt(dir.path().join("host.sock"), OwnedFd::from(other), sink);
-        assert!(matches!(adopted.err(), Some(UnixLinkError::Io(_))));
+        let adopted = UnixListenLink::adopt(&path, OwnedFd::from(other), sink);
+        assert!(
+            matches!(&adopted.err(), Some(UnixLinkError::Io(why)) if why.contains("not bound to")),
+            "refused for the wrong reason"
+        );
     }
 
     #[test]

@@ -66,11 +66,17 @@ fn alive(pid: u32) -> bool {
 /// Starts `shepherd host` in a fresh temp `HOME` whose config runs a plain shell, and waits until it serves: it
 /// releases its stderr then (the launcher's handshake).
 fn start_host() -> (Running, PathBuf) {
+    start_host_with(|_| PathBuf::from(SHEPHERD))
+}
+
+/// [`start_host`], running the binary `exe` returns, given the temp `HOME`.
+fn start_host_with(exe: impl FnOnce(&Path) -> PathBuf) -> (Running, PathBuf) {
     // Under /tmp: the socket path must stay under the OS limit.
     let home = tempfile::Builder::new()
         .prefix("shsw")
         .tempdir_in("/tmp")
         .unwrap();
+    let exe = exe(home.path());
     let root = home.path().join(".shepherd");
     shepherd::host::prepare_root(&root).unwrap();
     let mut config = fs::OpenOptions::new()
@@ -82,7 +88,7 @@ fn start_host() -> (Running, PathBuf) {
     config
         .write_all(b"[defaults]\nagent = \"shell\"\n")
         .unwrap();
-    let mut host = Command::new(SHEPHERD)
+    let mut host = Command::new(exe)
         .arg("host")
         .env("HOME", home.path())
         .env("SHELL", "/bin/sh")
@@ -427,4 +433,99 @@ fn handoff_check_prints_one_json_line_with_its_build_and_handoff_versions() {
     assert_eq!(check.handoff_versions, vec![HANDOFF_VERSION]);
     let built = shepherd::build::build_id(Path::new(SHEPHERD)).unwrap();
     assert_eq!(check.build, built);
+}
+
+/// A shell session on `socket`: the client that made it, what it has read, the session, and the shell's pid.
+fn shell_session(socket: &Path, running: &mut Running) -> (Client, Seen, SessionId) {
+    let mut a = Client::connect(socket);
+    a.request(ClientRequest::Subscribe(Subscribe::default()));
+    a.request(ClientRequest::SessionNew(SessionNew::default()));
+    let mut seen = Seen::default();
+    a.read_until(&mut seen, |s| answered(s, Method::SessionNew).is_some());
+    let session = SessionId::new(
+        answered(&seen, Method::SessionNew).unwrap()["session"]
+            .as_str()
+            .unwrap(),
+    );
+    a.input(&session, b"echo pid=$$\n");
+    a.read_until(&mut seen, |s| {
+        text(&s.output)
+            .split("pid=")
+            .any(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    });
+    running.shell = text(&seen.output).split("pid=").find_map(|rest| {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    });
+    (a, seen, session)
+}
+
+#[test]
+fn an_upgrade_with_a_broken_config_is_unavailable_and_the_sessions_keep_running() {
+    let (mut running, root) = start_host();
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    // A typo while the host runs.
+    fs::write(
+        root.join(shepherd::host::CONFIG_FILE),
+        b"[defaults\nagent = \"shell\"\n",
+    )
+    .unwrap();
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| answered(s, Method::HostUpgrade).is_some());
+    let answer: UpgradeAnswer =
+        serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
+    match answer {
+        UpgradeAnswer::Unavailable { reason } => {
+            assert!(reason.contains("fix your config"), "{reason}")
+        }
+        other => panic!("expected unavailable, got {other:?}"),
+    }
+    let shell = running.shell.unwrap();
+    assert!(alive(shell), "the shell {shell} died");
+    a.input(&session, b"echo still-$((40+2))\n");
+    a.read_until(&mut seen, |s| text(&s.output).contains("still-42"));
+}
+
+/// The swap execs the path the host started from, even after a new build was renamed over it: `current_exe()` would
+/// then name a deleted file on Linux.
+#[test]
+fn a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_file() {
+    let (mut running, root) = start_host_with(|home| {
+        let bin = home.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let exe = bin.join("shepherd");
+        fs::copy(SHEPHERD, &exe).unwrap();
+        exe
+    });
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let host_pid = running.host.id();
+    let home = root.parent().unwrap().to_path_buf();
+    let exe = home.join("bin").join("shepherd");
+    let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    // `cargo install` and friends: a new file renamed over the old one.
+    let fresh = home.join("bin").join("shepherd.new");
+    fs::copy(SHEPHERD, &fresh).unwrap();
+    fs::rename(&fresh, &exe).unwrap();
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| s.closed);
+    let answer: UpgradeAnswer =
+        serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
+    assert_eq!(answer, UpgradeAnswer::Accepted);
+
+    let mut b = Client::connect(&socket);
+    b.request(ClientRequest::Subscribe(Subscribe::default()));
+    let mut after = Seen::default();
+    b.read_until(&mut after, |s| answered(s, Method::Subscribe).is_some());
+    assert_eq!(running.host.try_wait().unwrap(), None, "the host exited");
+    assert_eq!(running.host.id(), host_pid);
+    let logged = fs::read_to_string(root.join(shepherd::host::LOG_FILE)).unwrap();
+    assert!(
+        logged.contains("took over from the previous host image"),
+        "{logged}"
+    );
+    b.input(&session, b"echo moved-$((40+2))\n");
+    b.read_until(&mut after, |s| text(&s.output).contains("moved-42"));
 }

@@ -294,6 +294,8 @@ pub struct RuntimeSettings {
     pub installed: InstalledExe,
     /// Runs `<shepherd> handoff-check` before an upgrade.
     pub preflight: PreflightRunner,
+    /// Something every client's hello tells the user, e.g. that the config couldn't be used after an update.
+    pub warning: Option<String>,
 }
 
 /// An upgrade request being decided.
@@ -1383,6 +1385,7 @@ impl<
                 let config = &settings.config;
                 let result = wire::negotiate(&hello, &self.machine).map(|ok| {
                     let ok = ok.with_profiles(config).with_notify(config);
+                    let ok = ok.with_warning(settings.warning.clone());
                     HostResult::Hello(ok.with_build(settings.build.clone(), installed))
                 });
                 let accepted = result.is_ok();

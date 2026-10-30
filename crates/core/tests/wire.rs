@@ -610,6 +610,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
             notify: Notify::default(),
             build: None,
             installed: None,
+            warning: None,
         })
     );
 }
@@ -686,6 +687,7 @@ fn a_hello_ok_from_an_older_host_has_no_profiles() {
             notify: Notify::default(),
             build: None,
             installed: None,
+            warning: None,
         }))
     );
 }
@@ -774,6 +776,7 @@ fn successful_responses_round_trip_by_method() {
                 notify: Notify { bell: true },
                 build: None,
                 installed: None,
+                warning: None,
             }),
         ),
         (

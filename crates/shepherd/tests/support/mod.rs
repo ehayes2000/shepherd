@@ -289,20 +289,26 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
         build: None,
         installed: InstalledExe::new(SHEPHERD_EXE),
         preflight: passing_preflight(),
+        warning: None,
     }
 }
 
 /// A preflight that finds a binary able to take over: what `handoff-check` prints.
 pub fn passing_preflight() -> PreflightRunner {
-    PreflightRunner::new(|_| {
-        let build = BuildId {
-            version: "0.1.0".into(),
-            digest: shepherd_core::wire::ExeDigest::from_bytes([7; 32]),
-        };
-        let mut stdout = serde_json::to_vec(&HandoffCheck::of(build)).expect("serializes");
-        stdout.push(b'\n');
-        Preflight::Exited { code: 0, stdout }
-    })
+    PreflightRunner::new(|_| passing_preflight_result().0)
+}
+
+/// How a passing preflight ends.
+pub struct PassingPreflight(pub Preflight);
+
+pub fn passing_preflight_result() -> PassingPreflight {
+    let build = BuildId {
+        version: "0.1.0".into(),
+        digest: shepherd_core::wire::ExeDigest::from_bytes([7; 32]),
+    };
+    let mut stdout = serde_json::to_vec(&HandoffCheck::of(build, None)).expect("serializes");
+    stdout.push(b'\n');
+    PassingPreflight(Preflight::Exited { code: 0, stdout })
 }
 
 fn build_runtime(
