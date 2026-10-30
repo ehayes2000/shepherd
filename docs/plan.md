@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
+| T37 worktree no cap + concurrent + cancel | in review | task/t37-worktree-nocap @ 8934970 (on 2609fd7) | 1 | PM-accepted: Worktrees::cancel_create + Cancelled; run_alone per create; narrowed repo lock. Builder disclosed one squashed --no-verify WIP commit |
 | T36a build id + mismatch UX | building | task/t36a-build-id @ c4bfd3b | 0 | – |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,

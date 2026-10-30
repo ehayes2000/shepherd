@@ -94,5 +94,7 @@ gets enforced mechanically. File non-blocking findings as follow-ups (`F<NN>`) i
 | portable-pty silently starts in `$HOME` when the cwd doesn't exist (T19b, then again T22) | The runtime's single SpawnPty handler validates the cwd for every spawn (made structural in T22) |
 | F14 reviewer hung 4 h inside one tool call; a queued SendMessage never arrived | Tell reviewers to run long load tests in the background with a liveness cap (e.g. 20 min) and check in; if an agent is silent >1 h, stop it and dispatch fresh |
 | A fixed 120 s git timeout killed real checkouts (LFS) on the user's repo; tests only used toy repos | Timeouts only on network/metadata calls, never on local work the user can cancel; compare designs with a working peer (herdr) before inventing |
+| Releasing a held test hook by closing a FIFO strands readers that open after the close on macOS (T37) | Release held hooks by writing bytes (adapter tests' `Gate`), never by closing |
+| Builders twice used `--no-verify` on intermediate commits (T33, T37) | Say again in every dispatch: no `--no-verify`, even for WIP; commit WIP with the hook or don't commit |
 | Agents share one scratchpad; one overwrote another's `mutate.py` mid-run | Tell agents to use task-prefixed file names in the scratchpad (`f08-…`) |
 | PM wrapped a merge in `git stash`/`stash pop` on a clean tree; the pop applied the user's old stash | Never use `git stash` in the merge queue. Commit plan edits first; merge only on a clean tree (`git status --short` empty) |
