@@ -90,3 +90,27 @@ fn only_agent_kinds_with_a_translator_produce_frames() {
             .is_empty()
     );
 }
+
+#[test]
+fn removing_a_session_drops_its_translator_and_only_its() {
+    let mut t = Translators::new();
+    assert!(t.is_empty());
+    translate(&mut t, "s_a", &prompt());
+    translate(&mut t, "s_b", &prompt());
+    assert_eq!(t.len(), 2);
+
+    t.remove(&sid("s_a"));
+    assert_eq!(t.len(), 1);
+    // s_b keeps its state: its open prompt still pairs with its Stop.
+    assert!(response_id(&translate(&mut t, "s_b", &stop())).is_some());
+    // Removing a session without a translator does nothing.
+    t.remove(&sid("s_nope"));
+    assert_eq!(t.len(), 1);
+}
+
+#[test]
+fn an_agent_kind_without_a_translator_leaves_no_state() {
+    let mut t = Translators::new();
+    t.translate(&sid("s1"), AgentKind::Shell, &prompt(), String::new);
+    assert!(t.is_empty());
+}

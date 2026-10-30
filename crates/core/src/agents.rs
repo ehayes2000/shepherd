@@ -63,4 +63,18 @@ impl Translators {
             AgentKind::Codex | AgentKind::Shell => Vec::new(),
         }
     }
+
+    /// Drops `session`'s translator, if it has one. The host does this when the session closes.
+    pub fn remove(&mut self, session: &SessionId) {
+        self.sessions.remove(session);
+    }
+
+    /// How many sessions have a translator.
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
 }
