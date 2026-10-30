@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F21 collapsed sidebar targets | building | task/f21-collapsed-sidebar @ HEAD | 0 | – |
-| F07 palette in snapshots | building | task/f07-palette-snapshots @ HEAD | 0 | – |
+| F21 collapsed sidebar targets | building | task/f21-collapsed-sidebar @ a45f034 | 0 | – |
+| F07 palette in snapshots | building | task/f07-palette-snapshots @ a45f034 | 0 | – |
 | T17 launch Claude sessions | in review | task/t17-launch-claude @ dc247bf (on 069e3b6) | 1 | PM-accepted: run files written by runtime (no port); default agent claude; exec-form hooks; names/agent field/startup sweep → F22 |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
