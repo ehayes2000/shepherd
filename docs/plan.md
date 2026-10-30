@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F36 display-safe gaps (minus ZWJ) | in review | task/f36-display-gaps @ efeae89 (on a971711) | 1 | PM-accepted: 16 chars/cluster; Line/Text/Span::from banned outside draw.rs; stderr_safe per line |
-| F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
+| F38+F40 adapter test hygiene | in review | task/f38-f40-test-hygiene @ fec5f02 (on 71df32d) | 1 | idle bound + byte limit; watchdog + group kill on drop (PM asked reviewer: pgid reuse?) |
 | F42 new session wrong size | in review | task/f42-spawn-size @ 19f5f48 (on b4d68f6) | 1 | PM-accepted: core host::sizes::Sizes wraps Host::handle; SessionNew.size; exited sizes not carried across swap |
 | F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ 7f7e811 (on b821b28) | 2 | private fetch ref + pinned update-ref; grace test; group wait probes with SIGKILL (PM asked reviewer: pgid reuse?) |
 
@@ -836,6 +836,17 @@ goal: `a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_fi
 within 60s" while other worktrees were building; passes alone. Find what it waits on (likely a build or a fixed bound) and
 make every bound a generous liveness bound or count progress; 0 failures in a 12-copy round under parallel builds.
 scope: crates/shepherd (tests)
+
+### F45: Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge)
+status: todo
+depends: T36a, T27
+touches: adapters (tests: handoff, forge)
+goal: In F38's load rounds, 22/24 copies failed `handoff::*` and `forge::gh_that_never_answers_is_killed_with_what_it_started`
+with 60 s TimedOut — even a stand-in doing `kill -9 $$` — on old and new code. Builder's guess: macOS stalls checking newly
+written executables under load. Confirm (e.g. run as `/bin/sh <file>` instead of exec'ing the file), then make these fixtures
+robust; 0 failures in a 24-copy round of the whole adapters binary.
+scope: crates/adapters
+notes: The same family may explain the occasional worktrees `git clone`/NotARepo flakes under load (F17).
 
 ## Out of scope for the initial feature set
 
