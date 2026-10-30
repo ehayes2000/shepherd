@@ -10,6 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F08 worktree create timeout cleanup | fixing (CHANGES) | task/f08-worktree-timeout @ 065762e | 1 | Load flakes (new tests 40%, T20 test regressed); separate cleanup timeout; FIFO-blocked hook; stale ref lock; fallback untested; TOCTOU on dir delete |
+| T19b resume | building | task/t19b-resume @ 4b1dd28 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -1026,7 +1027,7 @@ you found, and build fixtures from documented payload shapes. Follow T17's struc
 report options rather than editing user config. The PM does the real-codex check after merge.
 
 ### T19b: Resume after restart
-status: ready
+status: in-progress
 depends: T17, T19
 touches: core::host, tui
 goal: Exited agent sessions can be resumed where they left off.
