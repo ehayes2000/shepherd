@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 
 use jiff::SignedDuration;
 
-use crate::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame, Timestamp};
+use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp};
 use crate::host::{Host, HostSession, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::pty::PtySize;
@@ -378,6 +378,8 @@ pub struct ClientSession {
     pub branch: Option<String>,
     /// It is closing, and its worktree is being removed (or kept).
     pub removing_worktree: bool,
+    /// Its branch's pull request, if it has one the host could find.
+    pub pr: Option<Pr>,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -1237,6 +1239,7 @@ impl Client {
                     worktree: s.worktree,
                     branch: s.branch,
                     removing_worktree: s.removing_worktree,
+                    pr: s.pr,
                 }
             })
             .collect();

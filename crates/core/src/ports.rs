@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod config;
 pub mod event_log;
+pub mod forge;
 pub mod launcher;
 pub mod link;
 pub mod pty;
@@ -14,6 +15,7 @@ pub use commands::{
 };
 pub use config::{ConfigError, ConfigSource, RawConfig};
 pub use event_log::{EventLog, LogError, LogId};
+pub use forge::{Check, Forge, ForgeError, Pr, PrChecks, PrState};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};
 pub use link::{ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED};
 pub use pty::{

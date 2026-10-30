@@ -26,8 +26,8 @@ use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError,
-    UnixListenLink,
+    GhForge, GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource,
+    UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
 use shepherd_core::ports::{ConfigSource, LogError, LogId};
@@ -41,8 +41,15 @@ pub use runtime::{
 };
 
 /// The host runtime on the real adapters.
-pub type RealHost =
-    HostRuntime<PortablePty, GitWorktrees, ShellCommands, UnixListenLink, JsonlEventLog, RealEnv>;
+pub type RealHost = HostRuntime<
+    PortablePty,
+    GitWorktrees,
+    ShellCommands,
+    GhForge,
+    UnixListenLink,
+    JsonlEventLog,
+    RealEnv,
+>;
 
 /// Files under the root.
 pub const SOCKET_FILE: &str = "host.sock";
@@ -176,7 +183,16 @@ fn open_inner(
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
     HostRuntime::start(
-        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx,
+        pty,
+        worktrees,
+        commands,
+        GhForge::new(),
+        link,
+        log,
+        RealEnv,
+        settings,
+        tx,
+        rx,
     )
     .map_err(|e| start_error(root, e))
 }
@@ -241,7 +257,17 @@ fn open_adopted_inner(
     }));
     let commands = ShellCommands::new();
     HostRuntime::adopt(
-        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx, adoption,
+        pty,
+        worktrees,
+        commands,
+        GhForge::new(),
+        link,
+        log,
+        RealEnv,
+        settings,
+        tx,
+        rx,
+        adoption,
     )
     .map_err(|e| start_error(root, e))
 }

@@ -7,8 +7,8 @@ use shepherd_core::acpp::acp::{
 };
 use shepherd_core::acpp::{
     AgentIdle, Correlated, Dir, ENVELOPE_VERSION, EntryId, Envelope, EnvelopeError, Frame,
-    FrameDraft, FrameError, IdleInference, PendingRequests, RequestId, Seq, ShepherdFrame, Source,
-    SourceKind, Stamp, Timestamp,
+    FrameDraft, FrameError, IdleInference, PendingRequests, Pr, PrChecks, PrState, RequestId, Seq,
+    SessionPr, ShepherdFrame, Source, SourceKind, Stamp, Timestamp,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 
@@ -590,9 +590,70 @@ fn an_inferred_idle_serializes_its_inference_and_a_plain_one_has_none() {
 
 #[test]
 fn unknown_shepherd_method_parses_as_unknown() {
-    let raw =
-        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/pr", "params": { "url": "u" } });
+    let raw = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/teleported",
+                      "params": { "url": "u" } });
     assert_eq!(frame(raw.clone()), Frame::Unknown(raw));
+}
+
+fn session_pr(params: Value) -> Option<Pr> {
+    let f = frame(json!({ "jsonrpc": "2.0", "method": "_shepherd/session/pr", "params": params }));
+    let Frame::Shepherd(m) = &f else {
+        panic!("expected a shepherd frame, got {f:?}")
+    };
+    let ShepherdFrame::SessionPr(pr) = m.body() else {
+        panic!("expected session/pr")
+    };
+    pr.pr.clone()
+}
+
+#[test]
+fn a_session_pr_says_its_number_state_and_checks() {
+    let pr = session_pr(json!({ "pr": { "number": 123, "state": "open", "checks": "passing" } }));
+    assert_eq!(
+        pr,
+        Some(Pr {
+            number: 123,
+            state: PrState::Open,
+            checks: PrChecks::Passing,
+        })
+    );
+}
+
+#[test]
+fn a_session_pr_without_a_pr_says_it_has_none() {
+    assert_eq!(session_pr(json!({})), None);
+}
+
+#[test]
+fn a_session_pr_in_a_state_this_build_does_not_know_is_still_a_pr() {
+    let pr = session_pr(json!({ "pr": { "number": 7, "state": "queued", "checks": "flaky" } }));
+    assert_eq!(
+        pr,
+        Some(Pr {
+            number: 7,
+            state: PrState::Other("queued".to_owned()),
+            checks: PrChecks::Other("flaky".to_owned()),
+        })
+    );
+}
+
+#[test]
+fn a_session_pr_round_trips_and_none_serializes_as_empty_params() {
+    let some = ShepherdFrame::SessionPr(SessionPr {
+        pr: Some(Pr {
+            number: 9,
+            state: PrState::Merged,
+            checks: PrChecks::Failing,
+        }),
+    });
+    let wire = reserialized(&some.to_frame());
+    assert_eq!(
+        wire,
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/pr",
+                "params": { "pr": { "number": 9, "state": "merged", "checks": "failing" } } })
+    );
+    let none = ShepherdFrame::SessionPr(SessionPr { pr: None });
+    assert_eq!(reserialized(&none.to_frame())["params"], json!({}));
 }
 
 // ---------- responses ----------

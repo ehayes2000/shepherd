@@ -5,6 +5,9 @@
 //! One thread per port, taking calls in the order they were submitted, so results come back in that order too. A call
 //! that may run for long and doesn't need that order (creating a worktree, a hook) can instead run on a thread of its
 //! own ([`Worker::run_alone`]), so it never holds up the others: herdr's model, one thread per operation.
+//!
+//! A call's result is a [`HostEvent`] for core by default; a port whose answers go elsewhere (the `Forge`, whose
+//! answers go to the PR watch) picks its own result type.
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -17,14 +20,14 @@ use shepherd_core::host::HostEvent;
 use super::runtime::{RuntimeEvent, RuntimeTx};
 
 /// A call to run on the worker: what it computes from the port, and what to report instead if it panics.
-struct Job<W> {
-    call: Box<dyn FnOnce(&W) -> HostEvent + Send>,
-    panicked: HostEvent,
+struct Job<W, T> {
+    call: Box<dyn FnOnce(&W) -> T + Send>,
+    panicked: T,
 }
 
-impl<W> Job<W> {
+impl<W, T> Job<W, T> {
     /// Runs the call, reporting `panicked` if it panics.
-    fn run(self, port: &W, thread: &str) -> HostEvent {
+    fn run(self, port: &W, thread: &str) -> T {
         let call = self.call;
         catch_unwind(AssertUnwindSafe(|| call(port))).unwrap_or_else(|_| {
             tracing::error!(%thread, "a port call panicked");
@@ -35,22 +38,22 @@ impl<W> Job<W> {
 
 /// Owns a port, shared by a worker thread and the threads of [`Worker::run_alone`]. Dropping it lets the worker
 /// thread finish the call it is in and stop; no thread is joined, since a call may be a git command that runs for long.
-pub struct Worker<W> {
-    jobs: Sender<Job<W>>,
+pub struct Worker<W, T = HostEvent> {
+    jobs: Sender<Job<W, T>>,
     port: Arc<W>,
     tx: RuntimeTx,
-    wrap: fn(HostEvent) -> RuntimeEvent,
+    wrap: fn(T) -> RuntimeEvent,
 }
 
-impl<W: Send + Sync + 'static> Worker<W> {
+impl<W: Send + Sync + 'static, T: Clone + Send + 'static> Worker<W, T> {
     /// Moves `port` to a new thread called `name`, which reports each call's result into `tx`, wrapped by `wrap`.
     pub fn spawn(
         name: &str,
         port: W,
         tx: RuntimeTx,
-        wrap: fn(HostEvent) -> RuntimeEvent,
+        wrap: fn(T) -> RuntimeEvent,
     ) -> io::Result<Self> {
-        let (jobs, calls) = mpsc::channel::<Job<W>>();
+        let (jobs, calls) = mpsc::channel::<Job<W, T>>();
         let port = Arc::new(port);
         let thread = name.to_owned();
         let (shared, results) = (port.clone(), tx.clone());
@@ -80,9 +83,9 @@ impl<W: Send + Sync + 'static> Worker<W> {
     pub fn run_alone(
         &self,
         name: &str,
-        call: impl FnOnce(&W) -> HostEvent + Send + 'static,
-        panicked: HostEvent,
-    ) -> Result<(), Box<HostEvent>> {
+        call: impl FnOnce(&W) -> T + Send + 'static,
+        panicked: T,
+    ) -> Result<(), Box<T>> {
         let unanswered = panicked.clone();
         let job = Job {
             call: Box::new(call),
@@ -105,9 +108,9 @@ impl<W: Send + Sync + 'static> Worker<W> {
     /// and any queued behind it are dropped unanswered.
     pub fn submit(
         &self,
-        call: impl FnOnce(&W) -> HostEvent + Send + 'static,
-        panicked: HostEvent,
-    ) -> Result<(), Box<HostEvent>> {
+        call: impl FnOnce(&W) -> T + Send + 'static,
+        panicked: T,
+    ) -> Result<(), Box<T>> {
         let job = Job {
             call: Box::new(call),
             panicked,

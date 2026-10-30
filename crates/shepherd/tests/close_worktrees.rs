@@ -28,6 +28,7 @@ use shepherd_core::wire::{
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
+use shepherd_testkit::fakes::forge::FakeForge;
 use shepherd_testkit::fakes::hold::Hold;
 use shepherd_testkit::fakes::link::FakeNetwork;
 use shepherd_testkit::fakes::pty::FakePty;
@@ -430,6 +431,7 @@ fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
             pty,
             worktrees,
             commands.clone(),
+            FakeForge::new(),
             link,
             log_recording(&app, &recorded),
             TestEnv::new(),
