@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T27 PR status | building | task/t27-pr-status @ 62595e5 | 0 | – |
+| T27 PR status | in review | task/t27-pr-status @ dc0b09d (on 022d04f) | 1 | PM-accepted: gh pr list flags; display choices; Unavailable clears, errors keep; Worker<W,T> |
 | F33 hooks concurrent + bounded | fixing (CHANGES) | task/f33-hooks @ 1cb6c18 | 1 | Blocking: hooks started during shutdown never cancelled; real cancel test vacuous; tail cap untested. PM: close mid post-create hook goes through T25 inspection |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -760,6 +760,17 @@ acceptance:
   never read the user's global git config or hooks.
 - A detached orphan worktree (no branch) can be adopted and owned.
 scope: crates/shepherd, crates/core
+
+### F40: Launcher test stand-ins can leak
+status: todo
+depends: F18
+touches: adapters::launcher (tests)
+goal: Two launcher hygiene stand-ins (`/bin/sh -c … sleep 120 & wait` with a USR1 trap, report under a tempdir) were found
+orphaned for 5 hours on the PM's machine after load rounds; the PM stopped them by pid.
+acceptance:
+- Every stand-in a launcher test spawns is reaped or killed by a guard on every path (panics, timeouts), the shell exits when
+  its child does (no orphaned `wait`), and a load round leaves no stand-in processes (checked by recorded pids).
+scope: crates/adapters
 
 ## Out of scope for the initial feature set
 
