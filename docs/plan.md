@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
-| F25 failed worktree create cleanup | re-review | task/f25-worktree-fail-cleanup @ c4d9865 (on da1f29e) | 2 | Branch re-checked right before add (early BranchExists); signal-kill waits for group; message fixed. Residual window → F32 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F25 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
 | T18b | 2 | append-failure hot loop; next_deadline wiring untested; spec defect: output-as-answer would clear untouched dialogs (amended) |
 | F14 | 3 (+1 hung) | post-kill drop, shutdown ack, excess-ack banking untested; first reviewer hung 4 h |
 | F30 | 2 | width-0 cut returned 1 column; added helper property table |
@@ -425,7 +425,7 @@ acceptance:
 scope: crates/tui, crates/shepherd (tests/support fake host)
 
 ### F25: Clean up after a failed worktree create
-status: in-progress
+status: done (8861b54)
 depends: F08
 touches: adapters::worktrees
 goal: A `post-checkout` hook that exits non-zero (or any non-timeout failure of `worktree add`) can leave the worktree and
@@ -531,6 +531,8 @@ acceptance:
   to clean), then `git worktree add <path> <b>` without `-b`. Cleanup deletes the branch only if this create made it (and
   only with `update-ref -d refs/heads/<b> <base-oid>`, i.e. only if it still points where we put it). Regression tests: a branch
   appearing just before update-ref → BranchExists, untouched; a branch moved by someone after we created it → not deleted.
+- F25 review: the signal-kill path sends SIGKILL to the group after git was reaped (theoretical pid reuse). Learn how git
+  died with `waitid(WNOWAIT)` (as `wait_unreaped` does), kill the group, then reap.
 scope: crates/adapters
 
 ## Out of scope for the initial feature set
