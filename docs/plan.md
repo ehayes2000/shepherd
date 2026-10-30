@@ -9,6 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| F32 atomic branch create | building | task/f32-atomic-branch @ HEAD | 0 | – |
 | T25 close removes worktree | in review | task/t25-close-cleanup @ 808391d | 1 | PM-accepted: worktree/removing frame; worktree_kept; SessionClose.worktree mode; worktree/status request; Restarted event; force=false default |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -526,7 +527,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### F32: Create the worktree branch atomically
-status: todo
+status: in-progress
 depends: F25
 touches: adapters::worktrees
 goal: F25 re-checks that the branch is absent right before `worktree add -b`, but a branch created in the instant between that
