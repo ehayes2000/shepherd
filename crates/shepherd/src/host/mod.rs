@@ -20,12 +20,12 @@ use shepherd_adapters::{
     JsonlEventLog, PortablePty, TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
-use shepherd_core::ports::{ConfigSource, LogError};
+use shepherd_core::ports::{ConfigSource, LogError, LogId};
 
 pub use env::{Env, RealEnv};
 pub use runtime::{
-    HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx,
-    SHUTDOWN_GRACE, runtime_channel,
+    CATCH_UP_TICK, HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER, RuntimeEvent, RuntimeRx,
+    RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, runtime_channel,
 };
 
 /// The host runtime on the real adapters.
@@ -48,12 +48,21 @@ pub enum HostStartError {
     Root { path: PathBuf, reason: String },
     #[error("a shepherd host is already running for {0}")]
     AlreadyRunning(PathBuf),
-    #[error("cannot open the event log: {0}")]
-    Log(LogError),
+    #[error("cannot open the event log in {root}: {error}")]
+    Log { root: PathBuf, error: LogError },
+    #[error(
+        "{path} is corrupt at line {line}: {reason}. Shepherd never rewrites history, so fix or delete that line, \
+         or move the file aside to start without it"
+    )]
+    CorruptLog {
+        path: PathBuf,
+        line: u64,
+        reason: String,
+    },
     #[error("cannot listen on the host socket: {0}")]
     Socket(UnixLinkError),
-    #[error("invalid config: {0}")]
-    Config(ConfigError),
+    #[error("{path}: {error}")]
+    Config { path: PathBuf, error: ConfigError },
     #[error("cannot open {path}: {reason}")]
     LogFile { path: PathBuf, reason: String },
 }
@@ -94,27 +103,62 @@ pub fn file_subscriber(file: File) -> impl tracing::Subscriber + Send + Sync {
 }
 
 /// Builds the host on the real adapters under `root`, in the order the module docs give. `home` is where new
-/// sessions start, `login_shell` the user's `$SHELL`.
+/// sessions start, `login_shell` the user's `$SHELL`. A failure is also logged, for a host started in the
+/// background with no stderr.
 pub fn open(
     root: &Path,
     home: PathBuf,
     login_shell: Option<String>,
 ) -> Result<RealHost, HostStartError> {
+    open_inner(root, home, login_shell)
+        .inspect_err(|e| tracing::error!(error = %e, "host failed to start"))
+}
+
+fn open_inner(
+    root: &Path,
+    home: PathBuf,
+    login_shell: Option<String>,
+) -> Result<RealHost, HostStartError> {
     prepare_root(root)?;
-    let log = JsonlEventLog::open(root).map_err(|e| match e {
-        LogError::Locked => HostStartError::AlreadyRunning(root.to_path_buf()),
-        other => HostStartError::Log(other),
-    })?;
+    let log = JsonlEventLog::open(root).map_err(|e| log_error(root, e))?;
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
-    let raw = TomlConfigSource::new(root.join(CONFIG_FILE))
+    let config_path = root.join(CONFIG_FILE);
+    let config_error = |error| HostStartError::Config {
+        path: config_path.clone(),
+        error,
+    };
+    let raw = TomlConfigSource::new(&config_path)
         .load()
-        .map_err(HostStartError::Config)?;
-    let config = Config::resolve(raw, login_shell).map_err(HostStartError::Config)?;
+        .map_err(config_error)?;
+    let config = Config::resolve(raw, login_shell).map_err(config_error)?;
     let pty = PortablePty::new(tx.pty_sink());
     let settings = RuntimeSettings { config, home };
-    HostRuntime::start(pty, link, log, RealEnv, settings, tx, rx).map_err(HostStartError::Log)
+    HostRuntime::start(pty, link, log, RealEnv, settings, tx, rx).map_err(|e| log_error(root, e))
+}
+
+fn log_error(root: &Path, error: LogError) -> HostStartError {
+    match error {
+        LogError::Locked => HostStartError::AlreadyRunning(root.to_path_buf()),
+        LogError::Corrupt { log, line, reason } => HostStartError::CorruptLog {
+            path: log_path(root, &log),
+            line,
+            reason,
+        },
+        error => HostStartError::Log {
+            root: root.to_path_buf(),
+            error,
+        },
+    }
+}
+
+/// Where the JSONL adapter keeps `log` (the layout in `docs/acpp.md`, "Storage").
+fn log_path(root: &Path, log: &LogId) -> PathBuf {
+    match log {
+        LogId::Host => root.join("host.jsonl"),
+        LogId::Session(id) => root.join("sessions").join(format!("{id}.jsonl")),
+    }
 }
 
 /// `shepherd host`: logs to `~/.shepherd/host.log`, runs until SIGTERM or SIGINT, then shuts down cleanly.

@@ -162,6 +162,9 @@ impl Link for UnixListenLink {
     fn close(&mut self, conn: ConnId) -> Result<(), LinkError> {
         self.conns.close(conn)
     }
+    fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
+        self.conns.queued_bytes(conn)
+    }
 }
 
 impl Drop for UnixListenLink {
@@ -206,6 +209,9 @@ impl Link for UnixConnectLink {
 
     fn close(&mut self, conn: ConnId) -> Result<(), LinkError> {
         self.conns.close(conn)
+    }
+    fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
+        self.conns.queued_bytes(conn)
     }
 }
 
@@ -426,6 +432,14 @@ impl Conns {
         // Fails only once the writer is gone, and then the reader is about to report the disconnect.
         let _ = handle.queue.send(framed);
         Ok(())
+    }
+
+    /// Bytes sent to `conn` that its writer hasn't taken yet. The batch the writer is writing and what the kernel
+    /// buffers are not counted.
+    fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
+        let conns = self.lock();
+        let handle = conns.get(&conn)?;
+        Some(handle.shared.queued.load(Ordering::SeqCst))
     }
 
     fn close(&self, conn: ConnId) -> Result<(), LinkError> {

@@ -254,6 +254,13 @@ impl HostHarness {
         client
     }
 
+    /// Connects a slow client: it reads only what [`FakeClient::read`] lets it.
+    pub fn connect_paced(&mut self) -> FakeClient {
+        let client = FakeClient::connect_with(&self.net, true);
+        self.step();
+        client
+    }
+
     /// Stops this host (dropping its link, so clients see it go) and starts a new one on the same log, as if the
     /// process restarted. PTYs don't survive: the fake PTY is dropped with the old runtime.
     pub fn restart(&mut self) {
@@ -292,6 +299,7 @@ impl LinkEventSink for ChannelSink {
 /// A client on the fake network: sends requests and notifications, and reads what the host sent.
 pub struct FakeClient {
     link: FakeLink,
+    net: FakeNetwork,
     conn: ConnId,
     events: Receiver<LinkEvent>,
     next_id: i64,
@@ -302,18 +310,33 @@ pub struct FakeClient {
 
 impl FakeClient {
     fn connect(net: &FakeNetwork) -> Self {
+        Self::connect_with(net, false)
+    }
+
+    fn connect_with(net: &FakeNetwork, paced: bool) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (link, conn) = net
-            .connect(Arc::new(ChannelSink(Mutex::new(tx))))
-            .expect("connect to fake host");
+        let sink = Arc::new(ChannelSink(Mutex::new(tx)));
+        let (link, conn) = if paced {
+            net.connect_paced(sink)
+        } else {
+            net.connect(sink)
+        }
+        .expect("connect to fake host");
         Self {
             link,
+            net: net.clone(),
             conn,
             events: rx,
             next_id: 0,
             inbox: Vec::new(),
             disconnected: false,
         }
+    }
+
+    /// A paced client reads only through this: up to `max_bytes` of what the host sent (at least one line, if
+    /// any is waiting). Returns the bytes read.
+    pub fn read(&mut self, max_bytes: usize) -> usize {
+        self.net.deliver(self.conn, max_bytes)
     }
 
     /// Sends a request and returns its id.

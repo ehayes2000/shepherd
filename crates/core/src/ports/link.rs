@@ -93,4 +93,8 @@ pub trait Link {
     fn send(&mut self, conn: ConnId, line: &[u8]) -> Result<(), LinkError>;
     /// Flushes what is queued for `conn`, then disconnects it. Its `Disconnected` arrives through the sink.
     fn close(&mut self, conn: ConnId) -> Result<(), LinkError>;
+    /// The bytes sent to `conn` that are still waiting in its outbound queue, or `None` if `conn` is unknown. It
+    /// rises while the peer doesn't read and falls as it drains, so a sender can pace itself well below
+    /// [`MAX_QUEUED`] (decision 0013).
+    fn queued_bytes(&self, conn: ConnId) -> Option<usize>;
 }

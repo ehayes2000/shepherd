@@ -6,15 +6,19 @@
 //! - **Screens.** One `shepherd_term::Screen` per live PTY, fed every output chunk. Its query answers are written
 //!   back to the PTY, so agents get them with no client attached (decision 0007). A synchronized update's hold is
 //!   serviced as a deadline.
-//! - **Subscriptions.** Per connection. A subscribe is handled in one loop iteration: the log catch-up
-//!   (`EventLog::read`), then a `snapshot_ansi()` of every live screen, then the ack, and from then on every new
-//!   envelope and output chunk. Appends only happen on this thread, so there is no gap and no duplicate.
+//! - **Subscriptions.** Per connection, paced by the link's backpressure (decision 0013). A subscribe starts a
+//!   cursor per log; entries are read from the log and sent while the conn's queue is below [`LOW_WATER`], resuming
+//!   every [`CATCH_UP_TICK`] while any catch-up is pending. A log whose cursor hasn't reached its end gets no live
+//!   entries (the cursor reads them); once it reaches the end, in that same iteration, the log goes live. When
+//!   every cursor is done the conn gets a `snapshot_ansi()` of every live screen, then the ack, and from then on
+//!   live PTY output too. Appends only happen on this thread, so there is no gap and no duplicate.
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -23,8 +27,8 @@ use shepherd_core::config::Config;
 use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, Pty, PtyEvent, PtyEventSink,
-    PtySize, SpawnSpec,
+    ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
+    PtyEventSink, PtySize, SpawnSpec,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HostNotification, HostResponse,
@@ -40,6 +44,11 @@ pub const LOCAL_MACHINE: &str = "local";
 pub const INITIAL_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 /// How long shutdown waits for killed PTYs to report their exit before giving up on them.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// A subscription's catch-up only sends while the conn has fewer bytes than this queued, far below the
+/// [`MAX_QUEUED`] bound past which the link drops it.
+pub const LOW_WATER: usize = MAX_QUEUED / 4;
+/// How often a pending catch-up checks whether its conn has drained.
+pub const CATCH_UP_TICK: Duration = Duration::from_millis(5);
 
 /// Everything the loop reacts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +62,20 @@ pub enum RuntimeEvent {
 /// The sending side of the loop's channel. Unbounded, so a port's sink never blocks on the loop that owns the
 /// port (which could be inside `Link::close`, waiting for that very sink).
 #[derive(Clone)]
-pub struct RuntimeTx(Sender<RuntimeEvent>);
+pub struct RuntimeTx {
+    tx: Sender<RuntimeEvent>,
+    /// Set by [`RuntimeEvent::Shutdown`], so the loop sees it on its next iteration instead of behind whatever is
+    /// already queued.
+    shutdown: Arc<AtomicBool>,
+}
 
 impl RuntimeTx {
-    /// Queues `event`. Never blocks. Dropped silently once the loop has stopped.
+    /// Queues `event`. Never blocks. Dropped silently once the loop has stopped. A `Shutdown` jumps the queue.
     pub fn send(&self, event: RuntimeEvent) {
-        let _ = self.0.send(event);
+        if event == RuntimeEvent::Shutdown {
+            self.shutdown.store(true, Ordering::SeqCst);
+        }
+        let _ = self.tx.send(event);
     }
 
     /// A sink for a [`Pty`] adapter, forwarding into this channel.
@@ -90,7 +107,11 @@ pub struct RuntimeRx(Receiver<RuntimeEvent>);
 /// A new channel for one runtime. Build the port sinks from the sender before building the ports.
 pub fn runtime_channel() -> (RuntimeTx, RuntimeRx) {
     let (tx, rx) = mpsc::channel();
-    (RuntimeTx(tx), RuntimeRx(rx))
+    let tx = RuntimeTx {
+        tx,
+        shutdown: Arc::default(),
+    };
+    (tx, RuntimeRx(rx))
 }
 
 /// What the runtime needs besides its ports.
@@ -103,7 +124,40 @@ pub struct RuntimeSettings {
 
 #[derive(Debug, Default)]
 struct ConnState {
-    subscribed: bool,
+    sub: Option<Subscription>,
+}
+
+/// One conn's subscription.
+#[derive(Debug)]
+struct Subscription {
+    /// Logs still catching up. Their entries are sent by the cursor, never live.
+    cursors: BTreeMap<LogId, Cursor>,
+    /// The subscribe request, answered when catch-up completes.
+    ack: RequestId,
+    /// Every cursor is done and the snapshots are sent: everything is live, PTY output included.
+    complete: bool,
+}
+
+#[derive(Debug)]
+struct Cursor {
+    /// The last seq sent.
+    after: Seq,
+    /// Entries read from the log and not sent yet. Refilled from `after` when empty; empty after a refill means
+    /// the cursor has reached the end.
+    batch: VecDeque<Envelope>,
+}
+
+impl ConnState {
+    /// Whether this conn gets a new entry of `log` live.
+    fn live_for(&self, log: &LogId) -> bool {
+        self.sub
+            .as_ref()
+            .is_some_and(|s| !s.cursors.contains_key(log))
+    }
+
+    fn output_live(&self) -> bool {
+        self.sub.as_ref().is_some_and(|s| s.complete)
+    }
 }
 
 /// A screen's open synchronized-update hold and when it times out.
@@ -129,6 +183,8 @@ pub struct HostRuntime<P, L, E, V> {
     conns: BTreeMap<ConnId, ConnState>,
     replies: HashMap<ReplyTo, (ConnId, RequestId)>,
     next_reply: u64,
+    /// Set while a catch-up is waiting for its conn to drain: when to try again.
+    catch_up_at: Option<Instant>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -167,6 +223,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             conns: BTreeMap::new(),
             replies: HashMap::new(),
             next_reply: 0,
+            catch_up_at: None,
             shutdown_by: None,
             finished: false,
         };
@@ -222,13 +279,19 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         self.deadlines
             .values()
             .map(|d| d.due)
+            .chain(self.catch_up_at)
             .chain(self.shutdown_by)
             .min()
     }
 
-    /// Runs until shutdown completes, sleeping in `recv_timeout` until the next event or deadline.
+    /// Runs until shutdown completes, sleeping in `recv_timeout` until the next event or deadline. A shutdown
+    /// request and due deadlines are serviced on every iteration, so a busy channel can't starve them.
     pub fn run(&mut self) {
-        while !self.finished {
+        loop {
+            self.service();
+            if self.finished {
+                break;
+            }
             let next = match self.next_deadline() {
                 None => self.rx.0.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 Some(due) => {
@@ -238,7 +301,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             };
             match next {
                 Ok(event) => self.handle(event),
-                Err(RecvTimeoutError::Timeout) => self.fire_due(),
+                Err(RecvTimeoutError::Timeout) => {}
                 // The runtime holds a sender, so this can't happen; stop rather than spin.
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -249,7 +312,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
     /// the fakes queue their events synchronously.
     pub fn run_until_idle(&mut self) {
         loop {
-            self.fire_due();
+            self.service();
             match self.rx.0.try_recv() {
                 Ok(event) => self.handle(event),
                 Err(_) => break,
@@ -263,6 +326,9 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             return;
         }
         match event {
+            // Output while shutting down is dropped unread, so a flooding PTY's backlog drains fast and the exits
+            // queued behind it are reached.
+            RuntimeEvent::Pty(PtyEvent::Output { .. }) if self.shutdown_by.is_some() => {}
             RuntimeEvent::Pty(PtyEvent::Output { session, bytes }) => {
                 self.pty_output(session, bytes)
             }
@@ -358,10 +424,19 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             ts: self.env.now(),
             machine: self.machine.clone(),
         };
-        let envelope = self.log.append(LogId::of(&draft), draft, stamp)?;
+        let log = LogId::of(&draft);
+        let envelope = self.log.append(log.clone(), draft, stamp)?;
         self.host.apply(&envelope);
         let line = log_entry_line(envelope);
-        self.broadcast(&line);
+        let to: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.live_for(&log))
+            .map(|(&conn, _)| conn)
+            .collect();
+        for conn in to {
+            self.send(conn, &line);
+        }
         Ok(())
     }
 
@@ -379,7 +454,15 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             self.after_feed(&session);
         }
         let line = notification_line(&HostNotification::PtyOutput(PtyOutput { session, bytes }));
-        self.broadcast(&line);
+        let to: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.output_live())
+            .map(|(&conn, _)| conn)
+            .collect();
+        for conn in to {
+            self.send(conn, &line);
+        }
     }
 
     /// Writes the screen's query answers back to its PTY and keeps its sync-update deadline current.
@@ -406,9 +489,31 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         }
     }
 
-    /// Ends every synchronized update whose deadline has passed, and finishes a shutdown that ran out of time.
+    /// What every loop iteration does before taking the next event: fire due deadlines, then start a requested
+    /// shutdown.
+    fn service(&mut self) {
+        self.fire_due();
+        if self.tx.shutdown.load(Ordering::SeqCst) {
+            self.start_shutdown();
+        }
+    }
+
+    /// Ends every synchronized update whose deadline has passed, resumes pending catch-ups, and finishes a
+    /// shutdown that ran out of time.
     fn fire_due(&mut self) {
         let now = self.env.instant();
+        if self.catch_up_at.is_some_and(|at| at <= now) {
+            self.catch_up_at = None;
+            let pending: Vec<ConnId> = self
+                .conns
+                .iter()
+                .filter(|(_, c)| c.sub.as_ref().is_some_and(|s| !s.complete))
+                .map(|(&conn, _)| conn)
+                .collect();
+            for conn in pending {
+                self.pump(conn);
+            }
+        }
         let due: Vec<(SessionId, u64)> = self
             .deadlines
             .iter()
@@ -470,12 +575,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 let result = wire::negotiate(&hello, &self.machine).map(HostResult::Hello);
                 self.respond(conn, &respond_now(result));
             }
-            ClientRequest::Subscribe(subscribe) => {
-                let result = self
-                    .subscribe(conn, &subscribe.from)
-                    .map(|()| HostResult::Ack);
-                self.respond(conn, &respond_now(result));
-            }
+            ClientRequest::Subscribe(subscribe) => self.subscribe(conn, id, &subscribe.from),
             ClientRequest::HookFrame(_) => {
                 let error = WireError::MethodNotFound(format!(
                     "{} is not available on this host yet",
@@ -534,31 +634,144 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         }
     }
 
-    /// The log catch-up and screen snapshots for a new subscription, sent before it goes live. Reads everything
-    /// first, so a failed read sends nothing.
-    fn subscribe(&mut self, conn: ConnId, from: &SubscribeFrom) -> Result<(), WireError> {
-        let internal = |e: LogError| WireError::Internal(format!("reading the log: {e}"));
-        let mut lines = Vec::new();
-        for id in self.log.logs().map_err(internal)? {
-            let after = match &id {
-                LogId::Host => from.host.unwrap_or(Seq::ZERO),
-                LogId::Session(s) => from.sessions.get(s).copied().unwrap_or(Seq::ZERO),
+    /// Starts a subscription: a cursor for every log, from where the client left off. The catch-up starts in this
+    /// iteration and is answered when it completes (see the module docs). A newer subscribe on the same conn
+    /// replaces an unfinished one, whose request is answered with an error.
+    fn subscribe(&mut self, conn: ConnId, id: RequestId, from: &SubscribeFrom) {
+        let logs = match self.log.logs() {
+            Ok(logs) => logs,
+            Err(e) => {
+                let error = WireError::Internal(format!("reading the log: {e}"));
+                self.respond(
+                    conn,
+                    &HostResponse {
+                        id,
+                        result: Err(error),
+                    },
+                );
+                return;
+            }
+        };
+        let cursors = logs
+            .into_iter()
+            .map(|log| {
+                let after = match &log {
+                    LogId::Host => from.host.unwrap_or(Seq::ZERO),
+                    LogId::Session(s) => from.sessions.get(s).copied().unwrap_or(Seq::ZERO),
+                };
+                let cursor = Cursor {
+                    after,
+                    batch: VecDeque::new(),
+                };
+                (log, cursor)
+            })
+            .collect();
+        let sub = Subscription {
+            cursors,
+            ack: id,
+            complete: false,
+        };
+        let replaced = self.conns.entry(conn).or_default().sub.replace(sub);
+        if let Some(old) = replaced.filter(|old| !old.complete) {
+            let error = WireError::InvalidRequest("replaced by a newer subscribe".to_owned());
+            self.respond(
+                conn,
+                &HostResponse {
+                    id: old.ack,
+                    result: Err(error),
+                },
+            );
+        }
+        self.pump(conn);
+    }
+
+    /// Sends `conn`'s catch-up while its queue is below [`LOW_WATER`]. Finishes the subscription when every cursor
+    /// is done, or schedules another try.
+    fn pump(&mut self, conn: ConnId) {
+        loop {
+            let Some(sub) = self.conns.get_mut(&conn).and_then(|c| c.sub.as_mut()) else {
+                return;
             };
-            for envelope in self.log.read(id, after).map_err(internal)? {
-                lines.push(log_entry_line(envelope));
+            if sub.complete {
+                return;
+            }
+            let Some(mut entry) = sub.cursors.first_entry() else {
+                self.complete(conn);
+                return;
+            };
+            match self.link.queued_bytes(conn) {
+                // Gone: its `Disconnected` is on the way.
+                None => return,
+                Some(queued) if queued >= LOW_WATER => {
+                    if self.catch_up_at.is_none() {
+                        self.catch_up_at = Some(self.env.instant() + CATCH_UP_TICK);
+                    }
+                    return;
+                }
+                Some(_) => {}
+            }
+            let log = entry.key().clone();
+            let cursor = entry.get_mut();
+            if cursor.batch.is_empty() {
+                match self.log.read(log, cursor.after) {
+                    // The end of this log: it goes live now, before anything else can be appended to it.
+                    Ok(read) if read.is_empty() => {
+                        entry.remove();
+                    }
+                    Ok(read) => cursor.batch = read.into(),
+                    Err(e) => {
+                        tracing::error!(%conn, error = %e, "subscribe catch-up failed");
+                        let ack = sub.ack.clone();
+                        if let Some(c) = self.conns.get_mut(&conn) {
+                            c.sub = None;
+                        }
+                        let error = WireError::Internal(format!("reading the log: {e}"));
+                        self.respond(
+                            conn,
+                            &HostResponse {
+                                id: ack,
+                                result: Err(error),
+                            },
+                        );
+                        return;
+                    }
+                }
+                continue;
+            }
+            if let Some(envelope) = cursor.batch.pop_front() {
+                cursor.after = envelope.seq();
+                self.send(conn, &log_entry_line(envelope));
             }
         }
-        for (session, screen) in &self.screens {
-            lines.push(notification_line(&HostNotification::PtyOutput(PtyOutput {
-                session: session.clone(),
-                bytes: screen.snapshot_ansi(),
-            })));
-        }
-        for line in &lines {
+    }
+
+    /// The log catch-up is done: send every live screen, then the ack, and go fully live.
+    fn complete(&mut self, conn: ConnId) {
+        let snapshots: Vec<Vec<u8>> = self
+            .screens
+            .iter()
+            .map(|(session, screen)| {
+                notification_line(&HostNotification::PtyOutput(PtyOutput {
+                    session: session.clone(),
+                    bytes: screen.snapshot_ansi(),
+                }))
+            })
+            .collect();
+        for line in &snapshots {
             self.send(conn, line);
         }
-        self.conns.entry(conn).or_default().subscribed = true;
-        Ok(())
+        let Some(sub) = self.conns.get_mut(&conn).and_then(|c| c.sub.as_mut()) else {
+            return;
+        };
+        sub.complete = true;
+        let ack = sub.ack.clone();
+        self.respond(
+            conn,
+            &HostResponse {
+                id: ack,
+                result: Ok(HostResult::Ack),
+            },
+        );
     }
 
     fn reply_to(&mut self, conn: ConnId, id: RequestId) -> ReplyTo {
@@ -577,19 +790,6 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 
     fn respond(&mut self, conn: ConnId, response: &HostResponse) {
         self.send(conn, &without_newline(wire::encode_response(response)));
-    }
-
-    /// Sends `line` to every subscribed conn.
-    fn broadcast(&mut self, line: &[u8]) {
-        let subscribed: Vec<ConnId> = self
-            .conns
-            .iter()
-            .filter(|(_, c)| c.subscribed)
-            .map(|(&conn, _)| conn)
-            .collect();
-        for conn in subscribed {
-            self.send(conn, line);
-        }
     }
 
     fn send(&mut self, conn: ConnId, line: &[u8]) {
