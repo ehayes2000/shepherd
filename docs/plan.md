@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T19b resume | in review | task/t19b-resume @ db3d015 (on d0e6d04) | 1 | PM-accepted: session/created gains profile+cwd; shepherd agent/started on resume; session/resume request; builder edited acpp.md table |
+| T19b resume | fixing (CHANGES) | task/t19b-resume @ db3d015 | 1 | Blocking: resume doesn't validate logged cwd (portable-pty falls back to $HOME); shepherd-source guard on exited=false untested. Minors: refusal paths |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
