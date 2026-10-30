@@ -19,6 +19,7 @@ macro_rules! launcher_contract {
             launch_returns_while_the_host_keeps_running,
             each_launch_starts_its_own_host,
             launch_that_cannot_start_the_host_is_an_error,
+            a_host_that_fails_to_start_is_an_error_with_its_message,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -47,6 +48,8 @@ pub trait LauncherFixture {
     fn working(&mut self) -> Self::Launcher;
     /// A launcher whose host can't be started (for a process: its executable doesn't exist).
     fn broken(&mut self) -> Self::Launcher;
+    /// A launcher whose host starts, reports `message` as its startup error, and exits.
+    fn failing_host(&mut self, message: &str) -> Self::Launcher;
     /// Waits until `n` more hosts have started. Panics if they don't within `timeout`.
     fn wait_started(&mut self, n: usize, timeout: Duration);
 }
@@ -89,5 +92,15 @@ pub fn launch_that_cannot_start_the_host_is_an_error<F: LauncherFixture>(mut f: 
     assert!(
         matches!(launch(&launcher), Err(LaunchError::SpawnFailed(_))),
         "a host that can't start must be an error"
+    );
+}
+
+pub fn a_host_that_fails_to_start_is_an_error_with_its_message<F: LauncherFixture>(mut f: F) {
+    let message =
+        "shepherd host: /home/me/.shepherd has mode 755. Fix it with: chmod 700 /home/me/.shepherd";
+    let launcher = Arc::new(f.failing_host(message));
+    assert_eq!(
+        launch(&launcher),
+        Err(LaunchError::HostFailed(message.to_owned()))
     );
 }
