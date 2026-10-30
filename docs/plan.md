@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | review | task/t38-archive-blobs @ 1e554e2 (on 17c8d64) | 1 | PM-accepted: std private-file rules, std hex, test-only fault feature. Reviewer judges corrupt-existing put, 1 GiB cap, tmp leftovers |
-| F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | building | task/f45-standin-load @ 33fd53a | 0 |  |
+| F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | review | task/f45-standin-load @ 552c61f (on 3649a78) | 1 | cause: syspolicyd scans each new executable on first exec; fixtures symlink to one committed script |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
@@ -40,7 +40,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Conversation archive](features/conversation-archive.md) | M3+ | 0 | 7 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
-| [Host daemon and client runtime](features/host-and-client.md) | M1 | 7 | 2 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
+| [Host daemon and client runtime](features/host-and-client.md) | M1 | 7 | 3 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 3 | 1 | A new build replaces the running host in place without stopping sessions |
 | [Multi-machine](features/multi-machine.md) | M4 | 1 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
