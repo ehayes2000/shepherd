@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 | Archive crate and blob store | ready |  |  |  |
+| T38 | Archive crate and blob store | building | task/t38-archive-blobs @ 17c8d64 | 0 |  |
 | T39 | Archive index | todo |  |  |  |
 | T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
