@@ -953,3 +953,170 @@ fn the_workspace_switcher_puts_the_cursor_after_the_path() {
         "{buf:?}"
     );
 }
+
+// ---------- display width ----------
+
+/// Line `y` of `buf` as the terminal shows it: the cells a wide symbol covers are left out.
+fn line_text(buf: &Buffer, y: u16) -> String {
+    let mut text = String::new();
+    let mut x = buf.area.left();
+    while x < buf.area.right() {
+        let symbol = buf[(x, y)].symbol();
+        text.push_str(symbol);
+        x += u16::try_from(columns(symbol).max(1)).unwrap_or(1);
+    }
+    text
+}
+
+/// The first line of `buf` showing `text`, as the terminal shows it. Panics if none does.
+fn line_with(buf: &Buffer, text: &str) -> (u16, String) {
+    (buf.area.top()..buf.area.bottom())
+        .map(|y| (y, line_text(buf, y)))
+        .find(|(_, line)| line.contains(text))
+        .unwrap_or_else(|| panic!("{text:?} not drawn: {buf:?}"))
+}
+
+/// How many columns `text` takes.
+fn columns(text: &str) -> usize {
+    ratatui::text::Span::raw(text).width()
+}
+
+/// A path too wide for the switcher, though not too many characters for it.
+const CJK_PATH: &str = "/ユーザー/誰か/とても/深い/ディレクトリ/羊飼い";
+
+#[test]
+fn a_cjk_path_too_wide_for_the_switcher_keeps_the_repo_name_and_the_mark() {
+    let mut c = workspaces_used(1);
+    c.host().select_workspace(CJK_PATH);
+    c.sync();
+    c.user(Intent::BeginWorkspace);
+    let buf = buffer(c.client(), &Screens::new(), 60, 12);
+    let (_, row) = line_with(&buf, "/羊飼い");
+    assert!(row.contains("│ …ザー/"), "cut from the left: {row:?}");
+    assert!(row.contains("/羊飼い  (current)│"), "{row:?}");
+}
+
+#[test]
+fn an_emoji_path_too_wide_for_the_switcher_keeps_the_repo_name_and_the_mark() {
+    let path = format!("/src/{}/flock", "🐑".repeat(30));
+    let mut c = workspaces_used(1);
+    c.host().select_workspace(&path);
+    c.sync();
+    c.user(Intent::BeginWorkspace);
+    let buf = buffer(c.client(), &Screens::new(), 60, 12);
+    let (_, row) = line_with(&buf, "/flock");
+    assert!(row.contains("│ …🐑"), "cut from the left: {row:?}");
+    assert!(row.contains("🐑/flock  (current)"), "{row:?}");
+}
+
+#[test]
+fn a_cjk_profile_name_too_wide_for_the_picker_keeps_the_agent_and_the_mark() {
+    let name = "羊飼いのとても長いプロファイル名前";
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[(name, AgentKind::ClaudeCode), ("shell", AgentKind::Shell)],
+        name,
+    );
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(c.client(), &Screens::new(), 60, 10);
+    let (_, row) = line_with(&buf, "羊飼い");
+    assert!(row.contains("…  claude-code  (default)│"), "{row:?}");
+}
+
+/// The agent column starts in the same column on every row, however wide the names before it.
+#[test]
+fn the_pickers_agent_column_lines_up_after_wide_names() {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            ("羊飼い", AgentKind::ClaudeCode),
+            ("shell", AgentKind::Shell),
+        ],
+        "shell",
+    );
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(c.client(), &Screens::new(), 60, 10);
+    let (_, wide) = line_with(&buf, "羊飼い");
+    let (_, narrow) = line_with(&buf, "(default)");
+    let agent = |row: &str, at: Option<usize>| columns(&row[..at.unwrap_or_default()]);
+    assert_eq!(
+        agent(&wide, wide.find("claude-code")),
+        agent(&narrow, narrow.rfind("shell")),
+        "{buf:?}"
+    );
+}
+
+/// A name of family emoji, each one grapheme of several characters, cut to fit: no family is drawn in part.
+#[test]
+fn a_cut_profile_name_never_splits_a_grapheme() {
+    let family = "👨‍👩‍👧";
+    let name = family.repeat(20);
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            (name.as_str(), AgentKind::Shell),
+            ("claude", AgentKind::ClaudeCode),
+        ],
+        name.as_str(),
+    );
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(c.client(), &Screens::new(), 60, 10);
+    let (y, row) = line_with(&buf, "(default)");
+    assert!(row.contains("👧…  shell"), "{row:?}");
+    assert!(row.contains("(default)│"), "{row:?}");
+    for x in buf.area.left()..buf.area.right() {
+        let symbol = buf[(x, y)].symbol();
+        let in_a_family = symbol
+            .chars()
+            .any(|c| matches!(c, '👨' | '👩' | '👧' | '\u{200d}'));
+        assert!(
+            symbol == family || !in_a_family,
+            "{symbol:?} is part of a family: {row:?}"
+        );
+    }
+}
+
+/// A typed path too wide for the input keeps its end in view, the cursor after it.
+#[test]
+fn a_wide_typed_path_keeps_its_end_in_view() {
+    let mut c = two_workspaces();
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath(format!(
+        "{CJK_PATH}/もっと/終わり"
+    )));
+    let terminal = draw(c.client(), &Screens::new(), 80, 24);
+    let buf = terminal.backend().buffer().clone();
+    let (y, _) = line_with(&buf, "/終わり");
+    let cursor = terminal.backend().cursor_position();
+    assert_eq!(cursor.y, y, "the cursor is on the input: {buf:?}");
+    assert_eq!(buf[(cursor.x - 2, cursor.y)].symbol(), "り", "{buf:?}");
+}
+
+/// The sidebar's workspace button is as wide as its label in columns, so a wide name is drawn whole.
+#[test]
+fn a_wide_workspace_name_heads_the_sidebar_whole() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/羊🐑群れ");
+    c.sync();
+    let buf = buffer(c.client(), &Screens::new(), 80, 8);
+    assert!(line_text(&buf, 0).starts_with(" ⌂ 羊🐑群れ "), "{buf:?}");
+}
+
+/// A session with a wide name, from another workspace whose wide name is too long for the row: the name is drawn
+/// with its `×`, and the second line ends in `…` at the border.
+#[test]
+fn sidebar_rows_with_wide_names() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host()
+        .select_workspace("/src/羊飼いのとても長いリポジトリ");
+    c.host().new_session("s1");
+    c.host().rename("s1", "🐑 羊");
+    c.host().worktree_ready("s1");
+    c.host().select_workspace("/src/shepherd");
+    c.sync();
+    let buf = buffer(c.client(), &Screens::new(), 80, 8);
+    let (_, name) = line_with(&buf, "🐑 羊");
+    assert!(name.contains("×│"), "{name:?}");
+    let (_, detail) = line_with(&buf, "in 羊");
+    assert!(detail.contains("…│"), "{detail:?}");
+}

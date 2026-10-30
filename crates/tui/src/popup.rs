@@ -15,6 +15,7 @@ use shepherd_core::client::{Cell, Client, MenuEntry, MenuItem, Popup};
 use shepherd_core::wire::ProfileInfo;
 
 use crate::layout::Target;
+use crate::width::{columns, cut, cut_left, pad, tail};
 
 /// The prefix bindings, as the help lists them.
 pub const BINDINGS: [(&str, &str); 8] = [
@@ -109,7 +110,7 @@ fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
         let y = inside.bottom() - 1;
         let mut end = inside.right().saturating_sub(1);
         for (label, target) in buttons.iter().rev() {
-            let width = label.chars().count() as u16;
+            let width = u16::try_from(columns(label)).unwrap_or(u16::MAX);
             let Some(x) = end.checked_sub(width).filter(|&x| x >= inside.x) else {
                 break;
             };
@@ -146,7 +147,7 @@ fn menu_label(entry: &MenuEntry) -> String {
 fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
     let labels: Vec<String> = entries.iter().map(menu_label).collect();
     // A column after the longest label, and the border.
-    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let longest = labels.iter().map(|l| columns(l)).max().unwrap_or(0);
     let wanted = u16::try_from(longest + 3).unwrap_or(u16::MAX);
     let width = wanted.max(MENU_WIDTH).min(window.width);
     let height = (entries.len() as u16 + 2).min(window.height);
@@ -186,14 +187,14 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
     );
     let inside = inner(placed.area);
     let widest = |width: fn(&ProfileInfo) -> usize| profiles.iter().map(width).max().unwrap_or(0);
-    let agent_width = widest(|p| p.agent.as_str().chars().count());
+    let agent_width = widest(|p| columns(p.agent.as_str()));
     let mark_width = match client.default_profile() {
-        Some(_) => DEFAULT_MARK.chars().count() + 2,
+        Some(_) => columns(DEFAULT_MARK) + 2,
         None => 0,
     };
     // The leading blank, and two blanks after the name.
     let room = usize::from(inside.width).saturating_sub(3 + agent_width + mark_width);
-    let name_width = widest(|p| p.name.chars().count()).min(room.max(1));
+    let name_width = widest(|p| columns(&p.name)).min(room.max(1));
     let rows = (inside.y + 1)..inside.bottom().saturating_sub(1);
     let first = client
         .picker_scroll()
@@ -205,9 +206,9 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
             ""
         };
         let label = format!(
-            " {:<name_width$}  {:<agent_width$}  {mark}",
-            cut(&profile.name, name_width),
-            profile.agent.as_str()
+            " {}  {}  {mark}",
+            pad(&cut(&profile.name, name_width), name_width),
+            pad(profile.agent.as_str(), agent_width)
         );
         placed.controls.push(Control {
             area: Rect::new(inside.x, y, inside.width, 1),
@@ -223,27 +224,6 @@ pub(crate) fn picker_rows(client: &Client, window: Rect) -> usize {
     let placed = pick_profile(client, window);
     // Its border, the prompt and the buttons.
     usize::from(placed.area.height.saturating_sub(4))
-}
-
-/// `text` cut to `width` characters, its last one `…` if any were cut.
-fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
-/// `text` cut to its last `width` characters, its first one `…` if any were cut.
-fn cut_left(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count <= width {
-        return text.to_owned();
-    }
-    let mut cut = String::from('…');
-    cut.extend(text.chars().skip(count - width.saturating_sub(1)));
-    cut
 }
 
 /// The workspace switcher: the workspaces used before under a line saying so, each a whole line of the dialog with
@@ -278,7 +258,7 @@ fn switcher(client: &Client, window: Rect) -> Placed {
         // The leading blank, and the mark after two blanks.
         let room = match mark {
             "" => usize::from(inside.width).saturating_sub(1),
-            mark => usize::from(inside.width).saturating_sub(3 + mark.chars().count()),
+            mark => usize::from(inside.width).saturating_sub(3 + columns(mark)),
         };
         let shown = cut_left(&path.display().to_string(), room.max(1));
         let label = format!(" {shown}  {mark}");
@@ -431,8 +411,7 @@ fn text_input(text: &str, line: Rect, buf: &mut Buffer) -> Option<Position> {
         return None;
     }
     let room = usize::from(line.width - 1);
-    let chars: Vec<char> = text.chars().collect();
-    let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
+    let shown = tail(text, room);
     let (end, _) = buf.set_stringn(line.x, line.y, &shown, room, Style::new());
     Some(Position::new(end, line.y))
 }

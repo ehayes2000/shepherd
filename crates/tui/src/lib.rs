@@ -25,6 +25,7 @@ pub mod layout;
 mod popup;
 mod screen;
 pub mod sidebar;
+mod width;
 
 use std::collections::BTreeMap;
 
