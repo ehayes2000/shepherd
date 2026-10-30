@@ -1,6 +1,11 @@
 //! The client's view state and decisions: connecting to a host, the merged session list, selection, focus and
 //! popups, and turning what the user means into wire messages.
 //!
+//! Attention: a session wants the user when it starts waiting on them (asks permission or input, or goes idle) at
+//! a seq of its log the user hasn't seen. The selected session is seen up to its latest entry, so it is never marked,
+//! and selecting a marked session clears its mark. With the host's `[notify] bell` on, a session that newly wants the
+//! user gives a [`ClientCommand::Alert`], except while the log is being caught up after a (re)connect.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
@@ -105,6 +110,8 @@ pub enum ClientCommand {
     LaunchHost,
     /// Connect to the host. Feed [`ClientEvent::Connected`] or [`ClientEvent::ConnectFailed`].
     Connect,
+    /// Tell the user `session` wants them: the terminal bell and an OSC 9 notification saying `message`.
+    Alert { session: SessionId, message: String },
     /// Stop the client.
     Quit,
 }
@@ -187,7 +194,7 @@ pub struct ClientSession {
     /// Its PTY process has ended.
     pub exited: bool,
     pub activity: Activity,
-    /// It wants the user: blocked on them, or idle since the user last had it selected.
+    /// It wants the user: it started waiting on them (blocked, or idle) since the user last had it selected.
     pub attention: bool,
 }
 
@@ -227,6 +234,8 @@ pub struct Client {
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
     default_profile: Option<String>,
+    /// Alert when a session newly wants the user, from the host's hello answer.
+    bell: bool,
 }
 
 impl Client {
@@ -254,6 +263,7 @@ impl Client {
             notice: None,
             profiles: Vec::new(),
             default_profile: None,
+            bell: false,
         }
     }
 
@@ -297,6 +307,11 @@ impl Client {
     /// The profile a session runs when none is picked, once the host has said.
     pub fn default_profile(&self) -> Option<&str> {
         self.default_profile.as_deref()
+    }
+
+    /// Whether a session that newly wants the user gives a [`ClientCommand::Alert`] (the host's `[notify] bell`).
+    pub fn bell(&self) -> bool {
+        self.bell
     }
 
     /// The latest thing the host refused, for the user.
@@ -447,6 +462,7 @@ impl Client {
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
                 self.set_profiles(ok.profiles, ok.default_profile);
+                self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
                 self.launched = false;
                 let subscribe = Subscribe {
@@ -513,7 +529,32 @@ impl Client {
         if let Some(id) = env.session() {
             self.states.entry(id.clone()).or_default().apply(env);
         }
-        self.refresh()
+        let wanted: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|s| s.attention)
+            .map(|s| s.id.clone())
+            .collect();
+        let mut commands = self.refresh();
+        commands.extend(self.alerts(&wanted));
+        commands
+    }
+
+    /// An alert for each session that wants the user and wasn't in `wanted`, if the bell is on and the client is live.
+    fn alerts(&self, wanted: &[SessionId]) -> Vec<ClientCommand> {
+        // The subscribe is answered once the catch-up is sent: until then the entries are history, not news.
+        let catching_up = self.pending.values().any(|m| *m == Method::Subscribe);
+        if !self.bell || catching_up {
+            return Vec::new();
+        }
+        self.sessions
+            .iter()
+            .filter(|s| s.attention && !wanted.contains(&s.id))
+            .map(|s| ClientCommand::Alert {
+                session: s.id.clone(),
+                message: alert_message(s),
+            })
+            .collect()
     }
 
     /// Rebuilds the list from the folds, keeps the selection valid, and selects a session the user created.
@@ -832,5 +873,18 @@ impl Client {
             return Vec::new();
         }
         vec![self.request(body)]
+    }
+}
+
+/// What an alert about `session` says. It starts with fixed text, so a session's name can never lead it: OSC 9 text
+/// beginning `<digit>;` is a subcommand (progress, cwd) in ConEmu-style terminals.
+fn alert_message(session: &ClientSession) -> String {
+    let name = &session.name;
+    match &session.activity {
+        Activity::NeedsPermission { title } => {
+            format!("shepherd: {name} needs permission: {title}")
+        }
+        Activity::NeedsInput => format!("shepherd: {name} needs input"),
+        _ => format!("shepherd: {name} is idle"),
     }
 }

@@ -175,6 +175,216 @@ fn an_idle_session_wants_attention_until_it_is_selected() {
     assert!(!s1(&c), "seen once selected");
 }
 
+// ---------- attention ----------
+
+fn agent_frame(c: &mut ClientDriver, session: &str, frame: serde_json::Value) {
+    let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    c.host().append(Some(session), hook, frame);
+}
+
+fn ask_permission(c: &mut ClientDriver, session: &str, id: i64) {
+    agent_frame(
+        c,
+        session,
+        json!({ "jsonrpc": "2.0", "id": id, "method": "session/request_permission",
+                "params": { "sessionId": "a1", "toolCall": { "toolCallId": "t1", "title": "rm -rf build" },
+                            "options": [] } }),
+    );
+}
+
+fn go_idle(c: &mut ClientDriver, session: &str) {
+    agent_frame(
+        c,
+        session,
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} }),
+    );
+}
+
+fn start_turn(c: &mut ClientDriver, session: &str, id: i64) {
+    agent_frame(
+        c,
+        session,
+        json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+                "params": { "sessionId": "a1", "prompt": [{ "type": "text", "text": "go" }] } }),
+    );
+}
+
+fn attention(c: &ClientDriver, session: &str) -> bool {
+    c.client()
+        .sessions()
+        .iter()
+        .find(|s| s.id == sid(session))
+        .unwrap_or_else(|| panic!("{session} isn't listed"))
+        .attention
+}
+
+/// The alerts among `commands`: `(session, message)`.
+fn alerts(commands: &[ClientCommand]) -> Vec<(String, String)> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            ClientCommand::Alert { session, message } => {
+                Some((session.to_string(), message.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A live client with sessions `s1` and `s2` (selected), whose host has `[notify] bell = bell`.
+fn live(bell: bool) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    c.connect_live_with_bell(bell);
+    c.host().new_session("s1");
+    c.host().new_session("s2");
+    c.sync();
+    c
+}
+
+#[test]
+fn an_unselected_session_asking_permission_wants_attention_until_it_is_selected() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    start_turn(&mut c, "s1", 1);
+    ask_permission(&mut c, "s1", 7);
+    c.sync();
+    assert!(attention(&c, "s1"), "asked while not selected");
+    c.user(Intent::SelectSession(sid("s1")));
+    assert!(!attention(&c, "s1"), "seen once selected");
+}
+
+#[test]
+fn a_seen_permission_request_does_not_want_attention_again_after_selecting_away() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    start_turn(&mut c, "s1", 1);
+    ask_permission(&mut c, "s1", 7);
+    c.sync();
+    c.user(Intent::SelectSession(sid("s1")));
+    c.user(Intent::SelectSession(sid("s2")));
+    assert!(!attention(&c, "s1"));
+}
+
+#[test]
+fn the_selected_session_asking_permission_is_not_marked() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    start_turn(&mut c, "s2", 1);
+    ask_permission(&mut c, "s2", 7);
+    c.sync();
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    assert!(!attention(&c, "s2"));
+}
+
+#[test]
+fn a_session_going_idle_again_after_a_seen_idle_wants_attention_again() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    go_idle(&mut c, "s1");
+    c.sync();
+    c.user(Intent::SelectSession(sid("s1")));
+    c.user(Intent::SelectSession(sid("s2")));
+    start_turn(&mut c, "s1", 1);
+    go_idle(&mut c, "s1");
+    c.sync();
+    assert!(attention(&c, "s1"));
+}
+
+#[test]
+fn with_the_bell_on_a_session_newly_wanting_attention_alerts() {
+    let mut c = live(true);
+    assert!(c.client().bell());
+    start_turn(&mut c, "s1", 1);
+    ask_permission(&mut c, "s1", 7);
+    let sent = c.sync();
+    assert_eq!(
+        alerts(&sent),
+        [(
+            "s1".into(),
+            "shepherd: shell-1 needs permission: rm -rf build".into()
+        )]
+    );
+}
+
+#[test]
+fn an_alert_starts_with_fixed_text_whatever_the_session_is_called() {
+    // A name like an OSC 9 subcommand (`4;` progress, `9;` cwd in ConEmu-style terminals) must not lead the message.
+    let mut c = live(true);
+    c.host().rename("s1", "4;3;50");
+    c.sync();
+    go_idle(&mut c, "s1");
+    let sent = c.sync();
+    assert_eq!(
+        alerts(&sent),
+        [("s1".into(), "shepherd: 4;3;50 is idle".into())]
+    );
+}
+
+#[test]
+fn an_idle_session_alerts_that_it_is_done() {
+    let mut c = live(true);
+    go_idle(&mut c, "s1");
+    let sent = c.sync();
+    assert_eq!(
+        alerts(&sent),
+        [("s1".into(), "shepherd: shell-1 is idle".into())]
+    );
+}
+
+#[test]
+fn a_session_alerts_once_per_wait() {
+    let mut c = live(true);
+    go_idle(&mut c, "s1");
+    c.sync();
+    // The agent says it's idle again: the same wait, still unseen.
+    go_idle(&mut c, "s1");
+    assert_eq!(alerts(&c.sync()), []);
+}
+
+#[test]
+fn with_the_bell_off_nothing_alerts() {
+    let mut c = live(false);
+    assert!(!c.client().bell());
+    go_idle(&mut c, "s1");
+    assert_eq!(alerts(&c.sync()), []);
+    assert!(attention(&c, "s1"), "still marked");
+}
+
+#[test]
+fn a_host_that_says_nothing_about_notify_leaves_the_bell_off() {
+    let c = ClientDriver::with_sessions(&["s1"]);
+    assert!(!c.client().bell());
+}
+
+#[test]
+fn the_selected_session_does_not_alert() {
+    let mut c = live(true);
+    start_turn(&mut c, "s2", 1);
+    ask_permission(&mut c, "s2", 7);
+    assert_eq!(alerts(&c.sync()), []);
+}
+
+#[test]
+fn the_catch_up_after_connecting_does_not_alert() {
+    let mut c = ClientDriver::new();
+    c.host().new_session("s1");
+    c.host().new_session("s2");
+    go_idle(&mut c, "s1");
+    let answer =
+        json!({ "version": PROTOCOL_VERSION, "machine": "m_test", "notify": { "bell": true } });
+    c.handle(ClientEvent::Start);
+    let hello = c.handle(connected());
+    let subscribe = c.answer(&hello, Ok(answer));
+    // The host replays the log, then answers the subscribe.
+    let replayed = c.sync();
+    assert_eq!(alerts(&replayed), []);
+    assert!(attention(&c, "s1"), "marked, just not alerted");
+    assert_eq!(alerts(&c.answer(&subscribe, Ok(json!({})))), []);
+    // Live from here.
+    start_turn(&mut c, "s1", 1);
+    go_idle(&mut c, "s1");
+    assert_eq!(
+        alerts(&c.sync()),
+        [("s1".into(), "shepherd: shell-1 is idle".into())]
+    );
+}
+
 // ---------- selection ----------
 
 #[test]

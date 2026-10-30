@@ -258,6 +258,24 @@ pub struct HelloOk {
     /// The profile a session without one runs. `None` from a host older than profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
+    /// How the client tells the user a session wants them, from the host's config (the client reads none). Off from
+    /// a host older than notify, and left off the wire while off.
+    #[serde(default, skip_serializing_if = "Notify::is_off")]
+    pub notify: Notify,
+}
+
+/// `notify` in [`HelloOk`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notify {
+    /// Ring the terminal bell (and send an OSC 9 notification) when a session starts wanting the user.
+    #[serde(default)]
+    pub bell: bool,
+}
+
+impl Notify {
+    fn is_off(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl HelloOk {
@@ -272,6 +290,16 @@ impl HelloOk {
                 })
                 .collect(),
             default_profile: Some(config.default_agent().name.clone()),
+            ..self
+        }
+    }
+
+    /// This answer, carrying `config`'s `[notify]` settings.
+    pub fn with_notify(self, config: &Config) -> Self {
+        Self {
+            notify: Notify {
+                bell: config.notify_bell(),
+            },
             ..self
         }
     }
@@ -444,6 +472,7 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
         machine: host_machine.clone(),
         profiles: Vec::new(),
         default_profile: None,
+        notify: Notify::default(),
     })
 }
 

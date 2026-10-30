@@ -13,6 +13,8 @@ pub struct FakeTerminal {
     fail_mouse: bool,
     /// The outer terminal supports the kitty keyboard protocol.
     enhanced: bool,
+    /// The messages of every alert, in order.
+    alerts: Mutex<Vec<String>>,
 }
 
 // Not every test binary uses every constructor.
@@ -56,6 +58,14 @@ impl FakeTerminal {
             .clone()
     }
 
+    /// What each alert said, in order.
+    pub fn alerts(&self) -> Vec<String> {
+        self.alerts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn record(&self, call: &'static str) {
         self.calls
             .lock()
@@ -87,6 +97,14 @@ impl TerminalSetup for FakeTerminal {
 
     fn leave(&self) -> io::Result<()> {
         self.record("leave");
+        Ok(())
+    }
+
+    fn alert(&self, message: &str) -> io::Result<()> {
+        self.alerts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(message.to_owned());
         Ok(())
     }
 

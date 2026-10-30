@@ -51,7 +51,7 @@ macro_rules! config_contract {
 
 use std::collections::BTreeMap;
 
-use shepherd_core::config::{RawAgent, RawDefaults, RawKeys};
+use shepherd_core::config::{RawAgent, RawDefaults, RawKeys, RawNotify};
 use shepherd_core::ports::{ConfigError, ConfigSource, RawConfig};
 
 /// A config both as text and as the `RawConfig` it parses to.
@@ -108,6 +108,9 @@ env = { A = "1", B = "2" }
 
 [keys]
 prefix = "ctrl-a"
+
+[notify]
+bell = true
 "#,
         raw: RawConfig {
             defaults: Some(RawDefaults {
@@ -135,6 +138,7 @@ prefix = "ctrl-a"
             keys: Some(RawKeys {
                 prefix: Some("ctrl-a".into()),
             }),
+            notify: Some(RawNotify { bell: Some(true) }),
         },
     }
 }

@@ -10,6 +10,9 @@
 //! stops the client loop with an error, so a panic on another thread doesn't leave it drawing and `shepherd` exits
 //! non-zero. Signals (SIGTERM, SIGHUP, SIGINT) quit the client loop, which then returns through the guard (see
 //! [`crate::client::forward_signals`]).
+//!
+//! [`Restorer::alert`] tells the user a session wants them (the terminal bell and an OSC 9 notification), only while
+//! the terminal is still ours.
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -43,6 +46,11 @@ pub trait TerminalSetup: Send + Sync {
     /// Whether mouse events come to us or stay with the outer terminal. Turned on after `push_keyboard` and off
     /// before `pop_keyboard`.
     fn set_mouse_capture(&self, on: bool) -> io::Result<()>;
+    /// Gets the user's attention with `message`: rings the bell and posts it as a notification where the terminal
+    /// supports that. A terminal that can't does nothing.
+    fn alert(&self, _message: &str) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Restores the terminal once: later calls do nothing. Cheap to clone and share with a panic hook.
@@ -67,6 +75,14 @@ impl Restorer {
                 let _ = self.setup.pop_keyboard();
             }
             let _ = self.setup.leave();
+        }
+    }
+
+    /// Alerts the user with `message` (see [`TerminalSetup::alert`]), unless the terminal was already restored.
+    pub fn alert(&self, message: &str) {
+        if self.active.load(Ordering::SeqCst) {
+            // An alert that can't be shown is not worth stopping for.
+            let _ = self.setup.alert(message);
         }
     }
 
@@ -190,5 +206,46 @@ impl TerminalSetup for CrosstermSetup {
         } else {
             execute!(io::stdout(), DisableMouseCapture)
         }
+    }
+
+    fn alert(&self, message: &str) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.write_all(&alert_sequence(message))?;
+        out.flush()
+    }
+}
+
+/// The bytes that alert the user with `message`: BEL, then OSC 9 (a desktop notification in iTerm2, kitty, WezTerm,
+/// Ghostty and others; ignored elsewhere) ended by ST. Control characters in `message` are dropped, so it can't end
+/// the sequence early.
+pub fn alert_sequence(message: &str) -> Vec<u8> {
+    let text: String = message.chars().filter(|c| !c.is_control()).collect();
+    format!("\x07\x1b]9;{text}\x1b\\").into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_alert_rings_the_bell_then_posts_the_message_with_osc_9() {
+        assert_eq!(
+            alert_sequence("api is idle"),
+            b"\x07\x1b]9;api is idle\x1b\\"
+        );
+    }
+
+    #[test]
+    fn control_characters_cannot_end_the_alert_early() {
+        assert_eq!(
+            alert_sequence("a\x1b\\b\x07c\nd"),
+            b"\x07\x1b]9;a\\bcd\x1b\\"
+        );
+    }
+
+    #[test]
+    fn c1_control_characters_cannot_end_the_alert_early() {
+        // U+009C is ST and U+009B is CSI where a terminal reads C1 controls.
+        assert_eq!(alert_sequence("a\u{9c}b\u{9b}c"), b"\x07\x1b]9;abc\x1b\\");
     }
 }

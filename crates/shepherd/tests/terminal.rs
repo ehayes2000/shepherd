@@ -185,6 +185,18 @@ fn restoring_early_leaves_only_once() {
 }
 
 #[test]
+fn alerts_reach_the_terminal_only_while_it_is_taken_over() {
+    let terminal = FakeTerminal::new();
+    with_terminal(setup(&terminal), |restorer| {
+        restorer.alert("api is idle");
+        restorer.restore();
+        restorer.alert("docs is idle");
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(terminal.alerts(), ["api is idle"]);
+}
+
+#[test]
 fn keyboard_flags_are_pushed_and_popped_only_where_supported() {
     let terminal = FakeTerminal::new();
     let enhanced = with_terminal(setup(&terminal), |r| r.keyboard_enhanced())

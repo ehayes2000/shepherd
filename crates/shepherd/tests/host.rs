@@ -330,6 +330,23 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
 }
 
 #[test]
+fn hello_tells_the_client_to_ring_the_bell_when_the_config_says_so() {
+    let config = shepherd_core::config::RawConfig {
+        notify: Some(shepherd_core::config::RawNotify { bell: Some(true) }),
+        ..shell_default_config()
+    };
+    let mut h = HostHarness::builder().config(config).start();
+    let mut client = h.connect();
+    let req = client.request(ClientRequest::Hello(Hello {
+        version: PROTOCOL_VERSION,
+        machine: MachineId::new("laptop"),
+    }));
+    h.step();
+    let result = response(&client.take(), &req).expect("hello ok");
+    assert_eq!(result["notify"], json!({ "bell": true }));
+}
+
+#[test]
 fn hello_with_another_version_is_a_version_mismatch() {
     let mut h = HostHarness::new();
     let mut client = h.connect();

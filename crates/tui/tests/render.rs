@@ -178,6 +178,83 @@ fn footer_with_a_notice() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
+/// Four sessions: `api` asked permission and `docs` went idle while unselected (both marked), `tests` went idle and
+/// was looked at since (not marked), and `refactor` (newest, selected) is working.
+fn attention_sessions() -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2", "s3", "s4"]);
+    for (id, name) in [
+        ("s1", "api"),
+        ("s2", "docs"),
+        ("s3", "tests"),
+        ("s4", "refactor"),
+    ] {
+        c.host().rename(id, name);
+    }
+    prompt(&mut c, "s3");
+    idle(&mut c, "s3");
+    c.sync();
+    c.user(Intent::SelectSession(SessionId::new("s3")));
+    c.user(Intent::SelectSession(SessionId::new("s4")));
+    prompt(&mut c, "s1");
+    permission(&mut c, "s1");
+    prompt(&mut c, "s2");
+    idle(&mut c, "s2");
+    prompt(&mut c, "s4");
+    c.sync();
+    c
+}
+
+#[test]
+fn sidebar_with_attention_markers() {
+    let c = attention_sessions();
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 12));
+}
+
+#[test]
+fn clicking_a_marked_row_selects_it_and_clears_its_mark() {
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let mut c = attention_sessions();
+    let buf = buffer(c.client(), &Screens::new(), 80, 12);
+    let api = position_of(&buf, "api");
+    // The mark is the row's first cell.
+    let mark = Position::new(0, api.y);
+    assert_eq!(buf[mark].symbol(), "▌");
+    assert_eq!(buf[mark].fg, Color::Yellow);
+    let window = Rect::new(0, 0, 80, 12);
+    let mut pointer = Pointer::default();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let event = Event::Mouse(MouseEvent {
+            kind,
+            column: mark.x,
+            row: mark.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        for intent in map_event(&event, c.client(), &Modes::default(), window, &mut pointer) {
+            c.user(intent);
+        }
+    }
+    assert_eq!(c.client().selected(), Some(&SessionId::new("s1")));
+    let buf = buffer(c.client(), &Screens::new(), 80, 12);
+    assert_eq!(buf[mark].symbol(), " ", "no mark once selected");
+}
+
+/// Where `text` starts in `buf`. Panics if it isn't drawn.
+fn position_of(buf: &Buffer, text: &str) -> Position {
+    let chars: Vec<String> = text.chars().map(String::from).collect();
+    buf.area
+        .positions()
+        .find(|p| {
+            chars.iter().enumerate().all(|(i, ch)| {
+                let x = p.x + i as u16;
+                x < buf.area.right() && buf[(x, p.y)].symbol() == ch
+            })
+        })
+        .unwrap_or_else(|| panic!("{text:?} not drawn: {buf:?}"))
+}
+
 #[test]
 fn narrow_terminal_collapses_the_sidebar_to_glyphs() {
     let (c, screens) = three_sessions();

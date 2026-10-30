@@ -6,13 +6,15 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
+use serde_json::json;
+use shepherd_core::acpp::{Source, SourceKind};
 use shepherd_core::host::HostCommand;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, Link, LinkEvent};
 use shepherd_core::wire::{
-    ClientMessage, ClientNotification, ClientRequest, HostNotification, HostResponse, HostResult,
-    LogEntry, PtyOutput, Request, SessionResize, decode_client_message, encode_host_notification,
-    encode_response, negotiate,
+    ClientMessage, ClientNotification, ClientRequest, HelloOk, HostNotification, HostResponse,
+    HostResult, LogEntry, Notify, PtyOutput, Request, SessionResize, decode_client_message,
+    encode_host_notification, encode_response, negotiate,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::contracts::link::ChannelSink;
@@ -28,6 +30,8 @@ pub struct FakeHost {
     inputs: Vec<(SessionId, Vec<u8>)>,
     /// Every resize the host was sent, in order.
     resizes: Vec<SessionResize>,
+    /// What its hello answer says about `[notify] bell`.
+    bell: bool,
 }
 
 impl FakeHost {
@@ -45,7 +49,21 @@ impl FakeHost {
             sessions: 0,
             inputs: Vec::new(),
             resizes: Vec::new(),
+            bell: false,
         }
+    }
+
+    /// One whose config has `[notify] bell = true`.
+    pub fn with_bell(self) -> Self {
+        Self { bell: true, ..self }
+    }
+
+    /// The agent in `session` goes idle: its hook's frame is logged and sent to subscribers.
+    pub fn agent_idle(&mut self, session: &str) {
+        let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+        let frame = json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} });
+        let envelope = self.driver.append(Some(session), hook, frame);
+        self.broadcast(&HostNotification::LogEntry(Box::new(LogEntry { envelope })));
     }
 
     pub fn inputs(&self) -> &[(SessionId, Vec<u8>)] {
@@ -105,9 +123,12 @@ impl FakeHost {
     fn request(&mut self, conn: ConnId, Request { id, body }: Request) {
         let before = self.driver.log().len();
         let result = match body {
-            ClientRequest::Hello(hello) => {
-                negotiate(&hello, &MachineId::new("m_test")).map(HostResult::Hello)
-            }
+            ClientRequest::Hello(hello) => negotiate(&hello, &MachineId::new("m_test")).map(|ok| {
+                HostResult::Hello(HelloOk {
+                    notify: Notify { bell: self.bell },
+                    ..ok
+                })
+            }),
             ClientRequest::Subscribe(sub) => {
                 for env in self.driver.log().to_vec() {
                     let from = match env.session() {

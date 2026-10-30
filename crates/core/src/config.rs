@@ -1,4 +1,4 @@
-//! Shepherd's configuration: global defaults, agent profiles and key bindings.
+//! Shepherd's configuration: global defaults, agent profiles, key bindings and notifications.
 //!
 //! A [`ConfigSource`](crate::ports::ConfigSource) yields a [`RawConfig`], the file as written, with every field
 //! optional. [`Config::resolve`] merges it over the built-in defaults and validates it into a [`Config`].
@@ -18,6 +18,7 @@ pub struct RawConfig {
     pub defaults: Option<RawDefaults>,
     pub agents: Option<BTreeMap<String, RawAgent>>,
     pub keys: Option<RawKeys>,
+    pub notify: Option<RawNotify>,
 }
 
 /// `[defaults]`.
@@ -46,6 +47,14 @@ pub struct RawAgent {
 #[serde(deny_unknown_fields)]
 pub struct RawKeys {
     pub prefix: Option<String>,
+}
+
+/// `[notify]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawNotify {
+    /// Ring the terminal bell (and send an OSC 9 notification) when a session starts wanting the user.
+    pub bell: Option<bool>,
 }
 
 // ---------- errors ----------
@@ -169,6 +178,7 @@ pub struct Config {
     default_agent: AgentProfile,
     profiles: BTreeMap<String, AgentProfile>,
     key_prefix: KeyPrefix,
+    notify_bell: bool,
 }
 
 /// The built-in default agent.
@@ -191,6 +201,7 @@ impl Config {
     /// - A profile that is not built in must give `kind` and `command`.
     /// - `[defaults] agent` defaults to `claude` and must name a resulting profile.
     /// - `[keys] prefix` defaults to `ctrl-b` and must be `ctrl-<a..z>` or `ctrl-space`.
+    /// - `[notify] bell` defaults to off.
     pub fn resolve(
         raw: Option<RawConfig>,
         login_shell: Option<String>,
@@ -230,6 +241,7 @@ impl Config {
             default_agent,
             profiles,
             key_prefix,
+            notify_bell: raw.notify.and_then(|n| n.bell).unwrap_or(false),
         })
     }
 
@@ -257,6 +269,11 @@ impl Config {
 
     pub fn key_prefix(&self) -> KeyPrefix {
         self.key_prefix
+    }
+
+    /// Whether a client rings the bell when a session starts wanting the user (`[notify] bell`).
+    pub fn notify_bell(&self) -> bool {
+        self.notify_bell
     }
 }
 
