@@ -9,9 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F22 agent session polish | building | task/f22-agent-session-polish @ cd85430 | 0 | – |
-| T17b profile picker | in review | task/t17b-profile-picker @ b003c1f (on 8b90a96) | 1 | PM-accepted: BeginNewSession intent; optional HelloOk profiles; no client e2e; long lists clipped |
-| F23 kitty push panic | in review | task/f23-kitty-push-panic @ 1a64a4d (on f019c37) | 1 | Not pre-accepted: Handler wrapper (70 forwarded methods), panic-trigger dev feature vs 0012, panic-hook skip |
+| F22 agent session polish | in review | task/f22-agent-session-polish @ 8b98124 (on f019c37) | 1 | PM-accepted: relative cwd refused; global counter; pending_run_files() accessor; sweep race |
+| F23 kitty push panic | fixing (CHANGES) | task/f23-kitty-push-panic @ 1a64a4d | 1 | Wrapper design approved. Blocking: expire_sync path, pop count, guard flag reset, forward set_mouse_cursor_icon + missing_trait_methods lint. PM: host expire_sync guard untested OK; panic-trigger OK (decision 0015) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T17 | 1 | 4 untested defensive lines in run_files (→ F22) |
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
+| T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
 
 ## Milestones
 
@@ -391,6 +391,21 @@ acceptance:
 - Check the same pattern for other alacritty stacks reachable from output (title stack push `CSI 22 t`, etc.) and add a
   regression test for each that holds; report any that panic.
 scope: crates/term, crates/shepherd
+
+### F24: Profile picker polish
+status: todo
+depends: T17b
+touches: tui::popup, tui::keys
+goal: Gaps from the T17b review.
+acceptance:
+- A long profile list scrolls (wheel) instead of being clipped; dialog height uses saturating arithmetic and is capped to the
+  window (no overflow panic for a huge list from the host).
+- The agent and `(default)` columns are sized from the data (like `name_width`), and a long profile name is truncated so
+  `(default)` stays visible.
+- Esc on the picker has a key test (it mirrors the context menu).
+- A client scenario: the fake host sends profiles, a click on `+ New session` then a profile row sends `SessionNew` with
+  that profile.
+scope: crates/tui, crates/shepherd (tests/support fake host)
 
 ## Out of scope for the initial feature set
 
@@ -908,7 +923,7 @@ acceptance:
 scope: crates/core, crates/shepherd
 
 ### T17b: Profile picker
-status: in-progress
+status: done (a18bc42)
 depends: T17, T34
 touches: tui::popup, core::client
 goal: Clicking `+ New session` lets you pick which agent to run (decision 0014).

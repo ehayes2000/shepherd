@@ -248,3 +248,14 @@ bypass (shift-drag in most terminals, option-drag in iTerm2 and Terminal.app); t
 Consequences: snapshot tests show the clickable controls, and each control has a hit-test test that clicks its rendered
 cell. Keyboard-only use keeps working through the existing bindings.
 
+### 0015: Inert test-only fault-injection features are allowed (amends 0012) (2026-10-30)
+Context: F23 needed a way to make `Screen::feed` panic in tests without relying on the alacritty bug. The builder added a
+`panic-trigger` cargo feature on `shepherd-term`, enabled only by the `shepherd` crate's dev-dependencies. Decision 0012 says a
+dev-dependency feature that changes behavior must be on in normal builds or not at all. Normal and release builds of the
+binary (`cargo build`, `cargo install`) don't contain it; `cargo test` leaves a test build of `target/debug/shepherd` that does.
+Decision: a test-only feature is allowed when it is pure fault injection that is inert unless a specific marker input
+arrives, no test passes *because* of it (it only makes failures reachable), and its name says what it is. Features that
+change serialization, defaults or any normal-path behavior remain banned by 0012.
+Consequences: fault-injection tests stay simple. Never ship or smoke-test a binary from `cargo test`'s target dir; the smoke
+script uses `cargo build --release`.
+
