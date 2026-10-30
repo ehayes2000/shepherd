@@ -9,6 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ HEAD | 0 | user priority; modelled on herdr |
 | F32 atomic branch create | building | task/f32-atomic-branch @ eec8843 | 0 | – |
 | T25 close removes worktree | fixing (CHANGES) | task/t25-close-cleanup @ 808391d | 1 | Blocking: Remove-anyway can force-delete unconfirmed new changes; escape test passes via error. Minors: stale status answer, Failed→Keep, is_gone, wording (PM decisions) |
 
@@ -609,6 +610,30 @@ acceptance (spike: findings + a recommended design in docs/architecture.md, no p
 - UX: the client shows "host updated" / "host is older — updating…"; never silently kills sessions unless (c) is the only
   option, and then asks first.
 notes: Follow-ups after the spike: T36a mismatch detection + clear UX (can ship first, small), T36b the chosen swap.
+herdr (github.com/herdrdev/herdr) has a unix-only "live handoff" (`PlatformCapabilities::live_handoff`, src/main.rs,
+src/persist.rs, src/update.rs): read it first; it's likely prior art for (a)/(b).
+
+### T37: Worktree creation has no time cap, runs concurrently, and cancels on close
+status: in-progress (user priority: now)
+depends: T22, F27, F32
+touches: adapters::worktrees, shepherd::host (worker), core::host (close while creating)
+goal: On the user's real repo (macro: large, git-lfs) a new session stuck on "creating worktree…": the 120 s GIT_TIMEOUT
+covers `worktree add`, so a long checkout (LFS smudge) is killed and cleaned up; and the single Worktrees worker made a second
+new session queue behind it. herdr (github.com/herdrdev/herdr, src/worktree.rs + src/app/api/worktrees/deferred.rs) runs
+`git worktree add -b <b> <path> HEAD` with no timeout on its own thread per operation, and it works well.
+acceptance:
+- `worktree add` (and the checkout/LFS work it does) has no time cap. Git still runs non-interactively (no tty, setsid,
+  `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` — already set), so a credential prompt fails instead of hanging.
+  Short metadata calls (rev-parse, show-ref, update-ref, worktree list) keep a generous bound.
+- `fetch` keeps a bound; on timeout or failure the worktree starts from the last fetched `origin/<default>` and the session
+  says so (`fetch_error`, existing Stale/Local base path).
+- Each `create` runs on its own thread (herdr's model), so creations for different sessions run concurrently; the worker
+  for other Worktrees calls stays. A scenario with two held creates proves both start before either finishes (counted).
+- Closing a session whose worktree is being created kills that git process group (wait for it to be gone), runs the
+  existing F08/F25/F32 cleanup (never deleting what isn't ours), and records the close. Test with a create held on a FIFO.
+- No big-repo tests (user decision): prove "no cap" with a create held well past the old bound via an injected fake clock
+  or a held hook, never by size or wall-clock.
+scope: crates/adapters, crates/core, crates/shepherd, crates/testkit
 
 ## Out of scope for the initial feature set
 
