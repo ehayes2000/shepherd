@@ -11,6 +11,7 @@ use shepherd_core::client::{
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::ResumeUnavailable;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::WorktreeError;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::session::Activity;
 use shepherd_core::wire::{
@@ -1962,4 +1963,35 @@ fn picking_a_workspace_used_before_asks_the_host_to_select_it() {
     assert_eq!(bodies(&sent), [select_workspace("/src/a")]);
     c.answer(&sent, Ok(json!({})));
     assert_eq!(c.client().popup(), None);
+}
+
+// ---------- worktrees ----------
+
+#[test]
+fn a_session_shows_while_its_worktree_is_made_and_why_it_failed() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/app");
+    c.host().new_session("s1");
+    c.host().new_session("s2");
+    c.sync();
+    let state = |c: &ClientDriver| -> Vec<(bool, Option<String>)> {
+        c.client()
+            .sessions()
+            .iter()
+            .map(|s| (s.creating_worktree, s.failed.clone()))
+            .collect()
+    };
+    assert_eq!(state(&c), [(true, None), (true, None)]);
+    c.host().worktree_ready("s1");
+    let offline = WorktreeError::FetchFailed("offline".to_owned());
+    c.host().worktree_result("s2", Err(offline));
+    c.sync();
+    // Newest first: s2 failed, s1 runs in its worktree.
+    assert_eq!(
+        state(&c),
+        [
+            (false, Some("fetching origin failed: offline".to_owned())),
+            (false, None)
+        ]
+    );
 }

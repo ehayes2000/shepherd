@@ -13,25 +13,37 @@
 //! its hello) is probed only while no workspace is selected, and selected only if there still is none. Workspaces are
 //! paths as the probe resolved them, compared as paths. Each `session/created` records the workspace it was created in.
 //!
+//! Worktrees: a new session in a workspace, unless the request named its own cwd, gets a worktree of the workspace's
+//! repo, on a branch named after the session ([`naming`]) and started from the origin default. Its `session/created`
+//! records the branch and no cwd, and it is listed at once, waiting ([`ResumeUnavailable::Starting`], no PTY), while
+//! [`HostCommand::CreateWorktree`] runs off the runtime thread. The result comes back as [`HostEvent::WorktreeCreated`]:
+//! the worktree is recorded in `worktree/created`, whose path is the session's cwd from then on (resume uses it), and
+//! the PTY spawns there. A failure is recorded as `session/failed`, and the session stays listed with the reason and no
+//! PTY. A result for a session closed meanwhile is recorded the same way but spawns nothing; a created worktree is left
+//! in place for cleanup to find through its record.
+//!
 //! Host state is only a fold over `_shepherd/*` frames (`docs/acpp.md`, "State is a fold"). [`Host::handle`] reads
 //! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
 //! seals, appends, and hands back to [`Host::apply`].
 
 pub mod launch;
+pub mod naming;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
-    SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
+    SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
+    WorktreeCreated,
 };
 use crate::agents::Translators;
 use crate::config::AgentKind;
 use crate::ids::SessionId;
 use crate::ports::pty::{PtySize, SpawnSpec};
+use crate::ports::worktrees::{BaseSpec, BaseUsed, Created, RepoRef, WorktreeError, WorktreeName};
 use crate::wire::{HostResult, SessionNewOk, WireError};
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
@@ -59,6 +71,8 @@ pub struct NewSessionSpec {
     pub profile: String,
     /// What kind of agent that profile runs, recorded in `session/created`.
     pub agent: AgentKind,
+    /// The client asked for `spawn.cwd`. Otherwise a session in a workspace runs in a new worktree instead.
+    pub explicit_cwd: bool,
     pub spawn: SpawnSpec,
 }
 
@@ -91,6 +105,12 @@ pub enum ResumeUnavailable {
     /// Its PTY is still running.
     #[error("still running")]
     Running,
+    /// It is waiting for its worktree, and its PTY hasn't started yet.
+    #[error("still starting")]
+    Starting,
+    /// It failed to start (`session/failed`): it never ran an agent.
+    #[error("it failed to start")]
+    Failed,
     /// It doesn't run an agent that can resume, e.g. a shell.
     #[error("not an agent session")]
     NotAnAgent,
@@ -170,6 +190,12 @@ pub enum HostEvent {
         ask: WorkspaceAsk,
         repo: Result<PathBuf, String>,
     },
+    /// The answer to a [`HostCommand::CreateWorktree`], with the `spawn` it carried.
+    WorktreeCreated {
+        session: SessionId,
+        spawn: SpawnSpec,
+        result: Result<Created, WorktreeError>,
+    },
 }
 
 /// Something for the runtime to do.
@@ -211,6 +237,16 @@ pub enum HostCommand {
         ask: WorkspaceAsk,
         path: PathBuf,
     },
+    /// Create worktree `name` of `repo` from `base`, and feed the result back as [`HostEvent::WorktreeCreated`] with
+    /// the same `session` and `spawn`: what to spawn once the worktree exists (its cwd is replaced by the worktree's
+    /// path). Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    CreateWorktree {
+        session: SessionId,
+        repo: RepoRef,
+        name: WorktreeName,
+        base: BaseSpec,
+        spawn: SpawnSpec,
+    },
 }
 
 /// A session as [`Host::sessions`] lists it.
@@ -220,12 +256,27 @@ pub struct HostSession {
     pub name: String,
     /// The `ts` of its `session/created` entry.
     pub created: Timestamp,
-    /// Its PTY process has ended.
+    /// Its PTY process has ended, or it failed before one started.
     pub exited: bool,
     /// Whether it can be resumed, see [`Host::resume_target`].
     pub resume: Result<(), ResumeUnavailable>,
     /// The workspace it was created in. `None` if there was none, or it predates workspaces.
     pub workspace: Option<PathBuf>,
+    /// Why it failed to start (`session/failed`), for the user.
+    pub failed: Option<String>,
+    /// It is waiting for its worktree to be made, and has no PTY yet.
+    pub creating_worktree: bool,
+}
+
+/// Where a session is in its life, as far as its PTY goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Phase {
+    /// Waiting for its worktree. No PTY yet.
+    Starting,
+    Running,
+    Exited,
+    /// It never got a PTY, for this reason.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +284,7 @@ struct Entry {
     name: String,
     /// With the session id, orders [`Host::sessions`].
     created: Timestamp,
-    exited: bool,
+    phase: Phase,
     closed: bool,
     /// From `session/created`: what it runs, and how it was started (absent from logs older than resume).
     agent: Option<AgentKind>,
@@ -246,8 +297,11 @@ struct Entry {
 
 impl Entry {
     fn resume_target(&self) -> Result<ResumeTarget, ResumeUnavailable> {
-        if !self.exited {
-            return Err(ResumeUnavailable::Running);
+        match self.phase {
+            Phase::Starting => return Err(ResumeUnavailable::Starting),
+            Phase::Running => return Err(ResumeUnavailable::Running),
+            Phase::Failed(_) => return Err(ResumeUnavailable::Failed),
+            Phase::Exited => {}
         }
         let agent = self
             .agent
@@ -282,6 +336,10 @@ impl Entry {
 /// When something fails in the runtime:
 /// - If [`HostCommand::SpawnPty`] fails, the runtime feeds `HostEvent::PtyExited { session, code: None }`, so the
 ///   session shows as exited and closing it won't send [`HostCommand::KillPty`].
+/// - On start, it feeds the same for every listed session that isn't exited: a PTY never survives a restart, and a
+///   session still waiting for its worktree is failed, since the old host's git call answers nobody.
+/// - If [`HostCommand::CreateWorktree`] can't run (its worker is gone or the call panics), the runtime feeds a
+///   [`HostEvent::WorktreeCreated`] with an error, so the session fails instead of waiting forever.
 /// - If an [`HostCommand::Append`] fails, the runtime skips the rest of that `handle` call's commands. If they
 ///   include a [`HostCommand::Reply`], it sends that reply as `Err(WireError::Internal)` instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -291,6 +349,8 @@ pub struct Host {
     sessions: BTreeMap<SessionId, Entry>,
     /// Every workspace ever selected, the current one (the latest selected) first.
     workspaces: Vec<PathBuf>,
+    /// Every branch a session was given (`session/created`) or got (`worktree/created`), closed sessions' included.
+    branches: BTreeSet<String>,
 }
 
 impl Host {
@@ -307,9 +367,14 @@ impl Host {
                 id: id.clone(),
                 name: e.name.clone(),
                 created: e.created.clone(),
-                exited: e.exited,
+                exited: matches!(e.phase, Phase::Exited | Phase::Failed(_)),
                 resume: e.resume_target().map(|_| ()),
                 workspace: e.workspace.clone(),
+                failed: match &e.phase {
+                    Phase::Failed(reason) => Some(reason.clone()),
+                    _ => None,
+                },
+                creating_worktree: e.phase == Phase::Starting,
             })
             .collect()
     }
@@ -346,23 +411,45 @@ impl Host {
                 let name = spec
                     .name
                     .unwrap_or_else(|| format!("{}-{}", spec.profile, self.sessions.len() + 1));
+                let workspace = self.workspace().and_then(Path::to_str);
+                // A worktree is made in the workspace unless the client chose where to run.
+                let worktree = workspace.filter(|_| !spec.explicit_cwd).map(|repo| {
+                    (
+                        RepoRef::new(repo),
+                        naming::worktree_name(&name, &self.branches),
+                    )
+                });
                 let created = ShepherdFrame::SessionCreated(SessionCreated {
                     name,
-                    workspace: self.workspace().and_then(Path::to_str).map(str::to_owned),
+                    workspace: workspace.map(str::to_owned),
                     worktree: None,
-                    branch: None,
+                    branch: worktree.as_ref().map(|(_, name)| name.as_str().to_owned()),
                     agent: Some(spec.agent.as_str().to_owned()),
                     machine: None,
                     profile: Some(spec.profile),
-                    // A cwd that isn't UTF-8 isn't recorded, so the session can't be resumed.
-                    cwd: spec.spawn.cwd.to_str().map(str::to_owned),
+                    // A worktree session's cwd is its worktree, recorded once it exists. A cwd that isn't UTF-8 isn't
+                    // recorded, so the session can't be resumed.
+                    cwd: match worktree {
+                        Some(_) => None,
+                        None => spec.spawn.cwd.to_str().map(str::to_owned),
+                    },
                 });
-                vec![
-                    append(&id, created),
-                    HostCommand::SpawnPty {
+                let start = match worktree {
+                    Some((repo, name)) => HostCommand::CreateWorktree {
+                        session: id.clone(),
+                        repo,
+                        name,
+                        base: BaseSpec::OriginDefault,
+                        spawn: spec.spawn,
+                    },
+                    None => HostCommand::SpawnPty {
                         session: id.clone(),
                         spec: spec.spawn,
                     },
+                };
+                vec![
+                    append(&id, created),
+                    start,
                     HostCommand::Reply {
                         to: reply,
                         result: Ok(HostResult::SessionNew(SessionNewOk { session: id })),
@@ -385,7 +472,7 @@ impl Host {
                     return vec![unknown_session(reply, session)];
                 };
                 let mut commands = Vec::new();
-                if !entry.exited {
+                if entry.phase == Phase::Running {
                     commands.push(HostCommand::KillPty {
                         session: session.clone(),
                     });
@@ -421,6 +508,13 @@ impl Host {
                     },
                     ack(reply),
                 ]
+            }
+            // The runtime's restart sweep: a session still waiting for its worktree lost it with the old host.
+            HostEvent::PtyExited { session, .. } if self.starting(&session) => {
+                let failed = ShepherdFrame::SessionFailed(SessionFailed {
+                    reason: "the host stopped before the worktree was ready".to_owned(),
+                });
+                vec![append(&session, failed)]
             }
             // Input, resize and exits for a session that isn't running are dropped: notifications are never
             // answered, and a PTY exits once.
@@ -484,7 +578,70 @@ impl Host {
                 vec![HostCommand::ProbeWorkspace { ask, path }]
             }
             HostEvent::WorkspaceProbed { ask, repo } => self.workspace_probed(ask, repo),
+            HostEvent::WorktreeCreated {
+                session,
+                spawn,
+                result,
+            } => self.worktree_created(session, spawn, result),
         }
+    }
+
+    /// Records what came of a session's worktree, and spawns its PTY there if the session is still open. Only a
+    /// session waiting for its worktree takes a result.
+    fn worktree_created(
+        &self,
+        session: SessionId,
+        mut spawn: SpawnSpec,
+        result: Result<Created, WorktreeError>,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.sessions.get(&session) else {
+            return Vec::new();
+        };
+        if entry.phase != Phase::Starting {
+            return Vec::new();
+        }
+        let created = result.and_then(|created| match created.path.as_path().to_str() {
+            Some(path) => Ok((path.to_owned(), created)),
+            None => Err(WorktreeError::Other(format!(
+                "the worktree path {} is not UTF-8",
+                created.path
+            ))),
+        });
+        let (path, created) = match created {
+            Ok(created) => created,
+            Err(error) => {
+                let failed = ShepherdFrame::SessionFailed(SessionFailed {
+                    reason: error.to_string(),
+                });
+                return vec![append(&session, failed)];
+            }
+        };
+        let (base, fetch_error) = match created.base {
+            BaseUsed::Origin { branch } => (format!("origin/{branch}"), None),
+            BaseUsed::Stale {
+                branch,
+                fetch_error,
+            } => (format!("origin/{branch}"), Some(fetch_error)),
+            BaseUsed::Local {
+                branch,
+                fetch_error,
+            } => (branch.to_string(), Some(fetch_error)),
+        };
+        let recorded = ShepherdFrame::WorktreeCreated(WorktreeCreated {
+            path,
+            branch: created.branch.to_string(),
+            base,
+            fetch_error,
+        });
+        let mut commands = vec![append(&session, recorded)];
+        if !entry.closed {
+            spawn.cwd = created.path.as_path().to_path_buf();
+            commands.push(HostCommand::SpawnPty {
+                session,
+                spec: spawn,
+            });
+        }
+        commands
     }
 
     fn workspace_probed(
@@ -541,10 +698,16 @@ impl Host {
                 if self.sessions.contains_key(id) {
                     return;
                 }
+                // A session given a branch but no worktree is waiting for its worktree to be made.
+                let phase = match (&created.branch, &created.worktree) {
+                    (Some(_), None) => Phase::Starting,
+                    _ => Phase::Running,
+                };
+                self.branches.extend(created.branch.iter().cloned());
                 let entry = Entry {
                     name: created.name.clone(),
                     created: env.ts().clone(),
-                    exited: false,
+                    phase,
                     closed: false,
                     agent: created.agent.as_deref().and_then(AgentKind::parse),
                     profile: created.profile.clone(),
@@ -564,15 +727,33 @@ impl Host {
                     entry.closed = true;
                 }
             }
+            ShepherdFrame::WorktreeCreated(worktree) => {
+                self.branches.insert(worktree.branch.clone());
+                if let Some(entry) = self.sessions.get_mut(id)
+                    && entry.phase == Phase::Starting
+                {
+                    entry.phase = Phase::Running;
+                    entry.cwd = Some(PathBuf::from(&worktree.path));
+                }
+            }
+            ShepherdFrame::SessionFailed(failed) => {
+                if let Some(entry) = self.sessions.get_mut(id)
+                    && entry.phase == Phase::Starting
+                {
+                    entry.phase = Phase::Failed(failed.reason.clone());
+                }
+            }
             ShepherdFrame::AgentExited(_) if env.source().kind == SourceKind::Shepherd => {
-                if let Some(entry) = self.sessions.get_mut(id) {
-                    entry.exited = true;
+                if let Some(entry) = self.sessions.get_mut(id)
+                    && entry.phase == Phase::Running
+                {
+                    entry.phase = Phase::Exited;
                 }
             }
             ShepherdFrame::AgentStarted(started) => {
                 if let Some(entry) = self.sessions.get_mut(id) {
-                    if env.source().kind == SourceKind::Shepherd {
-                        entry.exited = false;
+                    if env.source().kind == SourceKind::Shepherd && entry.phase == Phase::Exited {
+                        entry.phase = Phase::Running;
                     }
                     if let Some(agent_session) = &started.agent_session_id {
                         entry.agent_session_id = Some(agent_session.clone());
@@ -588,9 +769,14 @@ impl Host {
         self.sessions.get(id).filter(|e| !e.closed)
     }
 
-    /// An open session whose PTY hasn't exited.
+    /// An open session whose PTY is running.
     fn running(&self, id: &SessionId) -> bool {
-        self.open(id).is_some_and(|e| !e.exited)
+        self.open(id).is_some_and(|e| e.phase == Phase::Running)
+    }
+
+    /// An open session waiting for its worktree.
+    fn starting(&self, id: &SessionId) -> bool {
+        self.open(id).is_some_and(|e| e.phase == Phase::Starting)
     }
 }
 

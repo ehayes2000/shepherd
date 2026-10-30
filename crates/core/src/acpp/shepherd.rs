@@ -16,6 +16,7 @@ pub enum ShepherdFrame {
     SessionCreated(SessionCreated),
     SessionRenamed(SessionRenamed),
     SessionClosed(SessionClosed),
+    SessionFailed(SessionFailed),
     AgentStarted(AgentStarted),
     AgentIdle(AgentIdle),
     AgentExited(AgentExited),
@@ -30,6 +31,7 @@ impl ShepherdFrame {
             Self::SessionCreated(_) => "_shepherd/session/created",
             Self::SessionRenamed(_) => "_shepherd/session/renamed",
             Self::SessionClosed(_) => "_shepherd/session/closed",
+            Self::SessionFailed(_) => "_shepherd/session/failed",
             Self::AgentStarted(_) => "_shepherd/agent/started",
             Self::AgentIdle(_) => "_shepherd/agent/idle",
             Self::AgentExited(_) => "_shepherd/agent/exited",
@@ -46,6 +48,7 @@ impl ShepherdFrame {
             Self::SessionCreated(p) => to_params(p),
             Self::SessionRenamed(p) => to_params(p),
             Self::SessionClosed(p) => to_params(p),
+            Self::SessionFailed(p) => to_params(p),
             Self::AgentStarted(p) => to_params(p),
             Self::AgentIdle(p) => to_params(p),
             Self::AgentExited(p) => to_params(p),
@@ -66,6 +69,7 @@ impl ShepherdFrame {
             "_shepherd/session/created" => Self::SessionCreated(p(params)?),
             "_shepherd/session/renamed" => Self::SessionRenamed(p(params)?),
             "_shepherd/session/closed" => Self::SessionClosed(p(params)?),
+            "_shepherd/session/failed" => Self::SessionFailed(p(params)?),
             "_shepherd/agent/started" => Self::AgentStarted(p(params)?),
             "_shepherd/agent/idle" => Self::AgentIdle(p(params)?),
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
@@ -119,6 +123,13 @@ pub struct SessionClosed {
     pub worktree_removed: bool,
 }
 
+/// The session couldn't start: its PTY never spawned, e.g. because its worktree couldn't be made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFailed {
+    /// Why, for the user.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStarted {
     pub agent: String,
@@ -147,7 +158,11 @@ pub struct AgentExited {
 pub struct WorktreeCreated {
     pub path: String,
     pub branch: String,
+    /// What the branch started from: `origin/<default>`, or the local `<default>` when origin had none.
     pub base: String,
+    /// Set when fetching origin failed, so `base` is as of the last fetch (or local) and may be behind origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -431,6 +431,8 @@ fn pty_exit_appends_agent_exited() {
             exited: true,
             resume: Err(ResumeUnavailable::NotAnAgent),
             workspace: None,
+            failed: None,
+            creating_worktree: false,
         }]
     );
 }
@@ -1195,7 +1197,8 @@ fn new_sessions_record_the_current_workspace() {
         append(
             "s2",
             "_shepherd/session/created",
-            json!({ "name": "shell-2", "workspace": "/src/app", "agent": "shell", "profile": "shell", "cwd": "/home/test" })
+            // In a workspace it gets a worktree (T22): a branch now, its cwd once the worktree exists.
+            json!({ "name": "shell-2", "workspace": "/src/app", "branch": "shell-2", "agent": "shell", "profile": "shell" })
         )
     );
     let workspaces: Vec<Option<PathBuf>> = host

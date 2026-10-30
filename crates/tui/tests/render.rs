@@ -786,6 +786,8 @@ fn status_glyphs_follow_the_documented_table() {
         resume: Ok(()),
         workspace: None,
         elsewhere: false,
+        creating_worktree: false,
+        failed: None,
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),
@@ -815,7 +817,7 @@ fn status_glyphs_follow_the_documented_table() {
 // ---------- workspaces ----------
 
 /// `login` was started in `/src/api`; then `/src/shepherd` was selected and `docs` and `refactor` (newest, selected)
-/// started there.
+/// started there. Each runs in its worktree.
 fn two_workspaces() -> ClientDriver {
     let mut c = ClientDriver::with_sessions(&[]);
     c.host().select_workspace("/src/api");
@@ -826,8 +828,28 @@ fn two_workspaces() -> ClientDriver {
     c.host().rename("s2", "docs");
     c.host().new_session("s3");
     c.host().rename("s3", "refactor");
+    for id in ["s1", "s2", "s3"] {
+        c.host().worktree_ready(id);
+    }
     c.sync();
     c
+}
+
+#[test]
+fn a_session_making_its_worktree_and_one_whose_worktree_failed() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/shepherd");
+    c.host().new_session("s1");
+    c.host().rename("s1", "docs");
+    c.host().new_session("s2");
+    c.host().rename("s2", "refactor");
+    let error = shepherd_core::ports::WorktreeError::FetchFailed(
+        "could not resolve host: github.com".to_owned(),
+    );
+    c.host().worktree_result("s2", Err(error));
+    c.sync();
+    // The reason is cut to the row's width.
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 8));
 }
 
 #[test]

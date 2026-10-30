@@ -30,8 +30,9 @@ use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 
 /// The login shell the harness's config resolves the `shell` profile to.
 pub const SHELL: &str = "/bin/fake-sh";
-/// The home directory new sessions start in.
-pub const HOME: &str = "/home/test";
+/// The home directory new sessions start in. It must exist, since the host refuses to spawn in a missing directory;
+/// the fake PTY never writes into it, so any existing directory does: this crate's.
+pub const HOME: &str = env!("CARGO_MANIFEST_DIR");
 /// The `shepherd` executable the host writes into agents' hook settings.
 pub const SHEPHERD_EXE: &str = "/opt/shepherd/bin/shepherd";
 /// The host socket the host tells agents about.

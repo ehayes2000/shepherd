@@ -21,6 +21,9 @@ pub mod builders {
     };
     use shepherd_core::ids::{MachineId, SessionId};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
+    use shepherd_core::ports::worktrees::{
+        BaseUsed, BranchName, Created, WorktreeError, WorktreePath,
+    };
     use shepherd_core::wire::{
         ClientMessage, ClientNotification, HostMessage, HostNotification, LogEntry,
         PROTOCOL_VERSION, RawResponse, Request, WireError,
@@ -269,6 +272,33 @@ pub mod builders {
             })
         }
 
+        /// The worktree result for session `id`, as the runtime feeds it back, with [`shell_spawn`] as its spawn.
+        pub fn worktree_result(
+            &mut self,
+            id: &str,
+            result: Result<Created, WorktreeError>,
+        ) -> Vec<HostCommand> {
+            self.handle(HostEvent::WorktreeCreated {
+                session: SessionId::new(id),
+                spawn: shell_spawn(),
+                result,
+            })
+        }
+
+        /// A worktree made for session `id` at `/wt/<id>`, on branch `<id>` from `origin/main`.
+        pub fn worktree_ready(&mut self, id: &str) -> Vec<HostCommand> {
+            self.worktree_result(
+                id,
+                Ok(Created {
+                    path: WorktreePath::new(format!("/wt/{id}")),
+                    branch: BranchName::new(id),
+                    base: BaseUsed::Origin {
+                        branch: BranchName::new("main"),
+                    },
+                }),
+            )
+        }
+
         pub fn pty_exited(&mut self, id: &str, code: Option<i32>) -> Vec<HostCommand> {
             self.handle(HostEvent::PtyExited {
                 session: SessionId::new(id),
@@ -468,6 +498,7 @@ pub mod builders {
             name: None,
             profile: "shell".to_owned(),
             agent: AgentKind::Shell,
+            explicit_cwd: false,
             spawn: shell_spawn(),
         }
     }
@@ -478,6 +509,7 @@ pub mod builders {
             name: None,
             profile: "claude".to_owned(),
             agent: AgentKind::ClaudeCode,
+            explicit_cwd: false,
             spawn: SpawnSpec {
                 command: "claude".to_owned(),
                 ..shell_spawn()

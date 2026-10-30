@@ -18,12 +18,14 @@
 //! - **Replies.** Each request turned into a [`HostEvent`] gets a [`ReplyTo`] that maps back to its connection and
 //!   JSON-RPC id.
 //! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
-//!   A command that needs it (a workspace probe) is submitted there and the loop carries on; the result comes back
-//!   as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still matters.
+//!   A command that needs it (a workspace probe, a new session's worktree) is submitted there and the loop carries
+//!   on; the result comes back as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still
+//!   matters.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
-//!   `session/closed` is appended. At startup, when no PTY is running, every leftover run directory is swept. A
+//!   `session/closed` is appended. A session waiting for its worktree keeps its files until the result comes back
+//!   (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -46,7 +48,7 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
-    PtyEventSink, PtySize, RepoRef, Worktrees,
+    PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -260,6 +262,8 @@ pub struct HostRuntime<P, W, L, E, V> {
     hook_seed: Option<String>,
     /// Run files of sessions being created, written just before their PTY is spawned.
     pending_run_files: HashMap<SessionId, Vec<RunFile>>,
+    /// Sessions whose worktree is being created, with the run files their spawn will write.
+    awaiting_worktree: HashMap<SessionId, Vec<RunFile>>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
     finished: bool,
@@ -310,6 +314,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             translators: Translators::new(),
             hook_seed: None,
             pending_run_files: HashMap::new(),
+            awaiting_worktree: HashMap::new(),
             shutdown_by: None,
             finished: false,
         };
@@ -343,9 +348,10 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         &self.translators
     }
 
-    /// How many sessions have run files waiting for their spawn. Zero between requests.
+    /// How many sessions have run files waiting for their spawn, those waiting for their worktree included. Zero
+    /// when no session is waiting.
     pub fn pending_run_files(&self) -> usize {
-        self.pending_run_files.len()
+        self.pending_run_files.len() + self.awaiting_worktree.len()
     }
 
     pub fn pty(&self) -> &P {
@@ -468,7 +474,13 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             }
             RuntimeEvent::Worktrees(event) => {
                 self.worktree_calls = self.worktree_calls.saturating_sub(1);
-                self.dispatch(event);
+                match &event {
+                    HostEvent::WorktreeCreated { session, .. } => {
+                        let session = session.clone();
+                        self.worktree_created(session, event);
+                    }
+                    _ => self.dispatch(event),
+                }
             }
             RuntimeEvent::Shutdown => self.start_shutdown(),
         }
@@ -508,11 +520,15 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 }
                 HostCommand::SpawnPty { session, spec } => {
                     let size = spec.size;
-                    let spawned = self.write_run_files(&session).and_then(|()| {
-                        self.pty
-                            .spawn(session.clone(), spec)
-                            .map_err(|e| e.to_string())
-                    });
+                    // Every spawn's cwd is checked: the PTY would silently start in the home directory instead.
+                    let spawned = existing_dir(&spec.cwd)
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| self.write_run_files(&session))
+                        .and_then(|()| {
+                            self.pty
+                                .spawn(session.clone(), spec)
+                                .map_err(|e| e.to_string())
+                        });
                     match spawned {
                         Ok(()) => {
                             self.screens
@@ -562,8 +578,57 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         }
                     }
                 }
+                HostCommand::CreateWorktree {
+                    session,
+                    repo,
+                    name,
+                    base,
+                    spawn,
+                } => {
+                    // Its run files wait with it, for the spawn the result may bring.
+                    let files = self.pending_run_files.remove(&session).unwrap_or_default();
+                    self.awaiting_worktree.insert(session.clone(), files);
+                    let panicked = HostEvent::WorktreeCreated {
+                        session: session.clone(),
+                        spawn: spawn.clone(),
+                        result: Err(WorktreeError::Other(format!(
+                            "creating worktree {name} failed unexpectedly"
+                        ))),
+                    };
+                    let call = move |worktrees: &W| HostEvent::WorktreeCreated {
+                        result: worktrees.create(&repo, &name, base),
+                        session,
+                        spawn,
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            // Nothing will spawn: its run files go with the failure.
+                            if let HostEvent::WorktreeCreated { session, .. } = &*unanswered {
+                                self.awaiting_worktree.remove(session);
+                            }
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Hands a session's worktree result (`event`) to core, with the run files that waited for it ready for its spawn.
+    fn worktree_created(&mut self, session: SessionId, event: HostEvent) {
+        let files = self.awaiting_worktree.remove(&session).unwrap_or_default();
+        if !files.is_empty() {
+            self.pending_run_files.insert(session.clone(), files);
+        }
+        let closed = self.host.resume_target(&session).is_none();
+        if let (true, HostEvent::WorktreeCreated { result: Ok(c), .. }) = (closed, &event) {
+            tracing::info!(%session, path = %c.path, "worktree made for a session closed meanwhile; left for cleanup");
+        }
+        self.dispatch(event);
+        // Left over only if nothing was spawned.
+        self.pending_run_files.remove(&session);
     }
 
     /// After a failed append: skips the rest of the batch, answering its replies with an error.
@@ -863,17 +928,14 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             WireError::InvalidParams(format!("unknown profile `{}`", name.unwrap_or_default()))
         })?;
         let cwd = match (new.cwd.as_deref(), self.host.workspace()) {
-            (Some(cwd), _) => existing_dir(cwd)?,
-            // Checked like a requested cwd: the PTY would silently start in the home directory instead.
-            (None, Some(workspace)) => workspace
-                .to_str()
-                .and_then(|w| existing_dir(w).ok())
-                .ok_or_else(|| {
-                    WireError::InvalidParams(format!(
-                        "the workspace {} no longer exists; choose another",
-                        workspace.display()
-                    ))
-                })?,
+            (Some(cwd), _) => existing_dir(Path::new(cwd))?,
+            // Checked here too, to say which workspace is gone; the spawn checks every cwd again.
+            (None, Some(workspace)) => existing_dir(workspace).map_err(|_| {
+                WireError::InvalidParams(format!(
+                    "the workspace {} no longer exists; choose another",
+                    workspace.display()
+                ))
+            })?,
             (None, None) => self.settings.home.clone(),
         };
         let ctx = LaunchContext {
@@ -889,6 +951,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             name: None,
             profile: profile.name.clone(),
             agent: profile.kind,
+            explicit_cwd: new.cwd.is_some(),
             spawn: launch.spawn,
         };
         Ok((spec, launch.files))
@@ -922,18 +985,13 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                     target.profile
                 ))
             })?;
-        // Checked as for a new session: the PTY would silently start a missing directory's agent in the home
-        // directory instead.
-        let cwd = target
-            .cwd
-            .to_str()
-            .and_then(|cwd| existing_dir(cwd).ok())
-            .ok_or_else(|| {
-                WireError::InvalidParams(format!(
-                    "can't resume {session}: {} no longer exists",
-                    target.cwd.display()
-                ))
-            })?;
+        // Checked here too, so the client hears why it can't resume; the spawn checks every cwd again.
+        let cwd = existing_dir(&target.cwd).map_err(|_| {
+            WireError::InvalidParams(format!(
+                "can't resume {session}: {} no longer exists",
+                target.cwd.display()
+            ))
+        })?;
         let ctx = LaunchContext {
             session: session.clone(),
             cwd,
@@ -1251,15 +1309,15 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 
 /// `cwd` as a directory a session can start in: absolute, since a client can't know where the host started, and an
 /// existing directory.
-fn existing_dir(cwd: &str) -> Result<PathBuf, WireError> {
-    let path = PathBuf::from(cwd);
+fn existing_dir(path: &Path) -> Result<PathBuf, WireError> {
+    let cwd = path.display();
     if !path.is_absolute() {
         return Err(WireError::InvalidParams(format!(
             "cwd `{cwd}` is not an absolute path"
         )));
     }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_dir() => Ok(path),
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(path.to_path_buf()),
         Ok(_) => Err(WireError::InvalidParams(format!(
             "cwd `{cwd}` is not a directory"
         ))),

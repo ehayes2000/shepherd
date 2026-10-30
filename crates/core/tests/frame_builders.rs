@@ -10,7 +10,7 @@ use shepherd_core::acpp::acp::{
 };
 use shepherd_core::acpp::{
     AgentExited, AgentIdle, AgentStarted, Correlated, Dir, Frame, PendingRequests, RequestId,
-    SessionClosed, SessionCreated, SessionRenamed, ShepherdFrame, WorkspaceSelected,
+    SessionClosed, SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame, WorkspaceSelected,
     WorktreeCreated, WorktreeHook,
 };
 use shepherd_core::ids::MachineId;
@@ -466,6 +466,7 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
         any::<bool>().prop_map(
             |worktree_removed| ShepherdFrame::SessionClosed(SessionClosed { worktree_removed })
         ),
+        arb_string().prop_map(|reason| ShepherdFrame::SessionFailed(SessionFailed { reason })),
         (
             arb_string(),
             arb_opt_string(),
@@ -486,9 +487,16 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             proptest::option::of(any::<i32>())
         )
             .prop_map(|(code, signal)| ShepherdFrame::AgentExited(AgentExited { code, signal })),
-        (arb_string(), arb_string(), arb_string()).prop_map(|(path, branch, base)| {
-            ShepherdFrame::WorktreeCreated(WorktreeCreated { path, branch, base })
-        }),
+        (arb_string(), arb_string(), arb_string(), arb_opt_string()).prop_map(
+            |(path, branch, base, fetch_error)| {
+                ShepherdFrame::WorktreeCreated(WorktreeCreated {
+                    path,
+                    branch,
+                    base,
+                    fetch_error,
+                })
+            }
+        ),
         (
             arb_string(),
             proptest::option::of(any::<i32>()),

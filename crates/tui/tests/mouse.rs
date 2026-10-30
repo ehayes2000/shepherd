@@ -1371,6 +1371,8 @@ fn sessions_from_another_workspace_are_dimmed_and_say_which() {
     c.host().select_workspace("/src/api");
     c.host().new_session("s2");
     c.host().rename("s2", "name-02");
+    // Running in its worktree, so line 2 isn't `creating worktree…`.
+    c.host().worktree_ready("s2");
     c.host().select_workspace("/src/shepherd");
     c.sync();
     let buf = buffer(&c, WIDE);

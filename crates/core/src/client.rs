@@ -245,6 +245,10 @@ pub struct ClientSession {
     pub workspace: Option<PathBuf>,
     /// It was created in a workspace other than the current one.
     pub elsewhere: bool,
+    /// It is waiting for its worktree to be made.
+    pub creating_worktree: bool,
+    /// Why it failed to start, e.g. its worktree couldn't be made.
+    pub failed: Option<String>,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -758,6 +762,8 @@ impl Client {
                         _ => false,
                     },
                     workspace: s.workspace,
+                    creating_worktree: s.creating_worktree,
+                    failed: s.failed,
                 }
             })
             .collect();
