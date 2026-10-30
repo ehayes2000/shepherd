@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | in review | task/t37-worktree-nocap @ 8934970 (on 2609fd7) | 1 | PM-accepted: Worktrees::cancel_create + Cancelled; run_alone per create; narrowed repo lock. Builder disclosed one squashed --no-verify WIP commit |
-| T36a build id + mismatch UX | fixing (CHANGES) | task/t36a-build-id @ 1c19ec0 | 1 | Blocking: stale restart dialog survives reconnect; terminate doesn't validate socket path/dir/peer uid; leaking test stand-in. PM: make Incompatible/-32601 reopen the dialog |
+| T36a build id + mismatch UX | re-review | task/t36a-build-id @ cd20f9e (on 1a972e4) | 2 | dialog cleared on drop/hello; terminate validates dir/socket/peer uid; ChildGuard; footer Restart host |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
