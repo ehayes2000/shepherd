@@ -8,7 +8,7 @@ use shepherd_core::client::{Focus, Intent};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
-use shepherd_tui::{layout, map_event, map_key};
+use shepherd_tui::{Pointer, layout, map_event, map_key};
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -246,18 +246,22 @@ fn any_key_closes_the_help() {
 const WINDOW: Rect = Rect::new(0, 0, 100, 30);
 
 fn events(c: &ClientDriver, event: Event, modes: Modes) -> Vec<Intent> {
-    map_event(&event, c.client(), &modes, WINDOW)
+    map_event(&event, c.client(), &modes, WINDOW, &mut Pointer::default())
 }
 
 #[test]
-fn a_resize_reports_the_sessions_pane_size() {
+fn a_resize_reports_the_sessions_pane_size_and_how_many_sessions_the_sidebar_shows() {
     let pane = layout(Rect::new(0, 0, 120, 40)).pane;
     assert_eq!(
         events(&client(), Event::Resize(120, 40), Modes::default()),
-        [Intent::Resize(PtySize {
-            cols: pane.width,
-            rows: pane.height
-        })]
+        [
+            Intent::Resize(PtySize {
+                cols: pane.width,
+                rows: pane.height
+            }),
+            // 40 lines: the header, the footer, and 19 sessions of two lines.
+            Intent::SidebarRows(19),
+        ]
     );
 }
 

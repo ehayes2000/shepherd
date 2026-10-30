@@ -1,12 +1,16 @@
 //! The session list on the left.
 //!
-//! Each session is two lines: its status glyph and name, then `machine · PR` (placeholders until M3 / M4). The
-//! selected session has a highlighted background, and a session that wants the user has a yellow bar on its left
-//! edge. The newest session is at the top, and the list scrolls to keep the selected one visible. The last line is a
-//! footer: the prefix while it's pending, else the latest notice, else a reconnecting note, else a hint for help.
+//! The first line is the header: a `+ New session` button (`+` when collapsed). Each session is two lines: its
+//! status glyph and name, then `machine · PR` (placeholders until M3 / M4). The selected session has a highlighted
+//! background, and a session that wants the user has a yellow bar on its left edge. The newest session is at the top.
+//! The list starts at the client's [`Client::sidebar_scroll`], which keeps the selected session visible when the
+//! selection changes and follows the wheel otherwise. The last line is a footer: the prefix while it's pending, else
+//! the latest notice, else a reconnecting note, else a hint for help.
 //!
-//! Collapsed (narrow windows), only the attention bar and glyph are drawn, and the footer shows `^B` while the prefix
-//! is pending.
+//! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, and the footer shows `^B` while
+//! the prefix is pending.
+//!
+//! [`crate::hit`] reads the same geometry ([`new_session_button`], [`visible_rows`]) that drawing uses.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -39,6 +43,68 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
     }
 }
 
+/// The button's label, and the collapsed sidebar's.
+const NEW_SESSION: &str = "+ New session";
+const NEW_SESSION_COLLAPSED: &str = "+";
+
+/// The sidebar left of its border.
+fn inner(layout: &Layout) -> Rect {
+    let area = layout.sidebar;
+    Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+}
+
+/// Where the `+ New session` button is: its label, on the header line.
+pub(crate) fn new_session_button(layout: &Layout) -> Rect {
+    let inner = inner(layout);
+    if inner.width < 2 || inner.height == 0 {
+        return Rect::default();
+    }
+    let label = if layout.collapsed {
+        NEW_SESSION_COLLAPSED
+    } else {
+        NEW_SESSION
+    };
+    let width = (label.chars().count() as u16).min(inner.width - 1);
+    Rect::new(inner.x + 1, inner.y, width, 1)
+}
+
+/// The session rows, between the header line and the footer line.
+fn list(layout: &Layout) -> Rect {
+    let inner = inner(layout);
+    Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(2),
+    )
+}
+
+/// How many sessions the sidebar of `layout` shows at once.
+pub(crate) fn capacity(layout: &Layout) -> usize {
+    let list = list(layout);
+    if list.width < 2 {
+        return 0;
+    }
+    usize::from(list.height / ROW_HEIGHT)
+}
+
+/// Each session shown, as its index in the client's list and its two lines, top to bottom, from the client's scroll.
+pub(crate) fn visible_rows(
+    client: &Client,
+    layout: &Layout,
+) -> impl Iterator<Item = (usize, Rect)> {
+    let list = list(layout);
+    let visible = capacity(layout);
+    let len = client.sessions().len();
+    let first = client.sidebar_scroll().min(len.saturating_sub(visible));
+    (first..len.min(first + visible))
+        .zip(0u16..)
+        .map(move |(index, slot)| {
+            let y = list.y + slot * ROW_HEIGHT;
+            (index, Rect::new(list.x, y, list.width, ROW_HEIGHT))
+        })
+}
+
 pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     let area = layout.sidebar;
     if area.width == 0 || area.height == 0 {
@@ -48,33 +114,23 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     for y in area.top()..area.bottom() {
         buf[(area.right() - 1, y)].set_symbol("│").set_style(border);
     }
-    // The area left of the border.
-    let inner = Rect::new(area.x, area.y, area.width - 1, area.height);
-    if layout.collapsed {
-        render_collapsed(client, inner, buf);
+    let button = new_session_button(layout);
+    let label = if layout.collapsed {
+        NEW_SESSION_COLLAPSED
     } else {
-        render_full(client, inner, buf);
+        NEW_SESSION
+    };
+    let style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    buf.set_stringn(button.x, button.y, label, usize::from(button.width), style);
+    if layout.collapsed {
+        render_collapsed(client, layout, buf);
+    } else {
+        render_full(client, layout, buf);
     }
 }
 
-fn render_full(client: &Client, area: Rect, buf: &mut Buffer) {
-    buf.set_stringn(
-        area.x + 1,
-        area.y,
-        "shepherd",
-        usize::from(area.width.saturating_sub(1)),
-        Style::new().add_modifier(Modifier::BOLD),
-    );
-    if area.height < 2 {
-        return;
-    }
-    let list = Rect::new(
-        area.x,
-        area.y + 1,
-        area.width,
-        area.height.saturating_sub(2),
-    );
-    rows(client, list, buf, |session, selected, line, buf| {
+fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
+    rows(client, layout, buf, |session, selected, line, buf| {
         let width = usize::from(line.width.saturating_sub(3));
         let mut style = Style::new();
         if selected {
@@ -86,20 +142,23 @@ fn render_full(client: &Client, area: Rect, buf: &mut Buffer) {
         let detail = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
         buf.set_stringn(line.x + 3, line.y + 1, PLACEHOLDER_DETAIL, width, detail);
     });
-    footer(
-        client,
-        Rect::new(area.x, area.bottom() - 1, area.width, 1),
-        buf,
-    );
+    let area = inner(layout);
+    if area.height >= 2 {
+        footer(
+            client,
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            buf,
+        );
+    }
 }
 
-fn render_collapsed(client: &Client, area: Rect, buf: &mut Buffer) {
-    let list = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
-    rows(client, list, buf, |session, _, line, buf| {
+fn render_collapsed(client: &Client, layout: &Layout, buf: &mut Buffer) {
+    rows(client, layout, buf, |session, _, line, buf| {
         let (symbol, color) = glyph(session);
         buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
     });
-    if client.focus() == Focus::Command && area.height > 0 {
+    let area = inner(layout);
+    if client.focus() == Focus::Command && area.height >= 2 {
         let style = Style::new().add_modifier(Modifier::REVERSED);
         buf.set_stringn(
             area.x,
@@ -114,35 +173,25 @@ fn render_collapsed(client: &Client, area: Rect, buf: &mut Buffer) {
 /// Draws each visible session's two lines with `draw`, after the selection highlight and attention bar.
 fn rows(
     client: &Client,
-    area: Rect,
+    layout: &Layout,
     buf: &mut Buffer,
     mut draw: impl FnMut(&ClientSession, bool, Rect, &mut Buffer),
 ) {
-    let visible = usize::from(area.height / ROW_HEIGHT);
-    if visible == 0 || area.width < 2 {
-        return;
-    }
     let sessions = client.sessions();
-    let selected = client
-        .selected()
-        .and_then(|id| sessions.iter().position(|s| &s.id == id));
-    let offset = selected.map_or(0, |i| (i + 1).saturating_sub(visible));
-    for (slot, (index, session)) in sessions
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible)
-        .enumerate()
-    {
-        let y = area.y + slot as u16 * ROW_HEIGHT;
-        let line = Rect::new(area.x, y, area.width, ROW_HEIGHT);
-        let is_selected = selected == Some(index);
+    for (index, line) in visible_rows(client, layout) {
+        let session = &sessions[index];
+        let is_selected = client.selected() == Some(&session.id);
         if is_selected {
             buf.set_style(line, Style::new().bg(SELECTED_BG));
         }
         if session.attention {
             for dy in 0..ROW_HEIGHT {
-                buf.set_string(line.x, y + dy, ATTENTION_BAR, Style::new().fg(ATTENTION));
+                buf.set_string(
+                    line.x,
+                    line.y + dy,
+                    ATTENTION_BAR,
+                    Style::new().fg(ATTENTION),
+                );
             }
         }
         draw(session, is_selected, line, buf);

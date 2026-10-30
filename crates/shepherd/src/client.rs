@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::Event;
 use ratatui::layout::Rect;
-use shepherd_term::MouseTracking;
-use shepherd_tui::{Screens, from_legacy_terminal, map_event};
+use shepherd_tui::{Pointer, Screens, from_legacy_terminal, map_event};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
@@ -145,20 +144,14 @@ pub trait View {
     fn draw(&mut self, client: &Client, screens: &Screens) -> io::Result<()>;
 }
 
-/// Draws with ratatui on `B`, and captures the mouse while the selected session has mouse reporting on.
+/// Draws with ratatui on `B`. The mouse is captured for the client's whole life by the terminal guard.
 pub struct TerminalView<B: Backend> {
     terminal: ratatui::Terminal<B>,
-    setup: Arc<dyn TerminalSetup>,
-    mouse: bool,
 }
 
 impl<B: Backend> TerminalView<B> {
-    pub fn new(terminal: ratatui::Terminal<B>, setup: Arc<dyn TerminalSetup>) -> Self {
-        Self {
-            terminal,
-            setup,
-            mouse: false,
-        }
+    pub fn new(terminal: ratatui::Terminal<B>) -> Self {
+        Self { terminal }
     }
 
     pub fn terminal(&self) -> &ratatui::Terminal<B> {
@@ -179,12 +172,6 @@ impl<B: Backend> View for TerminalView<B> {
         self.terminal
             .draw(|frame| shepherd_tui::render(client, screens, frame))
             .map_err(|e| io::Error::other(e.to_string()))?;
-        let mouse = selected_screen(client, screens)
-            .is_some_and(|s| s.modes().mouse.tracking != MouseTracking::Off);
-        if mouse != self.mouse {
-            self.setup.set_mouse_capture(mouse)?;
-            self.mouse = mouse;
-        }
         Ok(())
     }
 }
@@ -215,6 +202,8 @@ pub struct ClientRuntime<L, C, H> {
     panicked: bool,
     /// The outer terminal reports keys unambiguously (kitty keyboard protocol).
     keyboard_enhanced: bool,
+    /// Where a mouse press went down, so a release on the same control clicks it.
+    pointer: Pointer,
     done: bool,
 }
 
@@ -246,6 +235,7 @@ where
             terminal_failed: None,
             panicked: false,
             keyboard_enhanced: false,
+            pointer: Pointer::default(),
             done: false,
         }
     }
@@ -344,7 +334,7 @@ where
             .map(Screen::modes)
             .unwrap_or_default();
         let window = Rect::new(0, 0, self.window.0, self.window.1);
-        for intent in map_event(&event, &self.client, &modes, window) {
+        for intent in map_event(&event, &self.client, &modes, window, &mut self.pointer) {
             self.user(intent);
         }
     }
@@ -555,7 +545,7 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
         install_client_panic_hook(restorer.clone(), events.clone());
         runtime.set_keyboard_enhanced(restorer.keyboard_enhanced());
         read_terminal_events(events)?;
-        runtime.run_with(&mut TerminalView::new(backend, setup))
+        runtime.run_with(&mut TerminalView::new(backend))
     })
     .map_err(terminal_error)?
 }

@@ -3,15 +3,17 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::Event;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Source, SourceKind};
 use shepherd_core::client::{Client, Focus, Intent};
 use shepherd_core::ids::SessionId;
+use shepherd_term::Modes;
 use shepherd_term::Screen;
 use shepherd_testkit::builders::ClientDriver;
-use shepherd_tui::{Screens, layout, pane_size, render};
+use shepherd_tui::{Pointer, Screens, layout, map_event, pane_size, render};
 
 fn draw(client: &Client, screens: &Screens, cols: u16, rows: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap_or_else(|e| match e {});
@@ -23,6 +25,16 @@ fn draw(client: &Client, screens: &Screens, cols: u16, rows: u16) -> Terminal<Te
 
 fn buffer(client: &Client, screens: &Screens, cols: u16, rows: u16) -> Buffer {
     draw(client, screens, cols, rows).backend().buffer().clone()
+}
+
+/// Tells the client the window is `cols` x `rows`, as the runtime does with the terminal's resize.
+fn resized(c: &mut ClientDriver, cols: u16, rows: u16) {
+    let window = Rect::new(0, 0, cols, rows);
+    let event = Event::Resize(cols, rows);
+    let mut pointer = Pointer::default();
+    for intent in map_event(&event, c.client(), &Modes::default(), window, &mut pointer) {
+        c.user(intent);
+    }
 }
 
 fn hook() -> Source {
@@ -124,6 +136,17 @@ fn narrow_terminal_collapses_the_sidebar_to_glyphs() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 40, 12));
 }
 
+/// Fifteen sessions in a short window, scrolled down by the wheel (`ScrollSidebar`) past the selected newest one.
+#[test]
+fn a_scrolled_session_list() {
+    let ids: Vec<String> = (1..=15).map(|i| format!("s{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut c = ClientDriver::with_sessions(&ids);
+    resized(&mut c, 80, 12);
+    c.user(Intent::ScrollSidebar(4));
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 12));
+}
+
 #[test]
 fn prefix_pending() {
     let (mut c, screens) = three_sessions();
@@ -216,6 +239,7 @@ fn the_sidebar_scrolls_to_keep_the_selected_session_visible() {
     let ids: Vec<String> = (1..=15).map(|i| format!("s{i}")).collect();
     let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     let mut c = ClientDriver::with_sessions(&ids);
+    resized(&mut c, 80, 12);
     // The newest is selected at the top; going back once wraps to the oldest, at the bottom of the list.
     c.user(Intent::PrevSession);
     let selected = c
@@ -237,6 +261,28 @@ fn the_sidebar_scrolls_to_keep_the_selected_session_visible() {
         panic!("{selected} not shown: {buf:?}");
     };
     assert_ne!(buf[(side.x + 2, y)].bg, Color::Reset, "and highlighted");
+}
+
+#[test]
+fn a_taller_window_than_the_client_was_told_still_fills_the_list_to_its_end() {
+    let ids: Vec<String> = (1..=15).map(|i| format!("s{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut c = ClientDriver::with_sessions(&ids);
+    // Told 5 rows fit, scrolled to the end (rows 10..15); drawn where 11 fit, before the resize arrives.
+    resized(&mut c, 80, 12);
+    c.user(Intent::ScrollSidebar(100));
+    let buf = buffer(c.client(), &Screens::new(), 80, 24);
+    let side = layout(buf.area).sidebar;
+    let row_of = |y: u16| -> String {
+        (side.x..side.right() - 1)
+            .map(|x| buf[(x, y)].symbol().to_owned())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+    // The last 11 sessions, newest first: shell-11 at the top, down to shell-1 on the last row above the footer.
+    assert!(row_of(1).ends_with("shell-11"), "{buf:?}");
+    assert!(row_of(21).ends_with("shell-1"), "{buf:?}");
 }
 
 #[test]

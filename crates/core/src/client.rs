@@ -57,6 +57,13 @@ pub enum Intent {
     /// The terminal view's size changed.
     Resize(PtySize),
     SetFocus(Focus),
+    /// Select this session (a click on its row). A session that isn't listed is ignored.
+    SelectSession(SessionId),
+    /// Scroll the session list by this many rows: down for positive, up for negative. The selection stays put, even
+    /// out of view.
+    ScrollSidebar(i32),
+    /// How many sessions the sidebar shows at once, from the TUI's layout. The list scrolls to fit.
+    SidebarRows(usize),
     NewSession,
     ShowHelp,
     /// Open the rename popup for the selected session, starting from its current name.
@@ -168,6 +175,11 @@ pub struct Client {
     focus: Focus,
     popup: Option<Popup>,
     size: Option<PtySize>,
+    /// The index of the first session the sidebar shows, before clamping to the list (see
+    /// [`Client::sidebar_scroll`]).
+    scroll: usize,
+    /// How many sessions the sidebar shows at once, once the TUI has said.
+    sidebar_rows: Option<usize>,
     notice: Option<String>,
 }
 
@@ -191,6 +203,8 @@ impl Client {
             focus: Focus::default(),
             popup: None,
             size: None,
+            scroll: 0,
+            sidebar_rows: None,
             notice: None,
         }
     }
@@ -214,6 +228,11 @@ impl Client {
 
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// The index of the first session the sidebar shows.
+    pub fn sidebar_scroll(&self) -> usize {
+        self.scroll.min(self.max_scroll())
     }
 
     /// The terminal view's size, once the runtime has reported it.
@@ -491,12 +510,14 @@ impl Client {
         self.sessions.iter().position(|s| &s.id == id)
     }
 
-    /// Selects `id`, which is listed (or `None`), and resizes it to the view if the selection changed.
+    /// Selects `id`, which is listed (or `None`). If the selection changed, scrolls it into view and resizes it to
+    /// the view.
     fn select(&mut self, id: Option<SessionId>) -> Vec<ClientCommand> {
         let changed = self.selected != id;
         self.selected = id;
         self.mark_seen();
         if changed {
+            self.scroll_to_selected();
             self.resize_selected().into_iter().collect()
         } else {
             Vec::new()
@@ -516,6 +537,42 @@ impl Client {
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
             s.attention = attention;
         }
+    }
+
+    /// The furthest the sidebar scrolls: the last rows fill it.
+    fn max_scroll(&self) -> usize {
+        self.sessions
+            .len()
+            .saturating_sub(self.sidebar_rows.unwrap_or(1))
+    }
+
+    fn scroll_by(&mut self, rows: i32) {
+        let by = usize::try_from(rows.unsigned_abs()).unwrap_or(usize::MAX);
+        let from = self.sidebar_scroll();
+        let to = if rows < 0 {
+            from.saturating_sub(by)
+        } else {
+            from.saturating_add(by)
+        };
+        self.scroll = to.min(self.max_scroll());
+    }
+
+    /// Scrolls the least that shows the selected session, if the sidebar's height is known.
+    fn scroll_to_selected(&mut self) {
+        let (Some(index), Some(rows)) = (self.selected_index(), self.sidebar_rows) else {
+            return;
+        };
+        if rows == 0 {
+            return;
+        }
+        let first = self.sidebar_scroll();
+        self.scroll = if index < first {
+            index
+        } else if index >= first + rows {
+            index + 1 - rows
+        } else {
+            first
+        };
     }
 
     fn step(&mut self, forward: bool) -> Vec<ClientCommand> {
@@ -564,6 +621,22 @@ impl Client {
             }
             Intent::SetFocus(focus) => {
                 self.focus = focus;
+                Vec::new()
+            }
+            Intent::SelectSession(id) => {
+                if !self.listed(&id) {
+                    return Vec::new();
+                }
+                self.chosen = true;
+                self.select(Some(id))
+            }
+            Intent::ScrollSidebar(rows) => {
+                self.scroll_by(rows);
+                Vec::new()
+            }
+            Intent::SidebarRows(rows) => {
+                self.sidebar_rows = Some(rows);
+                self.scroll_to_selected();
                 Vec::new()
             }
             Intent::NewSession => {

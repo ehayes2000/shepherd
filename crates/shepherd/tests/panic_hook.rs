@@ -59,11 +59,18 @@ fn a_panic_on_another_thread_restores_the_terminal_first_and_fails_the_client() 
     );
     assert_eq!(
         *order.lock().unwrap_or_else(PoisonError::into_inner),
-        ["previous hook saw [enter,push keyboard,pop keyboard,leave]"]
+        ["previous hook saw [enter,push keyboard,mouse on,mouse off,pop keyboard,leave]"]
     );
     // Returning through the guard doesn't restore a second time.
     assert_eq!(
         terminal.calls(),
-        ["enter", "push keyboard", "pop keyboard", "leave"]
+        [
+            "enter",
+            "push keyboard",
+            "mouse on",
+            "mouse off",
+            "pop keyboard",
+            "leave"
+        ]
     );
 }

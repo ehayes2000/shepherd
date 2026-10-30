@@ -347,6 +347,124 @@ fn switching_sessions_resizes_the_newly_selected_one_to_the_view() {
     assert_eq!(notifications(&sent), [&resize("s1", 90, 20)]);
 }
 
+// ---------- clicking and scrolling the sidebar ----------
+
+#[test]
+fn selecting_a_listed_session_selects_it_and_resizes_it_to_the_view() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2", "s3"]);
+    c.user(Intent::Resize(PtySize { cols: 90, rows: 20 }));
+    let sent = c.user(Intent::SelectSession(sid("s1")));
+    assert_eq!(selected(&c).as_deref(), Some("s1"));
+    assert_eq!(notifications(&sent), [&resize("s1", 90, 20)]);
+}
+
+#[test]
+fn selecting_the_selected_session_again_sends_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::Resize(PtySize { cols: 90, rows: 20 }));
+    assert_eq!(c.user(Intent::SelectSession(sid("s2"))), []);
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+}
+
+#[test]
+fn selecting_a_session_that_is_not_listed_does_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    assert_eq!(c.user(Intent::SelectSession(sid("gone"))), []);
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+}
+
+#[test]
+fn a_selected_session_stays_selected_when_a_newer_one_is_listed() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::SelectSession(sid("s1")));
+    c.host().new_session("s3");
+    c.sync();
+    assert_eq!(selected(&c).as_deref(), Some("s1"));
+}
+
+/// Ten sessions, newest (`s10`) first and selected, in a sidebar that shows four at a time.
+fn ten_in_four() -> ClientDriver {
+    let ids: Vec<String> = (1..=10).map(|i| format!("s{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut c = ClientDriver::with_sessions(&ids);
+    c.user(Intent::SidebarRows(4));
+    c
+}
+
+#[test]
+fn the_sidebar_starts_at_the_top() {
+    assert_eq!(ten_in_four().client().sidebar_scroll(), 0);
+}
+
+#[test]
+fn scrolling_the_sidebar_moves_its_first_row_and_stops_at_either_end() {
+    let mut c = ten_in_four();
+    c.user(Intent::ScrollSidebar(3));
+    assert_eq!(c.client().sidebar_scroll(), 3);
+    // Ten sessions, four shown: the last six rows are as far down as it goes.
+    c.user(Intent::ScrollSidebar(100));
+    assert_eq!(c.client().sidebar_scroll(), 6);
+    c.user(Intent::ScrollSidebar(-2));
+    assert_eq!(c.client().sidebar_scroll(), 4);
+    c.user(Intent::ScrollSidebar(-100));
+    assert_eq!(c.client().sidebar_scroll(), 0);
+}
+
+#[test]
+fn scrolling_the_sidebar_leaves_the_selection_alone_even_out_of_view() {
+    let mut c = ten_in_four();
+    assert_eq!(c.user(Intent::ScrollSidebar(5)), []);
+    assert_eq!(selected(&c).as_deref(), Some("s10"));
+    assert_eq!(c.client().sidebar_scroll(), 5);
+}
+
+#[test]
+fn selecting_a_session_below_the_fold_scrolls_it_into_view() {
+    let mut c = ten_in_four();
+    // Wraps to the oldest, at the bottom: index 9 is the last of rows 6..10.
+    c.user(Intent::PrevSession);
+    assert_eq!(c.client().sidebar_scroll(), 6);
+    // And back to the top.
+    c.user(Intent::NextSession);
+    assert_eq!(c.client().sidebar_scroll(), 0);
+}
+
+#[test]
+fn selecting_a_session_above_the_fold_scrolls_it_into_view() {
+    let mut c = ten_in_four();
+    c.user(Intent::ScrollSidebar(6));
+    c.user(Intent::SelectSession(sid("s9"))); // index 1
+    assert_eq!(c.client().sidebar_scroll(), 1);
+}
+
+#[test]
+fn selecting_a_session_in_view_after_scrolling_does_not_move_the_list() {
+    let mut c = ten_in_four();
+    c.user(Intent::ScrollSidebar(5));
+    c.user(Intent::SelectSession(sid("s3"))); // index 7, shown in rows 5..9
+    assert_eq!(c.client().sidebar_scroll(), 5);
+}
+
+#[test]
+fn a_shorter_sidebar_keeps_the_selection_in_view() {
+    let mut c = ten_in_four();
+    c.user(Intent::PrevSession); // index 9, rows 6..10
+    c.user(Intent::SidebarRows(2));
+    assert_eq!(c.client().sidebar_scroll(), 8);
+}
+
+#[test]
+fn the_scroll_never_goes_past_the_end_of_a_shrinking_list() {
+    let mut c = ten_in_four();
+    c.user(Intent::ScrollSidebar(6));
+    for id in ["s1", "s2", "s3", "s4", "s5"] {
+        c.host().close(id);
+    }
+    c.sync();
+    // Five left, four shown.
+    assert_eq!(c.client().sidebar_scroll(), 1);
+}
+
 // ---------- focus and popups ----------
 
 #[test]
