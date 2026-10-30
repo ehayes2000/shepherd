@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
-| T36a build id + mismatch UX | building | task/t36a-build-id @ HEAD | 0 | – |
+| T36a build id + mismatch UX | building | task/t36a-build-id @ c4bfd3b | 0 | – |
 | F35 display-safe text | in review | task/f35-display-safe @ b040224 (on 97ff773) | 1 | PM-accepted: core::display module; DisplayText newtype + tui clippy ban (draw.rs only); ZWJ dropped (families split) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
