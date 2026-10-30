@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F22 agent session polish | building | task/f22-agent-session-polish @ cd85430 | 0 | – |
-| T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
+| T17b profile picker | in review | task/t17b-profile-picker @ b003c1f (on 8b90a96) | 1 | PM-accepted: BeginNewSession intent; optional HelloOk profiles; no client e2e; long lists clipped |
 | F23 kitty push panic | in review | task/f23-kitty-push-panic @ 1a64a4d (on f019c37) | 1 | Not pre-accepted: Handler wrapper (70 forwarded methods), panic-trigger dev feature vs 0012, panic-hook skip |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
