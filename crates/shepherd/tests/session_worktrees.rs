@@ -244,20 +244,52 @@ fn a_session_closed_while_its_worktree_is_made_never_spawns() {
     ));
     s.h.poll();
 
-    hold.release();
-    s.h.step();
+    // Closing cancelled the held create: it answers without the test releasing it, and makes nothing.
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
     assert!(!s.h.runtime().pty().is_running(&id));
-    // Recorded for cleanup, which finds the worktree it left behind through the record.
     assert_eq!(
         methods(&frames(&s.h, &id)),
         [
             "_shepherd/session/created",
             "_shepherd/session/closed",
-            "_shepherd/worktree/created"
+            "_shepherd/session/failed"
         ]
     );
+    let app = RepoRef::new(&s.app);
+    assert_eq!(s.worktrees.list_managed(&app), Ok(vec![]));
     assert!(seen.lock().unwrap().is_empty());
     assert_eq!(s.h.runtime().pending_run_files(), 0);
+    hold.release();
+}
+
+#[test]
+fn two_new_sessions_make_their_worktrees_at_the_same_time() {
+    let mut s = setup(|b| b);
+    s.make_worktree_dir("shell-1");
+    s.make_worktree_dir("shell-2");
+    let first = s.worktrees.hold_next();
+    let req1 = s.client.new_session();
+    s.h.poll();
+    assert!(
+        first.wait_entered(LIMIT),
+        "first create never reached the port"
+    );
+    let second = s.worktrees.hold_next();
+    let req2 = s.client.new_session();
+    s.h.poll();
+    // Both creates are in the port at once, neither finished: the second didn't queue behind the first.
+    assert!(
+        second.wait_entered(LIMIT),
+        "second create never reached the port"
+    );
+    assert_eq!(s.worktrees.creates_running(), 2);
+    let msgs = s.client.take();
+    let (id1, id2) = (new_session_id(&msgs, &req1), new_session_id(&msgs, &req2));
+    first.release();
+    second.release();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().pty().is_running(&id1));
+    assert!(s.h.runtime().pty().is_running(&id2));
 }
 
 #[test]

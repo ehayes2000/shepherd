@@ -544,3 +544,81 @@ fn a_session_still_waiting_for_its_worktree_when_the_host_restarts_fails() {
     );
     assert!(host.host().sessions()[0].failed.is_some());
 }
+
+// ---------- closing while the worktree is made (T37) ----------
+
+#[test]
+fn closing_a_session_whose_worktree_is_being_made_cancels_the_create_and_records_the_close() {
+    let mut host = in_workspace();
+    host.new_session("s1");
+    let cmds = host.close("s1");
+    assert_eq!(
+        cmds[..2],
+        [
+            HostCommand::CancelWorktree { session: sid("s1") },
+            append(
+                "s1",
+                "_shepherd/session/closed",
+                json!({ "worktree_removed": false })
+            ),
+        ]
+    );
+    assert!(
+        matches!(
+            &cmds[2..],
+            [HostCommand::Reply {
+                result: Ok(HostResult::Ack),
+                ..
+            }]
+        ),
+        "{cmds:?}"
+    );
+    // The cancelled create's answer is recorded for the closed session, and spawns nothing.
+    let cmds = worktree_result(
+        &mut host,
+        "s1",
+        shell_spawn(),
+        Err(WorktreeError::Cancelled),
+    );
+    assert_eq!(
+        cmds,
+        vec![append(
+            "s1",
+            "_shepherd/session/failed",
+            json!({ "reason": WorktreeError::Cancelled.to_string() })
+        )]
+    );
+    assert!(host.host().sessions().is_empty());
+}
+
+#[test]
+fn closing_a_session_whose_worktree_is_made_cancels_nothing() {
+    let mut host = in_workspace();
+    host.new_session("s1");
+    worktree_result(
+        &mut host,
+        "s1",
+        shell_spawn(),
+        Ok(created("/wt/app/shell-1", "shell-1", origin("main"))),
+    );
+    let cmds = host.close("s1");
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, HostCommand::CancelWorktree { .. })),
+        "{cmds:?}"
+    );
+}
+
+#[test]
+fn closing_a_session_without_a_worktree_cancels_nothing() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    let cmds = host.close("s1");
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, HostCommand::CancelWorktree { .. })),
+        "{cmds:?}"
+    );
+}

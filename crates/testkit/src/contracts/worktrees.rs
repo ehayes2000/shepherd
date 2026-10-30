@@ -58,6 +58,9 @@ macro_rules! worktrees_contract {
             create_offline_with_nothing_to_fall_back_to_is_fetch_failed,
             create_when_fetch_hangs_times_out_and_falls_back,
             concurrent_creates_all_succeed,
+            a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried,
+            a_create_cancelled_before_it_starts_makes_nothing_and_can_be_retried,
+            a_cancel_leaves_creates_of_other_names_alone,
             list_managed_lists_created_worktrees_only,
             list_managed_of_a_non_repo_is_not_a_repo,
             status_of_a_fresh_worktree_is_clean_merged_and_unpushed,
@@ -149,6 +152,21 @@ pub trait WorktreesFixture {
     fn same_named_repo(&self) -> RepoRef;
     /// `path` with symlinks resolved, as the port reports paths it found on its own (e.g. a tempdir behind `/var`).
     fn resolved(&self, path: &Path) -> PathBuf;
+    /// The next create blocks while it makes the worktree (for git: in the checkout, after the branch is made and the
+    /// worktree registered) until the returned handle is dropped. Creates after it are not held.
+    fn hold_next_create(&self) -> Box<dyn HeldCreate + '_>;
+}
+
+/// A create a [`WorktreesFixture::hold_next_create`] holds. Dropping it lets the create go on.
+pub trait HeldCreate {
+    /// Blocks until the held create is waiting, up to `limit` (a liveness bound). Whether it is.
+    fn wait_entered(&self, limit: Duration) -> bool;
+}
+
+impl HeldCreate for crate::fakes::hold::Hold {
+    fn wait_entered(&self, limit: Duration) -> bool {
+        crate::fakes::hold::Hold::wait_entered(self, limit)
+    }
 }
 
 /// A fixture backed by a real filesystem.
@@ -522,6 +540,49 @@ pub fn concurrent_creates_all_succeed<F: WorktreesFixture>(f: &F) {
         assert_eq!(created.base, BaseUsed::Origin { branch: default() });
     }
     assert_eq!(listed_paths(f).len(), 4);
+}
+
+// ---------- cancel_create ----------
+
+/// A liveness bound for a held create, never a measurement.
+const HOLD_LIMIT: Duration = Duration::from_secs(600);
+
+/// A create cancelled while it makes the worktree stops, and leaves nothing: a retry with the same name succeeds.
+pub fn a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried<F: WorktreesFixture>(
+    f: &F,
+) {
+    let repo = f.repo();
+    let port = f.port();
+    let held = f.hold_next_create();
+    let result = std::thread::scope(|s| {
+        let create = s.spawn(|| port.create(&repo, &name("doomed"), BaseSpec::OriginDefault));
+        assert!(held.wait_entered(HOLD_LIMIT), "the create never got going");
+        port.cancel_create(&repo, &name("doomed"));
+        create.join().unwrap()
+    });
+    drop(held);
+    assert_eq!(result, Err(WorktreeError::Cancelled));
+    assert!(listed_paths(f).is_empty());
+    create(f, "doomed");
+}
+
+/// A cancel that comes before its create starts (the create's thread is slow to start) still cancels it.
+pub fn a_create_cancelled_before_it_starts_makes_nothing_and_can_be_retried<F: WorktreesFixture>(
+    f: &F,
+) {
+    f.port().cancel_create(&f.repo(), &name("early"));
+    let result = f
+        .port()
+        .create(&f.repo(), &name("early"), BaseSpec::OriginDefault);
+    assert_eq!(result, Err(WorktreeError::Cancelled));
+    assert!(listed_paths(f).is_empty());
+    create(f, "early");
+}
+
+pub fn a_cancel_leaves_creates_of_other_names_alone<F: WorktreesFixture>(f: &F) {
+    f.port().cancel_create(&f.repo(), &name("other"));
+    let path = create(f, "mine");
+    assert_eq!(listed_paths(f), vec![path]);
 }
 
 // ---------- list_managed ----------

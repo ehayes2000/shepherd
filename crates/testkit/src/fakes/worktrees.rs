@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use super::hold::Hold;
-use super::hold::HoldSlot;
+use super::hold::{Gate, HoldSlot};
 use shepherd_core::ports::worktrees::{managed_parts, normalize_lexically};
 use shepherd_core::ports::{
     BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
@@ -67,12 +67,57 @@ struct State {
     fail_next: Option<WorktreeError>,
 }
 
+/// A create's repo (as the caller named it) and worktree name: what [`Worktrees::cancel_create`] names.
+type CreateKey = (PathBuf, String);
+
+/// Where a create [`Worktrees::cancel_create`] names is.
+#[derive(Debug)]
+enum CreateState {
+    /// Cancelled before it started: the next create of it is cancelled.
+    CancelledEarly,
+    /// Running, held at `gate` if it was held.
+    Running {
+        cancelled: bool,
+        gate: Option<Arc<Gate>>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct FakeWorktrees {
     root: PathBuf,
     state: Arc<Mutex<State>>,
     /// The gate the next call waits at, if [`FakeWorktrees::hold_next`] armed one.
     hold: HoldSlot,
+    /// Creates running or cancelled early. Kept apart from `state`, so a held create holds no lock.
+    creates: Arc<Mutex<BTreeMap<CreateKey, CreateState>>>,
+}
+
+/// Forgets a create once it returns.
+struct Running<'a> {
+    creates: &'a Mutex<BTreeMap<CreateKey, CreateState>>,
+    key: CreateKey,
+}
+
+impl Running<'_> {
+    fn cancelled(&self) -> bool {
+        matches!(
+            lock(self.creates).get(&self.key),
+            Some(CreateState::Running {
+                cancelled: true,
+                ..
+            })
+        )
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        lock(self.creates).remove(&self.key);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl FakeWorktrees {
@@ -82,6 +127,7 @@ impl FakeWorktrees {
             root: root.into(),
             state: Arc::default(),
             hold: HoldSlot::default(),
+            creates: Arc::default(),
         }
     }
 
@@ -135,6 +181,14 @@ impl FakeWorktrees {
     /// after it are not held. A call held for longer than a generous liveness bound panics.
     pub fn hold_next(&self) -> Hold {
         self.hold.arm()
+    }
+
+    /// How many creates are running right now (started and not yet returned), held ones included.
+    pub fn creates_running(&self) -> usize {
+        lock(&self.creates)
+            .values()
+            .filter(|c| matches!(c, CreateState::Running { .. }))
+            .count()
     }
 
     /// Commits on the branch (or detached HEAD) checked out at `path`. The checkout becomes clean.
@@ -299,6 +353,10 @@ impl FakeWorktrees {
     /// Every port call starts here: waits if held, then fails if a failure was injected.
     fn take_failure(&self) -> Result<MutexGuard<'_, State>, WorktreeError> {
         self.hold.wait_if_held("FakeWorktrees");
+        self.injected_failure()
+    }
+
+    fn injected_failure(&self) -> Result<MutexGuard<'_, State>, WorktreeError> {
         let mut s = self.lock();
         match s.fail_next.take() {
             Some(e) => Err(e),
@@ -403,7 +461,44 @@ impl Worktrees for FakeWorktrees {
         base: BaseSpec,
     ) -> Result<Created, WorktreeError> {
         let BaseSpec::OriginDefault = base;
-        let mut s = self.take_failure()?;
+        let key = (repo.as_path().to_owned(), name.as_str().to_owned());
+        // Forgotten when this returns, so a cancel after that waits for the next create of it.
+        let _running = {
+            let mut creates = lock(&self.creates);
+            match creates.get(&key) {
+                Some(CreateState::CancelledEarly) => {
+                    creates.remove(&key);
+                    return Err(WorktreeError::Cancelled);
+                }
+                Some(CreateState::Running { .. }) => {
+                    return Err(WorktreeError::Other(format!(
+                        "{name} is already being created"
+                    )));
+                }
+                None => {}
+            }
+            let gate = self.hold.take();
+            creates.insert(
+                key.clone(),
+                CreateState::Running {
+                    cancelled: false,
+                    gate: gate.clone(),
+                },
+            );
+            drop(creates);
+            let running = Running {
+                creates: &self.creates,
+                key,
+            };
+            if let Some(gate) = gate {
+                gate.wait("FakeWorktrees");
+            }
+            if running.cancelled() {
+                return Err(WorktreeError::Cancelled);
+            }
+            running
+        };
+        let mut s = self.injected_failure()?;
         let r = s
             .repo_of(repo.as_path())
             .ok_or_else(|| State::not_a_repo(repo.as_path()))?;
@@ -468,6 +563,25 @@ impl Worktrees for FakeWorktrees {
             branch,
             base,
         })
+    }
+
+    /// A held create stops waiting at once. Once a create is past its hold it can't be cancelled: the rest of it is
+    /// instant.
+    fn cancel_create(&self, repo: &RepoRef, name: &WorktreeName) {
+        let key = (repo.as_path().to_owned(), name.as_str().to_owned());
+        let mut creates = lock(&self.creates);
+        match creates.get_mut(&key) {
+            Some(CreateState::Running { cancelled, gate }) => {
+                *cancelled = true;
+                if let Some(gate) = gate {
+                    gate.cancel();
+                }
+            }
+            Some(CreateState::CancelledEarly) => {}
+            None => {
+                creates.insert(key, CreateState::CancelledEarly);
+            }
+        }
     }
 
     fn list_managed(&self, repo: &RepoRef) -> Result<Vec<Worktree>, WorktreeError> {
@@ -552,7 +666,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::contracts::worktrees::{DEFAULT, NESTED, REPO_NAME, SUBDIR, WorktreesFixture};
+    use crate::contracts::worktrees::{
+        DEFAULT, HeldCreate, NESTED, REPO_NAME, SUBDIR, WorktreesFixture,
+    };
 
     struct FakeFixture {
         fake: FakeWorktrees,
@@ -578,6 +694,10 @@ mod tests {
 
         fn root(&self) -> PathBuf {
             self.fake.root().to_owned()
+        }
+
+        fn hold_next_create(&self) -> Box<dyn HeldCreate + '_> {
+            Box::new(self.fake.hold_next())
         }
 
         fn repo(&self) -> RepoRef {
