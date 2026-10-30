@@ -36,7 +36,7 @@ use ratatui::Frame;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Widget, Wrap};
+use ratatui::widgets::Wrap;
 use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
 use shepherd_term::{CursorShape, Screen};
@@ -142,8 +142,11 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
         pane.width,
         height,
     );
-    draw::paragraph(lines)
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .render(area, buf);
+    draw::render(
+        draw::paragraph(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+        buf,
+    );
 }

@@ -364,10 +364,11 @@ pub fn main() -> ExitCode {
 }
 
 /// The one place the host prints: a startup error happens before (or instead of) its log file. A client that
-/// launched the host reads it from the host's stderr and shows it (see `shepherd_adapters::launcher`).
+/// launched the host reads it from the host's stderr and shows it (see `shepherd_adapters::launcher`). Paths in it
+/// can carry any text, so it is made display-safe first.
 #[allow(clippy::print_stderr)]
 fn report(e: &HostStartError) {
-    eprintln!("shepherd host: {e}");
+    eprintln!("shepherd host: {}", crate::stderr_safe(&e.to_string()));
 }
 
 fn run_default(adopt: Option<&Path>) -> Result<(), HostStartError> {

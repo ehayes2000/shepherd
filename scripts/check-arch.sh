@@ -63,6 +63,21 @@ for doc in CLAUDE.md docs/architecture.md docs/acpp.md docs/plan.md docs/pm.md d
   [[ -s "$doc" ]] || err "$doc is missing or empty"
 done
 
+# shepherd-tui draws text only through crate::draw, which takes a DisplayText (F35). crates/tui/clippy.toml bans
+# ratatui's text methods and `Widget::render`; these are the `From` conversions clippy can't single out.
+tui_from='(^|[^A-Za-z0-9_])(Line|Text|Span|ListItem|Row|Cell)::from\('
+if tui_text=$(grep -rnE --include='*.rs' "$tui_from" crates/tui 2>/dev/null |
+  grep -v '^crates/tui/src/draw\.rs:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
+  printf '%s\n' "$tui_text" >&2
+  err "shepherd-tui: text must reach ratatui through crate::draw (a DisplayText), not Line/Text/Span/ListItem/Row/Cell::from"
+fi
+# A buffer's cells are a public field, and a whole cell can be assigned by index: either skips crate::draw.
+if tui_cells=$(grep -rnE --include='*.rs' '\.content(\[|\.)|[A-Za-z0-9_)]\[\([^]]*\)\][[:space:]]*=[^=]' crates/tui/src 2>/dev/null |
+  grep -v '^crates/tui/src/draw\.rs:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
+  printf '%s\n' "$tui_cells" >&2
+  err "shepherd-tui: draw with crate::draw instead of writing a buffer's cells (.content, buf[(x, y)] = ...)"
+fi
+
 if [[ -d crates/core && ! -f crates/core/clippy.toml ]]; then
   err "crates/core/clippy.toml (purity lints) is missing"
 fi
