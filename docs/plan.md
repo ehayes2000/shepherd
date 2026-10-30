@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T36b host hot-swap by re-exec | building | task/t36b-hotswap @ HEAD | 0 | PtyHandoff port approved; rebases after T37 |
+| T36b host hot-swap by re-exec | building | task/t36b-hotswap @ 18410d7 | 0 | PtyHandoff port approved; rebases after T37 |
 | T37 worktree no cap + concurrent + cancel | fixing (CHANGES) | task/t37-worktree-nocap @ 8934970 | 1 | Blocking: F32 test item not done; 2-reader FIFO gate hang; inherited GIT_ASKPASS/core.askPass can hang uncapped create. PM: cancel creates on shutdown |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
