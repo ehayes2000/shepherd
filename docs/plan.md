@@ -10,8 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| F27 worktrees off runtime thread | in review | task/f27-worktrees-worker @ c162770 (on d92af88) | 1 | PM-accepted: generic Worker<W> wrapper; StartError; session/new vs hello race; no join at shutdown. T22 must route create through the worker + add a stale-result row |
-| F15 client display polish | in review | task/f15-display-polish @ 8542e4c (on d92af88) | 1 | PM-accepted: steady block → user shape; notice cleared by intents except layout; 50 ms tick for holds |
+| T22 new session creates worktree | building | task/t22-session-worktree @ HEAD | 0 | – |
+| F15 client display polish | fixing (CHANGES) | task/f15-display-polish @ 8542e4c | 1 | Blocking: hold-deadline restart guard untested. Minors: retain, notice table, own-timeout test, collapsed notice, Unknown snapshot |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -49,6 +49,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F27 | 1 | – (2 minors → F28) |
 | T21 | 2 | relative-path refusal passed for the wrong reason; refused-hello cwd and is_dir untested |
 | T19b | 2 | resume ignored a deleted cwd (portable-pty falls back to $HOME); exited guard untested |
 | F08 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
@@ -440,7 +441,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F27: Worktrees calls run off the host runtime thread
-status: in-progress
+status: done (db9a442)
 depends: T21
 touches: ports::worktrees (or a runtime worker), shepherd::host
 goal: `Worktrees` calls (`default_branch` may run `git remote set-head --auto` over the network; T22's `create` fetches) run
@@ -469,6 +470,9 @@ acceptance:
 - Workspace selection (hello cwd and typed paths) resolves to the repo root. Selecting a subdirectory of the current workspace
   is the same workspace (no append).
 - A typed path starting with `~/` (or exactly `~`) expands to the host's home; other relative paths are still refused.
+- From the F27 review: a scenario where a hello-cwd selection arrives live (probe held, hello with cwd, subscribe, release →
+  the client gets `workspace/selected` live, not in catch-up); and either a worker unit test with a dead thread/dropped receiver
+  or soften `Worker::submit`'s "every call is answered" doc (queued jobs are dropped if the thread dies).
 scope: crates/core, crates/adapters, crates/testkit, crates/shepherd
 
 ## Out of scope for the initial feature set
@@ -1126,7 +1130,7 @@ popup and selects nothing. Paths are stored canonicalized (no `..`, symlinks res
 New wire request `_shepherd/workspace/select { path }`.
 
 ### T22: New session creates a worktree
-status: todo
+status: in-progress
 depends: T17, T20, T21
 touches: core::host (new session flow)
 goal: You never think about worktrees, because a new session just has one.
@@ -1138,7 +1142,18 @@ acceptance:
   and no PTY is spawned.
 - The branch name is derived from the session slug, with uniqueness suffixes handled in core.
 - Scenario with fake Worktrees and fake Pty, covering the happy path and the fetch-failed path.
-scope: crates/core, crates/shepherd
+scope: crates/core, crates/shepherd, crates/testkit
+notes: (binding) Every new session gets a worktree when a workspace is selected and the request has no explicit `cwd`; with
+no workspace, or with an explicit `cwd`, it behaves as today (no worktree). All profiles, shell included. Base is the latest
+origin default branch (`BaseSpec` per T20). `create` runs through F27's `Worker` (never on the runtime thread); the session
+is appended as created (Starting) before the worktree exists, and its PTY spawns only when the result event arrives.
+Results that no longer matter (session closed while git was working) leave no PTY and record what happened; the created
+worktree is left in place for T25's cleanup, and that's logged. Core table rows for this. Skip the post-create hooks step
+(T23 adds it). The worktree path becomes the session's cwd for everything after: record it in `_shepherd/worktree/created`,
+and T19b resume must use it (resume of a worktree session whose worktree is gone is refused, per the existing cwd check).
+The branch name is a slug of the session's placeholder name (`claude-3` etc.) made unique in core against branches the host
+knows about; `create` refusing an existing branch is a `session/failed`, not a retry loop. All slugging/uniqueness logic is
+pure core with table tests (unicode, punctuation, collisions).
 
 ### T23: Worktree hooks
 status: todo
