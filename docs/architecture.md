@@ -72,7 +72,7 @@ Core purity is also enforced by `crates/core/clippy.toml` `disallowed-methods`/`
 `std::process`, `std::net`, `std::thread`, `std::env`, `Instant::now`, `SystemTime::now`.
 
 The TUI draws text only through `crates/tui/src/draw.rs`, whose functions take a `DisplayText` that only
-`shepherd_core::display::display_safe` can build (drops Cc/Cf, NFC, caps marks and length). `crates/tui/clippy.toml` bans
+`shepherd_core::display::display_safe` can build (drops Cc/Cf and Zl/Zp, caps chars per grapheme cluster,, NFC, caps marks and length). `crates/tui/clippy.toml` bans
 ratatui's raw text-drawing methods everywhere else (F35). The session's own terminal output (`render_screen`) is the one
 deliberate exception: it is drawn faithfully by the emulator.
 

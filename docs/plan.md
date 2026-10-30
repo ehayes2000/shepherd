@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ 72ebea3 | 0 | ZWJ item still awaits user |
+| F36 display-safe gaps (minus ZWJ) | in review | task/f36-display-gaps @ efeae89 (on a971711) | 1 | PM-accepted: 16 chars/cluster; Line/Text/Span::from banned outside draw.rs; stderr_safe per line |
 | F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
 | F42 new session wrong size | building | task/f42-spawn-size @ 95d0821 | 0 | user bug; diagnosis in spec |
 | F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ 7f7e811 (on b821b28) | 2 | private fetch ref + pinned update-ref; grace test; group wait probes with SIGKILL (PM asked reviewer: pgid reuse?) |
