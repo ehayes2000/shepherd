@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F18 | Host startup errors reach the user | done | 03c6d2f | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
 | F27 | Worktrees calls run off the host runtime thread | done | db9a442 | 1 | – (2 minors → F28) |
 | F40 | Launcher test stand-ins can leak | done | 24f1b49 | 1 | stand-ins orphaned; now a watchdog per stand-in and a group kill on drop |
-| F45 | Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | todo |  |  |  |
+| F45 | Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | building | task/f45-standin-load @ 33fd53a | 0 |  |
 
 ## Specs
 
