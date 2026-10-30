@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F22 agent session polish | in review | task/f22-agent-session-polish @ 8b98124 (on f019c37) | 1 | PM-accepted: relative cwd refused; global counter; pending_run_files() accessor; sweep race |
+| F22 agent session polish | fixing (CHANGES) | task/f22-agent-session-polish @ 8b98124 | 1 | Blocking: hook-sourced agent/exited (SessionEnd) must not remove run files — untested. PM: drop sweep's live param |
 | T18 attention | building | task/t18-attention @ 0fa5b1e | 0 | – |
 | T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | PM: hook trust via session-flags hooks.state + sha2 in core (decision 0016); never bypass-hook-trust |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
