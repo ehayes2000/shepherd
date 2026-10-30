@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T19 Codex | fixing (CHANGES) | task/t19-codex @ 09f87b9 | 1 | Hash/quoting verified. Blocking: tool matching, kind replacement, compaction cancel, 4 resets untested; commit note. PM: fresh seed per translator (run seed + counter); no unreachable! |
+| T19 Codex | re-review | task/t19-codex @ 3684c76 (on 6e6f7d9) | 2 | All 8 findings addressed, mutation-verified by builder. Decision 0016 |
 | F08 worktree create timeout cleanup | fixing (CHANGES) | task/f08-worktree-timeout @ 065762e | 1 | Load flakes (new tests 40%, T20 test regressed); separate cleanup timeout; FIFO-blocked hook; stale ref lock; fallback untested; TOCTOU on dir delete |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
