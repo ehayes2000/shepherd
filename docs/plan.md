@@ -582,7 +582,7 @@ The client runtime in `crates/shepherd/src/client.rs` is generic over `Link` and
 `core::host` (or a scripted fake host).
 
 ### T13: TUI layout, sidebar, and keys
-status: todo
+status: in-progress
 depends: T05, T09, T12
 touches: tui::layout, tui::sidebar, tui::keys, tui::help
 goal: The visible app: a left sidebar of sessions and the selected session's terminal on the right.
@@ -599,6 +599,24 @@ acceptance:
   events. Mouse and wheel input go to the agent when it has mouse mode on.
 scope: crates/tui
 notes: The status glyph shapes and colors are decided in this task and recorded in tui module docs.
+**This task finishes M1, the first thing the user can run.** It includes wiring the TUI into the real terminal:
+- `shepherd-tui`: pure `render(&ClientState, &Screens, &mut Frame)` (sidebar plus the selected session's `Screen` via the existing
+  `render_screen`, popups, help) and pure `map_key(KeyEvent, &ClientState) -> Option<ClientEvent>` plus input encoding per
+  `Screen::modes()` (kitty keyboard, SGR mouse, bracketed paste, focus). Encoding is a pure function, and table-tested.
+- Client runtime wiring (`crates/shepherd/src/client.rs`): crossterm raw mode, alternate screen, and restoring the terminal on
+  every exit path (normal quit, error, panic hook, SIGTERM/SIGHUP). Read crossterm events on a thread into the runtime channel
+  (decision 0011), and redraw with ratatui after state or screen changes, coalesced so a flood of output doesn't redraw per byte.
+  Terminal resize sends `Resize` for the selected session's pane size (window minus sidebar), not the whole window.
+- The pane size passed to resize must match exactly what `render` gives the session, so the agent's TUI fits. Test that the
+  layout function and the resize computation agree.
+- `q` detaches: it quits the client and leaves the host and sessions running. Starting `shepherd` again reattaches (T11
+  snapshots).
+- Scenario test: a client runtime with a ratatui `TestBackend` (instead of the real terminal), wired to the T11 host harness or
+  T12's fake host. Keys create two sessions, switch, type, and the rendered buffer shows the right session's output and sidebar
+  state. Put the real-terminal setup behind a tiny seam so it isn't exercised in tests (no real tty needed in the gate).
+- T11 (host runtime) may merge while you work: it also edits crates/shepherd (main.rs `host` arm, lib.rs, tests/support,
+  Cargo.toml). Keep your edits to those files minimal, and rebase if it lands.
+- After it merges, the PM will do a manual smoke run of the real binary.
 
 ---
 
