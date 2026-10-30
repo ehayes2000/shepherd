@@ -5,6 +5,7 @@
 //! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
 //! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
 //! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
+//! of one that is closing while its worktree is removed, `removing worktree…`;
 //! of one that started with a warning (a post-create hook failed), the warning, in yellow. A second line too long for
 //! the row ends in `…`. The selected session has a highlighted background, and a session that wants the user has a
 //! yellow bar on its left edge.
@@ -42,6 +43,8 @@ const ATTENTION_BAR: &str = "▌";
 const PLACEHOLDER_DETAIL: &str = "local · —";
 /// What line 2 says while a session's worktree is being made.
 const CREATING_WORKTREE: &str = "creating worktree…";
+/// What line 2 says while a closing session's worktree is being removed.
+const REMOVING_WORKTREE: &str = "removing worktree…";
 /// Ends a line 2 cut short.
 const CUT: &str = "…";
 
@@ -293,6 +296,7 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
         );
         let dim = Style::new().add_modifier(Modifier::DIM);
         let (text, style) = match (&session.failed, &session.warning, &session.workspace) {
+            _ if session.removing_worktree => (REMOVING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
             (Some(reason), _, _) => (reason.clone(), dim.fg(Color::Red)),
             _ if session.creating_worktree => (CREATING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
             (None, Some(warning), _) => (warning.clone(), dim.fg(Color::Yellow)),

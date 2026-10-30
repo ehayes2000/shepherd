@@ -31,6 +31,7 @@ use super::codec::frame;
 use crate::acpp::{Envelope, RequestId, Seq};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
+use crate::ports::worktrees::WorktreeStatus;
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -46,10 +47,11 @@ pub enum Method {
     HookFrame,
     SessionResume,
     WorkspaceSelect,
+    WorktreeStatus,
 }
 
 impl Method {
-    pub const ALL: [Method; 8] = [
+    pub const ALL: [Method; 9] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -58,6 +60,7 @@ impl Method {
         Self::HookFrame,
         Self::SessionResume,
         Self::WorkspaceSelect,
+        Self::WorktreeStatus,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -70,6 +73,7 @@ impl Method {
             Self::HookFrame => "_shepherd/hook/frame",
             Self::SessionResume => "_shepherd/session/resume",
             Self::WorkspaceSelect => "_shepherd/workspace/select",
+            Self::WorktreeStatus => "_shepherd/worktree/status",
         }
     }
 
@@ -95,6 +99,7 @@ pub enum ClientRequest {
     HookFrame(Box<HookFrame>),
     SessionResume(SessionResume),
     WorkspaceSelect(WorkspaceSelect),
+    WorktreeStatus(WorktreeCheck),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -174,9 +179,51 @@ pub struct SessionRename {
     pub name: String,
 }
 
+/// Close a session. Answered with an ack once it is closing: its PTY is killed at once, and if it has a worktree, what
+/// happens to it (`worktree`) is recorded in its `session/closed` once it is done.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionClose {
     pub session: SessionId,
+    /// What to do with the session's worktree, if it has one. Left off the wire for the default; clients older than
+    /// worktree removal send none.
+    #[serde(default, skip_serializing_if = "CloseWorktree::is_if_safe")]
+    pub worktree: CloseWorktree,
+}
+
+/// What closing a session does with its worktree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseWorktree {
+    /// Remove it, after its pre-remove hooks, if that loses nothing (no uncommitted changes, and its commits are
+    /// merged or pushed); otherwise keep it, saying why.
+    #[default]
+    IfSafe,
+    /// Remove it, after its pre-remove hooks, even though that loses what `confirmed` says: the status the user was
+    /// shown and chose to remove anyway. If the worktree has more to lose by then, it is kept.
+    Remove { confirmed: WorktreeStatus },
+    /// Keep it.
+    Keep,
+}
+
+impl CloseWorktree {
+    fn is_if_safe(&self) -> bool {
+        *self == Self::IfSafe
+    }
+}
+
+/// What removing a session's worktree would lose. Answered with [`WorktreeStatusOk`], or [`WireError::InvalidParams`]
+/// saying why it can't be told (the session has no worktree to remove, or it couldn't be inspected).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCheck {
+    pub session: SessionId,
+}
+
+/// The host's answer to `_shepherd/worktree/status`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeStatusOk {
+    /// `None` when the worktree is already gone: closing the session removes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorktreeStatus>,
 }
 
 /// Resume an exited session's agent where it left off, in the same session. Answered with an ack, or
@@ -279,6 +326,7 @@ impl ClientRequest {
             Self::HookFrame(_) => Method::HookFrame,
             Self::SessionResume(_) => Method::SessionResume,
             Self::WorkspaceSelect(_) => Method::WorkspaceSelect,
+            Self::WorktreeStatus(_) => Method::WorktreeStatus,
         }
     }
 
@@ -292,6 +340,7 @@ impl ClientRequest {
             Self::HookFrame(p) => json(p),
             Self::SessionResume(p) => json(p),
             Self::WorkspaceSelect(p) => json(p),
+            Self::WorktreeStatus(p) => json(p),
         }
     }
 
@@ -307,6 +356,7 @@ impl ClientRequest {
             Method::HookFrame => Self::HookFrame(invalid_params(params)?),
             Method::SessionResume => Self::SessionResume(invalid_params(params)?),
             Method::WorkspaceSelect => Self::WorkspaceSelect(invalid_params(params)?),
+            Method::WorktreeStatus => Self::WorktreeStatus(invalid_params(params)?),
         })
     }
 }
@@ -387,6 +437,7 @@ pub struct SessionNewOk {
 pub enum HostResult {
     Hello(HelloOk),
     SessionNew(SessionNewOk),
+    WorktreeStatus(WorktreeStatusOk),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -396,6 +447,7 @@ impl HostResult {
         match self {
             Self::Hello(r) => json(r),
             Self::SessionNew(r) => json(r),
+            Self::WorktreeStatus(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -404,6 +456,7 @@ impl HostResult {
         Ok(match method {
             Method::Hello => Self::Hello(serde_json::from_value(result)?),
             Method::SessionNew => Self::SessionNew(serde_json::from_value(result)?),
+            Method::WorktreeStatus => Self::WorktreeStatus(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

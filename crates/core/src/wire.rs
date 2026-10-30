@@ -11,11 +11,11 @@ mod message;
 pub use codec::{Decoder, LineTooLong, MAX_LINE};
 pub use error::{WireError, code};
 pub use message::{
-    ClientMessage, ClientNotification, ClientRequest, DecodeError, Hello, HelloOk, HookFrame,
-    HostMessage, HostNotification, HostResponse, HostResult, InputKind, LogEntry, Method, Notify,
-    PROTOCOL_VERSION, ProfileInfo, PtyOutput, RawResponse, Request, RequestError, SessionClose,
-    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
-    SubscribeFrom, WorkspaceSelect, decode_client_message, decode_host_message,
-    encode_client_notification, encode_host_notification, encode_request, encode_response,
-    negotiate,
+    ClientMessage, ClientNotification, ClientRequest, CloseWorktree, DecodeError, Hello, HelloOk,
+    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, InputKind, LogEntry,
+    Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, RawResponse, Request, RequestError,
+    SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize,
+    SessionResume, Subscribe, SubscribeFrom, WorkspaceSelect, WorktreeCheck, WorktreeStatusOk,
+    decode_client_message, decode_host_message, encode_client_notification,
+    encode_host_notification, encode_request, encode_response, negotiate,
 };

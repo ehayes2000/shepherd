@@ -11,7 +11,7 @@ use shepherd_core::acpp::acp::{
 use shepherd_core::acpp::{
     AgentExited, AgentIdle, AgentStarted, Correlated, Dir, Frame, IdleInference, PendingRequests,
     RequestId, SessionClosed, SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame,
-    WorkspaceSelected, WorktreeCreated, WorktreeHook,
+    WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoving,
 };
 use shepherd_core::ids::MachineId;
 
@@ -463,9 +463,12 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             ),
         (arb_string(), any::<bool>())
             .prop_map(|(name, auto)| ShepherdFrame::SessionRenamed(SessionRenamed { name, auto })),
-        any::<bool>().prop_map(
-            |worktree_removed| ShepherdFrame::SessionClosed(SessionClosed { worktree_removed })
-        ),
+        (any::<bool>(), arb_opt_string()).prop_map(|(worktree_removed, worktree_kept)| {
+            ShepherdFrame::SessionClosed(SessionClosed {
+                worktree_removed,
+                worktree_kept,
+            })
+        }),
         arb_string().prop_map(|reason| ShepherdFrame::SessionFailed(SessionFailed { reason })),
         (
             arb_string(),
@@ -520,6 +523,18 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
                     exit_code,
                     output_tail,
                     error,
+                })
+            }),
+        (
+            arb_string(),
+            any::<bool>(),
+            proptest::collection::vec(arb_string(), 0..3)
+        )
+            .prop_map(|(path, force, pre_remove)| {
+                ShepherdFrame::WorktreeRemoving(WorktreeRemoving {
+                    path,
+                    force,
+                    pre_remove,
                 })
             }),
         arb_string().prop_map(|repo| ShepherdFrame::WorkspaceSelected(WorkspaceSelected { repo })),

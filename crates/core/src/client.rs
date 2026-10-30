@@ -14,6 +14,12 @@
 //! ([`Popup::Workspace`]) asks the host to select a workspace and stays open until the host answers: a refusal is shown
 //! in it.
 //!
+//! Closing: the close confirmation of a session with a worktree asks the host what removing the worktree would lose
+//! ([`Client::close_check`]). If it loses nothing, confirming lets the host remove it (if that is still true when it
+//! closes); if it would lose work, the confirmation lists what and offers to remove it anyway or keep it, and confirming
+//! keeps it. A session is listed while its worktree is being removed, and can't be closed again. When the host keeps a
+//! worktree it tried to remove, the reason is a notice (live entries only, not the catch-up).
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
@@ -22,16 +28,17 @@ use std::path::{Path, PathBuf};
 
 use jiff::SignedDuration;
 
-use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
+use crate::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame, Timestamp};
 use crate::host::{Host, HostSession, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::pty::PtySize;
+use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
-    ClientMessage, ClientNotification, ClientRequest, Hello, HostMessage, HostNotification,
-    HostResult, InputKind, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request,
-    SessionClose, SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe,
-    SubscribeFrom, WireError, WorkspaceSelect,
+    ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HostMessage,
+    HostNotification, HostResult, InputKind, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse,
+    Request, SessionClose, SessionInput, SessionNew, SessionRename, SessionResize, SessionResume,
+    Subscribe, SubscribeFrom, WireError, WorkspaceSelect, WorktreeCheck,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -126,8 +133,14 @@ pub enum Intent {
     EditWorkspacePath(String),
     /// Select this workspace, from the open switcher's list of those used before. Ignored when the switcher isn't open.
     PickWorkspace(PathBuf),
-    /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path.
+    /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path. A close whose worktree
+    /// would lose work keeps the worktree.
     Confirm,
+    /// Close the session of the open close confirmation, removing its worktree even though that loses what the
+    /// confirmation showed. Ignored unless it showed something removing would lose.
+    CloseRemovingWorktree,
+    /// Close the session of the open close confirmation, keeping its worktree.
+    CloseKeepingWorktree,
     /// Close the open popup or menu without doing anything.
     Dismiss,
     /// Detach. Sessions keep running on the host.
@@ -216,6 +229,23 @@ pub enum Popup {
     },
 }
 
+/// What removing the worktree of the session in the open close confirmation would lose, as far as the client knows:
+/// [`Client::close_check`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseCheck {
+    /// The host has been asked.
+    Checking,
+    /// Nothing: closing removes it.
+    Safe,
+    /// Removing it would lose something ([`WorktreeStatus::losses`]): closing asks whether to remove it anyway, and
+    /// removing it anyway tells the host this was what the user saw.
+    AtRisk(WorktreeStatus),
+    /// It is already gone.
+    Gone,
+    /// The host couldn't tell, for this reason. Confirming keeps it.
+    Failed(String),
+}
+
 /// Where the client is with its host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Connection {
@@ -264,6 +294,10 @@ pub struct ClientSession {
     pub failed: Option<String>,
     /// Something went wrong that didn't stop it starting, e.g. a post-create hook failed.
     pub warning: Option<String>,
+    /// Its worktree, once made.
+    pub worktree: Option<PathBuf>,
+    /// It is closing, and its worktree is being removed (or kept).
+    pub removing_worktree: bool,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -296,6 +330,10 @@ pub struct Client {
     /// The terminal window has focus. Assumed until the terminal says otherwise.
     window_focused: bool,
     popup: Option<Popup>,
+    /// What removing the worktree of the session in the close confirmation would lose, while that is open.
+    close_check: Option<CloseCheck>,
+    /// The status request for the close confirmation's session, while unanswered.
+    status_request: Option<(RequestId, SessionId)>,
     size: Option<PtySize>,
     /// The index of the first session the sidebar shows, before clamping to the list (see
     /// [`Client::sidebar_scroll`]).
@@ -344,6 +382,8 @@ impl Client {
             focus: Focus::default(),
             window_focused: true,
             popup: None,
+            close_check: None,
+            status_request: None,
             size: None,
             scroll: 0,
             sidebar_rows: None,
@@ -389,6 +429,15 @@ impl Client {
 
     pub fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
+    }
+
+    /// What removing the worktree of the session in the open close confirmation would lose. `None` when no close
+    /// confirmation is open, or its session has no worktree.
+    pub fn close_check(&self) -> Option<&CloseCheck> {
+        match self.popup {
+            Some(Popup::ConfirmClose { .. }) => self.close_check.as_ref(),
+            _ => None,
+        }
     }
 
     /// The lines of the open context menu, in order: rename and close, then resume on an exited session, saying why
@@ -587,10 +636,19 @@ impl Client {
 
     /// A request with a fresh id, remembered so its answer can be typed.
     fn request(&mut self, body: ClientRequest) -> ClientCommand {
+        self.request_with_id(body).1
+    }
+
+    /// [`Client::request`], with the id it was given.
+    fn request_with_id(&mut self, body: ClientRequest) -> (RequestId, ClientCommand) {
         self.next_request += 1;
         let id = RequestId::Number(self.next_request.into());
         self.pending.insert(id.clone(), body.method());
-        ClientCommand::Send(ClientMessage::Request(Request { id, body }))
+        let request = Request {
+            id: id.clone(),
+            body,
+        };
+        (id, ClientCommand::Send(ClientMessage::Request(request)))
     }
 
     fn notify(&self, note: ClientNotification) -> Option<ClientCommand> {
@@ -602,6 +660,7 @@ impl Client {
         let Some(method) = self.pending.remove(&response.id) else {
             return Vec::new();
         };
+        let id = response.id.clone();
         let result = match response.typed(method) {
             Ok(typed) => typed.result,
             Err(e) => Err(WireError::Internal(e.to_string())),
@@ -632,6 +691,27 @@ impl Client {
                     (Err(WireError::InvalidParams(why)), Some(error)) => *error = Some(why),
                     (Err(e), Some(error)) => *error = Some(e.to_string()),
                     (Err(e), None) => self.set_notice(e.to_string()),
+                }
+                Vec::new()
+            }
+            (Method::WorktreeStatus, result) => {
+                let asked = self.status_request.take_if(|(asked, _)| *asked == id);
+                let open = match (&self.popup, asked) {
+                    (Some(Popup::ConfirmClose { session }), Some((_, asked))) => *session == asked,
+                    _ => false,
+                };
+                if open {
+                    self.close_check = Some(match result {
+                        Ok(HostResult::WorktreeStatus(ok)) => match ok.status {
+                            None => CloseCheck::Gone,
+                            Some(status) if status.losses().is_empty() => CloseCheck::Safe,
+                            Some(status) => CloseCheck::AtRisk(status),
+                        },
+                        // The host's reason is the whole story here, without the error's kind.
+                        Err(WireError::InvalidParams(why)) => CloseCheck::Failed(why),
+                        Err(e) => CloseCheck::Failed(e.to_string()),
+                        Ok(other) => CloseCheck::Failed(format!("unexpected answer {other:?}")),
+                    });
                 }
                 Vec::new()
             }
@@ -687,6 +767,7 @@ impl Client {
             return Vec::new();
         }
         self.seqs.insert(log, env.seq());
+        self.notice_kept_worktree(env);
         self.registry.apply(env);
         if let Some(id) = env.session() {
             self.states.entry(id.clone()).or_default().apply(env);
@@ -702,11 +783,33 @@ impl Client {
         commands
     }
 
+    /// A notice saying why the host kept the worktree of a session it closed, for a live `session/closed` that says.
+    fn notice_kept_worktree(&mut self, env: &Envelope) {
+        let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
+            return;
+        };
+        let ShepherdFrame::SessionClosed(closed) = message.body() else {
+            return;
+        };
+        let (Some(why), false) = (&closed.worktree_kept, self.catching_up()) else {
+            return;
+        };
+        let name = self
+            .sessions
+            .iter()
+            .find(|s| &s.id == id)
+            .map_or(id.as_str(), |s| s.name.as_str());
+        self.set_notice(format!("kept the worktree of {name}: {why}"));
+    }
+
+    /// The subscribe is answered once the catch-up is sent: until then the entries are history, not news.
+    fn catching_up(&self) -> bool {
+        self.pending.values().any(|m| *m == Method::Subscribe)
+    }
+
     /// An alert for each session that wants the user and wasn't in `wanted`, if the bell is on and the client is live.
     fn alerts(&self, wanted: &[SessionId]) -> Vec<ClientCommand> {
-        // The subscribe is answered once the catch-up is sent: until then the entries are history, not news.
-        let catching_up = self.pending.values().any(|m| *m == Method::Subscribe);
-        if !self.bell || catching_up {
+        if !self.bell || self.catching_up() {
             return Vec::new();
         }
         self.sessions
@@ -788,6 +891,8 @@ impl Client {
                     creating_worktree: s.creating_worktree,
                     failed: s.failed,
                     warning: s.warning,
+                    worktree: s.worktree,
+                    removing_worktree: s.removing_worktree,
                 }
             })
             .collect();
@@ -1013,16 +1118,11 @@ impl Client {
                 }
                 Vec::new()
             }
-            Intent::BeginClose => {
-                if let Some(session) = self.selected.clone() {
-                    self.begin_close(session);
-                }
-                Vec::new()
-            }
-            Intent::BeginCloseSession(session) => {
-                self.begin_close(session);
-                Vec::new()
-            }
+            Intent::BeginClose => match self.selected.clone() {
+                Some(session) => self.begin_close(session),
+                None => Vec::new(),
+            },
+            Intent::BeginCloseSession(session) => self.begin_close(session),
             Intent::OpenMenu { session, at } => {
                 if self.listed(&session) {
                     self.popup = Some(Popup::Menu { session, at });
@@ -1036,11 +1136,13 @@ impl Client {
                     return Vec::new();
                 };
                 match item {
-                    MenuItem::Rename => self.begin_rename(session),
+                    MenuItem::Rename => {
+                        self.begin_rename(session);
+                        Vec::new()
+                    }
                     MenuItem::Close => self.begin_close(session),
-                    MenuItem::Resume => return self.resume(session),
+                    MenuItem::Resume => self.resume(session),
                 }
-                Vec::new()
             }
             Intent::BeginWorkspace => {
                 self.popup = Some(Popup::Workspace {
@@ -1074,7 +1176,12 @@ impl Client {
                     }))
                 }
                 Some(Popup::ConfirmClose { session }) => {
-                    self.user_request(ClientRequest::SessionClose(SessionClose { session }))
+                    let worktree = match self.close_check.take() {
+                        // Removing it would lose work, or the host couldn't say whether it would.
+                        Some(CloseCheck::AtRisk(_) | CloseCheck::Failed(_)) => CloseWorktree::Keep,
+                        _ => CloseWorktree::IfSafe,
+                    };
+                    self.close(session, worktree)
                 }
                 // The switcher stays open until the host answers.
                 Some(Popup::Workspace { path, error }) => {
@@ -1089,6 +1196,23 @@ impl Client {
                 }
                 Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
+            Intent::CloseRemovingWorktree | Intent::CloseKeepingWorktree => {
+                // Removing anyway confirms the losses the user was shown, so it needs some shown.
+                let worktree = match (&intent, self.close_check()) {
+                    (Intent::CloseKeepingWorktree, _) => CloseWorktree::Keep,
+                    (_, Some(CloseCheck::AtRisk(shown))) => {
+                        CloseWorktree::Remove { confirmed: *shown }
+                    }
+                    _ => return Vec::new(),
+                };
+                let Some(Popup::ConfirmClose { session }) = self
+                    .popup
+                    .take_if(|p| matches!(p, Popup::ConfirmClose { .. }))
+                else {
+                    return Vec::new();
+                };
+                self.close(session, worktree)
+            }
             Intent::Dismiss => {
                 self.popup = None;
                 Vec::new()
@@ -1105,11 +1229,40 @@ impl Client {
         }
     }
 
-    /// Asks to close `session`, if it's listed.
-    fn begin_close(&mut self, session: SessionId) {
-        if self.listed(&session) {
-            self.popup = Some(Popup::ConfirmClose { session });
+    /// Asks to close `session`, if it's listed and not closing already. If it has a worktree, asks the host what
+    /// removing it would lose.
+    fn begin_close(&mut self, session: SessionId) -> Vec<ClientCommand> {
+        let Some(listed) = self.sessions.iter().find(|s| s.id == session) else {
+            return Vec::new();
+        };
+        if listed.removing_worktree {
+            return Vec::new();
         }
+        let has_worktree = listed.worktree.is_some() && !listed.creating_worktree;
+        self.popup = Some(Popup::ConfirmClose {
+            session: session.clone(),
+        });
+        self.close_check = None;
+        self.status_request = None;
+        if !has_worktree || self.connection != Connection::Ready {
+            return Vec::new();
+        }
+        let (id, ask) = self.request_with_id(ClientRequest::WorktreeStatus(WorktreeCheck {
+            session: session.clone(),
+        }));
+        self.status_request = Some((id, session));
+        self.close_check = Some(CloseCheck::Checking);
+        vec![ask]
+    }
+
+    /// Asks the host to close `session`, doing `worktree` with its worktree.
+    fn close(&mut self, session: SessionId, worktree: CloseWorktree) -> Vec<ClientCommand> {
+        self.close_check = None;
+        self.status_request = None;
+        self.user_request(ClientRequest::SessionClose(SessionClose {
+            session,
+            worktree,
+        }))
     }
 
     /// Asks the host to resume exited `session`, then selects it and sizes it to the view: its new PTY starts at the

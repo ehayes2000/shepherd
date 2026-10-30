@@ -244,6 +244,7 @@ fn closing_a_claude_session_removes_its_run_files() {
 
     let sent = client.request(ClientRequest::SessionClose(SessionClose {
         session: session.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     c.h.step();
     assert_eq!(response(&client.take(), &sent), Ok(json!({})));
@@ -1146,6 +1147,7 @@ read line
                     3,
                     ClientRequest::SessionClose(SessionClose {
                         session: session.clone(),
+                        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
                     }),
                 );
                 conn.response(3);

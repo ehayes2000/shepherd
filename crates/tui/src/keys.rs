@@ -159,6 +159,8 @@ fn map_mouse(
                 | Target::Popup
                 | Target::Confirm
                 | Target::Dismiss
+                | Target::RemoveWorktree
+                | Target::KeepWorktree
         )
     );
     let scroll_popup = |by| match client.popup() {
@@ -219,6 +221,8 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::Help => vec![Intent::ShowHelp],
         Target::MenuItem(item) => vec![Intent::MenuChoose(item)],
         Target::Confirm => vec![Intent::Confirm],
+        Target::RemoveWorktree => vec![Intent::CloseRemovingWorktree],
+        Target::KeepWorktree => vec![Intent::CloseKeepingWorktree],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::Popup => Vec::new(),

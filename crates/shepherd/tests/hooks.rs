@@ -241,6 +241,7 @@ fn session_with_a_hook(h: &mut HostHarness, client: &mut FakeClient) -> SessionI
 fn close(h: &mut HostHarness, client: &mut FakeClient, session: &SessionId) {
     let sent = client.request(ClientRequest::SessionClose(SessionClose {
         session: session.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     h.step();
     assert_eq!(response(&client.take(), &sent), Ok(json!({})));

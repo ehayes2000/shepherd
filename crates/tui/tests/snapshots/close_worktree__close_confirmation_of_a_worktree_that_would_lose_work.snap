@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/close_worktree.rs
+assertion_line: 152
+expression: "text(&buffer(&confirming(status(true, 2, false)), WIDE))"
+---
+ ⌂ shepherd            │
+ + New session         │
+ ◌ refactor           ×│
+   local · —           │
+                       │
+                       │
+                       │
+                       │
+                ┌ close session ───────────────────────────────┐
+                │Close refactor? Its agent is stopped.         │
+                │Removing its worktree deletes:                │
+                │  · uncommitted, untracked and ignored files  │
+                │2 commits not pushed — the branch is kept.    │
+                │enter keeps the worktree · esc cancels        │
+                │   [Remove anyway]  [Keep worktree]  [Cancel] │
+                └──────────────────────────────────────────────┘
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ ctrl-b ? help Detach ?│

@@ -67,6 +67,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::SessionClose(SessionClose {
             session: sid("s_1"),
+            worktree: shepherd_core::wire::CloseWorktree::IfSafe,
         }),
         ClientRequest::Subscribe(Subscribe {
             from: SubscribeFrom {
@@ -81,6 +82,20 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::WorkspaceSelect(WorkspaceSelect {
             path: "/src/shepherd".into(),
+        }),
+        ClientRequest::SessionClose(SessionClose {
+            session: sid("s_1"),
+            worktree: shepherd_core::wire::CloseWorktree::Remove {
+                confirmed: shepherd_core::ports::WorktreeStatus {
+                    dirty: true,
+                    ahead: 1,
+                    pushed: false,
+                    merged_into_default: false,
+                },
+            },
+        }),
+        ClientRequest::WorktreeStatus(shepherd_core::wire::WorktreeCheck {
+            session: sid("s_1"),
         }),
     ]
 }
@@ -201,6 +216,8 @@ fn requests_are_jsonrpc_with_shepherd_method_names() {
         "_shepherd/hook/frame",
         "_shepherd/session/resume",
         "_shepherd/workspace/select",
+        "_shepherd/session/close",
+        "_shepherd/worktree/status",
     ];
     for (body, method) in one_of_each_request().into_iter().zip(expected) {
         assert_eq!(body.method().as_str(), method);
@@ -356,7 +373,8 @@ fn unknown_request_fields_are_ignored() {
     assert_eq!(
         request(&line).body,
         ClientRequest::SessionClose(SessionClose {
-            session: sid("s_1")
+            session: sid("s_1"),
+            worktree: shepherd_core::wire::CloseWorktree::IfSafe,
         })
     );
 }
@@ -750,6 +768,21 @@ fn successful_responses_round_trip_by_method() {
         (Method::SessionClose, HostResult::Ack),
         (Method::HookFrame, HostResult::Ack),
         (Method::SessionResume, HostResult::Ack),
+        (
+            Method::WorktreeStatus,
+            HostResult::WorktreeStatus(shepherd_core::wire::WorktreeStatusOk {
+                status: Some(shepherd_core::ports::WorktreeStatus {
+                    dirty: true,
+                    ahead: 2,
+                    pushed: false,
+                    merged_into_default: false,
+                }),
+            }),
+        ),
+        (
+            Method::WorktreeStatus,
+            HostResult::WorktreeStatus(shepherd_core::wire::WorktreeStatusOk::default()),
+        ),
     ];
     for (method, result) in cases {
         let resp = HostResponse {
@@ -771,6 +804,38 @@ fn session_new_result_is_the_session_id() {
     assert_eq!(
         wire_json(&line),
         json!({ "jsonrpc": "2.0", "id": 2, "result": { "session": "s_9" } })
+    );
+}
+
+#[test]
+fn a_close_says_what_to_do_with_the_worktree_and_what_removing_it_anyway_confirmed() {
+    let params = |worktree| {
+        wire_json(&encode_request(&Request {
+            id: 1.into(),
+            body: ClientRequest::SessionClose(SessionClose {
+                session: sid("s_1"),
+                worktree,
+            }),
+        }))["params"]
+            .clone()
+    };
+    use shepherd_core::wire::CloseWorktree;
+    assert_eq!(params(CloseWorktree::IfSafe), json!({ "session": "s_1" }));
+    let confirmed = shepherd_core::ports::WorktreeStatus {
+        dirty: true,
+        ahead: 1,
+        pushed: false,
+        merged_into_default: false,
+    };
+    assert_eq!(
+        params(CloseWorktree::Remove { confirmed }),
+        json!({ "session": "s_1", "worktree": { "remove": { "confirmed": {
+            "dirty": true, "ahead": 1, "pushed": false, "merged_into_default": false
+        } } } })
+    );
+    assert_eq!(
+        params(CloseWorktree::Keep),
+        json!({ "session": "s_1", "worktree": "keep" })
     );
 }
 

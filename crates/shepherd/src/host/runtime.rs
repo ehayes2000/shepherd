@@ -20,8 +20,9 @@
 //! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
 //!   A command that needs it (a workspace probe, a new session's worktree) is submitted there and the loop carries
 //!   on; the result comes back as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still
-//!   matters. The `Commands` port (a new worktree's post-create hooks) runs on a worker of its own the same way, its
-//!   results coming back as [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
+//!   matters. Closing a session inspects and removes its worktree the same way. The `Commands` port (a worktree's
+//!   post-create and pre-remove hooks) runs on a worker of its own the same way, its results coming back as
+//!   [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -48,12 +49,14 @@ use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk, expand_home,
+    Host, HostCommand, HostEvent, Inspection, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
+    expand_home,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
+    MAX_QUEUED, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError,
+    WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -359,6 +362,8 @@ impl<
                 code: None,
             });
         }
+        // A session that was closing lost its worktree's inspection, hooks or removal with the old host.
+        runtime.dispatch(HostEvent::Restarted);
         // Every run directory is stale: the log lock is held and nothing has been spawned yet.
         run_files::sweep(&runtime.settings.run_root);
         Ok(runtime)
@@ -740,6 +745,97 @@ impl<
                         }
                     }
                 }
+                HostCommand::InspectWorktree {
+                    session,
+                    repo,
+                    path,
+                    purpose,
+                } => {
+                    let panicked = HostEvent::WorktreeInspected {
+                        session: session.clone(),
+                        path: path.clone(),
+                        purpose: purpose.clone(),
+                        result: Err(WorktreeError::Other(format!(
+                            "inspecting worktree {path} failed unexpectedly"
+                        ))),
+                    };
+                    let call = move |worktrees: &W| HostEvent::WorktreeInspected {
+                        result: inspect_worktree(worktrees, &repo, &path),
+                        session,
+                        path,
+                        purpose,
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
+                HostCommand::RunPreRemove {
+                    session,
+                    command,
+                    rest,
+                    path,
+                    force,
+                } => {
+                    let panicked = HostEvent::PreRemoveFinished {
+                        session: session.clone(),
+                        command: command.clone(),
+                        rest: rest.clone(),
+                        path: path.clone(),
+                        force,
+                        result: Err(CommandError::Failed(
+                            "running it failed unexpectedly".into(),
+                        )),
+                    };
+                    let call = move |commands: &C| HostEvent::PreRemoveFinished {
+                        result: commands.run(&command),
+                        session,
+                        command,
+                        rest,
+                        path,
+                        force,
+                    };
+                    match self.commands.submit(call, panicked) {
+                        Ok(()) => self.hook_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the hooks thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
+                HostCommand::RemoveWorktree {
+                    session,
+                    path,
+                    force,
+                } => {
+                    let panicked = HostEvent::WorktreeRemoved {
+                        session: session.clone(),
+                        path: path.clone(),
+                        result: Err(WorktreeError::Other(format!(
+                            "removing worktree {path} failed unexpectedly"
+                        ))),
+                        exists: true,
+                    };
+                    let call = move |worktrees: &W| {
+                        let result = worktrees.remove(&path, force);
+                        HostEvent::WorktreeRemoved {
+                            exists: anything_at(&path),
+                            result,
+                            session,
+                            path,
+                        }
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1054,9 +1150,23 @@ impl<
             }
             ClientRequest::SessionClose(close) => {
                 let reply = self.reply_to(conn, id);
+                // The hooks of the workspace the session was created in, as the config says now.
+                let hooks = match self.host.session_workspace(&close.session) {
+                    Some(workspace) => self.settings.config.workspace_hooks(workspace),
+                    None => WorkspaceHooks::default(),
+                };
                 self.dispatch(HostEvent::Close {
                     reply,
                     session: close.session,
+                    worktree: close.worktree,
+                    hooks,
+                });
+            }
+            ClientRequest::WorktreeStatus(check) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::WorktreeStatus {
+                    reply,
+                    session: check.session,
                 });
             }
             ClientRequest::WorkspaceSelect(select) => {
@@ -1480,6 +1590,28 @@ fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, S
         .default_branch(&RepoRef::new(root.clone()))
         .map_err(|e| format!("{shown}: {e}"))?;
     Ok(root)
+}
+
+/// Whether `path` is one of `repo`'s managed worktrees, at exactly the path the port lists, and if so its status; and
+/// whether anything is there at all (without following a symlink). Runs on the worker thread.
+fn inspect_worktree(
+    worktrees: &impl Worktrees,
+    repo: &RepoRef,
+    path: &WorktreePath,
+) -> Result<Inspection, WorktreeError> {
+    let listed = worktrees.list_managed(repo)?;
+    if listed.iter().any(|w| w.path == *path) {
+        let status = worktrees.status(path);
+        let exists = anything_at(path);
+        return Ok(Inspection::Listed { status, exists });
+    }
+    let exists = anything_at(path);
+    Ok(Inspection::Unlisted { exists })
+}
+
+/// Whether anything (a symlink included, not followed) is at `path`.
+fn anything_at(path: &WorktreePath) -> bool {
+    std::fs::symlink_metadata(path.as_path()).is_ok()
 }
 
 /// A session's screen panicked and was replaced with a blank one ([`screen_guard`]).

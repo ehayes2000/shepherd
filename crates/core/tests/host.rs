@@ -339,6 +339,8 @@ fn close_kills_the_pty_appends_closed_and_acks() {
     let cmds = host.handle(HostEvent::Close {
         reply,
         session: sid("s1"),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+        hooks: shepherd_core::config::WorkspaceHooks::default(),
     });
     assert_eq!(
         cmds,
@@ -380,6 +382,8 @@ fn closing_an_unknown_session_replies_unknown_session() {
     let cmds = host.handle(HostEvent::Close {
         reply,
         session: sid("nope"),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+        hooks: shepherd_core::config::WorkspaceHooks::default(),
     });
     assert_eq!(
         cmds,
@@ -434,6 +438,8 @@ fn pty_exit_appends_agent_exited() {
             failed: None,
             creating_worktree: false,
             warning: None,
+            worktree: None,
+            removing_worktree: false,
         }]
     );
 }
@@ -479,6 +485,8 @@ fn an_agent_exiting_inside_the_shell_does_not_mark_the_pty_exited() {
             .handle(HostEvent::Close {
                 reply: ReplyTo::new(1),
                 session: sid("s1"),
+                worktree: shepherd_core::wire::CloseWorktree::IfSafe,
+                hooks: shepherd_core::config::WorkspaceHooks::default(),
             })
             .contains(&HostCommand::KillPty { session: sid("s1") })
     );

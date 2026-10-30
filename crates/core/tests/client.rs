@@ -811,7 +811,8 @@ fn closing_asks_for_confirmation_first() {
     assert_eq!(
         bodies(&sent),
         [ClientRequest::SessionClose(SessionClose {
-            session: sid("s1")
+            session: sid("s1"),
+            worktree: shepherd_core::wire::CloseWorktree::IfSafe,
         })]
     );
 }
@@ -1096,7 +1097,8 @@ fn closing_a_given_session_asks_to_close_it_without_selecting_it() {
     assert_eq!(
         bodies(&sent),
         [ClientRequest::SessionClose(SessionClose {
-            session: sid("s1")
+            session: sid("s1"),
+            worktree: shepherd_core::wire::CloseWorktree::IfSafe,
         })]
     );
 }

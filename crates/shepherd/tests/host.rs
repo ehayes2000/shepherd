@@ -122,6 +122,7 @@ fn a_fresh_host_replayed_from_the_log_equals_the_live_one() {
     }));
     client.request(ClientRequest::SessionClose(SessionClose {
         session: second,
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     h.step();
 
@@ -279,6 +280,7 @@ fn closing_a_session_kills_its_pty() {
     let (mut client, id) = with_session(&mut h);
     let req = client.request(ClientRequest::SessionClose(SessionClose {
         session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     h.step();
     assert!(response(&client.take(), &req).is_ok());

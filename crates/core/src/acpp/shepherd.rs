@@ -22,6 +22,7 @@ pub enum ShepherdFrame {
     AgentExited(AgentExited),
     WorktreeCreated(WorktreeCreated),
     WorktreeHook(WorktreeHook),
+    WorktreeRemoving(WorktreeRemoving),
     WorkspaceSelected(WorkspaceSelected),
 }
 
@@ -37,6 +38,7 @@ impl ShepherdFrame {
             Self::AgentExited(_) => "_shepherd/agent/exited",
             Self::WorktreeCreated(_) => "_shepherd/worktree/created",
             Self::WorktreeHook(_) => "_shepherd/worktree/hook",
+            Self::WorktreeRemoving(_) => "_shepherd/worktree/removing",
             Self::WorkspaceSelected(_) => "_shepherd/workspace/selected",
         }
     }
@@ -54,6 +56,7 @@ impl ShepherdFrame {
             Self::AgentExited(p) => to_params(p),
             Self::WorktreeCreated(p) => to_params(p),
             Self::WorktreeHook(p) => to_params(p),
+            Self::WorktreeRemoving(p) => to_params(p),
             Self::WorkspaceSelected(p) => to_params(p),
         };
         Frame::notification(self.method(), params)
@@ -75,6 +78,7 @@ impl ShepherdFrame {
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
             "_shepherd/worktree/created" => Self::WorktreeCreated(p(params)?),
             "_shepherd/worktree/hook" => Self::WorktreeHook(p(params)?),
+            "_shepherd/worktree/removing" => Self::WorktreeRemoving(p(params)?),
             "_shepherd/workspace/selected" => Self::WorkspaceSelected(p(params)?),
             _ => return None,
         })
@@ -121,6 +125,10 @@ pub struct SessionRenamed {
 pub struct SessionClosed {
     #[serde(default)]
     pub worktree_removed: bool,
+    /// Why the session's worktree was kept when closing tried to remove it, for the user. Absent when it was removed,
+    /// was already gone, or the user chose to keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_kept: Option<String>,
 }
 
 /// The session couldn't start: its PTY never spawned, e.g. because its worktree couldn't be made.
@@ -198,6 +206,20 @@ pub struct WorktreeHook {
     /// when it exited with `exit_code`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Closing the session is removing its worktree: the session stays listed, its PTY gone, until its `session/closed`
+/// says how that went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRemoving {
+    pub path: String,
+    /// Removed even if that loses uncommitted changes or unpushed commits (the user said so).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+    /// The workspace's pre-remove hooks, run in order in the worktree before it is removed. Each one's result is a
+    /// `worktree/hook`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_remove: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

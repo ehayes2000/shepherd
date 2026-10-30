@@ -26,7 +26,7 @@ pub mod builders {
         BaseUsed, BranchName, Created, WorktreeError, WorktreePath,
     };
     use shepherd_core::wire::{
-        ClientMessage, ClientNotification, HostMessage, HostNotification, LogEntry,
+        ClientMessage, ClientNotification, CloseWorktree, HostMessage, HostNotification, LogEntry,
         PROTOCOL_VERSION, RawResponse, Request, WireError,
     };
 
@@ -251,11 +251,24 @@ pub mod builders {
             })
         }
 
+        /// A `Close` of `id` that removes its worktree if that loses nothing, in a workspace with no hooks.
         pub fn close(&mut self, id: &str) -> Vec<HostCommand> {
+            self.close_with(id, CloseWorktree::IfSafe, WorkspaceHooks::default())
+        }
+
+        /// A `Close` of `id` doing `worktree` with its worktree, its workspace's hooks being `hooks`.
+        pub fn close_with(
+            &mut self,
+            id: &str,
+            worktree: CloseWorktree,
+            hooks: WorkspaceHooks,
+        ) -> Vec<HostCommand> {
             let reply = self.reply_to();
             self.handle(HostEvent::Close {
                 reply,
                 session: SessionId::new(id),
+                worktree,
+                hooks,
             })
         }
 

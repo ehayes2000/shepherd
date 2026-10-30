@@ -18,6 +18,6 @@ pub use pty::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
 };
 pub use worktrees::{
-    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
+    BaseSpec, BaseUsed, BranchName, Created, Loss, RepoRef, Worktree, WorktreeError, WorktreeName,
     WorktreePath, WorktreeStatus, Worktrees,
 };

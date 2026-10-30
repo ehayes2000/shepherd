@@ -73,13 +73,14 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 |---|---|
 | `_shepherd/session/created`   | `{ name, workspace, worktree, branch, agent, machine, profile?, cwd? }` (profile and cwd: what resume runs again; a `branch` with no `worktree` and no `cwd`: its worktree is being made, and `worktree/created` gives the cwd) |
 | `_shepherd/session/renamed`   | `{ name, auto: bool }` |
-| `_shepherd/session/closed`    | `{ worktree_removed: bool }` |
+| `_shepherd/session/closed`    | `{ worktree_removed: bool, worktree_kept? }` (`worktree_kept`: why closing kept a worktree it tried to remove) |
 | `_shepherd/session/failed`    | `{ reason }` (it never got a PTY, e.g. its worktree couldn't be made) |
 | `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command }` (source `shepherd`: a resume respawned the agent) |
 | `_shepherd/agent/idle`        | `{ inferred? }` (agent is at its prompt with nothing to do; `inferred`: no agent signal said so and the host inferred it, `"quiet"` or `"quiet-after-permission"`) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
 | `_shepherd/worktree/created`  | `{ path, branch, base, fetch_error?, post_create? }` (`path` is the session's cwd from then on; `fetch_error`: `base` is as last fetched, or local; `post_create`: the hooks run there before the PTY spawns, each then a `worktree/hook`) |
 | `_shepherd/worktree/hook`     | `{ hook, exit_code?, output_tail, error? }` (`output_tail`: the last 4 KiB, control characters stripped; `error`: why it didn't exit normally or couldn't run, e.g. a timeout) |
+| `_shepherd/worktree/removing` | `{ path, force?, pre_remove? }` (closing is removing the session's worktree: `force` even if that loses work; `pre_remove`: the hooks run there first, each then a `worktree/hook`; `session/closed` ends it) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.
