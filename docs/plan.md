@@ -10,6 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
+| F29 workspace switcher scroll | building | task/f29-switcher-scroll @ e396325 | 0 | – |
 | F14 pty backpressure | rebasing (builder) | task/f14-pty-backpressure @ 1abe0c8 (on 03c6d2f, stale) | 1 | First reviewer hung 4 h in one tool call and was stopped with no verdict. Rebase onto main, then fresh review with time-bounded load. Earlier accepts stand |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -480,7 +481,7 @@ acceptance:
 scope: crates/core, crates/adapters, crates/testkit, crates/shepherd
 
 ### F29: Workspace switcher list scrolls and fits the window
-status: todo
+status: in-progress
 depends: T21, F24
 touches: tui::popup, core::client
 goal: The T21 workspace switcher has the same unscrolled, uncapped list the profile picker had before F24.
@@ -1179,7 +1180,7 @@ acceptance:
 - Config: `[workspaces."<repo path or name>".hooks] post_create = ["cp ../.envrc .", ...]`, plus a `pre_remove` list.
 - Each hook runs in the worktree with `SHEPHERD_*` env set. Its output tail and exit code go to `_shepherd/worktree/hook`.
   A failing post_create hook marks the session with a warning but still spawns the agent.
-- `Commands` port with contract, fake, and tokio::process adapter.
+- `Commands` port with contract, fake, and a `std::process` adapter (decision 0011: no tokio), run through F27's `Worker` pattern so hooks never block the runtime thread.
 scope: core, testkit, adapters
 
 ### T24: Auto-naming
