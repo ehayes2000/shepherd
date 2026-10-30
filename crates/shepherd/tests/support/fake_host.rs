@@ -32,6 +32,8 @@ pub struct FakeHost {
     resizes: Vec<SessionResize>,
     /// What its hello answer says about `[notify] bell`.
     bell: bool,
+    /// The `cwd` of every hello it was sent, in order.
+    hello_cwds: Vec<Option<String>>,
 }
 
 impl FakeHost {
@@ -50,6 +52,7 @@ impl FakeHost {
             inputs: Vec::new(),
             resizes: Vec::new(),
             bell: false,
+            hello_cwds: Vec::new(),
         }
     }
 
@@ -72,6 +75,11 @@ impl FakeHost {
 
     pub fn resizes(&self) -> &[SessionResize] {
         &self.resizes
+    }
+
+    /// The `cwd` of every hello it was sent, in order.
+    pub fn hello_cwds(&self) -> &[Option<String>] {
+        &self.hello_cwds
     }
 
     /// The open sessions' ids.
@@ -123,12 +131,15 @@ impl FakeHost {
     fn request(&mut self, conn: ConnId, Request { id, body }: Request) {
         let before = self.driver.log().len();
         let result = match body {
-            ClientRequest::Hello(hello) => negotiate(&hello, &MachineId::new("m_test")).map(|ok| {
-                HostResult::Hello(HelloOk {
-                    notify: Notify { bell: self.bell },
-                    ..ok
+            ClientRequest::Hello(hello) => {
+                self.hello_cwds.push(hello.cwd.clone());
+                negotiate(&hello, &MachineId::new("m_test")).map(|ok| {
+                    HostResult::Hello(HelloOk {
+                        notify: Notify { bell: self.bell },
+                        ..ok
+                    })
                 })
-            }),
+            }
             ClientRequest::Subscribe(sub) => {
                 for env in self.driver.log().to_vec() {
                     let from = match env.session() {
@@ -157,6 +168,7 @@ impl FakeHost {
             ClientRequest::SessionResume(r) => {
                 reply_of(self.driver.resume(r.session.as_str(), claude_resume_spec()))
             }
+            ClientRequest::WorkspaceSelect(w) => reply_of(self.driver.select_workspace(&w.path)),
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

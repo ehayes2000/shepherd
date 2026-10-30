@@ -233,8 +233,9 @@ fn a_scrolled_list_is_hit_where_its_rows_are_drawn() {
         hit_at(&c, SHORT, Position::new(first.x, first.y - 1)),
         Some(Target::NewSession)
     );
-    let last = at(&buf, "name-08");
-    assert_eq!(hit_at(&c, SHORT, below(last, 1)), session("s8"));
+    // Four rows fit under the two header lines: name-12 down to name-09.
+    let last = at(&buf, "name-09");
+    assert_eq!(hit_at(&c, SHORT, below(last, 1)), session("s9"));
     // The line below the last row is the footer.
     assert_eq!(hit_at(&c, SHORT, below(last, 2)), None);
 }
@@ -1094,4 +1095,145 @@ fn a_running_sessions_menu_has_no_resume() {
     let row = at(&buffer(&c, WIDE), "name-01");
     right_click(&mut c, WIDE, row);
     assert_eq!(find(&buffer(&c, WIDE), "Resume"), None);
+}
+
+// ---------- the workspace ----------
+
+/// `sessions(1, window)` on a host that has used `/src/api`, then `/src/shepherd` (the current workspace).
+fn with_workspaces(window: Rect) -> ClientDriver {
+    let mut c = sessions(1, window);
+    c.host().select_workspace("/src/api");
+    c.host().select_workspace("/src/shepherd");
+    c.sync();
+    c
+}
+
+/// The switcher open over `with_workspaces`, opened by clicking the workspace in the sidebar.
+fn switcher(window: Rect) -> ClientDriver {
+    let mut c = with_workspaces(window);
+    let label = if window == NARROW {
+        "⌂"
+    } else {
+        "⌂ shepherd"
+    };
+    let button = at(&buffer(&c, window), label);
+    assert_eq!(
+        click(&mut c, window, button),
+        [vec![], vec![Intent::BeginWorkspace]]
+    );
+    c
+}
+
+fn workspace_row(path: &str) -> Option<Target> {
+    Some(Target::WorkspaceRow(path.into()))
+}
+
+#[test]
+fn the_workspace_is_shown_above_new_session_and_hit_across_its_label() {
+    let c = with_workspaces(WIDE);
+    let buf = buffer(&c, WIDE);
+    let label = "⌂ shepherd";
+    let start = at(&buf, label);
+    assert_eq!(at(&buf, "+ New session"), below(start, 1));
+    let end = right(start, label.chars().count() as u16 - 1);
+    assert_eq!(hit_at(&c, WIDE, start), Some(Target::Workspace));
+    assert_eq!(hit_at(&c, WIDE, end), Some(Target::Workspace));
+    assert_eq!(hit_at(&c, WIDE, right(end, 1)), None);
+}
+
+#[test]
+fn without_a_workspace_the_sidebar_offers_to_choose_one() {
+    let mut c = sessions(1, WIDE);
+    let button = at(&buffer(&c, WIDE), "⌂ choose a workspace");
+    assert_eq!(
+        click(&mut c, WIDE, button),
+        [vec![], vec![Intent::BeginWorkspace]]
+    );
+}
+
+#[test]
+fn clicking_the_workspace_opens_the_switcher_in_both_sidebars() {
+    for window in [WIDE, NARROW] {
+        let c = switcher(window);
+        assert!(
+            matches!(c.client().popup(), Some(Popup::Workspace { .. })),
+            "{window:?}"
+        );
+        let buf = buffer(&c, window);
+        at(&buf, "[Open]");
+        at(&buf, "[Cancel]");
+    }
+}
+
+#[test]
+fn the_switcher_lists_the_workspaces_used_before_current_first() {
+    let c = switcher(WIDE);
+    let buf = buffer(&c, WIDE);
+    let current = at(&buf, "/src/shepherd");
+    assert_eq!(at(&buf, "/src/api"), below(current, 1));
+    let mark = at(&buf, "(current)");
+    assert_eq!(mark.y, current.y, "{buf:?}");
+    assert_eq!(hit_at(&c, WIDE, current), workspace_row("/src/shepherd"));
+    assert_eq!(
+        hit_at(&c, WIDE, right(current, 25)),
+        workspace_row("/src/shepherd")
+    );
+    assert_eq!(
+        hit_at(&c, WIDE, below(current, 1)),
+        workspace_row("/src/api")
+    );
+}
+
+#[test]
+fn clicking_a_workspace_used_before_asks_to_select_it() {
+    let mut c = switcher(WIDE);
+    let row = at(&buffer(&c, WIDE), "/src/api");
+    assert_eq!(
+        click(&mut c, WIDE, row),
+        [vec![], vec![Intent::PickWorkspace("/src/api".into())]]
+    );
+}
+
+#[test]
+fn the_switcher_opens_a_typed_path_by_its_button_and_cancels_by_the_other() {
+    let mut c = switcher(WIDE);
+    c.user(Intent::EditWorkspacePath("/src/new".into()));
+    let buf = buffer(&c, WIDE);
+    at(&buf, "/src/new");
+    let open = at(&buf, "[Open]");
+    assert_eq!(click(&mut c, WIDE, open), [vec![], vec![Intent::Confirm]]);
+    let cancel = at(&buffer(&c, WIDE), "[Cancel]");
+    assert_eq!(click(&mut c, WIDE, cancel), [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn a_refused_path_is_shown_in_the_switcher() {
+    let mut c = switcher(WIDE);
+    c.user(Intent::EditWorkspacePath("/tmp/x".into()));
+    let sent = c.user(Intent::Confirm);
+    c.answer(
+        &sent,
+        Err(shepherd_core::wire::WireError::InvalidParams(
+            "/tmp/x is not a repo".into(),
+        )),
+    );
+    at(&buffer(&c, WIDE), "/tmp/x is not a repo");
+}
+
+#[test]
+fn sessions_from_another_workspace_are_dimmed_and_say_which() {
+    let mut c = sessions(1, WIDE);
+    c.host().select_workspace("/src/api");
+    c.host().new_session("s2");
+    c.host().rename("s2", "name-02");
+    c.host().select_workspace("/src/shepherd");
+    c.sync();
+    let buf = buffer(&c, WIDE);
+    let elsewhere = at(&buf, "name-02");
+    let here = at(&buf, "name-01");
+    use ratatui::style::Modifier;
+    assert!(buf[elsewhere].modifier.contains(Modifier::DIM), "{buf:?}");
+    assert!(!buf[here].modifier.contains(Modifier::DIM), "{buf:?}");
+    assert_eq!(at(&buf, "in api").y, elsewhere.y + 1, "{buf:?}");
 }

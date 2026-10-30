@@ -6,10 +6,17 @@
 //! and selecting a marked session clears its mark. With the host's `[notify] bell` on, a session that newly wants the
 //! user gives a [`ClientCommand::Alert`], except while the log is being caught up after a (re)connect.
 //!
+//! Workspaces: the host's workspace and the ones used before are folded from its log like the sessions. Every session
+//! is listed, whatever its workspace; one created in a workspace other than the current one is marked
+//! ([`ClientSession::elsewhere`]) rather than hidden, so nothing running is ever out of sight. The switcher
+//! ([`Popup::Workspace`]) asks the host to select a workspace and stays open until the host answers: a refusal is shown
+//! in it.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use jiff::SignedDuration;
 
@@ -22,7 +29,7 @@ use crate::wire::{
     ClientMessage, ClientNotification, ClientRequest, Hello, HostMessage, HostNotification,
     HostResult, Method, PROTOCOL_VERSION, ProfileInfo, RawResponse, Request, SessionClose,
     SessionInput, SessionNew, SessionRename, SessionResize, SessionResume, Subscribe,
-    SubscribeFrom, WireError,
+    SubscribeFrom, WireError, WorkspaceSelect,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -94,7 +101,13 @@ pub enum Intent {
     },
     /// Run an item of the open menu on the menu's session.
     MenuChoose(MenuItem),
-    /// Accept the open popup: send the rename or the close.
+    /// Open the workspace switcher (a click on the workspace).
+    BeginWorkspace,
+    /// Replace the path typed in the workspace switcher.
+    EditWorkspacePath(String),
+    /// Select this workspace, from the open switcher's list of those used before. Ignored when the switcher isn't open.
+    PickWorkspace(PathBuf),
+    /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path.
     Confirm,
     /// Close the open popup or menu without doing anything.
     Dismiss,
@@ -169,6 +182,12 @@ pub enum Popup {
     },
     /// Which profile a new session runs, listing [`Client::profiles`].
     PickProfile,
+    /// The workspace switcher: the workspaces used before ([`Client::workspaces`]), and a path to type. `error` is why
+    /// the host refused the last path asked for, until the path is edited.
+    Workspace {
+        path: String,
+        error: Option<String>,
+    },
 }
 
 /// Where the client is with its host.
@@ -209,6 +228,10 @@ pub struct ClientSession {
     pub attention: bool,
     /// Whether it can be resumed, see [`Host::resume_target`].
     pub resume: Result<(), ResumeUnavailable>,
+    /// The workspace it was created in, if it was created in one.
+    pub workspace: Option<PathBuf>,
+    /// It was created in a workspace other than the current one.
+    pub elsewhere: bool,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -216,6 +239,8 @@ pub struct ClientSession {
 #[derive(Debug, Clone)]
 pub struct Client {
     machine: MachineId,
+    /// The directory the client started in, sent in its hello.
+    cwd: Option<String>,
     connection: Connection,
     /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
@@ -256,6 +281,7 @@ impl Client {
     pub fn new(machine: MachineId) -> Self {
         Self {
             machine,
+            cwd: None,
             connection: Connection::Idle,
             launched: false,
             next_request: 0,
@@ -278,6 +304,24 @@ impl Client {
             default_profile: None,
             bell: false,
         }
+    }
+
+    /// This client, telling the host in its hello that it started in `cwd`.
+    pub fn with_cwd(self, cwd: impl Into<String>) -> Self {
+        Self {
+            cwd: Some(cwd.into()),
+            ..self
+        }
+    }
+
+    /// The host's workspace, once its log says.
+    pub fn workspace(&self) -> Option<&Path> {
+        self.registry.workspace()
+    }
+
+    /// Every workspace the host has used, the current one first, see [`Host::workspaces`].
+    pub fn workspaces(&self) -> &[PathBuf] {
+        self.registry.workspaces()
     }
 
     /// Open sessions, newest first.
@@ -414,6 +458,7 @@ impl Client {
         let hello = Hello {
             version: PROTOCOL_VERSION,
             machine: self.machine.clone(),
+            cwd: self.cwd.clone(),
         };
         vec![self.request(ClientRequest::Hello(hello))]
     }
@@ -507,6 +552,21 @@ impl Client {
                 commands
             }
             (Method::Hello, Err(e)) => self.fail(format!("the shepherd host refused us: {e}")),
+            (Method::WorkspaceSelect, result) => {
+                let open = self.popup.as_mut().and_then(|p| match p {
+                    Popup::Workspace { error, .. } => Some(error),
+                    _ => None,
+                });
+                match (result, open) {
+                    (Ok(_), Some(_)) => self.popup = None,
+                    (Ok(_), None) => {}
+                    // The host's reason is the whole story here, without the error's kind.
+                    (Err(WireError::InvalidParams(why)), Some(error)) => *error = Some(why),
+                    (Err(e), Some(error)) => *error = Some(e.to_string()),
+                    (Err(e), None) => self.notice = Some(e.to_string()),
+                }
+                Vec::new()
+            }
             (Method::SessionNew, Ok(HostResult::SessionNew(ok))) => {
                 if self.listed(&ok.session) {
                     self.chosen = true;
@@ -638,6 +698,7 @@ impl Client {
 
     fn rebuild(&mut self, open: Vec<HostSession>) {
         let starting = SessionState::default();
+        let current = self.registry.workspace();
         self.sessions = open
             .into_iter()
             .map(|s| {
@@ -651,6 +712,11 @@ impl Client {
                     created: s.created,
                     exited: s.exited,
                     resume: s.resume,
+                    elsewhere: match (&s.workspace, current) {
+                        (Some(theirs), Some(current)) => theirs != current,
+                        _ => false,
+                    },
+                    workspace: s.workspace,
                 }
             })
             .collect();
@@ -862,6 +928,29 @@ impl Client {
                 }
                 Vec::new()
             }
+            Intent::BeginWorkspace => {
+                self.popup = Some(Popup::Workspace {
+                    path: String::new(),
+                    error: None,
+                });
+                Vec::new()
+            }
+            Intent::EditWorkspacePath(text) => {
+                if let Some(Popup::Workspace { path, error }) = &mut self.popup {
+                    *path = text;
+                    *error = None;
+                }
+                Vec::new()
+            }
+            Intent::PickWorkspace(path) => {
+                if !matches!(self.popup, Some(Popup::Workspace { .. })) {
+                    return Vec::new();
+                }
+                match path.to_str() {
+                    Some(path) => self.select_workspace(path.to_owned()),
+                    None => Vec::new(),
+                }
+            }
             Intent::Confirm => match self.popup.take() {
                 Some(Popup::Rename { session, name }) => {
                     self.user_request(ClientRequest::SessionRename(SessionRename {
@@ -871,6 +960,17 @@ impl Client {
                 }
                 Some(Popup::ConfirmClose { session }) => {
                     self.user_request(ClientRequest::SessionClose(SessionClose { session }))
+                }
+                // The switcher stays open until the host answers.
+                Some(Popup::Workspace { path, error }) => {
+                    let typed = path.trim().to_owned();
+                    if typed.is_empty() {
+                        let error = Some("type the path of a repo".to_owned());
+                        self.popup = Some(Popup::Workspace { path, error });
+                        return Vec::new();
+                    }
+                    self.popup = Some(Popup::Workspace { path, error });
+                    self.select_workspace(typed)
                 }
                 Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
@@ -929,6 +1029,11 @@ impl Client {
     /// Starts a session running `profile`, or the host's default.
     fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
         self.user_request(ClientRequest::SessionNew(SessionNew { profile, cwd: None }))
+    }
+
+    /// Asks the host to select workspace `path`. The switcher stays open until it answers.
+    fn select_workspace(&mut self, path: String) -> Vec<ClientCommand> {
+        self.user_request(ClientRequest::WorkspaceSelect(WorkspaceSelect { path }))
     }
 
     /// A request the user asked for. Dropped, with a notice, while not connected.

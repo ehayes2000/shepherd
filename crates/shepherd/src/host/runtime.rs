@@ -24,7 +24,7 @@
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -37,11 +37,13 @@ use shepherd_core::acpp::{
 use shepherd_core::agents::Translators;
 use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
-use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec};
+use shepherd_core::host::{
+    Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
+};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
-    PtyEventSink, PtySize,
+    PtyEventSink, PtySize, RepoRef, Worktrees,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -210,9 +212,10 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P, L, E, V> {
+pub struct HostRuntime<P, W, L, E, V> {
     host: Host,
     pty: P,
+    worktrees: W,
     link: L,
     log: E,
     env: V,
@@ -237,11 +240,13 @@ pub struct HostRuntime<P, L, E, V> {
     finished: bool,
 }
 
-impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
+impl<P: Pty, W: Worktrees, L: Link, E: EventLog, V: Env> HostRuntime<P, W, L, E, V> {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
     /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
+        worktrees: W,
         link: L,
         log: E,
         env: V,
@@ -258,6 +263,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let mut runtime = Self {
             host,
             pty,
+            worktrees,
             link,
             log,
             env,
@@ -486,8 +492,29 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                     }
                 }
                 HostCommand::Reply { to, result } => self.reply(to, result),
+                HostCommand::ProbeWorkspace { ask, path } => {
+                    let repo = self.probe_workspace(&path);
+                    follow_up.push_back(HostEvent::WorkspaceProbed { ask, repo });
+                }
             }
         }
+    }
+
+    /// `path` resolved (no `..`, symlinks followed), if it is a directory in a git repo (its default branch can be
+    /// found), or why it can't be a workspace, for the user.
+    fn probe_workspace(&self, path: &Path) -> Result<PathBuf, String> {
+        let shown = path.display();
+        if !path.is_absolute() {
+            return Err(format!("{shown} is not an absolute path"));
+        }
+        let resolved = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
+        if !resolved.is_dir() {
+            return Err(format!("{shown} is not a directory"));
+        }
+        self.worktrees
+            .default_branch(&RepoRef::new(resolved.clone()))
+            .map_err(|e| format!("{shown}: {e}"))?;
+        Ok(resolved)
     }
 
     /// After a failed append: skips the rest of the batch, answering its replies with an error.
@@ -685,7 +712,15 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 let config = &self.settings.config;
                 let result = wire::negotiate(&hello, &self.machine)
                     .map(|ok| HostResult::Hello(ok.with_profiles(config).with_notify(config)));
+                let accepted = result.is_ok();
                 self.respond(conn, &respond_now(result));
+                // Before this conn's next request (its subscribe) is read, so a selection is in its catch-up.
+                if let Some(cwd) = hello.cwd.filter(|_| accepted) {
+                    self.dispatch(HostEvent::SelectWorkspace {
+                        ask: WorkspaceAsk::ClientCwd,
+                        path: PathBuf::from(cwd),
+                    });
+                }
             }
             ClientRequest::Subscribe(subscribe) => self.subscribe(conn, id, &subscribe.from),
             ClientRequest::HookFrame(hook) => {
@@ -737,6 +772,13 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                     session: close.session,
                 });
             }
+            ClientRequest::WorkspaceSelect(select) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::SelectWorkspace {
+                    ask: WorkspaceAsk::Select(reply),
+                    path: PathBuf::from(select.path),
+                });
+            }
             ClientRequest::SessionResume(resume) => {
                 let reply = self.reply_to(conn, id);
                 let session = resume.session;
@@ -759,7 +801,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
     }
 
     /// What a new session runs, and the run files to write before spawning it: the named profile, else
-    /// `[defaults] agent`, in the requested directory, else the home directory, at [`INITIAL_SIZE`].
+    /// `[defaults] agent`, in the requested directory, else the workspace's root, else the home directory, at
+    /// [`INITIAL_SIZE`].
     fn plan_session(
         &self,
         session: &SessionId,
@@ -770,9 +813,19 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let profile = config.profile_or_default(name).ok_or_else(|| {
             WireError::InvalidParams(format!("unknown profile `{}`", name.unwrap_or_default()))
         })?;
-        let cwd = match new.cwd.as_deref() {
-            Some(cwd) => existing_dir(cwd)?,
-            None => self.settings.home.clone(),
+        let cwd = match (new.cwd.as_deref(), self.host.workspace()) {
+            (Some(cwd), _) => existing_dir(cwd)?,
+            // Checked like a requested cwd: the PTY would silently start in the home directory instead.
+            (None, Some(workspace)) => workspace
+                .to_str()
+                .and_then(|w| existing_dir(w).ok())
+                .ok_or_else(|| {
+                    WireError::InvalidParams(format!(
+                        "the workspace {} no longer exists; choose another",
+                        workspace.display()
+                    ))
+                })?,
+            (None, None) => self.settings.home.clone(),
         };
         let ctx = LaunchContext {
             session: session.clone(),

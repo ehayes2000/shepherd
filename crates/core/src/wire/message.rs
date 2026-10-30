@@ -45,10 +45,11 @@ pub enum Method {
     Subscribe,
     HookFrame,
     SessionResume,
+    WorkspaceSelect,
 }
 
 impl Method {
-    pub const ALL: [Method; 7] = [
+    pub const ALL: [Method; 8] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -56,6 +57,7 @@ impl Method {
         Self::Subscribe,
         Self::HookFrame,
         Self::SessionResume,
+        Self::WorkspaceSelect,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +69,7 @@ impl Method {
             Self::Subscribe => "_shepherd/subscribe",
             Self::HookFrame => "_shepherd/hook/frame",
             Self::SessionResume => "_shepherd/session/resume",
+            Self::WorkspaceSelect => "_shepherd/workspace/select",
         }
     }
 
@@ -91,6 +94,7 @@ pub enum ClientRequest {
     Subscribe(Subscribe),
     HookFrame(Box<HookFrame>),
     SessionResume(SessionResume),
+    WorkspaceSelect(WorkspaceSelect),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -149,6 +153,10 @@ fn invalid_params<T: DeserializeOwned>(params: Value) -> Result<T, WireError> {
 pub struct Hello {
     pub version: u32,
     pub machine: MachineId,
+    /// The directory the client was started in. A host with no workspace selected yet selects it if it is in a git
+    /// repo. Absent from clients older than workspaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Start a session. Answered with [`SessionNewOk`].
@@ -176,6 +184,13 @@ pub struct SessionClose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionResume {
     pub session: SessionId,
+}
+
+/// Make `path`, a git repo on the host, the host's workspace. Answered with an ack once the selection is in the host
+/// log, or [`WireError::InvalidParams`] saying why `path` can't be a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSelect {
+    pub path: String,
 }
 
 /// Bytes typed into a session's PTY. `data` is base64 on the wire.
@@ -231,6 +246,7 @@ impl ClientRequest {
             Self::Subscribe(_) => Method::Subscribe,
             Self::HookFrame(_) => Method::HookFrame,
             Self::SessionResume(_) => Method::SessionResume,
+            Self::WorkspaceSelect(_) => Method::WorkspaceSelect,
         }
     }
 
@@ -243,6 +259,7 @@ impl ClientRequest {
             Self::Subscribe(p) => json(p),
             Self::HookFrame(p) => json(p),
             Self::SessionResume(p) => json(p),
+            Self::WorkspaceSelect(p) => json(p),
         }
     }
 
@@ -257,6 +274,7 @@ impl ClientRequest {
             Method::Subscribe => Self::Subscribe(invalid_params(params)?),
             Method::HookFrame => Self::HookFrame(invalid_params(params)?),
             Method::SessionResume => Self::SessionResume(invalid_params(params)?),
+            Method::WorkspaceSelect => Self::WorkspaceSelect(invalid_params(params)?),
         })
     }
 }

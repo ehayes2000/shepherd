@@ -71,8 +71,13 @@ pub fn map_event(
         ],
         Event::Paste(text) => match (client.popup(), client.focus()) {
             (Some(Popup::Rename { name, .. }), _) => {
-                let line = text.split(['\r', '\n']).next().unwrap_or_default();
-                vec![Intent::EditRename(format!("{name}{line}"))]
+                vec![Intent::EditRename(format!("{name}{}", first_line(text)))]
+            }
+            (Some(Popup::Workspace { path, .. }), _) => {
+                vec![Intent::EditWorkspacePath(format!(
+                    "{path}{}",
+                    first_line(text)
+                ))]
             }
             (Some(_), _) => Vec::new(),
             (None, Focus::Command) => vec![
@@ -140,9 +145,16 @@ fn map_mouse(
     }
 }
 
+/// A paste's first line: what an input takes of it.
+fn first_line(text: &str) -> &str {
+    text.split(['\r', '\n']).next().unwrap_or_default()
+}
+
 /// A left click on `target`.
 fn click(target: Target, client: &Client) -> Vec<Intent> {
     match target {
+        Target::Workspace => vec![Intent::BeginWorkspace],
+        Target::WorkspaceRow(path) => vec![Intent::PickWorkspace(path)],
         Target::NewSession => vec![Intent::BeginNewSession],
         Target::Session(id) if client.selected() == Some(&id) => {
             vec![Intent::SetFocus(Focus::Terminal)]
@@ -202,20 +214,8 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
     match popup {
         Popup::Help => Some(Intent::Dismiss),
-        Popup::Rename { name, .. } => match key.code {
-            KeyCode::Enter => Some(Intent::Confirm),
-            KeyCode::Esc => Some(Intent::Dismiss),
-            KeyCode::Backspace => {
-                let mut name = name.clone();
-                name.pop();
-                Some(Intent::EditRename(name))
-            }
-            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
-                Some(Intent::EditRename(String::new()))
-            }
-            KeyCode::Char(c) if plain => Some(Intent::EditRename(format!("{name}{c}"))),
-            _ => None,
-        },
+        Popup::Rename { name, .. } => input_key(key, name, plain, Intent::EditRename),
+        Popup::Workspace { path, .. } => input_key(key, path, plain, Intent::EditWorkspacePath),
         Popup::ConfirmClose { .. } => match key.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter if plain => Some(Intent::Confirm),
             KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
@@ -224,6 +224,28 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
         Popup::Menu { .. } | Popup::PickProfile => {
             (key.code == KeyCode::Esc).then_some(Intent::Dismiss)
         }
+    }
+}
+
+/// A key in a popup with a text input holding `text`: enter accepts, esc dismisses, and editing keys give `edit` of the
+/// new text.
+fn input_key(
+    key: &KeyEvent,
+    text: &str,
+    plain: bool,
+    edit: fn(String) -> Intent,
+) -> Option<Intent> {
+    match key.code {
+        KeyCode::Enter => Some(Intent::Confirm),
+        KeyCode::Esc => Some(Intent::Dismiss),
+        KeyCode::Backspace => {
+            let mut text = text.to_owned();
+            text.pop();
+            Some(edit(text))
+        }
+        KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => Some(edit(String::new())),
+        KeyCode::Char(c) if plain => Some(edit(format!("{text}{c}"))),
+        _ => None,
     }
 }
 

@@ -16,7 +16,9 @@ pub mod builders {
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
     use shepherd_core::config::AgentKind;
-    use shepherd_core::host::{Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec};
+    use shepherd_core::host::{
+        Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
+    };
     use shepherd_core::ids::{MachineId, SessionId};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
     use shepherd_core::wire::{
@@ -253,6 +255,20 @@ pub mod builders {
             })
         }
 
+        /// A user's select of workspace `path`, its probe answering that `path` is a repo. Returns the commands of
+        /// the probe's answer.
+        pub fn select_workspace(&mut self, path: &str) -> Vec<HostCommand> {
+            let ask = WorkspaceAsk::Select(self.reply_to());
+            self.handle(HostEvent::SelectWorkspace {
+                ask,
+                path: PathBuf::from(path),
+            });
+            self.handle(HostEvent::WorkspaceProbed {
+                ask,
+                repo: Ok(PathBuf::from(path)),
+            })
+        }
+
         pub fn pty_exited(&mut self, id: &str, code: Option<i32>) -> Vec<HostCommand> {
             self.handle(HostEvent::PtyExited {
                 session: SessionId::new(id),
@@ -286,8 +302,13 @@ pub mod builders {
     impl ClientDriver {
         /// A client for machine `m_client` that hasn't started connecting.
         pub fn new() -> Self {
+            Self::from_client(Client::new(MachineId::new("m_client")))
+        }
+
+        /// Drives `client`, which hasn't started connecting.
+        pub fn from_client(client: Client) -> Self {
             Self {
-                client: Client::new(MachineId::new("m_client")),
+                client,
                 host: HostDriver::new(),
                 delivered: 0,
             }

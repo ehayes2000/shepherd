@@ -1,8 +1,10 @@
 //! The session list on the left.
 //!
-//! The first line is the header: a `+ New session` button (`+` when collapsed). Each session is two lines: its
-//! status glyph, name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). The
-//! selected session has a highlighted background, and a session that wants the user has a yellow bar on its left edge.
+//! The first two lines are the header: the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the
+//! switcher, then a `+ New session` button (`⌂` and `+` when collapsed). Each session is two lines: its status glyph,
+//! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
+//! another workspace is dimmed, and its second line says which workspace instead. The selected session has a
+//! highlighted background, and a session that wants the user has a yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice, else a reconnecting note, else a hint
@@ -12,8 +14,10 @@
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
 //! a right click opens the row's menu, which has Close.
 //!
-//! [`crate::hit`] reads the same geometry ([`new_session_button`], [`visible_rows`], [`close_button`],
-//! [`footer_buttons`]) that drawing uses.
+//! [`crate::hit`] reads the same geometry ([`workspace_button`], [`new_session_button`], [`visible_rows`],
+//! [`close_button`], [`footer_buttons`]) that drawing uses.
+
+use std::path::Path;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -25,6 +29,8 @@ use crate::layout::{Layout, Target};
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
+/// Lines above the list: the workspace and `+ New session`.
+const HEADER_HEIGHT: u16 = 2;
 const SELECTED_BG: Color = Color::DarkGray;
 const ATTENTION: Color = Color::Yellow;
 const ATTENTION_BAR: &str = "▌";
@@ -56,19 +62,51 @@ fn inner(layout: &Layout) -> Rect {
     Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
 }
 
-/// Where the `+ New session` button is: its label, on the header line.
-pub(crate) fn new_session_button(layout: &Layout) -> Rect {
+/// The workspace's label: its directory's name, or an offer to choose one.
+const WORKSPACE_MARK: &str = "⌂";
+const NO_WORKSPACE: &str = "⌂ choose a workspace";
+
+fn workspace_label(client: &Client, layout: &Layout) -> String {
+    if layout.collapsed {
+        return WORKSPACE_MARK.to_owned();
+    }
+    match client.workspace() {
+        Some(path) => format!("{WORKSPACE_MARK} {}", workspace_name(path)),
+        None => NO_WORKSPACE.to_owned(),
+    }
+}
+
+/// What a workspace is called in the sidebar: its directory's name.
+fn workspace_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A label on header line `line`, a column in from the left, cut to fit.
+fn header_button(layout: &Layout, line: u16, label: &str) -> Rect {
     let inner = inner(layout);
-    if inner.width < 2 || inner.height == 0 {
+    if inner.width < 2 || inner.height <= line {
         return Rect::default();
     }
+    let width = (label.chars().count() as u16).min(inner.width - 1);
+    Rect::new(inner.x + 1, inner.y + line, width, 1)
+}
+
+/// Where the workspace button is: its label, on the first line.
+pub(crate) fn workspace_button(client: &Client, layout: &Layout) -> Rect {
+    header_button(layout, 0, &workspace_label(client, layout))
+}
+
+/// Where the `+ New session` button is: its label, on the second line.
+pub(crate) fn new_session_button(layout: &Layout) -> Rect {
     let label = if layout.collapsed {
         NEW_SESSION_COLLAPSED
     } else {
         NEW_SESSION
     };
-    let width = (label.chars().count() as u16).min(inner.width - 1);
-    Rect::new(inner.x + 1, inner.y, width, 1)
+    header_button(layout, 1, label)
 }
 
 /// A row's close button, drawn as `×`.
@@ -104,7 +142,7 @@ pub(crate) fn footer_buttons(
         return Vec::new();
     }
     if layout.collapsed {
-        if inner.height < 3 || inner.width < 2 {
+        if inner.height < HEADER_HEIGHT + 2 || inner.width < 2 {
             return Vec::new();
         }
         let help = Rect::new(inner.x + 1, inner.bottom() - 1, 1, 1);
@@ -118,7 +156,7 @@ pub(crate) fn footer_buttons(
         ];
     }
     let width = DETACH.chars().count() as u16;
-    if inner.height < 2 || inner.width < width + 6 {
+    if inner.height < HEADER_HEIGHT + 1 || inner.width < width + 6 {
         return Vec::new();
     }
     let y = inner.bottom() - 1;
@@ -127,14 +165,16 @@ pub(crate) fn footer_buttons(
     vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)]
 }
 
-/// The session rows, between the header line and the footer.
+/// The session rows, between the header and the footer.
 fn list(layout: &Layout) -> Rect {
     let inner = inner(layout);
     Rect::new(
         inner.x,
-        inner.y.saturating_add(1),
+        inner.y.saturating_add(HEADER_HEIGHT),
         inner.width,
-        inner.height.saturating_sub(1 + footer_height(layout)),
+        inner
+            .height
+            .saturating_sub(HEADER_HEIGHT + footer_height(layout)),
     )
 }
 
@@ -173,6 +213,19 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     for y in area.top()..area.bottom() {
         buf[(area.right() - 1, y)].set_symbol("│").set_style(border);
     }
+    let workspace = workspace_button(client, layout);
+    let style = match client.workspace() {
+        Some(_) => Style::new().add_modifier(Modifier::BOLD),
+        None => Style::new().fg(Color::Gray),
+    };
+    let label = workspace_label(client, layout);
+    buf.set_stringn(
+        workspace.x,
+        workspace.y,
+        label,
+        usize::from(workspace.width),
+        style,
+    );
     let button = new_session_button(layout);
     let label = if layout.collapsed {
         NEW_SESSION_COLLAPSED
@@ -195,6 +248,9 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
         if selected {
             style = style.add_modifier(Modifier::BOLD);
         }
+        if session.elsewhere {
+            style = style.fg(Color::Gray).add_modifier(Modifier::DIM);
+        }
         let (symbol, color) = glyph(session);
         buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
         // The name stops a column short of the close button.
@@ -209,10 +265,14 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             Style::new().fg(Color::Gray),
         );
         let detail = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
-        buf.set_stringn(line.x + 3, line.y + 1, PLACEHOLDER_DETAIL, width, detail);
+        let text = match &session.workspace {
+            Some(workspace) if session.elsewhere => format!("in {}", workspace_name(workspace)),
+            _ => PLACEHOLDER_DETAIL.to_owned(),
+        };
+        buf.set_stringn(line.x + 3, line.y + 1, text, width, detail);
     });
     let area = inner(layout);
-    if area.height >= 2 {
+    if area.height > HEADER_HEIGHT {
         let buttons = footer_buttons(client, layout);
         let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
         for (at, _, label) in &buttons {
@@ -241,7 +301,7 @@ fn render_collapsed(client: &Client, layout: &Layout, buf: &mut Buffer) {
         buf.set_stringn(at.x, at.y, label, usize::from(at.width), button);
     }
     let area = inner(layout);
-    if client.focus() == Focus::Command && area.height >= 2 {
+    if client.focus() == Focus::Command && area.height > HEADER_HEIGHT {
         let style = Style::new().add_modifier(Modifier::REVERSED);
         buf.set_stringn(
             area.x,
