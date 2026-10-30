@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
 | F19 drop translator state | building | task/f19-drop-translators @ 64d2a42 | 0 | – |
-| F07 palette in snapshots | in review | task/f07-palette-snapshots @ 694310a | 1 | Builder found host-crash bug → F23 |
+| F07 palette in snapshots | fixing (CHANGES) | task/f07-palette-snapshots @ 694310a | 1 | Blocking: kitty_top refresh in expire_sync untested |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
