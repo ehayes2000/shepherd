@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| T22 new session creates worktree | fixing (CHANGES) | task/t22-session-worktree @ bf9ced1 | 1 | Blocking: worktree spawn cwd unchecked → PM: validate cwd in the single SpawnPty handler. Minors: run-file cleanup test, worker-gone leak, fold phase guards, slug '___' |
+| T22 new session creates worktree | re-review | task/t22-session-worktree @ 5986e07 (on a771f0b) | 2 | SpawnPty validates every cwd; test HOME now CARGO_MANIFEST_DIR |
 | F24 profile picker polish | fixing (CHANGES) | task/f24-picker-polish @ d49739d | 1 | Blocking: render clamp untested; picker panics in 0/1-row windows → PM: render every popup at sizes 0..=6 (class fix). Minors: core clamp, guard, wheel over prompt |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
