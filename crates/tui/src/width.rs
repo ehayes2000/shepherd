@@ -8,11 +8,13 @@ use ratatui::text::Span;
 const CUT: &str = "…";
 
 /// How many columns `text` takes.
+#[allow(clippy::disallowed_methods)] // Measures text; never draws it.
 pub(crate) fn columns(text: &str) -> usize {
     Span::raw(text).width()
 }
 
 /// `text`'s graphemes, each with the columns it takes.
+#[allow(clippy::disallowed_methods)] // Measures text; never draws it.
 fn graphemes(text: &str) -> Vec<(String, usize)> {
     Span::raw(text)
         .styled_graphemes(Style::new())

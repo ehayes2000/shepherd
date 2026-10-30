@@ -19,6 +19,7 @@
 //! A session that wants the user (blocked on them, or idle since they last looked) also gets a yellow `▌` on the
 //! left edge of its row, in both the full and the collapsed sidebar.
 
+mod draw;
 pub mod encode;
 mod keys;
 pub mod layout;
@@ -33,12 +34,12 @@ use ratatui::Frame;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Widget, Wrap};
 use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
 use shepherd_term::{CursorShape, Screen};
 
+use draw::shown;
 pub use keys::{PREFIX, Pointer, from_legacy_terminal, map_event, map_key};
 pub use layout::{Layout, Target, hit, layout, pane_size};
 pub use popup::BINDINGS;
@@ -111,16 +112,18 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
     let gray = Style::new().fg(Color::Gray);
     let lines = match client.connection() {
         Connection::Ready => vec![
-            Line::raw("No sessions yet."),
-            Line::raw(""),
-            Line::styled("Click + New session to start one.", gray),
-            Line::styled(
-                format!("Or press ctrl-{PREFIX} then n; ctrl-{PREFIX} then ? for help."),
+            draw::line(shown("No sessions yet."), Style::new()),
+            draw::line(shown(""), Style::new()),
+            draw::line(shown("Click + New session to start one."), gray),
+            draw::line(
+                shown(&format!(
+                    "Or press ctrl-{PREFIX} then n; ctrl-{PREFIX} then ? for help."
+                )),
                 gray,
             ),
         ],
-        Connection::Failed(why) => vec![Line::styled(why.clone(), Style::new().fg(Color::Red))],
-        _ => vec![Line::styled("Connecting to the shepherd host…", gray)],
+        Connection::Failed(why) => vec![draw::line(shown(why), Style::new().fg(Color::Red))],
+        _ => vec![draw::line(shown("Connecting to the shepherd host…"), gray)],
     };
     let height = (lines.len() as u16).min(pane.height);
     let area = Rect::new(
@@ -129,7 +132,7 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
         pane.width,
         height,
     );
-    Paragraph::new(lines)
+    draw::paragraph(lines)
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true })
         .render(area, buf);

@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/display_safe.rs
+expression: "text(&buffer(&evil_sidebar(), 100, 12))"
+---
+ ⌂ shxá̂̃ep              │
+ + New session         │
+ ◌ renxá̂̃amed          ×│
+   local · —           │
+ ◌ hooxá̂̃ked           ×│
+   hook failed (exit 1…│
+ ✕ failxá̂̃ed           ×│
+   fetching origin fai…│
+ ◌ awayxá̂̃             ×│
+   in elxá̂̃sewhere      │
+                       │
+ ctrl-b ? help Detach ?│

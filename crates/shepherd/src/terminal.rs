@@ -28,6 +28,7 @@ use ratatui::crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use ratatui::crossterm::{cursor, execute};
+use shepherd_core::display::display_safe;
 
 /// What the TUI does to the user's terminal.
 pub trait TerminalSetup: Send + Sync {
@@ -217,12 +218,15 @@ impl TerminalSetup for CrosstermSetup {
 }
 
 /// The bytes that alert the user with `message`: BEL, then OSC 9 (a desktop notification in iTerm2, kitty, WezTerm,
-/// Ghostty and others; ignored elsewhere) ended by ST. Control characters in `message` are dropped, so it can't end
-/// the sequence early.
+/// Ghostty and others; ignored elsewhere) ended by ST. `message` is made [`display_safe`] in at most [`ALERT_MAX`]
+/// grapheme clusters, which drops its control characters, so it can't end the sequence early.
 pub fn alert_sequence(message: &str) -> Vec<u8> {
-    let text: String = message.chars().filter(|c| !c.is_control()).collect();
+    let text = display_safe(message, ALERT_MAX);
     format!("\x07\x1b]9;{text}\x1b\\").into_bytes()
 }
+
+/// The most grapheme clusters an alert's message has.
+pub const ALERT_MAX: usize = 200;
 
 #[cfg(test)]
 mod tests {
@@ -248,5 +252,20 @@ mod tests {
     fn c1_control_characters_cannot_end_the_alert_early() {
         // U+009C is ST and U+009B is CSI where a terminal reads C1 controls.
         assert_eq!(alert_sequence("a\u{9c}b\u{9b}c"), b"\x07\x1b]9;abc\x1b\\");
+    }
+
+    #[test]
+    fn an_alert_is_display_safe() {
+        // Bidi controls, joiners and zalgo marks from a session's name don't reach the notification.
+        assert_eq!(
+            alert_sequence("api\u{202E} is\u{200B} ide\u{300}\u{301}\u{302}\u{303}"),
+            "\x07\x1b]9;api is idè\u{301}\u{302}\x1b\\".as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_huge_alert_is_cut() {
+        let sequence = alert_sequence(&"x".repeat(1_000_000));
+        assert_eq!(sequence.len(), "\x07\x1b]9;\x1b\\".len() + ALERT_MAX);
     }
 }

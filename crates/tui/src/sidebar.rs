@@ -27,8 +27,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
+use shepherd_core::display::DisplayText;
 use shepherd_core::session::Activity;
 
+use crate::draw::{self, shown};
 use crate::layout::{Layout, Target};
 use crate::width::columns;
 
@@ -45,21 +47,6 @@ const PLACEHOLDER_DETAIL: &str = "local · —";
 const CREATING_WORKTREE: &str = "creating worktree…";
 /// What line 2 says while a closing session's worktree is being removed.
 const REMOVING_WORKTREE: &str = "removing worktree…";
-/// Ends a line 2 cut short.
-const CUT: &str = "…";
-
-/// Draws `text` at `x`, `y` in at most `width` columns, ending in [`CUT`] when it doesn't fit.
-fn set_cut(buf: &mut Buffer, x: u16, y: u16, text: &str, width: usize, style: Style) {
-    if columns(text) <= width {
-        buf.set_stringn(x, y, text, width, style);
-        return;
-    }
-    let Some(room) = width.checked_sub(1) else {
-        return;
-    };
-    let (end, _) = buf.set_stringn(x, y, text, room, style);
-    buf.set_stringn(end, y, CUT, 1, style);
-}
 
 /// A session's status glyph and its colour. See the table in the crate docs.
 pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
@@ -91,13 +78,13 @@ fn inner(layout: &Layout) -> Rect {
 const WORKSPACE_MARK: &str = "⌂";
 const NO_WORKSPACE: &str = "⌂ choose a workspace";
 
-fn workspace_label(client: &Client, layout: &Layout) -> String {
+fn workspace_label(client: &Client, layout: &Layout) -> DisplayText {
     if layout.collapsed {
-        return WORKSPACE_MARK.to_owned();
+        return shown(WORKSPACE_MARK);
     }
     match client.workspace() {
-        Some(path) => format!("{WORKSPACE_MARK} {}", workspace_name(path)),
-        None => NO_WORKSPACE.to_owned(),
+        Some(path) => shown(&format!("{WORKSPACE_MARK} {}", workspace_name(path))),
+        None => shown(NO_WORKSPACE),
     }
 }
 
@@ -123,7 +110,7 @@ fn header_button(layout: &Layout, line: u16, label: &str) -> Rect {
 
 /// Where the workspace button is: its label, on the first line.
 pub(crate) fn workspace_button(client: &Client, layout: &Layout) -> Rect {
-    header_button(layout, 0, &workspace_label(client, layout))
+    header_button(layout, 0, workspace_label(client, layout).as_str())
 }
 
 /// Where the `+ New session` button is: its label, on the second line.
@@ -241,7 +228,7 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     }
     let border = Style::new().fg(Color::DarkGray);
     for y in area.top()..area.bottom() {
-        buf[(area.right() - 1, y)].set_symbol("│").set_style(border);
+        draw::set(buf, area.right() - 1, y, &shown("│"), 1, border);
     }
     let workspace = workspace_button(client, layout);
     let style = match client.workspace() {
@@ -249,10 +236,11 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
         None => Style::new().fg(Color::Gray),
     };
     let label = workspace_label(client, layout);
-    buf.set_stringn(
+    draw::set(
+        buf,
         workspace.x,
         workspace.y,
-        label,
+        &label,
         usize::from(workspace.width),
         style,
     );
@@ -263,7 +251,8 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
         NEW_SESSION
     };
     let style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    buf.set_stringn(button.x, button.y, label, usize::from(button.width), style);
+    let width = usize::from(button.width);
+    draw::set(buf, button.x, button.y, &shown(label), width, style);
     if layout.collapsed {
         render_collapsed(client, layout, buf);
     } else {
@@ -282,15 +271,25 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             style = style.fg(Color::Gray).add_modifier(Modifier::DIM);
         }
         let (symbol, color) = glyph(session);
-        buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
+        let glyph_style = Style::new().fg(color);
+        draw::set(
+            buf,
+            line.x + 1,
+            line.y,
+            &shown(symbol),
+            usize::MAX,
+            glyph_style,
+        );
         // The name stops a column short of the close button.
         let name_width = usize::from(line.width.saturating_sub(5));
-        buf.set_stringn(line.x + 3, line.y, &session.name, name_width, style);
+        let name = shown(&session.name);
+        draw::set(buf, line.x + 3, line.y, &name, name_width, style);
         let close = close_button(layout, line);
-        buf.set_stringn(
+        draw::set(
+            buf,
             close.x,
             close.y,
-            CLOSE,
+            &shown(CLOSE),
             usize::from(close.width),
             Style::new().fg(Color::Gray),
         );
@@ -306,14 +305,21 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             ),
             _ => (PLACEHOLDER_DETAIL.to_owned(), dim.fg(Color::Gray)),
         };
-        set_cut(buf, line.x + 3, line.y + 1, &text, width, style);
+        draw::set_cut(buf, line.x + 3, line.y + 1, &shown(&text), width, style);
     });
     let area = inner(layout);
     if area.height > HEADER_HEIGHT {
         let buttons = footer_buttons(client, layout);
         let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
         for (at, _, label) in &buttons {
-            buf.set_stringn(at.x, at.y, label, usize::from(at.width), button);
+            draw::set(
+                buf,
+                at.x,
+                at.y,
+                &shown(label),
+                usize::from(at.width),
+                button,
+            );
         }
         // The status keeps a blank column before the buttons.
         let line = Rect::new(area.x, area.bottom() - 1, area.width, 1);
@@ -331,19 +337,35 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
 fn render_collapsed(client: &Client, layout: &Layout, buf: &mut Buffer) {
     rows(client, layout, buf, |session, _, line, buf| {
         let (symbol, color) = glyph(session);
-        buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
+        let glyph_style = Style::new().fg(color);
+        draw::set(
+            buf,
+            line.x + 1,
+            line.y,
+            &shown(symbol),
+            usize::MAX,
+            glyph_style,
+        );
     });
     let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     for (at, _, label) in footer_buttons(client, layout) {
-        buf.set_stringn(at.x, at.y, label, usize::from(at.width), button);
+        draw::set(
+            buf,
+            at.x,
+            at.y,
+            &shown(label),
+            usize::from(at.width),
+            button,
+        );
     }
     let area = inner(layout);
     if client.focus() == Focus::Command && area.height > HEADER_HEIGHT {
         let style = Style::new().add_modifier(Modifier::REVERSED);
-        buf.set_stringn(
+        draw::set(
+            buf,
             area.x,
             area.bottom() - 1,
-            "^B",
+            &shown("^B"),
             usize::from(area.width),
             style,
         );
@@ -366,10 +388,12 @@ fn rows(
         }
         if session.attention {
             for dy in 0..ROW_HEIGHT {
-                buf.set_string(
+                draw::set(
+                    buf,
                     line.x,
                     line.y + dy,
-                    ATTENTION_BAR,
+                    &shown(ATTENTION_BAR),
+                    usize::MAX,
                     Style::new().fg(ATTENTION),
                 );
             }
@@ -382,21 +406,25 @@ fn footer(client: &Client, area: Rect, buf: &mut Buffer) {
     let width = usize::from(area.width.saturating_sub(1));
     let (x, y) = (area.x + 1, area.y);
     if client.focus() == Focus::Command {
-        let (end, _) = buf.set_stringn(
+        let (end, _) = draw::set(
+            buf,
             x,
             y,
-            "ctrl-b",
+            &shown("ctrl-b"),
             width,
             Style::new().add_modifier(Modifier::REVERSED),
         );
         let rest = width.saturating_sub(usize::from(end - x));
-        buf.set_stringn(end, y, " n j k r x ? q", rest, Style::new().fg(Color::Gray));
+        let keys = shown(" n j k r x ? q");
+        draw::set(buf, end, y, &keys, rest, Style::new().fg(Color::Gray));
     } else if let Some(notice) = client.notice() {
-        buf.set_stringn(x, y, notice, width, Style::new().fg(ATTENTION));
+        let notice = shown(notice);
+        draw::set(buf, x, y, &notice, width, Style::new().fg(ATTENTION));
     } else if *client.connection() != Connection::Ready && !client.sessions().is_empty() {
-        buf.set_stringn(x, y, "reconnecting…", width, Style::new().fg(ATTENTION));
+        let note = shown("reconnecting…");
+        draw::set(buf, x, y, &note, width, Style::new().fg(ATTENTION));
     } else {
         let hint = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
-        buf.set_stringn(x, y, "ctrl-b ? help", width, hint);
+        draw::set(buf, x, y, &shown("ctrl-b ? help"), width, hint);
     }
 }
