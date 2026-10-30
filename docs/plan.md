@@ -9,6 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| F22 agent session polish | building | task/f22-agent-session-polish @ cd85430 | 0 | – |
 | T17b profile picker | building | task/t17b-profile-picker @ 64d2a42 | 0 | – |
 | F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
@@ -356,7 +357,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F22: Agent session polish from T17
-status: ready
+status: in-progress
 depends: T17
 touches: core::host (new session spec), shepherd::host (run files)
 goal: Small gaps left by T17.
