@@ -10,10 +10,10 @@ expression: "text(&buffer(&confirming(status(false, 0, true)), WIDE))"
                        │
                        │
                        │
-                       │
                 ┌ close session ───────────────────────────────┐
                 │Close refactor? Its agent is stopped.         │
                 │Its worktree is removed: nothing is lost.     │
+                │Its ignored files are removed too.            │
                 │y / enter to close · n / esc to keep          │
                 │                            [Close]  [Cancel] │
                 └──────────────────────────────────────────────┘
@@ -25,4 +25,4 @@ expression: "text(&buffer(&confirming(status(false, 0, true)), WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Cleanup       Detach ?│

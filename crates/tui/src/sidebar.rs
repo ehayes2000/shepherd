@@ -16,7 +16,8 @@
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
 //! for it is drawn across the window's last lines instead), else a reconnecting note or a hint for help with the
-//! `Detach` and `?` buttons on the right.
+//! `Detach` and `?` buttons on the right, and a `Cleanup` button on the left while connected with a workspace (which
+//! then takes the hint's place).
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
@@ -177,6 +178,8 @@ const DETACH: &str = "Detach";
 const RESTART: &str = "Restart host";
 /// The footer's button that shows the host's warning again, while it warns ([`Client::host_warning`]).
 const HOST_WARNING: &str = "Host warning";
+/// The footer's button that opens the cleanup view, while connected with a workspace.
+const CLEANUP: &str = "Cleanup";
 const HELP: &str = "?";
 /// The collapsed sidebar's `Detach` button.
 const DETACH_COLLAPSED: &str = "⏏";
@@ -196,8 +199,8 @@ pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
 }
 
 /// The footer's buttons, left to right: `Restart host` while the host should be restarted ([`Client::restart_offer`],
-/// full sidebar only), else `Host warning` while the host warns ([`Client::host_warning`]), `Detach`, then `?` in the
-/// last column. Collapsed, they are glyphs in the
+/// full sidebar only), else `Host warning` while the host warns ([`Client::host_warning`]), else `Cleanup` while
+/// connected with a workspace (full sidebar only), `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
 /// glyph column: `⏏` just above `?` on the last line. Not shown while the prefix is pending, when the footer shows
 /// it instead, nor in the full sidebar while a notice shows, which then has the whole footer.
 pub(crate) fn footer_buttons(
@@ -237,6 +240,8 @@ pub(crate) fn footer_buttons(
         Some((Target::OfferRestart, RESTART))
     } else if client.host_warning().is_some() {
         Some((Target::ShowHostWarning, HOST_WARNING))
+    } else if *client.connection() == Connection::Ready && client.workspace().is_some() {
+        Some((Target::Cleanup, CLEANUP))
     } else {
         None
     };

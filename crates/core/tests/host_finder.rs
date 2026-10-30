@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
-use shepherd_core::host::{HostCommand, HostEvent, Inspect, NewSessionSpec, ReplyTo, WorkspaceAsk};
+use shepherd_core::host::{
+    HostCommand, HostEvent, Inspect, NewSessionSpec, Remover, ReplyTo, WorkspaceAsk,
+};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::SpawnSpec;
 use shepherd_core::ports::{BranchName, RepoRef, Worktree, WorktreeError, WorktreePath};
@@ -308,7 +310,7 @@ fn a_worktree_another_session_started_in_while_closing_is_kept() {
     // A new session there is refused now, so one that got past that (say, recorded by another host run) stands in.
     started_there_anyway(&mut host, "s2");
     let cmds = host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: WorktreePath::new("/wt/old-idea"),
         purpose,
         result: Ok(shepherd_core::host::Inspection::Listed {
@@ -318,6 +320,7 @@ fn a_worktree_another_session_started_in_while_closing_is_kept() {
                 ..Default::default()
             }),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(cmds, vec![closed("s1", "it is still in use by s2")]);
@@ -397,7 +400,7 @@ fn closing_with_a_hook(host: &mut HostDriver) -> HostCommand {
         panic!("{close:?}");
     };
     let cmds = host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: WorktreePath::new("/wt/old-idea"),
         purpose,
         result: Ok(shepherd_core::host::Inspection::Listed {
@@ -406,6 +409,7 @@ fn closing_with_a_hook(host: &mut HostDriver) -> HostCommand {
                 ..Default::default()
             }),
             exists: true,
+            branch: None,
         }),
     });
     match &cmds[..] {
@@ -442,7 +446,7 @@ fn a_worktree_a_session_started_in_while_its_pre_remove_hook_ran_is_kept() {
     // A session in it got past the refusal (say, recorded by another host run).
     started_there_anyway(&mut host, "s2");
     let cmds = host.handle(HostEvent::PreRemoveFinished {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         command,
         rest,
         path,

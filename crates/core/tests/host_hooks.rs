@@ -9,7 +9,7 @@ use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, Inspect, Inspection, NewSessionSpec, PostCreate, PreRemove,
-    ResumeUnavailable,
+    Remover, ResumeUnavailable,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::SpawnSpec;
@@ -348,7 +348,7 @@ fn closing_a_session_while_its_hooks_run_cancels_the_running_hook_and_inspects_i
                 json!({ "path": WORKTREE, "pre_remove": ["make clean"] })
             ),
             HostCommand::InspectWorktree {
-                session: sid("s1"),
+                remover: Remover::Session(sid("s1")),
                 repo: RepoRef::new("/src/app"),
                 path: WorktreePath::new(WORKTREE),
                 purpose: Inspect::Close {
@@ -384,7 +384,7 @@ fn a_session_closed_mid_hook_keeps_a_worktree_the_hook_left_files_in_and_says_wh
         merged_into_default: true,
     };
     let commands = host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: WorktreePath::new(WORKTREE),
         purpose: Inspect::Close {
             confirmed: None,
@@ -396,6 +396,7 @@ fn a_session_closed_mid_hook_keeps_a_worktree_the_hook_left_files_in_and_says_wh
         result: Ok(Inspection::Listed {
             status: Ok(dirty),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(
@@ -429,7 +430,7 @@ fn a_session_closed_mid_hook_removes_a_worktree_that_loses_nothing() {
         merged_into_default: true,
     };
     let commands = host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: WorktreePath::new(WORKTREE),
         purpose: Inspect::Close {
             confirmed: None,
@@ -441,12 +442,13 @@ fn a_session_closed_mid_hook_removes_a_worktree_that_loses_nothing() {
         result: Ok(Inspection::Listed {
             status: Ok(clean),
             exists: true,
+            branch: None,
         }),
     });
     assert_eq!(
         commands,
         [HostCommand::RemoveWorktree {
-            session: sid("s1"),
+            remover: Remover::Session(sid("s1")),
             path: WorktreePath::new(WORKTREE),
             force: false,
         }]

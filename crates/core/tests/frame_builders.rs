@@ -515,14 +515,16 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             arb_string(),
             proptest::option::of(any::<i32>()),
             arb_string(),
+            arb_opt_string(),
             arb_opt_string()
         )
-            .prop_map(|(hook, exit_code, output_tail, error)| {
+            .prop_map(|(hook, exit_code, output_tail, error, path)| {
                 ShepherdFrame::WorktreeHook(WorktreeHook {
                     hook,
                     exit_code,
                     output_tail,
                     error,
+                    path,
                 })
             }),
         (

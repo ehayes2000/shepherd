@@ -25,4 +25,4 @@ expression: "text(&buffer(&confirming(Some(Err(refused))), WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Cleanup       Detach ?│

@@ -7,4 +7,4 @@ expression: "text(&buffer(&c, Rect::new(0, 0, 80, 6)))"
  + New session         │
  ✕ refactor           ×│
    removing worktree…  │
- ctrl-b ? help Detach ?│
+ Cleanup       Detach ?│

@@ -65,6 +65,8 @@ struct State {
     /// Directories inside checkouts, from [`FakeWorktrees::add_dir`]. A checkout itself always exists.
     dirs: BTreeSet<PathBuf>,
     fail_next: Option<WorktreeError>,
+    /// Checkouts whose every `status` fails with this, from [`FakeWorktrees::fail_status`].
+    failing_status: BTreeMap<PathBuf, WorktreeError>,
 }
 
 /// A create's repo (as the caller named it) and worktree name: what [`Worktrees::cancel_create`] names.
@@ -175,6 +177,12 @@ impl FakeWorktrees {
     /// The next port call fails with `error` and changes nothing.
     pub fn fail_next(&self, error: WorktreeError) {
         self.lock().fail_next = Some(error);
+    }
+
+    /// Every `status` of the checkout at `path` fails with `error` from now on, while `list_managed` still lists it: as
+    /// git does for a worktree whose `.git` file is gone.
+    pub fn fail_status(&self, path: impl Into<PathBuf>, error: WorktreeError) {
+        self.lock().failing_status.insert(path.into(), error);
     }
 
     /// The next port call blocks, before it does anything, until the returned [`Hold`] is released or dropped. Calls
@@ -609,6 +617,9 @@ impl Worktrees for FakeWorktrees {
     fn status(&self, path: &WorktreePath) -> Result<WorktreeStatus, WorktreeError> {
         let mut s = self.take_failure()?;
         let path = path.as_path();
+        if let Some(error) = s.failing_status.get(path) {
+            return Err(error.clone());
+        }
         let (r, head) = s.checkout(path).ok_or_else(|| State::not_a_repo(path))?;
         s.repos[r].default_branch()?;
         let rp = &s.repos[r];

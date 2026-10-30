@@ -327,6 +327,24 @@ fn every_popup() -> Vec<(&'static str, ClientDriver)> {
         }),
     ));
     popups.push(("offer to start a session in a worktree", found));
+    popups.push(("cleanup loading", opened(&[Intent::BeginCleanup])));
+    let (mut cleanup, _) = three_sessions();
+    let asked = cleanup.user(Intent::BeginCleanup);
+    let status =
+        json!({ "dirty": true, "ahead": 2, "pushed": false, "merged_into_default": false });
+    cleanup.answer(
+        &asked,
+        Ok(json!({ "worktrees": [
+            { "path": "/wt/app/old-idea", "branch": "old-idea", "status": status },
+            { "path": "/wt/app/spike", "error": "a long reason why its status couldn't be found at all" },
+        ], "cleanup_after_days": 7 })),
+    );
+    popups.push(("cleanup with rows", cleanup.clone()));
+    let refused = cleanup.user(Intent::Dismiss);
+    assert!(refused.is_empty());
+    let asked = cleanup.user(Intent::BeginCleanup);
+    cleanup.answer(&asked, Err(WireError::InvalidParams("not a repo".into())));
+    popups.push(("cleanup that couldn't list", cleanup));
     popups
 }
 

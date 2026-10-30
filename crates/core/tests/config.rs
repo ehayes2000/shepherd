@@ -186,6 +186,23 @@ fn the_attention_bell_is_off_unless_turned_on() {
 }
 
 #[test]
+fn a_merged_exited_session_is_stale_after_seven_days_unless_configured() {
+    assert_eq!(Config::resolve(None, None).unwrap().cleanup_after_days(), 7);
+    assert_eq!(
+        resolve(json!({ "defaults": { "cleanup_after_days": 30 } }))
+            .unwrap()
+            .cleanup_after_days(),
+        30
+    );
+    assert_eq!(
+        resolve(json!({ "defaults": { "cleanup_after_days": 0 } }))
+            .unwrap()
+            .cleanup_after_days(),
+        0
+    );
+}
+
+#[test]
 fn an_unknown_notify_field_is_rejected() {
     let result = serde_json::from_value::<RawConfig>(json!({ "notify": { "bel": true } }));
     assert!(result.is_err());

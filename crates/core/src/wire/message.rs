@@ -51,10 +51,12 @@ pub enum Method {
     WorktreeStatus,
     HostUpgrade,
     WorktreeList,
+    WorktreeCleanup,
+    WorktreeRemove,
 }
 
 impl Method {
-    pub const ALL: [Method; 11] = [
+    pub const ALL: [Method; 13] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -66,6 +68,8 @@ impl Method {
         Self::WorktreeStatus,
         Self::HostUpgrade,
         Self::WorktreeList,
+        Self::WorktreeCleanup,
+        Self::WorktreeRemove,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -81,6 +85,8 @@ impl Method {
             Self::WorktreeStatus => "_shepherd/worktree/status",
             Self::HostUpgrade => "_shepherd/host/upgrade",
             Self::WorktreeList => "_shepherd/worktree/list",
+            Self::WorktreeCleanup => "_shepherd/worktree/cleanup",
+            Self::WorktreeRemove => "_shepherd/worktree/remove",
         }
     }
 
@@ -109,6 +115,8 @@ pub enum ClientRequest {
     WorktreeStatus(WorktreeCheck),
     HostUpgrade(HostUpgrade),
     WorktreeList(WorktreeList),
+    WorktreeCleanup(WorktreeCleanup),
+    WorktreeRemove(WorktreeRemove),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -266,6 +274,54 @@ pub struct WorktreeInfo {
     pub branch: Option<String>,
 }
 
+/// The current workspace's orphan worktrees, as `_shepherd/worktree/list` finds them, each with its status: what the
+/// cleanup view lists. Answered with [`WorktreeCleanupOk`] (no worktrees with no workspace), or
+/// [`WireError::InvalidParams`] saying why they couldn't be listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCleanup {}
+
+/// The host's answer to `_shepherd/worktree/cleanup`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCleanupOk {
+    #[serde(default)]
+    pub worktrees: Vec<CleanupInfo>,
+    /// How many days after its PTY exited a session whose branch is merged counts as stale (`cleanup_after_days` in
+    /// the host's config).
+    pub cleanup_after_days: u32,
+}
+
+/// An orphan worktree, as `_shepherd/worktree/cleanup` lists it: what removing it would lose, or why that can't be
+/// told.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupInfo {
+    pub path: String,
+    /// `None` when its HEAD is detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorktreeStatus>,
+    /// Why its status couldn't be found, for the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Remove `path`, one of the current workspace's orphan worktrees, if that loses nothing: the same inspection,
+/// pre-remove hooks and removal as closing a session's worktree. Its hooks get the branch git lists for it, so the
+/// client names none (any other field is ignored). Answered with [`WorktreeRemoveOk`] once that is done, or
+/// [`WireError::InvalidParams`] when it can't start (no workspace, the worktree is in use or already being removed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRemove {
+    pub path: String,
+}
+
+/// The host's answer to `_shepherd/worktree/remove`: removed, or kept and why. Neither means it was already gone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRemoveOk {
+    pub removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
+}
+
 /// Resume an exited session's agent where it left off, in the same session. Answered with an ack, or
 /// [`WireError::InvalidParams`] saying why it can't be resumed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +449,8 @@ impl ClientRequest {
             Self::WorktreeStatus(_) => Method::WorktreeStatus,
             Self::HostUpgrade(_) => Method::HostUpgrade,
             Self::WorktreeList(_) => Method::WorktreeList,
+            Self::WorktreeCleanup(_) => Method::WorktreeCleanup,
+            Self::WorktreeRemove(_) => Method::WorktreeRemove,
         }
     }
 
@@ -409,6 +467,8 @@ impl ClientRequest {
             Self::WorktreeStatus(p) => json(p),
             Self::HostUpgrade(p) => json(p),
             Self::WorktreeList(p) => json(p),
+            Self::WorktreeCleanup(p) => json(p),
+            Self::WorktreeRemove(p) => json(p),
         }
     }
 
@@ -427,6 +487,8 @@ impl ClientRequest {
             Method::WorktreeStatus => Self::WorktreeStatus(invalid_params(params)?),
             Method::HostUpgrade => Self::HostUpgrade(invalid_params(params)?),
             Method::WorktreeList => Self::WorktreeList(invalid_params(params)?),
+            Method::WorktreeCleanup => Self::WorktreeCleanup(invalid_params(params)?),
+            Method::WorktreeRemove => Self::WorktreeRemove(invalid_params(params)?),
         })
     }
 }
@@ -536,6 +598,8 @@ pub enum HostResult {
     WorktreeStatus(WorktreeStatusOk),
     Upgrade(UpgradeAnswer),
     WorktreeList(WorktreeListOk),
+    WorktreeCleanup(WorktreeCleanupOk),
+    WorktreeRemove(WorktreeRemoveOk),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -548,6 +612,8 @@ impl HostResult {
             Self::WorktreeStatus(r) => json(r),
             Self::Upgrade(r) => json(r),
             Self::WorktreeList(r) => json(r),
+            Self::WorktreeCleanup(r) => json(r),
+            Self::WorktreeRemove(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -559,6 +625,8 @@ impl HostResult {
             Method::WorktreeStatus => Self::WorktreeStatus(serde_json::from_value(result)?),
             Method::HostUpgrade => Self::Upgrade(serde_json::from_value(result)?),
             Method::WorktreeList => Self::WorktreeList(serde_json::from_value(result)?),
+            Method::WorktreeCleanup => Self::WorktreeCleanup(serde_json::from_value(result)?),
+            Method::WorktreeRemove => Self::WorktreeRemove(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

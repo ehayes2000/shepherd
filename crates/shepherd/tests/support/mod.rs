@@ -58,6 +58,7 @@ pub fn shell_default_config() -> RawConfig {
         defaults: Some(RawDefaults {
             agent: Some("shell".to_owned()),
             env: None,
+            cleanup_after_days: None,
         }),
         ..RawConfig::default()
     }
