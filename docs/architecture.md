@@ -609,4 +609,9 @@ file, only after a `handoff-check` preflight passes. A restart that kills sessio
 Option (b) (second host + SCM_RIGHTS, herdr's approach) is not built: it loses agent exit codes and overlaps two runtimes.
 Consequences: one new port (`PtyHandoff`); the handoff format is versioned and read by older and newer builds; agents
 survive host updates on unix. Linux `ETXTBSY` / `/proc/self/exe (deleted)` behaviour must be verified in T36b.
+Recorded from T36b: the listener is handed over before connections close (a reconnect racing the exec was otherwise
+accepted by the old image and cut off); the redraw nudge resizes one column narrower and back (same-size doesn't SIGWINCH);
+the preflight validates `config.toml`, and after adoption a broken config falls back to defaults with a persistent host
+warning instead of killing sessions; adoption kills only processes `waitid` proves are our children and closes only carried
+terminals; a SIGTERM between Accepted and exec is dropped (the new image then runs the installed build anyway).
 
