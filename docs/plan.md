@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| T18b quiet idle fallback | building | task/t18b-quiet-idle @ HEAD | 0 | merges before T23 |
+| T23 worktree hooks | building | task/t23-worktree-hooks @ HEAD | 0 | rebases after T18b |
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -1055,7 +1057,7 @@ Attention for a session that becomes selected is cleared immediately; a session 
 focused is not marked.
 
 ### T18b: Quiet-output idle fallback
-status: ready
+status: in-progress
 depends: T11, T15
 touches: core::session (or core::agents), core::host, shepherd::host
 goal: A session interrupted with Esc (no `Stop` hook fires) stops showing Working within seconds, not minutes.
@@ -1074,6 +1076,8 @@ acceptance:
   and Esc during a hook.
 - Whatever sets NeedsInput (or idle-by-inference) must also set the session's `waiting_since` seq, or T18 attention never
   marks it (T18 review).
+- (binding) Applies to agent profiles only (claude-code, codex), never shell. The inferred idle sets `waiting_since` like a
+  real idle so T18 attention marks it. The quiet deadline is serviced from the host runtime's existing deadline/tick loop.
 - Tests: core table tests (quiet then idle, output resets the timer, already Idle means no duplicate, an untouched NeedsPermission
   stays put, NeedsPermission plus output plus quiet goes idle) and a scenario with the fake PTY.
 scope: crates/core, crates/shepherd
@@ -1185,7 +1189,7 @@ knows about; `create` refusing an existing branch is a `session/failed`, not a r
 pure core with table tests (unicode, punctuation, collisions).
 
 ### T23: Worktree hooks
-status: ready
+status: in-progress
 depends: T22
 touches: ports::commands, core::host, adapters::commands
 goal: Run user-defined setup in new worktrees (copy `.envrc`, install deps, ...).
@@ -1194,7 +1198,18 @@ acceptance:
 - Each hook runs in the worktree with `SHEPHERD_*` env set. Its output tail and exit code go to `_shepherd/worktree/hook`.
   A failing post_create hook marks the session with a warning but still spawns the agent.
 - `Commands` port with contract, fake, and a `std::process` adapter (decision 0011: no tokio), run through F27's `Worker` pattern so hooks never block the runtime thread.
-scope: core, testkit, adapters
+scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
+notes: (binding) Hooks run with `/bin/sh -c <hook>` (portable; not the user's login shell), cwd = the worktree (validated to
+exist), stdin closed, in their own process group, env = the host env plus `SHEPHERD_SESSION`, `SHEPHERD_WORKTREE`,
+`SHEPHERD_BRANCH`, `SHEPHERD_REPO` (the main repo root, so `cp "$SHEPHERD_REPO/.envrc" .` works). Each hook has a generous
+timeout (default 10 min, config `hook_timeout_s`) that kills the whole group (F08's wait-for-group pattern). Output tail is
+capped (last 4 KiB, decoded lossily, control characters stripped before display). post_create hooks run in order; the first
+failure (non-zero, timeout, spawn error) stops the rest, records `_shepherd/worktree/hook { hook, exit_code, output_tail }`,
+marks the session with a warning (visible on sidebar line 2 like T22's text) and the agent still spawns. Workspace keys match
+the canonical repo path or the repo directory's name; path match wins. `pre_remove` is parsed and validated now but run by
+T25. The PTY spawns only after all post_create hooks finished (or the first failed); a session closed meanwhile spawns nothing.
+Contract cases: exit code, output tail cap, timeout kills the group (no leaked children — check with a hook that forks
+`sleep`), env and cwd, a missing cwd is an error.
 
 ### T24: Auto-naming
 status: todo
