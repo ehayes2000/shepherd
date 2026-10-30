@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18 attention | fixing (APPROVE + 2 minor) | task/t18-attention @ 9147ef6 | 1 | Fix: C1 strip test; OSC 9 payload starts with fixed text (no ConEmu subcommand from session names). Note: NeedsInput detection must set waiting_since |
 | T19 Codex | in review | task/t19-codex @ 09f87b9 (on 1a63b20) | 1 | Decision 0016. PM-accepted: single -c hooks= arg; no notify; NotShellSafe; translator replaced on agent-kind change |
 | F08 worktree create timeout cleanup | fixing (CHANGES) | task/f08-worktree-timeout @ 065762e | 1 | Load flakes (new tests 40%, T20 test regressed); separate cleanup timeout; FIFO-blocked hook; stale ref lock; fallback untested; TOCTOU on dir delete |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T18 | 2 | C1 strip untested; session name could form a ConEmu OSC 9 subcommand |
 | F22 | 2 | hook-sourced agent/exited could delete a live session's run files (untested guard) |
 | F23 | 2 | sync-timeout path unguarded; pop count, guard-flag reset untested; missing_trait_methods lint added |
 
@@ -966,7 +966,7 @@ carries the chosen profile name (`wire::SessionNew.profile` already exists). The
 host may be another machine).
 
 ### T18: Attention and notifications
-status: in-progress
+status: done (b17c1b4)
 depends: T13, T17
 touches: core::client (attention), tui::sidebar
 goal: Never miss an agent that's waiting on you.
@@ -1002,6 +1002,8 @@ acceptance:
   `_shepherd/agent/idle { inferred: "quiet-after-permission" }`.
 - The same fallback covers the other no-signal cases from the T15 review: a prompt blocked by another `UserPromptSubmit` hook,
   and Esc during a hook.
+- Whatever sets NeedsInput (or idle-by-inference) must also set the session's `waiting_since` seq, or T18 attention never
+  marks it (T18 review).
 - Tests: core table tests (quiet then idle, output resets the timer, already Idle means no duplicate, an untouched NeedsPermission
   stays put, NeedsPermission plus output plus quiet goes idle) and a scenario with the fake PTY.
 scope: crates/core, crates/shepherd
