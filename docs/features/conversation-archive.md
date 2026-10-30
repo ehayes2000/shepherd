@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 | Archive crate and blob store | review | task/t38-archive-blobs @ 1e554e2 (on 17c8d64) | 1 | PM-accepted: std private-file rules, std hex, test-only fault feature. Reviewer judges corrupt-existing put, 1 GiB cap, tmp leftovers |
+| T38 | Archive crate and blob store | fixing | task/t38-archive-blobs @ 1e554e2 | 1 | Blocking: decompression bound untested; put must heal a corrupt existing blob. PM: cap 256 MiB |
 | T39 | Archive index | todo |  |  |  |
 | T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
@@ -56,6 +56,9 @@ acceptance:
   "commit unknown" and a squash-merge case found by branch/PR.
 - Two processes writing at once (two `Archive` handles in separate processes) both succeed; nothing is lost.
 - `verify()` reports index rows whose blob is missing or corrupt, and orphan blobs; it never deletes anything.
+- From T38's review: a maintenance step (under the index lock, not on `open`) removes `.tmp` files a crashed `put` left
+  in shard dirs; it never touches a blob or a temp file another live writer may own (e.g. only temps older than the index lock
+  holder's start, or take an exclusive lock).
 - Times are parameters (`captured_at` etc. as `jiff::Timestamp`), never read from a clock inside the crate.
 scope: crates/archive, Cargo.toml
 notes: (binding) Decision 0020: `rusqlite` with `bundled`. All SQL uses bound parameters; values are typed (commit hashes
