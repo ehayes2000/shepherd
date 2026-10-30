@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T24 auto-naming | building | task/t24-auto-naming @ HEAD | 0 | – |
-| T25 close removes worktree | building | task/t25-close-cleanup @ HEAD | 0 | split: cleanup view → T25b |
+| T24 auto-naming | building | task/t24-auto-naming @ 83746d2 | 0 | – |
+| T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
 | F31 real answers only | building | task/f31-answer-input @ 8e92a8a | 0 | – |
 
