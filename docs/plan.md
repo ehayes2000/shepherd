@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F36 display-safe gaps (minus ZWJ) | fixing (CHANGES) | task/f36-display-gaps @ efeae89 | 1 | Blocking: cap on later clusters untested; .render grep misses variables → clippy ban Widget::render; draw::spans .into() hole. PM: Prepend can't take a cluster's last slot |
+| F36 display-safe gaps (minus ZWJ) | re-review | task/f36-display-gaps @ 3921826 (on 7844d8f) | 2 | sealed draw::render + ShownLine; PM-accepted: no Into::into ban (sealed types instead); Prepend rule; later-cluster cap test |
 | F38+F40 adapter test hygiene | in review | task/f38-f40-test-hygiene @ fec5f02 (on 71df32d) | 1 | idle bound + byte limit; watchdog + group kill on drop (PM asked reviewer: pgid reuse?) |
 | F42 new session wrong size | re-review | task/f42-spawn-size @ 4648f06 (on 971a533) | 2 | runtime adopt test; one decide() path; sizes clamped to Screen bounds |
 | F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ b0867bd (on 971a533) | 3 | N1/N2 tests; update-ref timeout fails the create; update-ref with old value |
