@@ -843,3 +843,32 @@ fn the_wheel_does_nothing_under_a_popup() {
     let out = events(&mut c, SHORT, &[mouse(MouseEventKind::ScrollDown, row)]);
     assert_eq!(out, [vec![]]);
 }
+
+#[test]
+fn a_press_and_release_of_different_buttons_on_one_row_do_nothing() {
+    for (down, up) in [(DOWN, RIGHT_UP), (RIGHT_DOWN, UP)] {
+        let mut c = sessions(2, WIDE);
+        let row = at(&buffer(&c, WIDE), "name-01");
+        let out = events(&mut c, WIDE, &[mouse(down, row), mouse(up, row)]);
+        assert!(
+            out.iter().all(Vec::is_empty),
+            "{down:?} then {up:?}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn a_long_name_stops_a_blank_column_short_of_the_close_button() {
+    let mut c = sessions(1, WIDE);
+    c.host().rename("s1", "a-name-much-longer-than-the-sidebar");
+    c.sync();
+    let buf = buffer(&c, WIDE);
+    let start = at(&buf, "a-name-much");
+    let x = last_on_row(&buf, start.y, "×");
+    assert_eq!(buf[(x.x - 1, x.y)].symbol(), " ", "{buf:?}");
+    assert_ne!(
+        buf[(x.x - 2, x.y)].symbol(),
+        " ",
+        "the name fills up to it: {buf:?}"
+    );
+}
