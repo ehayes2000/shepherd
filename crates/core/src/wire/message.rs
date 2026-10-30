@@ -209,9 +209,13 @@ pub struct SessionInput {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputKind {
-    /// A key the user pressed, encoded for the session.
+    /// A key the user pressed, encoded for the session. From a client older than [`InputKind::Answer`], any key;
+    /// from a newer one, a key that can't answer a dialog.
     #[default]
     Keys,
+    /// A key the user pressed that can answer a dialog (Enter, Esc, Ctrl-C or a printable key), encoded for the
+    /// session. The client knows the key; its bytes may not say (kitty keyboard modes encode every key as `CSI … u`).
+    Answer,
     /// Text the user pasted.
     Paste,
     /// The window gaining or losing focus (`CSI I` / `CSI O`), reported because the session asked.

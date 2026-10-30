@@ -10,9 +10,10 @@
 //! - **NeedsPermission**: an untouched dialog is legitimately quiet, so quiet alone never clears it, and neither does
 //!   output alone (the dialog's own first draw and resize redraws come after the request too). An answer written to
 //!   the PTY after the request, then output (it redrew), then the quiet period gives
-//!   [`IdleInference::QuietAfterPermission`]. An answer is client input that could pick an option: Enter, a printable
-//!   key or a paste. Moving around the dialog, focus and mouse reports, and the screen's own query replies (which the
-//!   runtime writes without telling the watch) are not answers.
+//!   [`IdleInference::QuietAfterPermission`]. An answer is client input that could pick an option or dismiss the
+//!   dialog: a key the client marks as one (Enter, Esc, Ctrl-C, a printable key) or a paste. Moving around the
+//!   dialog, focus and mouse reports, and the screen's own query replies (which the runtime writes without telling
+//!   the watch) are not answers.
 //! - Anything else, and shell sessions always, are left alone. Output never makes a session working again: only a
 //!   real turn signal does (`core::session`).
 //! - A tick that asks for an idle restarts that session's quiet period, so an idle the runtime failed to append is
@@ -96,15 +97,18 @@ impl Watched {
     }
 }
 
-/// Whether client input of `kind` could answer a dialog: Enter or a printable key, or a paste. Moving around a
-/// dialog (cursor keys, Tab, Backspace) doesn't, and neither do the terminal's focus and mouse reports.
+/// Whether client input of `kind` could answer a dialog: a key the client marked as one ([`InputKind::Answer`]), or
+/// a paste. Moving around a dialog (cursor keys, Tab, Backspace) doesn't, and neither do the terminal's focus and
+/// mouse reports.
 ///
-/// Keys starting with ESC are escape sequences, never text: cursor and function keys, alt chords, and every key the
-/// kitty keyboard protocol encodes as `CSI … u`. So Esc and Ctrl-C, which can dismiss a dialog, don't count, and
-/// with kitty's "report all keys" flag on no key does. The dialog then waits for a real signal.
+/// A client older than [`InputKind::Answer`] sends every key as [`InputKind::Keys`], so those are judged by their
+/// bytes: Enter or a printable key. Keys starting with ESC are escape sequences, never text: cursor and function keys,
+/// alt chords, and every key the kitty keyboard protocol encodes as `CSI … u`. So from such a client Esc and Ctrl-C,
+/// which can dismiss a dialog, don't count, and with kitty's "report all keys" flag on no key does. The dialog then
+/// waits for a real signal.
 fn answers(kind: InputKind, bytes: &[u8]) -> bool {
     match kind {
-        InputKind::Paste => true,
+        InputKind::Answer | InputKind::Paste => true,
         InputKind::Keys if bytes.first() != Some(&0x1b) => String::from_utf8_lossy(bytes)
             .chars()
             .any(|c| c == '\r' || !c.is_control()),

@@ -47,7 +47,24 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
             intents
         }
         Focus::Terminal if is_prefix(key) => vec![Intent::SetFocus(Focus::Command)],
-        Focus::Terminal => input(InputKind::Keys, encode::key(key, modes)),
+        Focus::Terminal => input(key_kind(key), encode::key(key, modes)),
+    }
+}
+
+/// Whether `key` can answer a dialog in the session: Enter, Esc, Ctrl-C or a printable key (shift is how some are
+/// typed). The host can't always tell from the bytes, which in kitty keyboard modes may be `CSI … u` for any key.
+fn key_kind(key: &KeyEvent) -> InputKind {
+    let mods = key.modifiers;
+    let answers = match key.code {
+        KeyCode::Enter | KeyCode::Esc => mods.is_empty(),
+        KeyCode::Char('c') if mods == KeyModifiers::CONTROL => true,
+        KeyCode::Char(_) => (mods - KeyModifiers::SHIFT).is_empty(),
+        _ => false,
+    };
+    if answers {
+        InputKind::Answer
+    } else {
+        InputKind::Keys
     }
 }
 
@@ -220,7 +237,7 @@ fn right_click(target: Target, at: Cell) -> Vec<Intent> {
 }
 
 /// Input for the session, tagged with what made it, so the host knows a mouse or focus report isn't the user
-/// answering a dialog.
+/// answering a dialog, and which keys can be.
 fn input(kind: InputKind, bytes: Option<Vec<u8>>) -> Vec<Intent> {
     bytes
         .map(|bytes| Intent::Input(kind, bytes))

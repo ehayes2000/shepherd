@@ -461,6 +461,7 @@ fn input_says_what_kind_of_input_it_is_unless_it_is_keys() {
         (InputKind::Paste, json!("paste")),
         (InputKind::Focus, json!("focus")),
         (InputKind::Mouse, json!("mouse")),
+        (InputKind::Answer, json!("answer")),
     ];
     for (kind, name) in kinds {
         let line = encode_client_notification(&ClientNotification::SessionInput(SessionInput {
