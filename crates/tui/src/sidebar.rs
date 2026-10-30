@@ -1,16 +1,18 @@
 //! The session list on the left.
 //!
 //! The first line is the header: a `+ New session` button (`+` when collapsed). Each session is two lines: its
-//! status glyph and name, then `machine · PR` (placeholders until M3 / M4). The selected session has a highlighted
-//! background, and a session that wants the user has a yellow bar on its left edge. The newest session is at the top.
-//! The list starts at the client's [`Client::sidebar_scroll`], which keeps the selected session visible when the
-//! selection changes and follows the wheel otherwise. The last line is a footer: the prefix while it's pending, else
-//! the latest notice, else a reconnecting note, else a hint for help.
+//! status glyph, name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). The
+//! selected session has a highlighted background, and a session that wants the user has a yellow bar on its left edge.
+//! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
+//! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
+//! the prefix and its bindings while it's pending; otherwise the latest notice, else a reconnecting note, else a hint
+//! for help, then the `Detach` and `?` buttons on the right.
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, and the footer shows `^B` while
 //! the prefix is pending.
 //!
-//! [`crate::hit`] reads the same geometry ([`new_session_button`], [`visible_rows`]) that drawing uses.
+//! [`crate::hit`] reads the same geometry ([`new_session_button`], [`visible_rows`], [`close_button`],
+//! [`footer_buttons`]) that drawing uses.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,7 +20,7 @@ use ratatui::style::{Color, Modifier, Style};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::session::Activity;
 
-use crate::layout::Layout;
+use crate::layout::{Layout, Target};
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
@@ -66,6 +68,41 @@ pub(crate) fn new_session_button(layout: &Layout) -> Rect {
     };
     let width = (label.chars().count() as u16).min(inner.width - 1);
     Rect::new(inner.x + 1, inner.y, width, 1)
+}
+
+/// A row's close button, drawn as `×`.
+const CLOSE: &str = "×";
+const DETACH: &str = "Detach";
+const HELP: &str = "?";
+
+/// Where the close button of the session drawn on `row` is: the last cell of its first line. The collapsed sidebar
+/// has none.
+pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
+    if layout.collapsed || row.width < 6 || row.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(row.right() - 1, row.y, 1, 1)
+}
+
+/// The footer's buttons, left to right: `Detach`, then `?` in the last column. Not shown in the collapsed sidebar, nor
+/// while the prefix is pending, when the footer lists the bindings instead.
+pub(crate) fn footer_buttons(
+    client: &Client,
+    layout: &Layout,
+) -> Vec<(Rect, Target, &'static str)> {
+    let inner = inner(layout);
+    let width = DETACH.chars().count() as u16;
+    if layout.collapsed
+        || client.focus() == Focus::Command
+        || inner.height < 2
+        || inner.width < width + 6
+    {
+        return Vec::new();
+    }
+    let y = inner.bottom() - 1;
+    let help = Rect::new(inner.right() - 1, y, 1, 1);
+    let detach = Rect::new(help.x - 1 - width, y, width, 1);
+    vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)]
 }
 
 /// The session rows, between the header line and the footer line.
@@ -138,17 +175,37 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
         }
         let (symbol, color) = glyph(session);
         buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
-        buf.set_stringn(line.x + 3, line.y, &session.name, width, style);
+        // The name stops a column short of the close button.
+        let name_width = usize::from(line.width.saturating_sub(5));
+        buf.set_stringn(line.x + 3, line.y, &session.name, name_width, style);
+        let close = close_button(layout, line);
+        buf.set_stringn(
+            close.x,
+            close.y,
+            CLOSE,
+            usize::from(close.width),
+            Style::new().fg(Color::Gray),
+        );
         let detail = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
         buf.set_stringn(line.x + 3, line.y + 1, PLACEHOLDER_DETAIL, width, detail);
     });
     let area = inner(layout);
     if area.height >= 2 {
-        footer(
-            client,
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
-            buf,
-        );
+        let buttons = footer_buttons(client, layout);
+        let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        for (at, _, label) in &buttons {
+            buf.set_stringn(at.x, at.y, label, usize::from(at.width), button);
+        }
+        // The status keeps a blank column before the buttons.
+        let line = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        let status = match buttons.first() {
+            Some((detach, ..)) => Rect {
+                width: detach.x.saturating_sub(line.x + 1),
+                ..line
+            },
+            None => line,
+        };
+        footer(client, status, buf);
     }
 }
 

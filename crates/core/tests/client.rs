@@ -3,8 +3,8 @@
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind, Timestamp};
 use shepherd_core::client::{
-    ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS,
-    Popup,
+    Cell, ClientCommand, ClientEvent, Connection, Focus, HELLO_TIMEOUT, Intent,
+    MAX_CONNECT_ATTEMPTS, MenuItem, Popup,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -529,6 +529,150 @@ fn rename_and_close_need_a_selected_session() {
     let mut c = ClientDriver::with_sessions(&[]);
     c.user(Intent::BeginRename);
     c.user(Intent::BeginClose);
+    assert_eq!(c.client().popup(), None);
+}
+
+// ---------- the context menu and the close button ----------
+
+fn cell(col: u16, row: u16) -> Cell {
+    Cell { col, row }
+}
+
+#[test]
+fn opening_a_menu_on_a_session_shows_it_where_it_was_asked_for() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    let sent = c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(4, 3),
+    });
+    assert_eq!(sent, []);
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::Menu {
+            session: sid("s1"),
+            at: cell(4, 3)
+        })
+    );
+    assert_eq!(selected(&c).as_deref(), Some("s2"), "the selection stays");
+}
+
+#[test]
+fn a_menu_on_a_session_that_is_not_listed_does_not_open() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::OpenMenu {
+        session: sid("gone"),
+        at: cell(0, 0),
+    });
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn choosing_rename_renames_the_menus_session_not_the_selected_one() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    });
+    assert_eq!(c.user(Intent::MenuChoose(MenuItem::Rename)), []);
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::Rename {
+            session: sid("s1"),
+            name: "shell-1".into()
+        })
+    );
+    c.user(Intent::EditRename("api".into()));
+    let sent = c.user(Intent::Confirm);
+    assert_eq!(
+        bodies(&sent),
+        [ClientRequest::SessionRename(SessionRename {
+            session: sid("s1"),
+            name: "api".into()
+        })]
+    );
+}
+
+#[test]
+fn choosing_close_asks_to_close_the_menus_session() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    });
+    assert_eq!(c.user(Intent::MenuChoose(MenuItem::Close)), []);
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::ConfirmClose { session: sid("s1") })
+    );
+}
+
+#[test]
+fn choosing_with_no_menu_open_does_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::MenuChoose(MenuItem::Close));
+    assert_eq!(c.client().popup(), None);
+    c.user(Intent::ShowHelp);
+    c.user(Intent::MenuChoose(MenuItem::Rename));
+    assert_eq!(c.client().popup(), Some(&Popup::Help));
+}
+
+#[test]
+fn choosing_on_a_session_that_closed_meanwhile_just_closes_the_menu() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    });
+    c.host().close("s1");
+    c.sync();
+    c.user(Intent::MenuChoose(MenuItem::Rename));
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn dismissing_a_menu_closes_it() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    });
+    assert_eq!(c.user(Intent::Dismiss), []);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn confirming_a_menu_does_nothing_but_close_it() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::OpenMenu {
+        session: sid("s1"),
+        at: cell(1, 1),
+    });
+    assert_eq!(c.user(Intent::Confirm), []);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn closing_a_given_session_asks_to_close_it_without_selecting_it() {
+    let mut c = ClientDriver::with_sessions(&["s1", "s2"]);
+    assert_eq!(c.user(Intent::BeginCloseSession(sid("s1"))), []);
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::ConfirmClose { session: sid("s1") })
+    );
+    assert_eq!(selected(&c).as_deref(), Some("s2"));
+    let sent = c.user(Intent::Confirm);
+    assert_eq!(
+        bodies(&sent),
+        [ClientRequest::SessionClose(SessionClose {
+            session: sid("s1")
+        })]
+    );
+}
+
+#[test]
+fn closing_a_session_that_is_not_listed_does_nothing() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    c.user(Intent::BeginCloseSession(sid("gone")));
     assert_eq!(c.client().popup(), None);
 }
 

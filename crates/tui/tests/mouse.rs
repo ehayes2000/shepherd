@@ -6,7 +6,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::{Focus, Intent};
+use shepherd_core::client::{Cell, Focus, Intent, MenuItem, Popup};
 use shepherd_core::ids::SessionId;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
@@ -178,8 +178,13 @@ fn a_session_row_is_hit_across_the_sidebar_but_not_on_its_border() {
         hit_at(&c, WIDE, Position::new(side.x, row.y)),
         session("s1")
     );
+    // The last cell of the first line is the close button; the second line is the row to the border.
     assert_eq!(
-        hit_at(&c, WIDE, Position::new(border - 1, row.y)),
+        hit_at(&c, WIDE, Position::new(border - 2, row.y)),
+        session("s1")
+    );
+    assert_eq!(
+        hit_at(&c, WIDE, Position::new(border - 1, row.y + 1)),
         session("s1")
     );
     assert_eq!(hit_at(&c, WIDE, Position::new(border, row.y)), None);
@@ -357,26 +362,27 @@ fn clicking_empty_sidebar_space_does_nothing() {
 }
 
 #[test]
-fn other_buttons_on_a_row_do_nothing() {
+fn the_middle_button_on_a_row_does_nothing() {
     let mut c = sessions(2, WIDE);
     let second = at(&buffer(&c, WIDE), "name-01");
     let out = events(
         &mut c,
         WIDE,
         &[
-            mouse(MouseEventKind::Down(MouseButton::Right), second),
-            mouse(MouseEventKind::Up(MouseButton::Right), second),
+            mouse(MouseEventKind::Down(MouseButton::Middle), second),
+            mouse(MouseEventKind::Up(MouseButton::Middle), second),
         ],
     );
     assert_eq!(out, [vec![], vec![]]);
 }
 
 #[test]
-fn clicks_under_a_popup_do_nothing() {
+fn a_click_on_a_control_under_a_popup_only_dismisses_the_popup() {
     let mut c = sessions(1, WIDE);
     let button = at(&buffer(&c, WIDE), "+ New session");
     c.user(Intent::ShowHelp);
-    assert_eq!(click(&mut c, WIDE, button), [vec![], vec![]]);
+    assert_eq!(click(&mut c, WIDE, button), [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
 }
 
 // ---------- the wheel ----------
@@ -510,4 +516,330 @@ fn a_press_on_nothing_replaces_an_earlier_press_on_a_control() {
         &[mouse(DOWN, button), mouse(DOWN, empty), mouse(UP, button)],
     );
     assert!(out.iter().all(Vec::is_empty), "{out:?}");
+}
+
+// ---------- the close button and the footer ----------
+
+/// Where `text` is drawn on row `y`, searching from the right.
+fn last_on_row(buf: &Buffer, y: u16, text: &str) -> Position {
+    (0..buf.area.width)
+        .rev()
+        .map(|x| Position::new(x, y))
+        .find(|p| buf[*p].symbol() == text)
+        .unwrap_or_else(|| panic!("{text:?} not drawn on row {y}: {buf:?}"))
+}
+
+#[test]
+fn each_rows_close_button_is_the_last_cell_of_its_first_line() {
+    let c = sessions(2, WIDE);
+    let buf = buffer(&c, WIDE);
+    for (name, id) in [("name-02", "s2"), ("name-01", "s1")] {
+        let row = at(&buf, name);
+        let x = last_on_row(&buf, row.y, "×");
+        assert_eq!(
+            buf[(x.x + 1, x.y)].symbol(),
+            "│",
+            "right against the border"
+        );
+        assert_eq!(
+            hit_at(&c, WIDE, x),
+            Some(Target::CloseSession(SessionId::new(id)))
+        );
+        assert_eq!(hit_at(&c, WIDE, Position::new(x.x - 1, x.y)), session(id));
+        assert_eq!(hit_at(&c, WIDE, below(x, 1)), session(id));
+    }
+}
+
+#[test]
+fn clicking_a_rows_close_button_asks_to_close_it_without_selecting_it() {
+    let mut c = sessions(2, WIDE);
+    let buf = buffer(&c, WIDE);
+    let x = last_on_row(&buf, at(&buf, "name-01").y, "×");
+    let out = click(&mut c, WIDE, x);
+    assert_eq!(
+        out,
+        [
+            vec![],
+            vec![Intent::BeginCloseSession(SessionId::new("s1"))]
+        ]
+    );
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::ConfirmClose {
+            session: SessionId::new("s1")
+        })
+    );
+    assert_eq!(c.client().selected(), Some(&SessionId::new("s2")));
+}
+
+#[test]
+fn the_footer_has_detach_and_help_buttons() {
+    let c = sessions(1, WIDE);
+    let buf = buffer(&c, WIDE);
+    let detach = at(&buf, "Detach");
+    assert_eq!(hit_at(&c, WIDE, detach), Some(Target::Detach));
+    assert_eq!(hit_at(&c, WIDE, right(detach, 5)), Some(Target::Detach));
+    let help = last_on_row(&buf, detach.y, "?");
+    assert!(help.x > detach.x + 5);
+    assert_eq!(hit_at(&c, WIDE, help), Some(Target::Help));
+    assert_eq!(
+        hit_at(&c, WIDE, Position::new(detach.x - 1, detach.y)),
+        None
+    );
+}
+
+#[test]
+fn clicking_detach_quits_and_clicking_help_shows_it() {
+    let mut c = sessions(1, WIDE);
+    let buf = buffer(&c, WIDE);
+    let detach = at(&buf, "Detach");
+    let help = last_on_row(&buf, detach.y, "?");
+    assert_eq!(click(&mut c, WIDE, detach), [vec![], vec![Intent::Quit]]);
+    assert_eq!(click(&mut c, WIDE, help), [vec![], vec![Intent::ShowHelp]]);
+    assert_eq!(c.client().popup(), Some(&Popup::Help));
+}
+
+// ---------- the context menu ----------
+
+const RIGHT_DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Right);
+const RIGHT_UP: MouseEventKind = MouseEventKind::Up(MouseButton::Right);
+
+fn right_click(c: &mut ClientDriver, window: Rect, p: Position) -> Vec<Vec<Intent>> {
+    events(c, window, &[mouse(RIGHT_DOWN, p), mouse(RIGHT_UP, p)])
+}
+
+fn cell(p: Position) -> Cell {
+    Cell { col: p.x, row: p.y }
+}
+
+#[test]
+fn right_clicking_a_row_opens_its_menu_at_the_click() {
+    let mut c = sessions(2, WIDE);
+    let second = below(at(&buffer(&c, WIDE), "name-01"), 1);
+    let out = right_click(&mut c, WIDE, second);
+    let open = Intent::OpenMenu {
+        session: SessionId::new("s1"),
+        at: cell(second),
+    };
+    assert_eq!(out, [vec![], vec![open]]);
+    let buf = buffer(&c, WIDE);
+    let rename = at(&buf, "Rename");
+    let close = at(&buf, "Close");
+    assert_eq!(close, below(rename, 1));
+    // The menu's top-left corner is the click; the items are inside its border.
+    assert_eq!(buf[second].symbol(), "┌", "{buf:?}");
+    assert_eq!(rename.y, second.y + 1);
+    assert_eq!(c.client().selected(), Some(&SessionId::new("s2")));
+}
+
+#[test]
+fn a_right_press_and_release_on_different_rows_opens_nothing() {
+    let mut c = sessions(2, WIDE);
+    let buf = buffer(&c, WIDE);
+    let out = events(
+        &mut c,
+        WIDE,
+        &[
+            mouse(RIGHT_DOWN, at(&buf, "name-02")),
+            mouse(RIGHT_UP, at(&buf, "name-01")),
+        ],
+    );
+    assert!(out.iter().all(Vec::is_empty), "{out:?}");
+}
+
+#[test]
+fn the_menu_is_kept_inside_the_window() {
+    let mut c = sessions(1, WIDE);
+    c.user(Intent::OpenMenu {
+        session: SessionId::new("s1"),
+        at: Cell {
+            col: WIDE.right() - 1,
+            row: WIDE.bottom() - 1,
+        },
+    });
+    let buf = buffer(&c, WIDE);
+    let close = at(&buf, "Close");
+    assert_eq!(
+        buf[(WIDE.right() - 1, WIDE.bottom() - 1)].symbol(),
+        "┘",
+        "{buf:?}"
+    );
+    assert_eq!(
+        hit_at(&c, WIDE, close),
+        Some(Target::MenuItem(MenuItem::Close))
+    );
+}
+
+#[test]
+fn the_menus_items_are_hit_across_their_rows() {
+    let mut c = sessions(1, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    let buf = buffer(&c, WIDE);
+    let rename = at(&buf, "Rename");
+    assert_eq!(
+        hit_at(&c, WIDE, rename),
+        Some(Target::MenuItem(MenuItem::Rename))
+    );
+    assert_eq!(
+        hit_at(&c, WIDE, Position::new(rename.x - 1, rename.y)),
+        Some(Target::MenuItem(MenuItem::Rename))
+    );
+    assert_eq!(
+        hit_at(&c, WIDE, below(rename, 1)),
+        Some(Target::MenuItem(MenuItem::Close))
+    );
+    // Its border is the menu, but no item.
+    assert_eq!(hit_at(&c, WIDE, row), Some(Target::Popup));
+    assert_eq!(hit_at(&c, WIDE, below(rename, 3)), Some(Target::Backdrop));
+}
+
+#[test]
+fn clicking_rename_in_the_menu_opens_the_rename_popup_for_that_session() {
+    let mut c = sessions(2, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    let rename = at(&buffer(&c, WIDE), "Rename");
+    assert_eq!(
+        click(&mut c, WIDE, rename),
+        [vec![], vec![Intent::MenuChoose(MenuItem::Rename)]]
+    );
+    assert!(
+        matches!(c.client().popup(), Some(Popup::Rename { session, .. }) if session.as_str() == "s1"),
+        "{:?}",
+        c.client().popup()
+    );
+}
+
+#[test]
+fn clicking_close_in_the_menu_asks_to_close_that_session() {
+    let mut c = sessions(2, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    let close = at(&buffer(&c, WIDE), "Close");
+    assert_eq!(
+        click(&mut c, WIDE, close),
+        [vec![], vec![Intent::MenuChoose(MenuItem::Close)]]
+    );
+    assert_eq!(
+        c.client().popup(),
+        Some(&Popup::ConfirmClose {
+            session: SessionId::new("s1")
+        })
+    );
+}
+
+#[test]
+fn clicking_outside_the_menu_dismisses_it() {
+    let mut c = sessions(2, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    let pane = layout(WIDE).pane;
+    let out = click(&mut c, WIDE, Position::new(pane.x + 30, 20));
+    assert_eq!(out, [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn right_clicking_outside_the_menu_dismisses_it() {
+    let mut c = sessions(2, WIDE);
+    let buf = buffer(&c, WIDE);
+    right_click(&mut c, WIDE, at(&buf, "name-01"));
+    let out = right_click(&mut c, WIDE, at(&buf, "+ New session"));
+    assert_eq!(out, [vec![], vec![Intent::Dismiss]]);
+}
+
+#[test]
+fn a_press_on_a_menu_item_released_elsewhere_does_nothing() {
+    let mut c = sessions(1, WIDE);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    right_click(&mut c, WIDE, row);
+    let buf = buffer(&c, WIDE);
+    let out = events(
+        &mut c,
+        WIDE,
+        &[
+            mouse(DOWN, at(&buf, "Rename")),
+            mouse(UP, at(&buf, "Close")),
+        ],
+    );
+    assert!(out.iter().all(Vec::is_empty), "{out:?}");
+}
+
+// ---------- dialogs ----------
+
+#[test]
+fn the_close_confirmation_answers_by_its_buttons() {
+    for (label, intent) in [("[Close]", Intent::Confirm), ("[Cancel]", Intent::Dismiss)] {
+        let mut c = sessions(1, WIDE);
+        c.user(Intent::BeginClose);
+        let button = at(&buffer(&c, WIDE), label);
+        assert_eq!(
+            click(&mut c, WIDE, right(button, 2)),
+            [vec![], vec![intent]],
+            "{label}"
+        );
+        assert_eq!(c.client().popup(), None, "{label}");
+    }
+}
+
+#[test]
+fn the_rename_dialog_answers_by_its_buttons() {
+    for (label, intent) in [("[Save]", Intent::Confirm), ("[Cancel]", Intent::Dismiss)] {
+        let mut c = sessions(1, WIDE);
+        c.user(Intent::BeginRename);
+        let button = at(&buffer(&c, WIDE), label);
+        assert_eq!(
+            click(&mut c, WIDE, button),
+            [vec![], vec![intent]],
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn the_help_closes_by_its_button() {
+    let mut c = sessions(1, WIDE);
+    c.user(Intent::ShowHelp);
+    let button = at(&buffer(&c, WIDE), "[Close]");
+    assert_eq!(click(&mut c, WIDE, button), [vec![], vec![Intent::Dismiss]]);
+}
+
+#[test]
+fn clicking_inside_a_dialog_off_its_buttons_does_nothing() {
+    let mut c = sessions(1, WIDE);
+    c.user(Intent::BeginClose);
+    let text = at(&buffer(&c, WIDE), "Close name-01?");
+    assert_eq!(hit_at(&c, WIDE, text), Some(Target::Popup));
+    assert_eq!(click(&mut c, WIDE, text), [vec![], vec![]]);
+    assert!(c.client().popup().is_some());
+}
+
+#[test]
+fn clicking_outside_a_dialog_cancels_it() {
+    let mut c = sessions(1, WIDE);
+    c.user(Intent::BeginRename);
+    let row = at(&buffer(&c, WIDE), "name-01");
+    assert_eq!(hit_at(&c, WIDE, row), Some(Target::Backdrop));
+    assert_eq!(click(&mut c, WIDE, row), [vec![], vec![Intent::Dismiss]]);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn a_popup_takes_clicks_over_a_session_that_tracks_the_mouse() {
+    let mut c = sessions(1, WIDE);
+    c.user(Intent::BeginClose);
+    let pane = layout(WIDE).pane;
+    let p = Position::new(pane.right() - 2, 1);
+    let out = events_with(&mut c, WIDE, sgr_mouse(), &[mouse(DOWN, p), mouse(UP, p)]);
+    assert_eq!(out, [vec![], vec![Intent::Dismiss]]);
+}
+
+#[test]
+fn the_wheel_does_nothing_under_a_popup() {
+    let mut c = sessions(15, SHORT);
+    let row = at(&buffer(&c, SHORT), "name-15");
+    c.user(Intent::ShowHelp);
+    let out = events(&mut c, SHORT, &[mouse(MouseEventKind::ScrollDown, row)]);
+    assert_eq!(out, [vec![]]);
 }

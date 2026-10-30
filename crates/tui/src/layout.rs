@@ -4,12 +4,12 @@
 //! area [`crate::render`] draws its screen in.
 
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::Client;
+use shepherd_core::client::{Client, MenuItem};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{MIN_COLS, MIN_ROWS};
 
-use crate::sidebar;
+use crate::{popup, sidebar};
 
 /// The sidebar's width, its right border included.
 pub const SIDEBAR_WIDTH: u16 = 24;
@@ -54,22 +54,55 @@ pub enum Target {
     NewSession,
     /// A session's row in the sidebar, either of its lines.
     Session(SessionId),
+    /// The `×` at the right of a session's row.
+    CloseSession(SessionId),
     /// The pane: the selected session's terminal.
     Terminal,
+    /// The sidebar footer's `Detach` button.
+    Detach,
+    /// The sidebar footer's `?` button.
+    Help,
+    /// An item of the open context menu.
+    MenuItem(MenuItem),
+    /// The open dialog's button that answers yes: `[Close]` or `[Save]`.
+    Confirm,
+    /// The open dialog's button that cancels it: `[Cancel]`, or help's `[Close]`.
+    Dismiss,
+    /// The open popup, off its controls.
+    Popup,
+    /// Anywhere outside the open popup.
+    Backdrop,
 }
 
-/// What is under the cell at `col`, `row`, from the same geometry and scroll [`crate::render`] draws with.
+/// What is under the cell at `col`, `row`, from the same geometry and scroll [`crate::render`] draws with. An open
+/// popup covers the whole window: its controls, itself, or the backdrop around it.
 pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Target> {
     let at = Position::new(col, row);
+    if let Some(placed) = popup::place(client, layout.sidebar.union(layout.pane)) {
+        let control = placed.controls.into_iter().find(|c| c.area.contains(at));
+        return Some(match control {
+            Some(control) => control.target,
+            None if placed.area.contains(at) => Target::Popup,
+            None => Target::Backdrop,
+        });
+    }
     if layout.pane.contains(at) {
         return Some(Target::Terminal);
     }
     if sidebar::new_session_button(layout).contains(at) {
         return Some(Target::NewSession);
     }
-    let (index, _) = sidebar::visible_rows(client, layout).find(|(_, line)| line.contains(at))?;
-    let session = client.sessions().get(index)?;
-    Some(Target::Session(session.id.clone()))
+    let footer = sidebar::footer_buttons(client, layout);
+    if let Some((_, target, _)) = footer.into_iter().find(|(area, ..)| area.contains(at)) {
+        return Some(target);
+    }
+    let (index, line) =
+        sidebar::visible_rows(client, layout).find(|(_, line)| line.contains(at))?;
+    let id = client.sessions().get(index)?.id.clone();
+    if sidebar::close_button(layout, line).contains(at) {
+        return Some(Target::CloseSession(id));
+    }
+    Some(Target::Session(id))
 }
 
 /// How many sessions the sidebar shows at once in a `window`, for [`Intent::SidebarRows`].

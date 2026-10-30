@@ -8,8 +8,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Source, SourceKind};
-use shepherd_core::client::{Client, Focus, Intent};
+use shepherd_core::client::{Cell, Client, Focus, Intent};
 use shepherd_core::ids::SessionId;
+use shepherd_core::wire::WireError;
 use shepherd_term::Modes;
 use shepherd_term::Screen;
 use shepherd_testkit::builders::ClientDriver;
@@ -127,6 +128,32 @@ fn close_confirmation() {
 fn help_popup() {
     let (mut c, screens) = three_sessions();
     c.user(Intent::ShowHelp);
+    insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
+/// Right-clicked on the second line of `docs`, which isn't the selected session.
+#[test]
+fn context_menu_open() {
+    let (mut c, screens) = three_sessions();
+    c.user(Intent::OpenMenu {
+        session: SessionId::new("s2"),
+        at: Cell { col: 5, row: 4 },
+    });
+    insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
+/// The footer with a notice, which leaves room for the buttons.
+#[test]
+fn footer_with_a_notice() {
+    let (mut c, screens) = three_sessions();
+    c.user(Intent::BeginRename);
+    let sent = c.user(Intent::Confirm);
+    c.answer(
+        &sent,
+        Err(WireError::UnknownSession {
+            session: SessionId::new("s3"),
+        }),
+    );
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
@@ -251,8 +278,9 @@ fn the_sidebar_scrolls_to_keep_the_selected_session_visible() {
         .unwrap_or_default();
     let buf = buffer(c.client(), &Screens::new(), 80, 12);
     let side = layout(buf.area).sidebar;
+    // Left of each row's close button.
     let row_of = |y: u16| -> String {
-        (side.x..side.right() - 1)
+        (side.x..side.right() - 2)
             .map(|x| buf[(x, y)].symbol().to_owned())
             .collect()
     };
@@ -273,8 +301,9 @@ fn a_taller_window_than_the_client_was_told_still_fills_the_list_to_its_end() {
     c.user(Intent::ScrollSidebar(100));
     let buf = buffer(c.client(), &Screens::new(), 80, 24);
     let side = layout(buf.area).sidebar;
+    // Left of each row's close button.
     let row_of = |y: u16| -> String {
-        (side.x..side.right() - 1)
+        (side.x..side.right() - 2)
             .map(|x| buf[(x, y)].symbol().to_owned())
             .collect::<String>()
             .trim_end()

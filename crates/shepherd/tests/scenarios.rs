@@ -350,7 +350,8 @@ fn keys_create_and_switch_sessions_and_the_screen_shows_the_selected_one() {
     let mut h = Harness::ready();
     let mut view = test_view();
     let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
-    let side = 0..pane.x - 1;
+    // Left of each row's close button.
+    let side = 0..pane.x - 2;
     let screen = pane.x..pane.right();
 
     h.keys(&[ctrl('b'), ch('n'), ctrl('b'), ch('n')]);
@@ -551,6 +552,65 @@ fn clicks_create_sessions_and_pick_the_one_that_gets_typing() {
         (h.typed_into("s1"), h.typed_into("s2")),
         ("one".into(), "two".into())
     );
+}
+
+impl Harness {
+    /// A right press and release at `(col, row)`.
+    fn right_click(&mut self, (column, row): (u16, u16)) {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Right),
+        ] {
+            self.term(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+    }
+}
+
+/// Where the `×` of the row whose first line is `y` is drawn: the last one on that line of the sidebar.
+fn close_button(view: &TerminalView<TestBackend>, y: u16) -> (u16, u16) {
+    let buf = view.terminal().backend().buffer();
+    let side = layout(buf.area).sidebar;
+    let x = (side.x..side.right())
+        .rev()
+        .find(|&x| buf[(x, y)].symbol() == "×");
+    let x = x.unwrap_or_else(|| panic!("no close button on row {y}: {buf:?}"));
+    (x, y)
+}
+
+#[test]
+fn the_mouse_renames_a_session_from_its_menu_and_closes_one_by_its_close_button() {
+    let mut h = Harness::ready();
+    let mut view = test_view();
+    h.keys(&[ctrl('b'), ch('n'), ctrl('b'), ch('n')]);
+    h.draw(&mut view);
+
+    // Rename the older session, shell-1, from its context menu.
+    h.right_click(find(&view, "shell-1"));
+    h.draw(&mut view);
+    h.click(find(&view, "Rename"));
+    h.keys(&[ctrl('u')]);
+    h.typed("api");
+    h.draw(&mut view);
+    h.click(find(&view, "[Save]"));
+    h.draw(&mut view);
+    let (_, api) = find(&view, "api");
+    assert_eq!(h.runtime.client().popup(), None);
+
+    // Close it by its ×, then [Close].
+    h.click(close_button(&view, api));
+    h.draw(&mut view);
+    h.click(find(&view, "[Close]"));
+    h.draw(&mut view);
+    assert_eq!(h.host(FakeHost::sessions), [SessionId::new("s2")]);
+    let names: Vec<&str> = (h.runtime.client().sessions().iter())
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, ["shell-2"]);
 }
 
 #[test]

@@ -72,9 +72,20 @@ pub enum Intent {
     EditRename(String),
     /// Ask to close the selected session.
     BeginClose,
+    /// Ask to close this session (its row's close button), without selecting it. A session that isn't listed is
+    /// ignored.
+    BeginCloseSession(SessionId),
+    /// Open the context menu of this session at a cell of the window (a right click on its row). A session that isn't
+    /// listed is ignored.
+    OpenMenu {
+        session: SessionId,
+        at: Cell,
+    },
+    /// Run an item of the open menu on the menu's session.
+    MenuChoose(MenuItem),
     /// Accept the open popup: send the rename or the close.
     Confirm,
-    /// Close the open popup without doing anything.
+    /// Close the open popup or menu without doing anything.
     Dismiss,
     /// Detach. Sessions keep running on the host.
     Quit,
@@ -103,11 +114,36 @@ pub enum Focus {
     Command,
 }
 
+/// A cell of the window, counted from its top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cell {
+    pub col: u16,
+    pub row: u16,
+}
+
+/// What a session's context menu offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    Rename,
+    Close,
+}
+
+/// What is open over everything else. It takes the keys and the clicks until it's answered or dismissed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
     Help,
-    Rename { session: SessionId, name: String },
-    ConfirmClose { session: SessionId },
+    Rename {
+        session: SessionId,
+        name: String,
+    },
+    ConfirmClose {
+        session: SessionId,
+    },
+    /// A session's context menu, asked for at `at`. The TUI places it there, kept inside the window.
+    Menu {
+        session: SessionId,
+        at: Cell,
+    },
 }
 
 /// Where the client is with its host.
@@ -647,9 +683,8 @@ impl Client {
                 Vec::new()
             }
             Intent::BeginRename => {
-                if let Some(s) = self.selected_session() {
-                    let (session, name) = (s.id.clone(), s.name.clone());
-                    self.popup = Some(Popup::Rename { session, name });
+                if let Some(session) = self.selected.clone() {
+                    self.begin_rename(session);
                 }
                 Vec::new()
             }
@@ -661,7 +696,29 @@ impl Client {
             }
             Intent::BeginClose => {
                 if let Some(session) = self.selected.clone() {
-                    self.popup = Some(Popup::ConfirmClose { session });
+                    self.begin_close(session);
+                }
+                Vec::new()
+            }
+            Intent::BeginCloseSession(session) => {
+                self.begin_close(session);
+                Vec::new()
+            }
+            Intent::OpenMenu { session, at } => {
+                if self.listed(&session) {
+                    self.popup = Some(Popup::Menu { session, at });
+                }
+                Vec::new()
+            }
+            Intent::MenuChoose(item) => {
+                let Some(Popup::Menu { session, .. }) =
+                    self.popup.take_if(|p| matches!(p, Popup::Menu { .. }))
+                else {
+                    return Vec::new();
+                };
+                match item {
+                    MenuItem::Rename => self.begin_rename(session),
+                    MenuItem::Close => self.begin_close(session),
                 }
                 Vec::new()
             }
@@ -675,7 +732,7 @@ impl Client {
                 Some(Popup::ConfirmClose { session }) => {
                     self.user_request(ClientRequest::SessionClose(SessionClose { session }))
                 }
-                Some(Popup::Help) | None => Vec::new(),
+                Some(Popup::Help | Popup::Menu { .. }) | None => Vec::new(),
             },
             Intent::Dismiss => {
                 self.popup = None;
@@ -685,9 +742,19 @@ impl Client {
         }
     }
 
-    fn selected_session(&self) -> Option<&ClientSession> {
-        let id = self.selected.as_ref()?;
-        self.sessions.iter().find(|s| &s.id == id)
+    /// Opens the rename popup for `session`, starting from its current name, if it's listed.
+    fn begin_rename(&mut self, session: SessionId) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == session) {
+            let name = s.name.clone();
+            self.popup = Some(Popup::Rename { session, name });
+        }
+    }
+
+    /// Asks to close `session`, if it's listed.
+    fn begin_close(&mut self, session: SessionId) {
+        if self.listed(&session) {
+            self.popup = Some(Popup::ConfirmClose { session });
+        }
     }
 
     /// A request the user asked for. Dropped, with a notice, while not connected.

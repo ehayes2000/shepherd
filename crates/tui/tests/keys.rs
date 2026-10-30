@@ -4,7 +4,8 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use shepherd_core::client::{Focus, Intent};
+use shepherd_core::client::{Cell, Focus, Intent};
+use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
 use shepherd_testkit::builders::ClientDriver;
@@ -238,6 +239,19 @@ fn any_key_closes_the_help() {
     c.user(Intent::ShowHelp);
     for key in [ch('q'), press(KeyCode::Esc), ch('?'), ch('a')] {
         assert_eq!(keys(&c, key), [Intent::Dismiss], "{key:?}");
+    }
+}
+
+#[test]
+fn esc_dismisses_the_context_menu_and_other_keys_are_dropped() {
+    let mut c = client();
+    c.user(Intent::OpenMenu {
+        session: SessionId::new("s1"),
+        at: Cell { col: 2, row: 3 },
+    });
+    assert_eq!(keys(&c, press(KeyCode::Esc)), [Intent::Dismiss]);
+    for key in [ch('r'), ch('x'), press(KeyCode::Enter), ctrl('b')] {
+        assert_eq!(keys(&c, key), [], "{key:?}");
     }
 }
 

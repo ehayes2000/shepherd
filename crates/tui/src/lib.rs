@@ -1,7 +1,7 @@
 //! Pure rendering of client state and key mapping. See `docs/architecture.md`.
 //!
 //! - [`render`] draws the sidebar ([`sidebar`]), the selected session's terminal in the pane ([`layout`]), and any
-//!   popup.
+//!   popup or menu.
 //! - [`map_event`] / [`map_key`] turn terminal events into client [`Intent`](shepherd_core::client::Intent)s, with input
 //!   for the session encoded by [`encode`] for its [`Screen::modes`].
 //!
@@ -20,9 +20,9 @@
 //! left edge of its row, in both the full and the collapsed sidebar.
 
 pub mod encode;
-mod help;
 mod keys;
 pub mod layout;
+mod popup;
 mod screen;
 pub mod sidebar;
 
@@ -37,9 +37,9 @@ use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
 use shepherd_term::Screen;
 
-pub use help::BINDINGS;
 pub use keys::{PREFIX, Pointer, from_legacy_terminal, map_event, map_key};
 pub use layout::{Layout, Target, hit, layout, pane_size};
+pub use popup::BINDINGS;
 pub use screen::render_screen;
 
 /// Each session's terminal, as the client runtime keeps them.
@@ -56,7 +56,7 @@ pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
         None if client.sessions().is_empty() => empty(client, layout.pane, buf),
         None => {}
     }
-    let popup_cursor = help::render(client, frame.area(), frame.buffer_mut());
+    let popup_cursor = popup::render(client, frame.area(), frame.buffer_mut());
     let cursor = match (client.popup(), selected) {
         (Some(_), _) => popup_cursor,
         (None, Some(screen)) if client.focus() == Focus::Terminal => {

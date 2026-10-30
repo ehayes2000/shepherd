@@ -1,12 +1,13 @@
 //! What keys and other terminal events mean.
 //!
 //! Keys go to the selected session, encoded for its input modes, except the prefix (`ctrl-b`). After the prefix,
-//! one key is a shepherd command (see [`crate::help::BINDINGS`]) and keys go back to the session; an unbound key
+//! one key is a shepherd command (see [`crate::BINDINGS`]) and keys go back to the session; an unbound key
 //! cancels the prefix and is dropped, and the prefix again sends a literal `ctrl-b`. An open popup takes every key.
 //!
-//! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a left press that went down
-//! on the same control ([`Pointer`] remembers it), and the wheel scrolls the sidebar. Only a session that tracks the
-//! mouse gets mouse events in its pane.
+//! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a press of the same button
+//! that went down on the same control ([`Pointer`] remembers it). A left click presses the control; a right click on a
+//! session opens its context menu at the click. Under an open popup, a click outside it dismisses it. The wheel
+//! scrolls the sidebar when no popup is open. Only a session that tracks the mouse gets mouse events in its pane.
 //!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
 //! be handled in order.
@@ -15,7 +16,7 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::{Client, Focus, Intent, Popup};
+use shepherd_core::client::{Cell, Client, Focus, Intent, Popup};
 use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
@@ -47,10 +48,10 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
     }
 }
 
-/// What the mouse is doing between events: the control a left press went down on.
+/// What the mouse is doing between events: the button last pressed and the control it went down on.
 #[derive(Debug, Clone, Default)]
 pub struct Pointer {
-    pressed: Option<Target>,
+    pressed: Option<(MouseButton, Target)>,
 }
 
 /// What a terminal event means. `window` is the whole window, for placing mouse events.
@@ -89,8 +90,8 @@ pub fn map_event(
 }
 
 /// A mouse event. In the pane of a session that tracks the mouse (with keys going to it), it goes to the session.
-/// Otherwise a left press and release on the same control clicks it, and the wheel scrolls the sidebar. Under a popup
-/// the mouse does nothing.
+/// Otherwise a press and release of one button on the same control clicks it, and the wheel scrolls the sidebar. An
+/// open popup covers everything under it ([`hit`]).
 fn map_mouse(
     mouse: &MouseEvent,
     client: &Client,
@@ -98,17 +99,12 @@ fn map_mouse(
     window: Rect,
     pointer: &mut Pointer,
 ) -> Vec<Intent> {
-    // Every left press or release ends the earlier press, whatever it lands on (a popup, a tracked pane, nothing), so
-    // only a press below can arm the next release.
+    // Every press or release ends the earlier press, whatever it lands on (a tracked pane, nothing), so only a press
+    // below can arm the next release.
     let pressed = match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-            pointer.pressed.take()
-        }
+        MouseEventKind::Down(_) | MouseEventKind::Up(_) => pointer.pressed.take(),
         _ => None,
     };
-    if client.popup().is_some() {
-        return Vec::new();
-    }
     let layout = layout(window);
     let target = hit(&layout, client, mouse.column, mouse.row);
     let tracked = modes.mouse.tracking != MouseTracking::Off;
@@ -116,16 +112,26 @@ fn map_mouse(
         let (col, row) = (mouse.column - layout.pane.x, mouse.row - layout.pane.y);
         return input(encode::mouse(mouse, col, row, modes));
     }
-    let over_sidebar = layout
-        .sidebar
-        .contains(Position::new(mouse.column, mouse.row));
+    let over_sidebar = client.popup().is_none()
+        && layout
+            .sidebar
+            .contains(Position::new(mouse.column, mouse.row));
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            pointer.pressed = target;
+        MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) => {
+            pointer.pressed = target.map(|target| (button, target));
             Vec::new()
         }
-        MouseEventKind::Up(MouseButton::Left) => match target {
-            Some(target) if pressed.as_ref() == Some(&target) => click(target, client),
+        MouseEventKind::Up(button) => match (target, pressed) {
+            (Some(target), Some(pressed)) if pressed == (button, target.clone()) => {
+                let at = Cell {
+                    col: mouse.column,
+                    row: mouse.row,
+                };
+                match button {
+                    MouseButton::Left => click(target, client),
+                    _ => right_click(target, at),
+                }
+            }
             _ => Vec::new(),
         },
         MouseEventKind::ScrollDown if over_sidebar => vec![Intent::ScrollSidebar(1)],
@@ -142,7 +148,25 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
             vec![Intent::SetFocus(Focus::Terminal)]
         }
         Target::Session(id) => vec![Intent::SelectSession(id), Intent::SetFocus(Focus::Terminal)],
+        Target::CloseSession(id) => vec![Intent::BeginCloseSession(id)],
         Target::Terminal => vec![Intent::SetFocus(Focus::Terminal)],
+        Target::Detach => vec![Intent::Quit],
+        Target::Help => vec![Intent::ShowHelp],
+        Target::MenuItem(item) => vec![Intent::MenuChoose(item)],
+        Target::Confirm => vec![Intent::Confirm],
+        Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
+        Target::Popup => Vec::new(),
+    }
+}
+
+/// A right click on `target`, at `at`: a session's context menu, or away from an open popup.
+fn right_click(target: Target, at: Cell) -> Vec<Intent> {
+    match target {
+        Target::Session(session) | Target::CloseSession(session) => {
+            vec![Intent::OpenMenu { session, at }]
+        }
+        Target::Backdrop => vec![Intent::Dismiss],
+        _ => Vec::new(),
     }
 }
 
@@ -196,6 +220,7 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
             KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
             _ => None,
         },
+        Popup::Menu { .. } => (key.code == KeyCode::Esc).then_some(Intent::Dismiss),
     }
 }
 
