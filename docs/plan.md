@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T25b cleanup view | fixing (CHANGES) | task/t25b-cleanup @ bd5d303 | 1 | Blocking: orphan hook SHEPHERD_BRANCH taken from client request — use list_managed's branch. Minors: guard/workspace/footer tests, disconnect outcome unknown, path on worktree/hook. Conflicts with F37 in check_shutdown_done (keep both) |
-| F37 worktree lock/shutdown leftovers | in review | task/f37-worktree-leftovers @ 15e96c9 (on 292908d) | 1 | PM-accepted: 30 s create grace at shutdown; shared process_group helpers. Reviewer judges the foreign-lock-during-killed-fetch gap |
+| F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
