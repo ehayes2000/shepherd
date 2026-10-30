@@ -10,8 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| T22 new session creates worktree | re-review | task/t22-session-worktree @ 5986e07 (on a771f0b) | 2 | SpawnPty validates every cwd; test HOME now CARGO_MANIFEST_DIR |
-| F24 profile picker polish | fixing (CHANGES) | task/f24-picker-polish @ d49739d | 1 | Blocking: render clamp untested; picker panics in 0/1-row windows → PM: render every popup at sizes 0..=6 (class fix). Minors: core clamp, guard, wheel over prompt |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -49,6 +47,8 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T22 | 2 | worktree spawn cwd unchecked → cwd check made structural in SpawnPty; run-file cleanup untested |
+| F24 | 2 | picker panicked in 0/1-row windows → every-popup tiny-window test |
 | F26 | 1 | – |
 | F15 | 2 | hold-deadline restart guard untested; notice table incomplete. Unknown-glyph snapshot deferred until a frame produces Unknown |
 | F27 | 1 | – (2 minors → F28) |
@@ -309,6 +309,8 @@ touches: adapters::worktrees (tests)
 goal: `worktrees::tests::remove_deletes_the_directory` failed once in 24 parallel runs (the `create` step at
 contracts/worktrees.rs:162 errored during a 215 s run at load average ~70).
 acceptance:
+- Also seen: one unidentified `shepherd-adapters --lib` failure in the PM's merge gate for T22 (2026-10-30; passed on rerun;
+  log not kept). Likely the same class.
 - Reproduce and find the cause: a git timeout, or a real race. If it's a timeout under extreme load, make the fixture's bounds and
   error reporting robust (print the actual error). If it's a race, fix it. Then 0 failures in 5 rounds of 24 parallel copies.
 scope: crates/adapters, crates/testkit
@@ -404,7 +406,7 @@ acceptance:
 scope: crates/term, crates/shepherd
 
 ### F24: Profile picker polish
-status: in-progress
+status: done (520877d)
 depends: T17b
 touches: tui::popup, tui::keys
 goal: Gaps from the T17b review.
@@ -1143,7 +1145,7 @@ popup and selects nothing. Paths are stored canonicalized (no `..`, symlinks res
 New wire request `_shepherd/workspace/select { path }`.
 
 ### T22: New session creates a worktree
-status: in-progress
+status: done (10681b4)
 depends: T17, T20, T21
 touches: core::host (new session flow)
 goal: You never think about worktrees, because a new session just has one.
@@ -1169,7 +1171,7 @@ knows about; `create` refusing an existing branch is a `session/failed`, not a r
 pure core with table tests (unicode, punctuation, collisions).
 
 ### T23: Worktree hooks
-status: todo
+status: ready
 depends: T22
 touches: ports::commands, core::host, adapters::commands
 goal: Run user-defined setup in new worktrees (copy `.envrc`, install deps, ...).

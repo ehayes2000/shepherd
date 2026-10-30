@@ -47,7 +47,7 @@ context reset.
 ### Merge queue (one at a time)
 ```
 git merge --no-ff task/<id> -m "feat: merge <ID> <title>"
-scripts/check.sh                       # on the merged tree, every time
+scripts/check.sh > <scratchpad>/pm-gate.log 2>&1   # on the merged tree, every time; keep the log to name any flake
 # conflict in Cargo.lock: git checkout --theirs Cargo.lock && cargo generate-lockfile, then gate
 # conflict in module lists / main.rs: keep both sides
 ```
