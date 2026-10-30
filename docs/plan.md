@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T26 search and open | fixing (round 3) | task/t26-search @ c02fc34 | 2 | Blocking: in-use bypass via plain cwd during pre_remove hooks, and path aliases → re-check before remove, refuse cwd into removing path, canonicalize cwds in runtime |
-| T36b host hot-swap by re-exec | fixing (CHANGES) | task/t36b-hotswap @ a52f5e0 | 1 | Blocking: bad config after adoption kills sessions; refuse() can killpg/close what isn't ours; vacuous refusal tests; CLOEXEC re-set, hooks-busy, 0600, drain untested |
+| T36b host hot-swap by re-exec | re-review | task/t36b-hotswap @ 298f42c (on 85202e0) | 2 | config validated in preflight + defaults fallback; adopt only our children/terminals; strict handoff path |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
