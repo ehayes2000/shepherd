@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18b quiet idle fallback | fixing (CHANGES) | task/t18b-quiet-idle @ bb50fcf | 1 | Blocking: append-failure hot loop (fix in core: record attempt); next_deadline wiring untested; spec amended: permission 'answered' = client input after request, then output, then quiet |
+| T18b quiet idle fallback | re-review | task/t18b-quiet-idle @ f57c2db (on 30296e4) | 2 | hot loop fixed in core; next_deadline asserted; input-based permission rule per amended spec |
 | T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
 | F25 failed worktree create cleanup | building (fresh builder) | task/f25-worktree-fail-cleanup @ e58c9a2 | 0 | First builder silent 2.5 h inside a load round; stopped. Its uncommitted WIP saved as scratchpad/pm-f25-wip.patch (on 62e768e) |
 
