@@ -19,18 +19,28 @@ pub(crate) fn kill_group(pid: u32) {
     }
 }
 
-/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken.
-pub(crate) fn wait_unreaped(pid: u32) {
+/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken, and returns how it
+/// exited: the `si_code` of `waitid`, e.g. `CLD_EXITED` or `CLD_KILLED`.
+pub(crate) fn wait_unreaped(pid: u32) -> io::Result<libc::c_int> {
     let pid = libc::id_t::from(pid);
     loop {
         // SAFETY: `info` is a valid out-pointer; `pid` is our own unreaped child.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let rc =
             unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if rc == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return;
+        if rc == 0 {
+            return Ok(info.si_code);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
+}
+
+/// Whether a child that exited as `code` (from [`wait_unreaped`]) was killed by a signal.
+pub(crate) fn killed_by_signal(code: libc::c_int) -> bool {
+    code == libc::CLD_KILLED || code == libc::CLD_DUMPED
 }
 
 /// Blocks until process group `pgid` has no members left, or [`GROUP_EXIT_WAIT`] has passed. Its id can't be reused

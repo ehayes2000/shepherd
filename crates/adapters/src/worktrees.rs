@@ -34,6 +34,12 @@
 //!   `update-ref`, which never sets an upstream (so `branch.autoSetupMerge` doesn't apply).
 //! - `update-ref` (making and deleting the new branch) and `worktree add`: `-c core.filesRefLockTimeout=0`, so they
 //!   never wait on another process's lock of the new branch, and a lock left after one of them is killed is its own.
+//! - `fetch`: `-c core.filesRefLockTimeout=0` too. The one ref it locks is `refs/remotes/origin/<default>` (the
+//!   explicit refspec; `remote.origin.followRemoteHEAD` only applies to the configured refspecs). A fetch killed by
+//!   its timeout or a cancel may die holding that lock, which would fail every later fetch, so the lock is then
+//!   removed, unless it was there before the fetch started (another process's, which the fetch fails on at once).
+//!   Known gap: a lock another git process (outside shepherd: creates take turns at the fetch) takes while the fetch
+//!   runs, and still holds when the fetch is killed, looks the same as one the fetch died holding, and is removed.
 //! - Config injected through the environment (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its
 //!   `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`) is removed, as are variables that point git at another repo
 //!   (`GIT_DIR`, ...).
@@ -50,7 +56,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use shepherd_core::ports::worktrees::{
     managed_parts, normalize_lexically, repo_name_from_common_dir,
@@ -60,15 +66,17 @@ use shepherd_core::ports::{
     WorktreePath, WorktreeStatus, Worktrees,
 };
 
+use crate::process_group::{kill_group, killed_by_signal, wait_group_gone, wait_unreaped};
+
 /// For every git call except fetch and `worktree add`: short metadata calls (rev-parse, show-ref, update-ref, worktree
 /// list, ...), so generous. `worktree add` has no time cap: it checks out files (a big repo's checkout with git-lfs
 /// smudging can take many minutes) and runs the user's hooks; [`Worktrees::cancel_create`] stops it.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// For the calls that lock the new branch (`update-ref`, `worktree add`, deleting it in cleanup): fail at once on a
-/// lock that is already taken instead of waiting (`core.filesRefLockTimeout`), so a lock left after such a call is
-/// killed is always its own, and cleanup doesn't hang on someone else's.
+/// For the calls that lock a ref (`update-ref`, `worktree add`, deleting the new branch in cleanup, and the fetch's
+/// remote-tracking ref): fail at once on a lock that is already taken instead of waiting (`core.filesRefLockTimeout`),
+/// so a lock left after such a call is killed is not one it was waiting on, and cleanup doesn't hang on someone else's.
 const NO_REF_LOCK_WAIT: &str = "core.filesRefLockTimeout=0";
 
 /// Variables that would point git at some other repo than the `-C` directory (e.g. when shepherd itself runs from a
@@ -787,9 +795,15 @@ impl Worktrees for GitWorktrees {
                 path.display()
             )));
         }
+        // The only ref the fetch locks. A lock of it there before the fetch is another process's: the fetch fails at
+        // once on it (`NO_REF_LOCK_WAIT`) instead of taking it over.
+        let tracking_lock = common.join(format!("refs/remotes/origin/{default}.lock"));
+        let foreign_lock = tracking_lock.symlink_metadata().is_ok();
         let fetch = self.run(
             dir,
             &[
+                "-c",
+                NO_REF_LOCK_WAIT,
                 "fetch",
                 "--quiet",
                 "--no-tags",
@@ -802,6 +816,15 @@ impl Worktrees for GitWorktrees {
             Some(self.fetch_timeout),
             Some(&call),
         );
+        // Killed (timed out, cancelled, or by a signal), so it may have died holding the lock, which would fail every
+        // later fetch. It never waits for a lock, so a lock there now that wasn't before is one it took (but see the
+        // known gap in the module docs).
+        let left_lock = match &fetch {
+            Err(failure) if failure.killed() && !foreign_lock => {
+                remove_stale_lock(&tracking_lock).err()
+            }
+            _ => None,
+        };
         let (start, base) = match fetch {
             Ok(_) => (
                 format!("refs/remotes/origin/{default}"),
@@ -809,9 +832,19 @@ impl Worktrees for GitWorktrees {
                     branch: BranchName::new(&default),
                 },
             ),
-            Err(Failure::Cancelled) => return Err(WorktreeError::Cancelled),
+            Err(Failure::Cancelled) => {
+                return Err(match left_lock {
+                    None => WorktreeError::Cancelled,
+                    Some(cant) => {
+                        WorktreeError::Other(format!("git fetch was cancelled, and {cant}"))
+                    }
+                });
+            }
             Err(failure) => {
-                let fetch_error = failure.describe(self.fetch_timeout);
+                let mut fetch_error = failure.describe(self.fetch_timeout);
+                if let Some(cant) = left_lock {
+                    fetch_error = format!("{fetch_error}, and {cant}");
+                }
                 let branch = BranchName::new(&default);
                 let stale = format!("refs/remotes/origin/{default}");
                 let local = format!("refs/heads/{default}");
@@ -894,10 +927,7 @@ impl Worktrees for GitWorktrees {
                 });
             }
             Err(failure) => {
-                let killed = matches!(
-                    failure,
-                    Failure::Timeout | Failure::Cancelled | Failure::Exit { code: None, .. }
-                );
+                let killed = failure.killed();
                 (failure, killed)
             }
         };
@@ -1027,6 +1057,16 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
+/// Deletes the ref lock `lock` a killed git left behind, if there is one.
+fn remove_stale_lock(lock: &Path) -> Result<(), String> {
+    match std::fs::remove_file(lock) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(format!("can't delete {}: {e}", lock.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn name_of(common: &Path) -> Result<String, WorktreeError> {
     repo_name_from_common_dir(common)
         .ok_or_else(|| WorktreeError::Other(format!("can't name the repo at {}", common.display())))
@@ -1057,6 +1097,14 @@ impl Failure {
             } => format!("exit {code}: {stderr}"),
             Self::Exit { code: None, stderr } => format!("killed by a signal: {stderr}"),
         }
+    }
+
+    /// Whether git was killed rather than exiting on its own: it may have died holding a lock.
+    fn killed(&self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Cancelled | Self::Exit { code: None, .. }
+        )
     }
 
     fn into_error(self, op: &str) -> WorktreeError {
@@ -1114,55 +1162,6 @@ fn read_all(file: &mut File) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     Ok(buf)
-}
-
-fn kill_group(pid: u32) {
-    if let Ok(pid) = libc::pid_t::try_from(pid) {
-        // SAFETY: plain syscall. While the leader is unreaped or the group has members, the group id still names our
-        // group; if the group has no members left it fails with ESRCH, which is fine.
-        unsafe { libc::killpg(pid, libc::SIGKILL) };
-    }
-}
-
-/// Blocks until child `pid` has exited, leaving it a zombie (`WNOWAIT`) so its pid stays taken, and returns how it
-/// exited: the `si_code` of `waitid`, e.g. `CLD_EXITED` or `CLD_KILLED`.
-fn wait_unreaped(pid: u32) -> io::Result<libc::c_int> {
-    let pid = libc::id_t::from(pid);
-    loop {
-        // SAFETY: `info` is a valid out-pointer; `pid` is our own unreaped child.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let rc =
-            unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if rc == 0 {
-            return Ok(info.si_code);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
-/// Whether a child that exited as `code` (from [`wait_unreaped`]) was killed by a signal.
-fn killed_by_signal(code: libc::c_int) -> bool {
-    code == libc::CLD_KILLED || code == libc::CLD_DUMPED
-}
-
-/// How long to wait for the members of a killed process group to finish dying. SIGKILL can't be caught, so this is
-/// only a bound for a process stuck in an uninterruptible syscall.
-const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
-
-/// Blocks until process group `pgid` has no members left, or [`GROUP_EXIT_WAIT`] has passed. Its id can't be reused
-/// by a new process while the group has members.
-fn wait_group_gone(pgid: u32) {
-    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
-        return;
-    };
-    let started = Instant::now();
-    // SAFETY: plain syscall; signal 0 only checks that the group exists.
-    while unsafe { libc::killpg(pgid, 0) } == 0 && started.elapsed() < GROUP_EXIT_WAIT {
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[cfg(test)]
@@ -1474,19 +1473,25 @@ mod tests {
     /// runs the hook while it is installed is held. Dropping it releases the gate and uninstalls the hook.
     struct HeldHook<'a> {
         f: &'a GitFixture,
+        name: &'static str,
         entered: PathBuf,
         gate: Option<Gate>,
     }
 
     impl<'a> HeldHook<'a> {
         fn install(f: &'a GitFixture, setup: &str) -> Self {
+            Self::install_as(f, "post-checkout", setup)
+        }
+
+        /// The same as hook `name`; `setup` may `exit 0` to let a run of it through unheld.
+        fn install_as(f: &'a GitFixture, name: &'static str, setup: &str) -> Self {
             let n = f.counter.fetch_add(1, Ordering::Relaxed);
             let entered = f.tmp().join(format!("entered-{n}.fifo"));
             mkfifo(&entered);
             let gate = Gate::new(f.tmp().join(format!("gate-{n}.fifo")));
             hook(
                 f,
-                "post-checkout",
+                name,
                 &format!(
                     "{setup}\nexec 3< '{}'\necho entered > '{}'\n{}",
                     gate.path.display(),
@@ -1496,6 +1501,7 @@ mod tests {
             );
             Self {
                 f,
+                name,
                 entered,
                 gate: Some(gate),
             }
@@ -1510,7 +1516,7 @@ mod tests {
 
     impl Drop for HeldHook<'_> {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(self.f.app().join(".git/hooks/post-checkout"));
+            let _ = std::fs::remove_file(self.f.app().join(".git/hooks").join(self.name));
             if let Some(gate) = self.gate.take() {
                 gate.release();
             }
@@ -1787,7 +1793,16 @@ mod tests {
     /// the create from another thread, and returns what the create returned. A cancel that doesn't stop the create
     /// fails the test (after releasing the hook), never hangs it.
     fn cancelled_create(f: &GitFixture, n: &str, setup: &str) -> Result<Created, WorktreeError> {
-        let held = HeldHook::install(f, setup);
+        cancelled_while_held(f, n, HeldHook::install(f, setup))
+    }
+
+    /// Creates `n`, and once `held` says it has started, cancels the create from another thread; returns what the
+    /// create returned, as for [`cancelled_create`].
+    fn cancelled_while_held(
+        f: &GitFixture,
+        n: &str,
+        held: impl HeldCreate,
+    ) -> Result<Created, WorktreeError> {
         let repo = &f.repo();
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1847,6 +1862,84 @@ mod tests {
         assert_eq!(pids.len(), 2, "{pids:?}");
         assert!(alive.is_empty(), "still running: {alive:?}");
         assert_nothing_left(&f, "orphans");
+    }
+
+    /// Run from a hook (in git's process group and session) with a file to write to: leaves a `sleep` in git's group
+    /// whose parent is outside it, in a group of its own; that parent reaps the `sleep` two seconds after it dies, then
+    /// exits. Writes "<git's group> <parent>" once the `sleep` is in the group.
+    const LINGERING_ZOMBIE: &str = r#"
+use strict;
+use POSIX ();
+my $pids = shift;
+my $group = getpgrp();
+pipe(my $r, my $w) or die "pipe: $!";
+my $parent = fork() // die "fork: $!";
+if ($parent == 0) {
+    POSIX::setpgid(0, 0) or die "setpgid: $!";
+    my $dead = 0;
+    $SIG{CHLD} = sub { $dead = 1 };
+    my $child = fork() // die "fork: $!";
+    if ($child == 0) {
+        POSIX::setpgid(0, $group) or die "setpgid: $!";
+        close $r;
+        print $w "ready\n";
+        close $w;
+        exec "sleep", "900";
+        die "exec: $!";
+    }
+    close $r;
+    close $w;
+    select(undef, undef, undef, 0.05) until $dead;
+    select(undef, undef, undef, 2);
+    waitpid($child, 0);
+    exit 0;
+}
+close $w;
+my $ready = <$r>;
+exit 1 unless defined $ready && $ready eq "ready\n";
+open(my $out, '>', $pids) or die "open: $!";
+print $out "$group $parent\n";
+close $out;
+"#;
+
+    /// A cancel returns only once git's whole process group is gone, checked the moment it returns: on macOS a group
+    /// whose last members are dying, or are zombies not yet reaped, answers EPERM rather than ESRCH and still holds its
+    /// id.
+    ///
+    /// The witness is a member of git's group whose parent is outside it (in a group of its own, in git's session), so
+    /// the kill leaves it a zombie its parent reaps only a while later; until then the group is there (EPERM on macOS).
+    #[test]
+    fn a_cancelled_create_returns_once_its_process_group_is_gone() {
+        let f = GitFixture::new();
+        let pids = f.tmp().join("lingering.pids");
+        let script = f.tmp().join("lingering.pl");
+        std::fs::write(&script, LINGERING_ZOMBIE).unwrap();
+        let setup = format!("perl '{}' '{}' || exit 1", script.display(), pids.display());
+        let result = cancelled_create(&f, "grouped", &setup);
+        let recorded = std::fs::read_to_string(&pids).unwrap();
+        let mut recorded = recorded
+            .split_whitespace()
+            .map(|pid| pid.parse::<libc::pid_t>().unwrap());
+        let (pgid, parent) = (recorded.next().unwrap(), recorded.next().unwrap());
+        // SAFETY: plain syscall; signal 0 only checks whether the group exists.
+        let rc = unsafe { libc::killpg(pgid, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        // SAFETY: plain syscalls. The parent is the script's own process, alive until it has reaped its child (its
+        // pid can't be reused before we are done with it, short of minutes passing); the group, while it has members,
+        // is still the one git led.
+        unsafe {
+            if running(parent) {
+                libc::kill(parent, libc::SIGKILL);
+            }
+            if rc == 0 {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        assert_eq!(result, Err(WorktreeError::Cancelled));
+        assert!(
+            rc == -1 && errno == Some(libc::ESRCH),
+            "group {pgid} still there: rc {rc}, errno {errno:?}"
+        );
     }
 
     /// Two creates in one repo check out at the same time: the second gets to its hook while the first is held in its
@@ -2209,6 +2302,178 @@ mod tests {
             Err(WorktreeError::BranchExists(BranchName::new("raced")))
         );
         assert!(!worktree_path(&f, "raced").exists());
+    }
+
+    /// The lock of the remote-tracking ref the fetch updates.
+    fn tracking_lock(f: &GitFixture) -> PathBuf {
+        f.app()
+            .join(format!(".git/refs/remotes/origin/{DEFAULT}.lock"))
+    }
+
+    /// A `reference-transaction` hook held once the fetch has locked the remote-tracking ref (its `prepared` state), so
+    /// git is killed holding that lock. Origin moves first, so the fetch has an update to make.
+    fn fetch_held_holding_its_lock(f: &GitFixture) -> HeldHook<'_> {
+        f.advance_origin();
+        let setup = format!(
+            "[ \"$1\" = prepared ] || exit 0\n\
+             grep -q ' refs/remotes/origin/{DEFAULT}$' || exit 0"
+        );
+        HeldHook::install_as(f, "reference-transaction", &setup)
+    }
+
+    /// A create after a killed fetch fetches again: nothing it left behind fails that fetch.
+    fn next_create_fetches(f: &GitFixture, n: &str) {
+        let created = f
+            .port
+            .create(&f.repo(), &name(n), BaseSpec::OriginDefault)
+            .unwrap();
+        let fetched = BaseUsed::Origin {
+            branch: BranchName::new(DEFAULT),
+        };
+        assert_eq!(created.base, fetched);
+        assert_eq!(f.head(created.path.as_path()), f.origin_tip());
+    }
+
+    #[test]
+    fn a_cancelled_fetch_removes_the_remote_tracking_refs_stale_lock() {
+        let f = GitFixture::new();
+        let held = fetch_held_holding_its_lock(&f);
+        let result = cancelled_while_held(&f, "fetching", held);
+        assert_eq!(result, Err(WorktreeError::Cancelled));
+        assert!(!tracking_lock(&f).exists());
+        next_create_fetches(&f, "after");
+    }
+
+    /// Killed (here by its own `reference-transaction` hook, while it holds the lock) rather than cancelled: the
+    /// create goes on from the last fetched origin default, and the lock is gone for the next fetch. A timeout kills
+    /// git the same way; it isn't the witness here, since under load the fetch may not reach the lock before any
+    /// timeout short enough for a test fires.
+    #[test]
+    fn a_killed_fetch_removes_the_remote_tracking_refs_stale_lock() {
+        let f = GitFixture::new();
+        f.advance_origin();
+        hook(
+            &f,
+            "reference-transaction",
+            &format!(
+                "[ \"$1\" = prepared ] || exit 0\n\
+                 grep -q ' refs/remotes/origin/{DEFAULT}$' || exit 0\n\
+                 kill -KILL $PPID"
+            ),
+        );
+        let created = f
+            .port
+            .create(&f.repo(), &name("killed"), BaseSpec::OriginDefault)
+            .unwrap();
+        std::fs::remove_file(f.app().join(".git/hooks/reference-transaction")).unwrap();
+        let BaseUsed::Stale { fetch_error, .. } = &created.base else {
+            panic!("{:?}", created.base);
+        };
+        assert!(fetch_error.contains("killed by a signal"), "{fetch_error}");
+        assert!(!tracking_lock(&f).exists());
+        next_create_fetches(&f, "after");
+    }
+
+    /// An origin reached over "ssh" whose stand-in runs a setup script, then is held at a [`Gate`] like a
+    /// [`HeldHook`], then fails. Dropping it releases the gate.
+    struct HeldOrigin {
+        entered: PathBuf,
+        gate: Option<Gate>,
+    }
+
+    impl HeldOrigin {
+        fn install(f: &GitFixture, setup: &str) -> Self {
+            let tmp = f.tmp();
+            let entered = tmp.join("origin-entered.fifo");
+            mkfifo(&entered);
+            let gate = Gate::new(tmp.join("origin-gate.fifo"));
+            let ssh = tmp.join("held-ssh.sh");
+            std::fs::write(
+                &ssh,
+                format!(
+                    "#!/bin/sh\n{setup}\nexec 3< '{}'\necho entered > '{}'\n{}\nexit 1\n",
+                    gate.path.display(),
+                    entered.display(),
+                    Gate::WAIT
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+            let app = f.app();
+            f.git(&app, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+            f.git(&app, &["config", "ssh.variant", "simple"]);
+            let url = "ssh://held.invalid/x.git";
+            f.git(&app, &["remote", "set-url", "origin", url]);
+            Self {
+                entered,
+                gate: Some(gate),
+            }
+        }
+    }
+
+    impl HeldCreate for HeldOrigin {
+        fn wait_entered(&self, limit: Duration) -> bool {
+            read_entered(&self.entered, limit)
+        }
+    }
+
+    impl Drop for HeldOrigin {
+        fn drop(&mut self) {
+            if let Some(gate) = self.gate.take() {
+                gate.release();
+            }
+        }
+    }
+
+    /// Another process's lock of the remote-tracking ref, there before the fetch started, is not one the fetch died
+    /// holding: it would have failed at once on it (`core.filesRefLockTimeout=0`).
+    #[test]
+    fn a_killed_fetch_leaves_a_foreign_remote_tracking_lock_alone() {
+        let f = GitFixture::new();
+        let lock = tracking_lock(&f);
+        std::fs::write(&lock, "").unwrap();
+        let held = HeldOrigin::install(&f, "");
+        let result = cancelled_while_held(&f, "foreign", held);
+        assert_eq!(result, Err(WorktreeError::Cancelled));
+        assert!(lock.exists());
+    }
+
+    /// With `core.filesRefLockTimeout=-1` the fetch would wait forever on another process's lock taken while it ran
+    /// (here by the "ssh" that serves it), be killed by the timeout, and that lock would look like one it died holding.
+    /// The timeout is the generous test one, a liveness bound: with the pin the fetch fails at once on its own.
+    #[test]
+    fn a_fetch_blocked_by_a_foreign_remote_tracking_lock_leaves_it_alone_whatever_the_lock_timeout()
+    {
+        let f = GitFixture::new();
+        f.advance_origin();
+        let app = f.app();
+        f.git(&app, &["config", "core.filesRefLockTimeout", "-1"]);
+        let lock = tracking_lock(&f);
+        // Takes the lock, then serves the fetch from the local origin: `$2` is `git-upload-pack '<path>'`.
+        let ssh = f.tmp().join("locking-ssh.sh");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nexec sh -c \"git ${{2#git-}}\"\n",
+                lock.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+        f.git(&app, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+        f.git(&app, &["config", "ssh.variant", "simple"]);
+        let origin = f.tmp().join("origin.git");
+        let url = format!("ssh://locking.invalid{}", origin.display());
+        f.git(&app, &["remote", "set-url", "origin", &url]);
+        let created = f
+            .port
+            .create(&f.repo(), &name("blocked"), BaseSpec::OriginDefault)
+            .unwrap();
+        let BaseUsed::Stale { fetch_error, .. } = &created.base else {
+            panic!("{:?}", created.base);
+        };
+        assert!(!fetch_error.contains("timed out"), "{fetch_error}");
+        assert!(lock.exists(), "{fetch_error}");
     }
 
     /// Someone moves the new branch after `create` made it (here the hook, which then fails the add). It now holds

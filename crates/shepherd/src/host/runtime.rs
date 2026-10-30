@@ -24,14 +24,16 @@
 //!   ([`Worker::run_alone`]), since its checkout has no time cap: creates for different sessions run at the same time,
 //!   and none holds up the worker. Closing a session whose create is running cancels it (`Worktrees::cancel_create`,
 //!   which never waits on git), and the create's answer comes back as usual; shutting the host down cancels every
-//!   running create. The `Commands` port (a worktree's post-create and pre-remove hooks) runs each hook on a thread of
-//!   its own the same way, its results coming back as [`RuntimeEvent::Commands`], so a long hook never holds up git
+//!   running create and waits (within [`CREATE_CLEANUP_GRACE`]) for its answer, which core records, so a create
+//!   stopped by the shutdown never leaves a worktree or branch behind unrecorded. The `Commands` port (a worktree's
+//!   post-create and pre-remove hooks) runs each hook on a thread of its own the same way, its results coming back as
+//!   [`RuntimeEvent::Commands`], so a long hook never holds up git
 //!   calls, the loop, or another session's hooks. Closing a session whose hook is running cancels it
 //!   (`Commands::cancel`, which kills its process group and never waits), and its answer comes back as usual; the
 //!   close's inspection of the worktree waits for that answer, so it sees what the hook left. Shutting the host down
 //!   cancels every running hook and waits (within the shutdown grace) for their answers, which it drops: a session
-//!   stopping with the host spawns nothing. From then on no hook starts (a close's inspection or a create's result
-//!   that arrives later would otherwise start one nothing cancels).
+//!   stopping with the host spawns nothing. From then on no hook starts and no PTY spawns (a close's inspection or a
+//!   create's result that arrives later would otherwise start one nothing stops).
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -106,6 +108,10 @@ pub const LOCAL_MACHINE: &str = "local";
 pub const INITIAL_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 /// How long shutdown waits for killed PTYs to report their exit before giving up on them.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// How long shutdown waits, instead, when a worktree create is running: the create, cancelled, kills its git and undoes
+/// what it made (deleting a big checkout takes a while), and a host that stopped first would leave that half made and
+/// unrecorded.
+pub const CREATE_CLEANUP_GRACE: Duration = Duration::from_secs(30);
 /// A subscription's catch-up only sends while the conn has fewer bytes than this queued, far below the
 /// [`MAX_QUEUED`] bound past which the link drops it.
 pub const LOW_WATER: usize = MAX_QUEUED / 4;
@@ -860,6 +866,8 @@ impl<
                     HostEvent::WorktreeCreated { session, .. } => {
                         let session = session.clone();
                         self.worktree_created(session, event);
+                        // The last create a shutdown waited for.
+                        self.check_shutdown_done();
                     }
                     _ => self.dispatch(event),
                 }
@@ -969,6 +977,11 @@ impl<
                     }
                     // Core decides what follows from the frames, e.g. naming the session after its first prompt.
                     follow_up.push_back(HostEvent::HookTranslated { session });
+                }
+                // Nor does a PTY spawn, e.g. for a create that finished just as the shutdown cancelled it: the PTYs
+                // were killed when it began, so nothing would stop this one. Its session stops with the host.
+                HostCommand::SpawnPty { session, .. } if self.shutdown_by.is_some() => {
+                    tracing::debug!(%session, "not spawning: the host is shutting down");
                 }
                 HostCommand::SpawnPty { session, spec } => {
                     let size = spec.size;
@@ -1534,8 +1547,11 @@ impl<
         }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
             tracing::warn!(
-                left = self.screens.len(),
-                "PTYs didn't exit in time; stopping anyway"
+                ptys = self.screens.len(),
+                hooks = self.hooks.len(),
+                cleanup_hooks = self.cleanup_hooks.len(),
+                creates = self.creating.len(),
+                "not everything stopped in time; stopping anyway"
             );
             self.finish();
         }
@@ -2228,9 +2244,13 @@ impl<
         if self.shutdown_by.is_some() {
             return;
         }
-        self.shutdown_by = Some(self.env.instant() + SHUTDOWN_GRACE);
-        // A create has no time cap: one left running would outlive the host. Its answer, if it comes before the loop
-        // stops, is dropped like any other.
+        let grace = match self.creating.is_empty() {
+            true => SHUTDOWN_GRACE,
+            false => CREATE_CLEANUP_GRACE,
+        };
+        self.shutdown_by = Some(self.env.instant() + grace);
+        // A create has no time cap: one left running would outlive the host. The shutdown waits for its answer, once it
+        // has cleaned up, and core records it (a worktree it made all the same is recorded, for cleanup).
         for (repo, name) in self.creating.values() {
             self.worktrees.port().cancel_create(repo, name);
         }
@@ -2253,6 +2273,7 @@ impl<
             && self.screens.is_empty()
             && self.hooks.is_empty()
             && self.cleanup_hooks.is_empty()
+            && self.creating.is_empty()
         {
             self.finish();
         }

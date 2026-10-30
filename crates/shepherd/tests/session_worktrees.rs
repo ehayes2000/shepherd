@@ -279,6 +279,92 @@ fn shutting_the_host_down_cancels_a_worktree_still_being_made() {
     assert!(hold.wait_cancelled(LIMIT), "the create was left running");
 }
 
+/// A create cancelled by the shutdown answers once it has cleaned up; stopping before that would leave its worktree
+/// and branch half made and unrecorded. The fake answers a cancelled create at once, on its own thread, so the host
+/// can only have seen that answer after another event.
+#[test]
+fn shutting_the_host_down_waits_for_a_cancelled_create_to_answer() {
+    let mut s = setup(|b| b);
+    let hold = s.worktrees.hold_next();
+    let req = s.client.new_session();
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "create never reached the port");
+    let id = new_session_id(&s.client.take(), &req);
+    s.h.runtime_mut()
+        .handle(shepherd::host::RuntimeEvent::Shutdown);
+    assert!(
+        !s.h.runtime().is_finished(),
+        "stopped with a create still running"
+    );
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        methods(&frames(&s.h, &id)),
+        ["_shepherd/session/created", "_shepherd/session/failed"]
+    );
+}
+
+/// The wait for creates is bounded: once it runs out the host stops, before it takes the create's answer (deadlines
+/// are serviced ahead of queued events), so nothing follows from that answer.
+#[test]
+fn shutting_the_host_down_stops_waiting_for_a_create_in_time() {
+    let mut s = setup(|b| b);
+    let hold = s.worktrees.hold_next();
+    let req = s.client.new_session();
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "create never reached the port");
+    let id = new_session_id(&s.client.take(), &req);
+    s.h.runtime_mut()
+        .handle(shepherd::host::RuntimeEvent::Shutdown);
+    s.h.clock().advance(shepherd::host::CREATE_CLEANUP_GRACE);
+    s.h.poll();
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(methods(&frames(&s.h, &id)), ["_shepherd/session/created"]);
+}
+
+/// A create that finished just as the host began shutting down (its answer still queued, so the cancel came too late)
+/// is recorded, so the worktree it made can be cleaned up, but its PTY is not spawned: nothing would stop it. Another
+/// session runs, so the host is still waiting for that PTY's exit when the answer comes.
+#[test]
+fn a_create_that_finishes_as_the_host_shuts_down_is_recorded_and_spawns_nothing() {
+    let mut s = setup(|b| b);
+    s.client.request(ClientRequest::SessionNew(SessionNew {
+        profile: None,
+        cwd: Some(s.app.to_str().unwrap().to_owned()),
+        branch: None,
+    }));
+    s.h.step();
+    s.client.take();
+    // Whichever name the new session gets.
+    s.make_worktree_dir("shell-1");
+    s.make_worktree_dir("shell-2");
+    let hold = s.worktrees.hold_next();
+    let req = s.client.new_session();
+    s.h.poll();
+    assert!(hold.wait_entered(LIMIT), "create never reached the port");
+    let id = new_session_id(&s.client.take(), &req);
+    hold.release();
+    let started = std::time::Instant::now();
+    while s.worktrees.creates_running() > 0 {
+        assert!(started.elapsed() < LIMIT, "the create never finished");
+        std::thread::yield_now();
+    }
+    // Seen by the loop before the create's answer: a shutdown request is serviced ahead of queued events.
+    s.h.runtime()
+        .sender()
+        .send(shepherd::host::RuntimeEvent::Shutdown);
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(
+        !s.h.runtime().pty().is_running(&id),
+        "spawned during shutdown"
+    );
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        methods(&frames(&s.h, &id)),
+        ["_shepherd/session/created", "_shepherd/worktree/created"]
+    );
+}
+
 #[test]
 fn two_new_sessions_make_their_worktrees_at_the_same_time() {
     let mut s = setup(|b| b);
