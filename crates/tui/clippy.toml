@@ -16,7 +16,8 @@ disallowed-methods = [
   { path = "ratatui::buffer::Cell::merge_symbol", reason = "draw text with crate::draw::set, which takes a DisplayText" },
   { path = "ratatui::buffer::Cell::new", reason = "build cells only by drawing with crate::draw, whose text is a DisplayText" },
   { path = "ratatui::buffer::Buffer::filled", reason = "build cells only by drawing with crate::draw, whose text is a DisplayText" },
-  # Tests may build a `Buffer::with_lines` to compare against: none of its cells can reach the frame without these.
+  # Tests may build a `Buffer::with_lines` to compare against; scripts/check-arch.sh keeps it out of non-test tui code,
+  # since its cells could otherwise be moved into the frame (`*buf = other`, `mem::swap`, field moves).
   { path = "ratatui::buffer::Buffer::merge", reason = "build cells only by drawing with crate::draw, whose text is a DisplayText" },
   { path = "ratatui::buffer::Buffer::cell_mut", reason = "build cells only by drawing with crate::draw, whose text is a DisplayText" },
   { path = "ratatui::buffer::Buffer::get_mut", reason = "build cells only by drawing with crate::draw, whose text is a DisplayText" },

@@ -78,6 +78,15 @@ if tui_cells=$(grep -rnE --include='*.rs' '\.content(\[|\.)|[A-Za-z0-9_)]\[\([^]
   err "shepherd-tui: draw with crate::draw instead of writing a buffer's cells (.content, buf[(x, y)] = ...)"
 fi
 
+# The source, not the moves: with Cell::new, Buffer::filled and Cell::from gone, Buffer::with_lines is the last way to build
+# cells holding arbitrary text, and a buffer or cell can be moved into the frame in more ways than a grep can list (F36).
+# Tests may use it to compare against; non-test tui code may not.
+if tui_lines=$(grep -rnE --include='*.rs' 'with_lines[[:space:]]*\(' crates/tui/src 2>/dev/null |
+  grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
+  printf '%s\n' "$tui_lines" >&2
+  err "shepherd-tui: Buffer::with_lines builds cells from raw text; draw with crate::draw (tests may use it)"
+fi
+
 if [[ -d crates/core && ! -f crates/core/clippy.toml ]]; then
   err "crates/core/clippy.toml (purity lints) is missing"
 fi
