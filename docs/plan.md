@@ -12,7 +12,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
 | F35 display-safe text | building | task/f35-display-safe @ b9df22b | 0 | T24 follow-ups done; PM: unicode-properties allowed (0017 amended) for display_safe |
 | T36 spike host hot-swap | building (spike) | task/t36-hotswap-spike @ 0e68fe1 | 0 | docs only; read herdr's live handoff |
-| F32 atomic branch create | re-review | task/f32-atomic-branch @ 2cecb65 (on 74389f2) | 2 | filesRefLockTimeout=0 pinned on create, add, cleanup delete |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -49,6 +48,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F32 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
 | T25 | 2 | Remove-anyway could force-delete unconfirmed new changes; escape test passed via an error |
 | T24 | 4 | control chars, boundaries untested; NFD split; bidi/format chars and unbounded graphemes in names (decision 0017) |
 | F28 | 2 | .git-named bare repo gave a root the port rejects |
@@ -530,7 +530,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### F32: Create the worktree branch atomically
-status: in-progress
+status: done (d93bb15)
 depends: F25
 touches: adapters::worktrees
 goal: F25 re-checks that the branch is absent right before `worktree add -b`, but a branch created in the instant between that
@@ -635,6 +635,8 @@ acceptance:
   existing F08/F25/F32 cleanup (never deleting what isn't ours), and records the close. Test with a create held on a FIFO.
 - No big-repo tests (user decision): prove "no cap" with a create held well past the old bound via an injected fake clock
   or a held hook, never by size or wall-clock.
+- From the F32 review: give `an_add_blocked_by_a_foreign_branch_lock_…` a short cleanup timeout and assert no "timed out",
+  so removing the cleanup-delete lock pin fails fast instead of hanging.
 scope: crates/adapters, crates/core, crates/shepherd, crates/testkit
 
 ## Out of scope for the initial feature set
