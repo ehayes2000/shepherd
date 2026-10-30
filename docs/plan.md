@@ -17,6 +17,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | review | task/t38-archive-blobs @ 1e554e2 (on 17c8d64) | 1 | PM-accepted: std private-file rules, std hex, test-only fault feature. Reviewer judges corrupt-existing put, 1 GiB cap, tmp leftovers |
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | building | task/f45-standin-load @ 33fd53a | 0 |  |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
+| F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
 
@@ -29,7 +30,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | todo | T36b |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
-| F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | todo | T20 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
 
 ## Features

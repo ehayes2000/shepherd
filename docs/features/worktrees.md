@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T26 | Search and open | done | 103ca34 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
 | T37 | Worktree creation has no time cap, runs concurrently, and cancels on close | done | 850906b | 2 | inherited GIT_ASKPASS could hang uncapped creates; 2-reader FIFO gate hang; restack dropped edits |
 | F08 | Clean up after a timed-out worktree create | done | da443a6 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
-| F17 | Worktrees contract flake under heavy load | todo |  |  |  |
+| F17 | Worktrees contract flake under heavy load | building | task/f17-load-bounds @ 187c64a | 0 |  |
 | F25 | Clean up after a failed worktree create | done | 8861b54 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
 | F28 | Workspace from a subdirectory, and `~` in typed paths | done | 6f1c62b | 2 | .git-named bare repo gave a root the port rejects |
 | F32 | Create the worktree branch atomically | done | d93bb15 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
@@ -238,7 +238,7 @@ acceptance:
 - From the F43 merge gate (load average ~100): `close_worktrees.rs` `removal_never_touches_a_recorded_path_outside_the_managed_root`
   and its `_beside_a_managed_worktree` twin failed `run_until_settled(LIMIT)` with `LIMIT = 10 s` (real git under load);
   passed alone and on re-run. Make LIMIT a generous liveness bound (as F38 did) across the scenario tests that use real git.
-scope: crates/adapters, crates/testkit
+scope: crates/adapters, crates/testkit, crates/shepherd (tests)
 
 ### F25: Clean up after a failed worktree create
 depends: F08
