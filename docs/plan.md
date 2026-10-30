@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T26 search and open | fixing (round 4) | task/t26-search @ 36e2796 | 3 | Blocking: host-made worktree paths unresolved under a symlinked root → PM: canonicalize the worktrees root once at host start |
-| T36b host hot-swap by re-exec | re-review | task/t36b-hotswap @ 298f42c (on 85202e0) | 2 | config validated in preflight + defaults fallback; adopt only our children/terminals; strict handoff path |
+| T36b host hot-swap by re-exec | fixing (round 3) | task/t36b-hotswap @ 298f42c | 2 | Blocking: not-our-child test can't fail (stand-in not yet a group leader). Minors: log wording; sticky config warning (PM) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
