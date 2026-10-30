@@ -9,8 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T27 PR status | building | task/t27-pr-status @ HEAD | 0 | – |
-| F33 hooks concurrent + bounded | building | task/f33-hooks @ HEAD | 0 | – |
+| T27 PR status | building | task/t27-pr-status @ 62595e5 | 0 | – |
+| F33 hooks concurrent + bounded | building | task/f33-hooks @ 62595e5 | 0 | – |
 | T26 search and open | fixing (round 5) | task/t26-search @ 081ca46 | 4 | Blocking: host::open root-resolution line untested (real-host test). PM: 0700 worktrees dir; resolve recorded paths on replay |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
