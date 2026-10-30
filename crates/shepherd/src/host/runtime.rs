@@ -564,7 +564,7 @@ impl<
         }
     }
 
-    /// Executes `commands` in order. Events they produce (a failed spawn) are pushed to `follow_up`.
+    /// Executes `commands` in order. Events they produce (a failed spawn, a translated hook) are pushed to `follow_up`.
     fn execute(&mut self, commands: Vec<HostCommand>, follow_up: &mut VecDeque<HostEvent>) {
         let mut commands = commands.into_iter();
         while let Some(command) = commands.next() {
@@ -584,6 +584,8 @@ impl<
                         self.abandon(&error, commands.by_ref());
                         return;
                     }
+                    // Core decides what follows from the frames, e.g. naming the session after its first prompt.
+                    follow_up.push_back(HostEvent::HookTranslated { session });
                 }
                 HostCommand::SpawnPty { session, spec } => {
                     let size = spec.size;
