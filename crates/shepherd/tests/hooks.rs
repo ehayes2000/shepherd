@@ -16,10 +16,10 @@ use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LinkEvent, LinkEventSink, LogId};
 use shepherd_core::session::{Activity, SessionState};
-use shepherd_core::wire::{ClientRequest, HookFrame, WireError};
+use shepherd_core::wire::{ClientRequest, HookFrame, SessionClose, WireError};
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::ProgramInput;
-use support::{HostHarness, Program, SHELL, new_session_id, response};
+use support::{FakeClient, HostHarness, Program, SHELL, new_session_id, response};
 
 /// A liveness bound for hook threads in scenarios, never reached when the host is stepped.
 const GENEROUS: Duration = Duration::from_secs(60);
@@ -165,6 +165,59 @@ fn hook_request_ids_do_not_collide_across_a_host_restart() {
     let ids = prompt_ids(&h, &session);
     assert_eq!(ids.len(), 2, "{ids:?}");
     assert_ne!(ids[0], ids[1]);
+}
+
+/// Creates a session and sends it one Claude Code hook, so it has a translator.
+fn session_with_a_hook(h: &mut HostHarness, client: &mut FakeClient) -> SessionId {
+    let id = client.new_session();
+    h.step();
+    let session = new_session_id(&client.take(), &id);
+    let sent = client.request(ClientRequest::HookFrame(Box::new(claude_hook(
+        &session,
+        prompt("hi"),
+    ))));
+    h.step();
+    assert_eq!(response(&client.take(), &sent), Ok(json!({})));
+    session
+}
+
+fn close(h: &mut HostHarness, client: &mut FakeClient, session: &SessionId) {
+    let sent = client.request(ClientRequest::SessionClose(SessionClose {
+        session: session.clone(),
+    }));
+    h.step();
+    assert_eq!(response(&client.take(), &sent), Ok(json!({})));
+}
+
+#[test]
+fn closing_a_session_drops_its_hook_translator() {
+    let mut h = HostHarness::new();
+    let mut client = h.connect();
+    let kept = session_with_a_hook(&mut h, &mut client);
+    for _ in 0..3 {
+        let session = session_with_a_hook(&mut h, &mut client);
+        assert_eq!(h.runtime().translators().len(), 2);
+        close(&mut h, &mut client, &session);
+        assert_eq!(h.runtime().translators().len(), 1);
+    }
+
+    // An exit alone keeps the translator (a closed session takes no more hooks, an exited one is still listed);
+    // the close that follows drops it.
+    let exited = session_with_a_hook(&mut h, &mut client);
+    client.input(&exited, b"exit\r");
+    h.step();
+    assert!(
+        h.host()
+            .sessions()
+            .iter()
+            .any(|s| s.id == exited && s.exited)
+    );
+    assert_eq!(h.runtime().translators().len(), 2);
+    close(&mut h, &mut client, &exited);
+    assert_eq!(h.runtime().translators().len(), 1);
+
+    close(&mut h, &mut client, &kept);
+    assert!(h.runtime().translators().is_empty());
 }
 
 #[test]

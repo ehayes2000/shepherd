@@ -220,7 +220,8 @@ pub struct HostRuntime<P, L, E, V> {
     conns: BTreeMap<ConnId, ConnState>,
     replies: HashMap<ReplyTo, (ConnId, RequestId)>,
     next_reply: u64,
-    /// Per-session hook translation state. Not host state: a restarted host starts with none.
+    /// Per-session hook translation state, dropped when the session closes. Not host state: a restarted host starts
+    /// with none.
     translators: Translators,
     /// Seeds every translator this host run creates; made on the first hook.
     hook_seed: Option<String>,
@@ -292,6 +293,10 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
 
     pub fn log(&self) -> &E {
         &self.log
+    }
+
+    pub fn translators(&self) -> &Translators {
+        &self.translators
     }
 
     pub fn pty(&self) -> &P {
@@ -515,7 +520,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
         let log = LogId::of(&draft);
         let envelope = self.log.append(log.clone(), draft, stamp)?;
         self.host.apply(&envelope);
-        self.remove_run_files_if_closed(&envelope);
+        self.release_if_closed(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
             .conns
@@ -753,15 +758,18 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             .map_err(|e| format!("cannot write run files: {e}"))
     }
 
-    /// Removes a session's run files once its `session/closed` is in the log.
-    fn remove_run_files_if_closed(&self, envelope: &Envelope) {
+    /// Releases what a session holds for this host run once its `session/closed` is in the log: its run files and
+    /// its hook translator. A closed session takes no more hooks, so neither is needed again.
+    fn release_if_closed(&mut self, envelope: &Envelope) {
         let (Some(session), Frame::Shepherd(message)) = (envelope.session(), envelope.frame())
         else {
             return;
         };
-        if let ShepherdFrame::SessionClosed(_) = message.body()
-            && let Err(error) = run_files::remove(&self.settings.run_root, session)
-        {
+        let ShepherdFrame::SessionClosed(_) = message.body() else {
+            return;
+        };
+        self.translators.remove(session);
+        if let Err(error) = run_files::remove(&self.settings.run_root, session) {
             tracing::warn!(%session, %error, "cannot remove run files");
         }
     }
