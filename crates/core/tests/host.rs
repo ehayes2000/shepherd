@@ -432,6 +432,7 @@ fn pty_exit_appends_agent_exited() {
             resume: Err(ResumeUnavailable::NotAnAgent),
             workspace: None,
             failed: None,
+            creating_worktree: false,
         }]
     );
 }

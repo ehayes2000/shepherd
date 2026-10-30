@@ -3,7 +3,9 @@
 //! The first two lines are the header: the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the
 //! switcher, then a `+ New session` button (`⌂` and `+` when collapsed). Each session is two lines: its status glyph,
 //! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
-//! another workspace is dimmed, and its second line says which workspace instead. The selected session has a
+//! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
+//! failed to start is the reason, in red, and of one whose worktree is being made, `creating worktree…`; a second line
+//! too long for the row ends in `…`. The selected session has a
 //! highlighted background, and a session that wants the user has a yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
@@ -22,6 +24,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::session::Activity;
 
@@ -36,6 +39,23 @@ const ATTENTION: Color = Color::Yellow;
 const ATTENTION_BAR: &str = "▌";
 /// What line 2 says until sessions know their machine (M4) and PR (M3).
 const PLACEHOLDER_DETAIL: &str = "local · —";
+/// What line 2 says while a session's worktree is being made.
+const CREATING_WORKTREE: &str = "creating worktree…";
+/// Ends a line 2 cut short.
+const CUT: &str = "…";
+
+/// Draws `text` at `x`, `y` in at most `width` columns, ending in [`CUT`] when it doesn't fit.
+fn set_cut(buf: &mut Buffer, x: u16, y: u16, text: &str, width: usize, style: Style) {
+    if Span::raw(text).width() <= width {
+        buf.set_stringn(x, y, text, width, style);
+        return;
+    }
+    let Some(room) = width.checked_sub(1) else {
+        return;
+    };
+    let (end, _) = buf.set_stringn(x, y, text, room, style);
+    buf.set_stringn(end, y, CUT, 1, style);
+}
 
 /// A session's status glyph and its colour. See the table in the crate docs.
 pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
@@ -268,12 +288,17 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             usize::from(close.width),
             Style::new().fg(Color::Gray),
         );
-        let detail = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
-        let text = match &session.workspace {
-            Some(workspace) if session.elsewhere => format!("in {}", workspace_name(workspace)),
-            _ => PLACEHOLDER_DETAIL.to_owned(),
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        let (text, style) = match (&session.failed, &session.workspace) {
+            (Some(reason), _) => (reason.clone(), dim.fg(Color::Red)),
+            _ if session.creating_worktree => (CREATING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
+            (None, Some(workspace)) if session.elsewhere => (
+                format!("in {}", workspace_name(workspace)),
+                dim.fg(Color::Gray),
+            ),
+            _ => (PLACEHOLDER_DETAIL.to_owned(), dim.fg(Color::Gray)),
         };
-        buf.set_stringn(line.x + 3, line.y + 1, text, width, detail);
+        set_cut(buf, line.x + 3, line.y + 1, &text, width, style);
     });
     let area = inner(layout);
     if area.height > HEADER_HEIGHT {

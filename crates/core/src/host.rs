@@ -264,6 +264,8 @@ pub struct HostSession {
     pub workspace: Option<PathBuf>,
     /// Why it failed to start (`session/failed`), for the user.
     pub failed: Option<String>,
+    /// It is waiting for its worktree to be made, and has no PTY yet.
+    pub creating_worktree: bool,
 }
 
 /// Where a session is in its life, as far as its PTY goes.
@@ -372,6 +374,7 @@ impl Host {
                     Phase::Failed(reason) => Some(reason.clone()),
                     _ => None,
                 },
+                creating_worktree: e.phase == Phase::Starting,
             })
             .collect()
     }
