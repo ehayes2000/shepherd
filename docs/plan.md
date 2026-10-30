@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T37 worktree no cap + concurrent + cancel | in review | task/t37-worktree-nocap @ 8934970 (on 2609fd7) | 1 | PM-accepted: Worktrees::cancel_create + Cancelled; run_alone per create; narrowed repo lock. Builder disclosed one squashed --no-verify WIP commit |
+| T37 worktree no cap + concurrent + cancel | fixing (CHANGES) | task/t37-worktree-nocap @ 8934970 | 1 | Blocking: F32 test item not done; 2-reader FIFO gate hang; inherited GIT_ASKPASS/core.askPass can hang uncapped create. PM: cancel creates on shutdown |
 | T36a build id + mismatch UX | re-review | task/t36a-build-id @ cd20f9e (on 1a972e4) | 2 | dialog cleared on drop/hello; terminate validates dir/socket/peer uid; ChildGuard; footer Restart host |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -718,6 +718,18 @@ acceptance:
   `crates/shepherd/src/host/mod.rs` startup report) with `display_safe`.
 - Pending user decision: keep a ZWJ when it joins two visible chars inside one grapheme (emoji families, Indic half-forms).
 scope: crates/core, crates/tui, crates/shepherd, scripts
+
+### F37: A killed fetch can leave a stale remote-ref lock
+status: todo
+depends: T37
+touches: adapters::worktrees
+goal: From the T37 review: a fetch killed by a cancel or its timeout can leave `refs/remotes/origin/<default>.lock`; every
+later fetch then fails and falls back to the stale base.
+acceptance:
+- After a fetch that was killed (timeout/cancel) with `core.filesRefLockTimeout=0` pinned, remove only the remote-tracking ref
+  locks that fetch could have held, and only if git died holding them (same rules as F32's branch lock). Test with a hook or
+  a fake remote that hangs mid-fetch; a foreign lock is never removed.
+scope: crates/adapters
 
 ## Out of scope for the initial feature set
 
