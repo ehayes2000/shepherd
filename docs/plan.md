@@ -12,9 +12,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | T28 spike iroh peering | building | task/t28-iroh-spike @ 72ebea3 | 0 | docs only |
 | F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ 72ebea3 | 0 | ZWJ item still awaits user |
 | F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
-| F41 T27/T25b test gaps | building | task/f41-test-gaps @ 72ebea3 | 0 | – |
 | F42 new session wrong size | building | task/f42-spawn-size @ 95d0821 | 0 | user bug; diagnosis in spec |
-| F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
+| F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ 7f7e811 (on b821b28) | 2 | private fetch ref + pinned update-ref; grace test; group wait probes with SIGKILL (PM asked reviewer: pgid reuse?) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -786,7 +785,7 @@ acceptance:
 scope: crates/adapters
 
 ### F41: T27 and T25b leftovers
-status: in-progress
+status: done (a971711)
 depends: T27
 touches: adapters::forge (tests), shepherd tests, core tests
 goal: Test gaps from the T27 and T25b final reviews.
@@ -818,6 +817,26 @@ scope: crates/core, crates/shepherd, crates/testkit
 notes: (binding) Pending size is pure core state per session (no clock); `SpawnSpec` carries the size; `INITIAL_SIZE` is
 only the fallback. Also check the client sends a resize when a new session becomes selected via `session/created` (not only
 on user selection) and add a test either way.
+
+### F43: Tab next to wide chars stored as a '\t' spacer
+status: todo
+depends: T03
+touches: term (grid)
+goal: `crates/term/tests/fuzz.rs` `random_output_never_panics_and_snapshots_round_trip` failed once (F41's gate): a tab cell
+came back as a `'\t'` Spacer instead of `' '`. Input (6 cols): `"a" | ESC[4h | ESC[2;4r | "\t" | "日" "日" ESC[3D | "\t" |
+"\r   "`. Proptest seed saved by the PM at scratchpad `f43-fuzz-seed.txt` (also reproducible from the input above).
+acceptance:
+- Regression test first (fix-bug) with that exact input as a deterministic case; fix; the fuzz property holds.
+scope: crates/term
+
+### F44: hotswap_e2e times out under load
+status: todo
+depends: T36b
+touches: shepherd tests (hotswap_e2e)
+goal: `a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_file` once hit "nothing more from the host
+within 60s" while other worktrees were building; passes alone. Find what it waits on (likely a build or a fixed bound) and
+make every bound a generous liveness bound or count progress; 0 failures in a 12-copy round under parallel builds.
+scope: crates/shepherd (tests)
 
 ## Out of scope for the initial feature set
 
