@@ -5,7 +5,7 @@ use serde_json::json;
 use shepherd_core::client::{ClientCommand, CloseCheck, Intent, Popup};
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::Loss;
+use shepherd_core::ports::WorktreeStatus;
 use shepherd_core::wire::{ClientRequest, CloseWorktree, SessionClose, WireError, WorktreeCheck};
 use shepherd_testkit::builders::{ClientDriver, requests};
 
@@ -53,6 +53,15 @@ fn checked(answer: Result<serde_json::Value, WireError>) -> ClientDriver {
     c
 }
 
+fn worktree(dirty: bool, ahead: u32, pushed: bool, merged: bool) -> WorktreeStatus {
+    WorktreeStatus {
+        dirty,
+        ahead,
+        pushed,
+        merged_into_default: merged,
+    }
+}
+
 fn status(dirty: bool, ahead: u32, pushed: bool, merged: bool) -> serde_json::Value {
     json!({ "status": { "dirty": dirty, "ahead": ahead, "pushed": pushed, "merged_into_default": merged } })
 }
@@ -92,14 +101,11 @@ fn the_answer_says_whether_removing_the_worktree_loses_anything() {
         (status(false, 2, true, false), CloseCheck::Safe),
         (
             status(true, 0, false, true),
-            CloseCheck::AtRisk(vec![Loss::UncommittedChanges]),
+            CloseCheck::AtRisk(worktree(true, 0, false, true)),
         ),
         (
-            status(true, 2, false, false),
-            CloseCheck::AtRisk(vec![
-                Loss::UncommittedChanges,
-                Loss::Unpushed { commits: 2 },
-            ]),
+            status(false, 2, false, false),
+            CloseCheck::AtRisk(worktree(false, 2, false, false)),
         ),
         (json!({}), CloseCheck::Gone),
     ];
@@ -125,11 +131,7 @@ fn a_refused_status_says_why() {
 
 #[test]
 fn confirming_a_close_that_loses_nothing_lets_the_host_remove_the_worktree_if_still_safe() {
-    for answer in [
-        Ok(status(false, 0, false, true)),
-        Ok(json!({})),
-        Err(WireError::Internal("x".into())),
-    ] {
+    for answer in [Ok(status(false, 0, false, true)), Ok(json!({}))] {
         let mut c = checked(answer);
         assert_eq!(
             bodies(&c.user(Intent::Confirm)),
@@ -147,9 +149,50 @@ fn confirming_a_close_that_loses_nothing_lets_the_host_remove_the_worktree_if_st
 }
 
 #[test]
+fn confirming_a_close_whose_worktree_could_not_be_checked_keeps_it() {
+    let mut c = checked(Err(WireError::Internal("x".into())));
+    assert_eq!(
+        bodies(&c.user(Intent::Confirm)),
+        [close("s1", CloseWorktree::Keep)]
+    );
+}
+
+#[test]
+fn removing_anyway_tells_the_host_what_the_user_was_shown() {
+    let shown = worktree(false, 2, false, false);
+    let mut c = checked(Ok(status(false, 2, false, false)));
+    assert_eq!(
+        bodies(&c.user(Intent::CloseRemovingWorktree)),
+        [close("s1", CloseWorktree::Remove { confirmed: shown })]
+    );
+}
+
+#[test]
+fn removing_anyway_needs_a_shown_loss_to_confirm() {
+    for answer in [
+        None,
+        Some(Ok(status(false, 0, false, true))),
+        Some(Ok(json!({}))),
+    ] {
+        let mut c = with_worktree_session();
+        let asked = c.user(Intent::BeginCloseSession(sid("s1")));
+        if let Some(answer) = answer.clone() {
+            c.answer(&asked, answer);
+        }
+        assert_eq!(c.user(Intent::CloseRemovingWorktree), [], "{answer:?}");
+        assert!(c.client().popup().is_some(), "{answer:?}");
+    }
+}
+
+#[test]
 fn at_risk_the_buttons_remove_anyway_or_keep_and_confirming_keeps() {
     let cases = [
-        (Intent::CloseRemovingWorktree, CloseWorktree::Remove),
+        (
+            Intent::CloseRemovingWorktree,
+            CloseWorktree::Remove {
+                confirmed: worktree(true, 0, false, true),
+            },
+        ),
         (Intent::CloseKeepingWorktree, CloseWorktree::Keep),
         (Intent::Confirm, CloseWorktree::Keep),
     ];
@@ -186,6 +229,21 @@ fn an_answer_after_the_confirmation_was_dismissed_changes_nothing() {
     c.user(Intent::BeginCloseSession(sid("s2")));
     c.answer(&asked, Ok(status(true, 0, false, true)));
     assert_eq!(c.client().close_check(), None);
+}
+
+#[test]
+fn a_stale_answer_never_applies_to_a_reopened_confirmation_of_the_same_session() {
+    let mut c = with_worktree_session();
+    let first = c.user(Intent::BeginCloseSession(sid("s1")));
+    c.user(Intent::Dismiss);
+    let second = c.user(Intent::BeginCloseSession(sid("s1")));
+    c.answer(&first, Ok(status(false, 0, false, true)));
+    assert_eq!(c.client().close_check(), Some(&CloseCheck::Checking));
+    c.answer(&second, Ok(status(true, 0, false, true)));
+    assert_eq!(
+        c.client().close_check(),
+        Some(&CloseCheck::AtRisk(worktree(true, 0, false, true)))
+    );
 }
 
 #[test]

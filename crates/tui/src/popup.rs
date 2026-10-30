@@ -12,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use shepherd_core::client::{Cell, Client, CloseCheck, MenuEntry, MenuItem, Popup};
+use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
 
 use crate::layout::Target;
@@ -49,6 +50,8 @@ const DIALOG_HEIGHT: u16 = 5;
 const WORKTREE_DIALOG_WIDTH: u16 = 48;
 /// The close confirmation's hint while confirming closes the session (and removes its worktree if that's safe).
 const CLOSE_HINT: &str = "y / enter to close · n / esc to keep";
+/// What removing a dirty worktree anyway deletes.
+const DELETED_FILES: &str = "  · uncommitted, untracked and ignored files";
 /// Its hint when removing the worktree would lose work: confirming keeps it.
 const AT_RISK_HINT: &str = "enter keeps the worktree · esc cancels";
 const HELP_WIDTH: u16 = 56;
@@ -475,14 +478,28 @@ fn close_lines<'a>(name: &'a str, check: Option<&CloseCheck>) -> Vec<Line<'a>> {
             lines.push(Line::styled("Its worktree is kept:", red));
             lines.push(Line::styled(why.clone(), red));
         }
-        Some(CloseCheck::AtRisk(losses)) => {
-            lines.push(Line::raw("Removing its worktree would lose:"));
+        Some(CloseCheck::AtRisk(status)) => {
+            // Only files are deleted: unpushed commits stay on the branch, which is kept. Removing anyway forces only
+            // past uncommitted changes, and then ignored files go too.
             let loss = Style::new().fg(Color::Yellow);
-            lines.extend(
-                losses
-                    .iter()
-                    .map(|l| Line::styled(format!("  · {l}"), loss)),
-            );
+            for lost in status.losses() {
+                match lost {
+                    Loss::UncommittedChanges => {
+                        lines.push(Line::raw("Removing its worktree deletes:"));
+                        lines.push(Line::styled(DELETED_FILES, loss));
+                    }
+                    Loss::Unpushed { commits } => {
+                        let commits = match commits {
+                            1 => "1 commit".to_owned(),
+                            n => format!("{n} commits"),
+                        };
+                        lines.push(Line::styled(
+                            format!("{commits} not pushed — the branch is kept."),
+                            loss,
+                        ));
+                    }
+                }
+            }
             lines.push(Line::styled(AT_RISK_HINT, gray));
             return lines;
         }

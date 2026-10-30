@@ -105,10 +105,31 @@ fn inspected(
     })
 }
 
-fn close_purpose(force: bool, hooks_: &[&str]) -> Inspect {
+/// The purpose of a closing session's inspection: remove it if safe (`confirmed: None`), or even though removing loses
+/// what the user `confirmed`.
+fn close_purpose(confirmed: Option<WorktreeStatus>, hooks_: &[&str]) -> Inspect {
     Inspect::Close {
-        force,
+        confirmed,
         hooks: pre_remove(hooks_),
+    }
+}
+
+/// What a dialog showed the user who chose to remove anyway: uncommitted changes and 3 unpushed commits.
+fn everything() -> WorktreeStatus {
+    status(true, 3, false, false)
+}
+
+fn remove_anyway() -> CloseWorktree {
+    CloseWorktree::Remove {
+        confirmed: everything(),
+    }
+}
+
+/// A managed worktree, with `status`.
+fn listed(status: Result<WorktreeStatus, WorktreeError>) -> Inspection {
+    Inspection::Listed {
+        status,
+        exists: true,
     }
 }
 
@@ -161,12 +182,23 @@ fn exited(code: i32) -> Result<CommandOutput, CommandError> {
     })
 }
 
-fn removed(host: &mut HostDriver, result: Result<(), WorktreeError>) -> Vec<HostCommand> {
+/// The result of removing `s1`'s worktree; `exists`: something is still at its path afterwards.
+fn removed_with(
+    host: &mut HostDriver,
+    result: Result<(), WorktreeError>,
+    exists: bool,
+) -> Vec<HostCommand> {
     host.handle(HostEvent::WorktreeRemoved {
         session: sid("s1"),
         path: path(),
         result,
+        exists,
     })
+}
+
+fn removed(host: &mut HostDriver, result: Result<(), WorktreeError>) -> Vec<HostCommand> {
+    let exists = result.is_err();
+    removed_with(host, result, exists)
 }
 
 fn remove(force: bool) -> HostCommand {
@@ -207,7 +239,7 @@ fn closing_a_worktree_session_kills_its_pty_records_the_removal_and_inspects_the
                 session: sid("s1"),
                 repo: RepoRef::new(REPO),
                 path: path(),
-                purpose: close_purpose(false, &["make clean"]),
+                purpose: close_purpose(None, &["make clean"]),
             },
             HostCommand::Reply {
                 to: reply.unwrap_or_else(|| panic!("no reply")),
@@ -228,7 +260,7 @@ fn closing_a_worktree_session_kills_its_pty_records_the_removal_and_inspects_the
 
 #[test]
 fn removing_anyway_records_a_forced_removal() {
-    let (_, commands) = closing(CloseWorktree::Remove, &[]);
+    let (_, commands) = closing(remove_anyway(), &[]);
     assert!(commands.contains(&append(
         "s1",
         "_shepherd/worktree/removing",
@@ -238,7 +270,7 @@ fn removing_anyway_records_a_forced_removal() {
         session: sid("s1"),
         repo: RepoRef::new(REPO),
         path: path(),
-        purpose: close_purpose(true, &[]),
+        purpose: close_purpose(Some(everything()), &[]),
     }));
 }
 
@@ -282,7 +314,7 @@ fn a_session_whose_worktree_is_still_being_made_closes_at_once() {
     let mut host = HostDriver::new();
     host.select_workspace(REPO);
     host.new_session("s1");
-    let commands = host.close_with("s1", CloseWorktree::Remove, hooks(&["make clean"]));
+    let commands = host.close_with("s1", remove_anyway(), hooks(&["make clean"]));
     assert_eq!(commands[0], closed(false, None));
 }
 
@@ -316,8 +348,8 @@ fn a_worktree_that_loses_nothing_runs_its_pre_remove_hooks_in_order_then_is_remo
     let (mut host, _) = closing(CloseWorktree::IfSafe, &["a", "b"]);
     let found = inspected(
         &mut host,
-        close_purpose(false, &["a", "b"]),
-        Ok(Inspection::Listed(Ok(clean_merged()))),
+        close_purpose(None, &["a", "b"]),
+        Ok(listed(Ok(clean_merged()))),
     );
     assert_eq!(found, vec![run_pre_remove("a", &["b"], false)]);
     let first = hook_finished(&mut host, "a", &["b"], false, exited(0));
@@ -355,8 +387,8 @@ fn a_worktree_with_no_pre_remove_hooks_is_removed_at_once() {
     let (mut host, _) = closing(CloseWorktree::IfSafe, &[]);
     let found = inspected(
         &mut host,
-        close_purpose(false, &[]),
-        Ok(Inspection::Listed(Ok(clean_merged()))),
+        close_purpose(None, &[]),
+        Ok(listed(Ok(clean_merged()))),
     );
     assert_eq!(found, vec![remove(false)]);
 }
@@ -385,8 +417,8 @@ fn only_a_clean_worktree_that_is_merged_or_pushed_is_removed_unasked() {
         let (mut host, _) = closing(CloseWorktree::IfSafe, &["make clean"]);
         let commands = inspected(
             &mut host,
-            close_purpose(false, &["make clean"]),
-            Ok(Inspection::Listed(Ok(found))),
+            close_purpose(None, &["make clean"]),
+            Ok(listed(Ok(found))),
         );
         let expected = match kept {
             None => vec![run_pre_remove("make clean", &[], false)],
@@ -398,11 +430,11 @@ fn only_a_clean_worktree_that_is_merged_or_pushed_is_removed_unasked() {
 
 #[test]
 fn removing_anyway_removes_a_worktree_that_would_lose_work_after_its_hooks() {
-    let (mut host, _) = closing(CloseWorktree::Remove, &["make clean"]);
+    let (mut host, _) = closing(remove_anyway(), &["make clean"]);
     let found = inspected(
         &mut host,
-        close_purpose(true, &["make clean"]),
-        Ok(Inspection::Listed(Ok(status(true, 3, false, false)))),
+        close_purpose(Some(everything()), &["make clean"]),
+        Ok(listed(Ok(status(true, 3, false, false)))),
     );
     assert_eq!(found, vec![run_pre_remove("make clean", &[], true)]);
     let done = hook_finished(&mut host, "make clean", &[], true, exited(0));
@@ -410,15 +442,74 @@ fn removing_anyway_removes_a_worktree_that_would_lose_work_after_its_hooks() {
 }
 
 #[test]
+fn removing_anyway_forces_only_when_the_user_confirmed_uncommitted_changes() {
+    let unpushed = status(false, 2, false, false);
+    let (mut host, _) = closing(
+        CloseWorktree::Remove {
+            confirmed: unpushed,
+        },
+        &[],
+    );
+    let found = inspected(
+        &mut host,
+        close_purpose(Some(unpushed), &[]),
+        Ok(listed(Ok(unpushed))),
+    );
+    assert_eq!(found, vec![remove(false)]);
+}
+
+#[test]
+fn removing_anyway_keeps_a_worktree_that_has_more_to_lose_than_the_user_confirmed() {
+    // (confirmed, found now, why it's kept)
+    let cases = [
+        (
+            status(false, 2, false, false),
+            status(true, 2, false, false),
+            "it has uncommitted changes, which closing didn't confirm",
+        ),
+        (
+            status(true, 0, false, true),
+            status(true, 1, false, false),
+            "it has 1 commit not pushed or merged, which closing didn't confirm",
+        ),
+        (
+            status(false, 1, false, false),
+            status(false, 3, false, false),
+            "it has 3 commits not pushed or merged, which closing didn't confirm",
+        ),
+    ];
+    for (confirmed, now, why) in cases {
+        let (mut host, _) = closing(CloseWorktree::Remove { confirmed }, &["make clean"]);
+        let commands = inspected(
+            &mut host,
+            close_purpose(Some(confirmed), &["make clean"]),
+            Ok(listed(Ok(now))),
+        );
+        assert_eq!(commands, vec![closed(false, Some(why))], "{now:?}");
+    }
+    // Less to lose than confirmed is fine.
+    let (mut host, _) = closing(remove_anyway(), &[]);
+    let found = inspected(
+        &mut host,
+        close_purpose(Some(everything()), &[]),
+        Ok(listed(Ok(clean_merged()))),
+    );
+    assert_eq!(found, vec![remove(true)]);
+}
+
+#[test]
 fn a_worktree_that_is_already_gone_closes_normally() {
     for found in [
         Inspection::Unlisted { exists: false },
-        Inspection::Listed(Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE)))),
+        Inspection::Listed {
+            status: Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
+            exists: false,
+        },
     ] {
-        let (mut host, _) = closing(CloseWorktree::Remove, &["make clean"]);
+        let (mut host, _) = closing(remove_anyway(), &["make clean"]);
         let commands = inspected(
             &mut host,
-            close_purpose(true, &["make clean"]),
+            close_purpose(Some(everything()), &["make clean"]),
             Ok(found.clone()),
         );
         assert_eq!(commands, vec![closed(false, None)], "{found:?}");
@@ -430,10 +521,10 @@ fn a_worktree_that_is_already_gone_closes_normally() {
 fn a_recorded_path_that_is_not_a_managed_worktree_is_left_alone() {
     // E.g. a log saying the worktree is at `<root>/app/../../home`, or at a symlink out of the root: the port doesn't
     // list it, so no hook runs there and nothing is removed, even when forced.
-    let (mut host, _) = closing(CloseWorktree::Remove, &["rm -rf ."]);
+    let (mut host, _) = closing(remove_anyway(), &["rm -rf ."]);
     let commands = inspected(
         &mut host,
-        close_purpose(true, &["rm -rf ."]),
+        close_purpose(Some(everything()), &["rm -rf ."]),
         Ok(Inspection::Unlisted { exists: true }),
     );
     assert_eq!(
@@ -449,17 +540,21 @@ fn a_recorded_path_that_is_not_a_managed_worktree_is_left_alone() {
 fn an_inspection_error_keeps_the_worktree_and_says_why() {
     let cases = [
         Err(WorktreeError::Timeout("worktree list".into())),
-        Ok(Inspection::Listed(Err(WorktreeError::NoDefaultBranch(
-            PathBuf::from(REPO),
-        )))),
+        Ok(listed(Err(WorktreeError::NoDefaultBranch(PathBuf::from(
+            REPO,
+        ))))),
     ];
     let reasons = [
         "git worktree list timed out",
         "/src/app has no origin default branch",
     ];
     for (result, why) in cases.into_iter().zip(reasons) {
-        let (mut host, _) = closing(CloseWorktree::Remove, &["make clean"]);
-        let commands = inspected(&mut host, close_purpose(true, &["make clean"]), result);
+        let (mut host, _) = closing(remove_anyway(), &["make clean"]);
+        let commands = inspected(
+            &mut host,
+            close_purpose(Some(everything()), &["make clean"]),
+            result,
+        );
         assert_eq!(commands, vec![closed(false, Some(why))]);
     }
 }
@@ -484,8 +579,8 @@ fn a_failing_pre_remove_hook_keeps_the_worktree_and_says_why() {
         let (mut host, _) = closing(CloseWorktree::IfSafe, &["a", "b"]);
         inspected(
             &mut host,
-            close_purpose(false, &["a", "b"]),
-            Ok(Inspection::Listed(Ok(clean_merged()))),
+            close_purpose(None, &["a", "b"]),
+            Ok(listed(Ok(clean_merged()))),
         );
         let commands = hook_finished(&mut host, "a", &["b"], false, result);
         assert_eq!(commands.len(), 2, "{why}: {commands:?}");
@@ -508,15 +603,61 @@ fn a_remove_error_keeps_the_worktree_and_says_why_but_a_gone_one_closes_normally
                 Some("/wt/s1 is not inside the managed worktree root"),
             ),
         ),
-        (
-            Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
-            closed(false, None),
-        ),
     ];
     for (result, expected) in cases {
         let (mut host, _) = closing(CloseWorktree::IfSafe, &[]);
         assert_eq!(removed(&mut host, result), vec![expected]);
     }
+    let (mut host, _) = closing(CloseWorktree::IfSafe, &[]);
+    let gone = Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE)));
+    assert_eq!(
+        removed_with(&mut host, gone, false),
+        vec![closed(false, None)]
+    );
+}
+
+#[test]
+fn not_a_repo_with_something_still_at_the_path_keeps_it_and_says_why() {
+    let not_a_repo = || Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE)));
+    let why = "/wt/s1 is not a git repository";
+    // Inspected,
+    let (mut host, _) = closing(CloseWorktree::IfSafe, &["make clean"]);
+    let found = Inspection::Listed {
+        status: not_a_repo(),
+        exists: true,
+    };
+    let commands = inspected(&mut host, close_purpose(None, &["make clean"]), Ok(found));
+    assert_eq!(commands, vec![closed(false, Some(why))]);
+    // removed,
+    let (mut host, _) = closing(CloseWorktree::IfSafe, &[]);
+    assert_eq!(
+        removed_with(
+            &mut host,
+            Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
+            true
+        ),
+        vec![closed(false, Some(why))]
+    );
+    // and asked about.
+    let mut host = running();
+    let reply = host.reply_to();
+    let found = Inspection::Listed {
+        status: not_a_repo(),
+        exists: true,
+    };
+    let answer = host.handle(HostEvent::WorktreeInspected {
+        session: sid("s1"),
+        path: path(),
+        purpose: Inspect::Ask(reply),
+        result: Ok(found),
+    });
+    assert_eq!(
+        answer,
+        vec![HostCommand::Reply {
+            to: reply,
+            result: Err(WireError::InvalidParams(why.into())),
+        }]
+    );
 }
 
 #[test]
@@ -524,8 +665,8 @@ fn results_for_a_session_that_is_not_removing_its_worktree_do_nothing() {
     let mut host = running();
     let found = inspected(
         &mut host,
-        close_purpose(false, &[]),
-        Ok(Inspection::Listed(Ok(clean_merged()))),
+        close_purpose(None, &[]),
+        Ok(listed(Ok(clean_merged()))),
     );
     assert_eq!(found, vec![]);
     assert_eq!(hook_finished(&mut host, "a", &[], false, exited(0)), vec![]);
@@ -590,7 +731,7 @@ fn asking_for_a_worktrees_status_inspects_it_and_answers_what_it_finds() {
     );
     let cases = [
         (
-            Ok(Inspection::Listed(Ok(clean_merged()))),
+            Ok(listed(Ok(clean_merged()))),
             Ok(HostResult::WorktreeStatus(WorktreeStatusOk {
                 status: Some(clean_merged()),
             })),
@@ -602,9 +743,10 @@ fn asking_for_a_worktrees_status_inspects_it_and_answers_what_it_finds() {
             })),
         ),
         (
-            Ok(Inspection::Listed(Err(WorktreeError::NotARepo(
-                PathBuf::from(WORKTREE),
-            )))),
+            Ok(Inspection::Listed {
+                status: Err(WorktreeError::NotARepo(PathBuf::from(WORKTREE))),
+                exists: false,
+            }),
             Ok(HostResult::WorktreeStatus(WorktreeStatusOk {
                 status: None,
             })),

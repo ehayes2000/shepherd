@@ -817,11 +817,16 @@ impl<
                         result: Err(WorktreeError::Other(format!(
                             "removing worktree {path} failed unexpectedly"
                         ))),
+                        exists: true,
                     };
-                    let call = move |worktrees: &W| HostEvent::WorktreeRemoved {
-                        result: worktrees.remove(&path, force),
-                        session,
-                        path,
+                    let call = move |worktrees: &W| {
+                        let result = worktrees.remove(&path, force);
+                        HostEvent::WorktreeRemoved {
+                            exists: anything_at(&path),
+                            result,
+                            session,
+                            path,
+                        }
                     };
                     match self.worktrees.submit(call, panicked) {
                         Ok(()) => self.worktree_calls += 1,
@@ -1587,8 +1592,8 @@ fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, S
     Ok(root)
 }
 
-/// Whether `path` is one of `repo`'s managed worktrees, at exactly the path the port lists, and if so its status; if
-/// not, whether anything is there at all (without following a symlink). Runs on the worker thread.
+/// Whether `path` is one of `repo`'s managed worktrees, at exactly the path the port lists, and if so its status; and
+/// whether anything is there at all (without following a symlink). Runs on the worker thread.
 fn inspect_worktree(
     worktrees: &impl Worktrees,
     repo: &RepoRef,
@@ -1596,10 +1601,17 @@ fn inspect_worktree(
 ) -> Result<Inspection, WorktreeError> {
     let listed = worktrees.list_managed(repo)?;
     if listed.iter().any(|w| w.path == *path) {
-        return Ok(Inspection::Listed(worktrees.status(path)));
+        let status = worktrees.status(path);
+        let exists = anything_at(path);
+        return Ok(Inspection::Listed { status, exists });
     }
-    let exists = std::fs::symlink_metadata(path.as_path()).is_ok();
+    let exists = anything_at(path);
     Ok(Inspection::Unlisted { exists })
+}
+
+/// Whether anything (a symlink included, not followed) is at `path`.
+fn anything_at(path: &WorktreePath) -> bool {
+    std::fs::symlink_metadata(path.as_path()).is_ok()
 }
 
 /// A session's screen panicked and was replaced with a blank one ([`screen_guard`]).

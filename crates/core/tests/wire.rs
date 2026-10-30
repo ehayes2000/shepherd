@@ -85,7 +85,14 @@ fn one_of_each_request() -> Vec<ClientRequest> {
         }),
         ClientRequest::SessionClose(SessionClose {
             session: sid("s_1"),
-            worktree: shepherd_core::wire::CloseWorktree::Remove,
+            worktree: shepherd_core::wire::CloseWorktree::Remove {
+                confirmed: shepherd_core::ports::WorktreeStatus {
+                    dirty: true,
+                    ahead: 1,
+                    pushed: false,
+                    merged_into_default: false,
+                },
+            },
         }),
         ClientRequest::WorktreeStatus(shepherd_core::wire::WorktreeCheck {
             session: sid("s_1"),
@@ -801,7 +808,7 @@ fn session_new_result_is_the_session_id() {
 }
 
 #[test]
-fn a_close_says_what_to_do_with_the_worktree_only_when_it_is_not_the_default() {
+fn a_close_says_what_to_do_with_the_worktree_and_what_removing_it_anyway_confirmed() {
     let params = |worktree| {
         wire_json(&encode_request(&Request {
             id: 1.into(),
@@ -814,9 +821,17 @@ fn a_close_says_what_to_do_with_the_worktree_only_when_it_is_not_the_default() {
     };
     use shepherd_core::wire::CloseWorktree;
     assert_eq!(params(CloseWorktree::IfSafe), json!({ "session": "s_1" }));
+    let confirmed = shepherd_core::ports::WorktreeStatus {
+        dirty: true,
+        ahead: 1,
+        pushed: false,
+        merged_into_default: false,
+    };
     assert_eq!(
-        params(CloseWorktree::Remove),
-        json!({ "session": "s_1", "worktree": "remove" })
+        params(CloseWorktree::Remove { confirmed }),
+        json!({ "session": "s_1", "worktree": { "remove": { "confirmed": {
+            "dirty": true, "ahead": 1, "pushed": false, "merged_into_default": false
+        } } } })
     );
     assert_eq!(
         params(CloseWorktree::Keep),

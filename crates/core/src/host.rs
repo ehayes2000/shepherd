@@ -147,8 +147,12 @@ pub struct PreRemove {
 pub enum Inspect {
     /// A client asked what removing it would lose: answer it.
     Ask(ReplyTo),
-    /// Its session is closing: remove it if that loses nothing or `force`, after `hooks`.
-    Close { force: bool, hooks: PreRemove },
+    /// Its session is closing: remove it after `hooks` if that loses nothing, or, with `confirmed` (what the user was
+    /// shown and chose to remove anyway), if it loses nothing beyond that.
+    Close {
+        confirmed: Option<WorktreeStatus>,
+        hooks: PreRemove,
+    },
 }
 
 /// What [`HostCommand::InspectWorktree`] found at a session's recorded worktree path.
@@ -157,8 +161,12 @@ pub enum Inspection {
     /// The port doesn't list it among the repo's managed worktrees. `exists`: something is at the path anyway (it isn't
     /// ours, so it is left alone); otherwise the worktree is gone.
     Unlisted { exists: bool },
-    /// It is a managed worktree, with this status (or the error getting it).
-    Listed(Result<WorktreeStatus, WorktreeError>),
+    /// It is a managed worktree, with this status (or the error getting it). `exists`: something is at the path, so a
+    /// [`WorktreeError::NotARepo`] doesn't mean it's gone.
+    Listed {
+        status: Result<WorktreeStatus, WorktreeError>,
+        exists: bool,
+    },
 }
 
 /// What to resume an exited session with. The runtime builds it from the profile in [`Host::resume_target`]
@@ -314,11 +322,12 @@ pub enum HostEvent {
         force: bool,
         result: Result<CommandOutput, CommandError>,
     },
-    /// The answer to a [`HostCommand::RemoveWorktree`].
+    /// The answer to a [`HostCommand::RemoveWorktree`]. `exists`: something is still at the path afterwards.
     WorktreeRemoved {
         session: SessionId,
         path: WorktreePath,
         result: Result<(), WorktreeError>,
+        exists: bool,
     },
     /// The runtime has just started, the logs folded: nothing an earlier host run started is still running.
     Restarted,
@@ -835,9 +844,9 @@ impl Host {
             HostEvent::WorktreeInspected {
                 session,
                 path,
-                purpose: Inspect::Close { force, hooks },
+                purpose: Inspect::Close { confirmed, hooks },
                 result,
-            } => self.worktree_inspected(session, path, force, hooks, result),
+            } => self.worktree_inspected(session, path, confirmed, hooks, result),
             HostEvent::PreRemoveFinished {
                 session,
                 command,
@@ -850,6 +859,7 @@ impl Host {
                 session,
                 path: _,
                 result,
+                exists,
             } => {
                 if !self.removing(&session) {
                     return Vec::new();
@@ -857,7 +867,7 @@ impl Host {
                 match result {
                     Ok(()) => vec![closed(&session, true, None)],
                     // Already gone: nothing was lost and nothing is left.
-                    Err(error) if is_gone(&error) => vec![closed(&session, false, None)],
+                    Err(error) if is_gone(&error, exists) => vec![closed(&session, false, None)],
                     Err(error) => vec![closed(&session, false, Some(error.to_string()))],
                 }
             }
@@ -891,7 +901,10 @@ impl Host {
                 session: session.clone(),
             });
         }
-        let force = worktree == CloseWorktree::Remove;
+        let confirmed = match worktree {
+            CloseWorktree::Remove { confirmed } => Some(confirmed),
+            CloseWorktree::IfSafe | CloseWorktree::Keep => None,
+        };
         let removable = entry.removable_worktree().zip(entry.workspace.as_ref());
         let (Some(((path, _), repo)), false) = (removable, worktree == CloseWorktree::Keep) else {
             commands.push(closed(&session, false, None));
@@ -900,7 +913,7 @@ impl Host {
         };
         let removing = ShepherdFrame::WorktreeRemoving(WorktreeRemoving {
             path: path.to_string_lossy().into_owned(),
-            force,
+            force: confirmed.is_some(),
             pre_remove: hooks.pre_remove.clone(),
         });
         commands.push(append(&session, removing));
@@ -909,7 +922,7 @@ impl Host {
             repo: RepoRef::new(repo),
             path: WorktreePath::new(path),
             purpose: Inspect::Close {
-                force,
+                confirmed,
                 hooks: PreRemove {
                     hooks: hooks.pre_remove,
                     timeout: hooks.timeout,
@@ -921,12 +934,13 @@ impl Host {
     }
 
     /// Decides on a closing session's worktree from what inspecting it found: remove it (its pre-remove hooks first),
-    /// or close keeping it.
+    /// or close keeping it. Without `confirmed` it is removed only if that loses nothing; with it, only if that loses
+    /// nothing the user wasn't shown, and the removal is forced only if the user confirmed losing uncommitted changes.
     fn worktree_inspected(
         &self,
         session: SessionId,
         path: WorktreePath,
-        force: bool,
+        confirmed: Option<WorktreeStatus>,
         hooks: PreRemove,
         result: Result<Inspection, WorktreeError>,
     ) -> Vec<HostCommand> {
@@ -934,23 +948,42 @@ impl Host {
             return Vec::new();
         }
         let status = match result {
-            Err(error) | Ok(Inspection::Listed(Err(error))) if !is_gone(&error) => {
-                return vec![closed(&session, false, Some(error.to_string()))];
+            Ok(Inspection::Listed {
+                status: Ok(status), ..
+            }) => status,
+            Ok(Inspection::Listed {
+                status: Err(error),
+                exists,
+            }) if is_gone(&error, exists) => {
+                return vec![closed(&session, false, None)];
+            }
+            Ok(Inspection::Unlisted { exists: false }) => {
+                return vec![closed(&session, false, None)];
             }
             Ok(Inspection::Unlisted { exists: true }) => {
                 let why = format!("{path} isn't a worktree shepherd manages");
                 return vec![closed(&session, false, Some(why))];
             }
-            Ok(Inspection::Listed(Ok(status))) => status,
-            // Gone: unlisted with nothing there, or listed with its directory missing.
-            _ => return vec![closed(&session, false, None)],
+            Err(error)
+            | Ok(Inspection::Listed {
+                status: Err(error), ..
+            }) => {
+                return vec![closed(&session, false, Some(error.to_string()))];
+            }
         };
-        let losses = status.losses();
-        if !force && !losses.is_empty() {
-            let lost: Vec<String> = losses.iter().map(ToString::to_string).collect();
-            let why = format!("it has {}", lost.join(" and "));
+        let (unconfirmed, why) = match confirmed {
+            None => (status.losses(), ""),
+            Some(confirmed) => (
+                status.losses_beyond(&confirmed),
+                ", which closing didn't confirm",
+            ),
+        };
+        if !unconfirmed.is_empty() {
+            let lost: Vec<String> = unconfirmed.iter().map(ToString::to_string).collect();
+            let why = format!("it has {}{why}", lost.join(" and "));
             return vec![closed(&session, false, Some(why))];
         }
+        let force = confirmed.is_some_and(|c| c.dirty);
         vec![self.next_pre_remove(session, path, force, hooks)]
     }
 
@@ -1397,9 +1430,9 @@ fn hook_failure(hook: &WorktreeHook) -> Option<String> {
     }
 }
 
-/// A port error that means the worktree is already gone.
-fn is_gone(error: &WorktreeError) -> bool {
-    matches!(error, WorktreeError::NotARepo(_))
+/// A port error that means the worktree is already gone: it says there's no repo, and nothing is at the path.
+fn is_gone(error: &WorktreeError, exists: bool) -> bool {
+    matches!(error, WorktreeError::NotARepo(_)) && !exists
 }
 
 /// The answer to a client's `_shepherd/worktree/status` from what inspecting the worktree at `path` found.
@@ -1408,15 +1441,24 @@ fn status_answer(
     result: Result<Inspection, WorktreeError>,
 ) -> Result<HostResult, WireError> {
     let status = match result {
-        Ok(Inspection::Listed(Ok(status))) => Some(status),
-        Err(error) | Ok(Inspection::Listed(Err(error))) if !is_gone(&error) => {
-            return Err(WireError::InvalidParams(error.to_string()));
-        }
+        Ok(Inspection::Listed {
+            status: Ok(status), ..
+        }) => Some(status),
+        Ok(Inspection::Listed {
+            status: Err(error),
+            exists,
+        }) if is_gone(&error, exists) => None,
+        Ok(Inspection::Unlisted { exists: false }) => None,
         Ok(Inspection::Unlisted { exists: true }) => {
             let why = format!("{path} isn't a worktree shepherd manages");
             return Err(WireError::InvalidParams(why));
         }
-        _ => None,
+        Err(error)
+        | Ok(Inspection::Listed {
+            status: Err(error), ..
+        }) => {
+            return Err(WireError::InvalidParams(error.to_string()));
+        }
     };
     Ok(HostResult::WorktreeStatus(WorktreeStatusOk { status }))
 }

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use shepherd_core::client::{ClientCommand, Intent};
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::ids::SessionId;
+use shepherd_core::ports::WorktreeStatus;
 use shepherd_core::wire::{CloseWorktree, WireError};
 use shepherd_term::Modes;
 use shepherd_testkit::builders::ClientDriver;
@@ -152,6 +153,12 @@ fn close_confirmation_of_a_worktree_that_would_lose_work() {
 }
 
 #[test]
+fn close_confirmation_of_a_worktree_with_only_an_unpushed_commit() {
+    // Nothing is deleted: the commit stays on the branch.
+    insta::assert_snapshot!(text(&buffer(&confirming(status(false, 1, false)), WIDE)));
+}
+
+#[test]
 fn close_confirmation_of_a_worktree_already_gone() {
     insta::assert_snapshot!(text(&buffer(&confirming(Some(Ok(json!({})))), WIDE)));
 }
@@ -197,7 +204,14 @@ fn clicking_remove_anyway_or_keep_worktree_closes_the_session_that_way() {
         (
             "[Remove anyway]",
             Intent::CloseRemovingWorktree,
-            CloseWorktree::Remove,
+            CloseWorktree::Remove {
+                confirmed: WorktreeStatus {
+                    dirty: true,
+                    ahead: 2,
+                    pushed: false,
+                    merged_into_default: false,
+                },
+            },
         ),
         (
             "[Keep worktree]",

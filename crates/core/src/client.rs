@@ -32,7 +32,7 @@ use crate::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame, Timestamp};
 use crate::host::{Host, HostSession, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::pty::PtySize;
-use crate::ports::worktrees::Loss;
+use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
 use crate::wire::{
     ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HostMessage,
@@ -136,7 +136,8 @@ pub enum Intent {
     /// Accept the open popup: send the rename, the close, or the workspace switcher's typed path. A close whose worktree
     /// would lose work keeps the worktree.
     Confirm,
-    /// Close the session of the open close confirmation, removing its worktree even if that loses work.
+    /// Close the session of the open close confirmation, removing its worktree even though that loses what the
+    /// confirmation showed. Ignored unless it showed something removing would lose.
     CloseRemovingWorktree,
     /// Close the session of the open close confirmation, keeping its worktree.
     CloseKeepingWorktree,
@@ -236,11 +237,12 @@ pub enum CloseCheck {
     Checking,
     /// Nothing: closing removes it.
     Safe,
-    /// This: closing asks whether to remove it anyway.
-    AtRisk(Vec<Loss>),
+    /// Removing it would lose something ([`WorktreeStatus::losses`]): closing asks whether to remove it anyway, and
+    /// removing it anyway tells the host this was what the user saw.
+    AtRisk(WorktreeStatus),
     /// It is already gone.
     Gone,
-    /// The host couldn't tell, for this reason. Closing keeps it.
+    /// The host couldn't tell, for this reason. Confirming keeps it.
     Failed(String),
 }
 
@@ -702,10 +704,8 @@ impl Client {
                     self.close_check = Some(match result {
                         Ok(HostResult::WorktreeStatus(ok)) => match ok.status {
                             None => CloseCheck::Gone,
-                            Some(status) => match status.losses() {
-                                losses if losses.is_empty() => CloseCheck::Safe,
-                                losses => CloseCheck::AtRisk(losses),
-                            },
+                            Some(status) if status.losses().is_empty() => CloseCheck::Safe,
+                            Some(status) => CloseCheck::AtRisk(status),
                         },
                         // The host's reason is the whole story here, without the error's kind.
                         Err(WireError::InvalidParams(why)) => CloseCheck::Failed(why),
@@ -1177,7 +1177,8 @@ impl Client {
                 }
                 Some(Popup::ConfirmClose { session }) => {
                     let worktree = match self.close_check.take() {
-                        Some(CloseCheck::AtRisk(_)) => CloseWorktree::Keep,
+                        // Removing it would lose work, or the host couldn't say whether it would.
+                        Some(CloseCheck::AtRisk(_) | CloseCheck::Failed(_)) => CloseWorktree::Keep,
                         _ => CloseWorktree::IfSafe,
                     };
                     self.close(session, worktree)
@@ -1196,15 +1197,19 @@ impl Client {
                 Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
             Intent::CloseRemovingWorktree | Intent::CloseKeepingWorktree => {
+                // Removing anyway confirms the losses the user was shown, so it needs some shown.
+                let worktree = match (&intent, self.close_check()) {
+                    (Intent::CloseKeepingWorktree, _) => CloseWorktree::Keep,
+                    (_, Some(CloseCheck::AtRisk(shown))) => {
+                        CloseWorktree::Remove { confirmed: *shown }
+                    }
+                    _ => return Vec::new(),
+                };
                 let Some(Popup::ConfirmClose { session }) = self
                     .popup
                     .take_if(|p| matches!(p, Popup::ConfirmClose { .. }))
                 else {
                     return Vec::new();
-                };
-                let worktree = match intent {
-                    Intent::CloseRemovingWorktree => CloseWorktree::Remove,
-                    _ => CloseWorktree::Keep,
                 };
                 self.close(session, worktree)
             }

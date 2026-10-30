@@ -198,8 +198,9 @@ pub enum CloseWorktree {
     /// merged or pushed); otherwise keep it, saying why.
     #[default]
     IfSafe,
-    /// Remove it, after its pre-remove hooks, even if that loses work.
-    Remove,
+    /// Remove it, after its pre-remove hooks, even though that loses what `confirmed` says: the status the user was
+    /// shown and chose to remove anyway. If the worktree has more to lose by then, it is kept.
+    Remove { confirmed: WorktreeStatus },
     /// Keep it.
     Keep,
 }

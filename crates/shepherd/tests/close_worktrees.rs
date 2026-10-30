@@ -17,6 +17,7 @@ use shepherd_adapters::GitWorktrees;
 use shepherd_core::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame};
 use shepherd_core::config::{RawConfig, RawHooks, RawWorkspace};
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::WorktreeStatus;
 use shepherd_core::ports::{
     BaseUsed, BranchName, Created, EventLog, LogId, WorktreePath, Worktrees,
 };
@@ -222,14 +223,43 @@ fn a_client_hears_what_a_dirty_worktree_would_lose_and_removing_anyway_removes_i
         }));
     s.h.step();
     let answer = response(&s.client.take(), &ask).unwrap();
-    assert_eq!(answer["status"]["dirty"], json!(true));
+    let shown: WorktreeStatus = serde_json::from_value(answer["status"].clone()).unwrap();
+    assert!(shown.dirty);
 
-    s.close(CloseWorktree::Remove);
+    s.close(CloseWorktree::Remove { confirmed: shown });
     s.h.step();
     assert!(!s.listed(), "removed anyway");
     assert_eq!(s.commands.runs().len(), 1, "after its hook");
     let closed = last_closed(&s.frames());
     assert!(closed.worktree_removed);
+}
+
+#[test]
+fn removing_anyway_keeps_a_worktree_that_got_more_to_lose_after_the_user_looked() {
+    let mut s = Setup::new();
+    // The user is shown an unpushed commit, and chooses to remove anyway; meanwhile the agent writes a file.
+    s.worktrees.commit(&s.path);
+    let ask = s
+        .client
+        .request(ClientRequest::WorktreeStatus(WorktreeCheck {
+            session: s.id.clone(),
+        }));
+    s.h.step();
+    let answer = response(&s.client.take(), &ask).unwrap();
+    let shown: WorktreeStatus = serde_json::from_value(answer["status"].clone()).unwrap();
+    assert!(!shown.dirty && shown.ahead == 1);
+    s.worktrees.set_dirty(&s.path, true);
+
+    s.close(CloseWorktree::Remove { confirmed: shown });
+    s.h.step();
+    assert!(s.listed(), "kept");
+    assert!(s.commands.runs().is_empty(), "no hook ran");
+    let closed = last_closed(&s.frames());
+    assert!(!closed.worktree_removed);
+    assert_eq!(
+        closed.worktree_kept.as_deref(),
+        Some("it has uncommitted changes, which closing didn't confirm")
+    );
 }
 
 #[test]
@@ -333,26 +363,54 @@ fn log_recording(app: &Path, recorded: &Path) -> FakeEventLog {
 fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).unwrap();
-    let (app, root, victim, home) = (
+    let (origin, seed, app, root, victim, home) = (
+        base.join("origin.git"),
+        base.join("seed"),
         base.join("app"),
         base.join("worktrees"),
         base.join("victim"),
         base.join("home"),
     );
-    for dir in [&app, &root.join("app"), &victim, &home] {
+    for dir in [&origin, &seed, &root.join("app"), &home] {
         std::fs::create_dir_all(dir).unwrap();
     }
     let env = git_env(&home);
-    git(&app, &env, &["init", "-q", "-b", "main"]);
+    // An origin with `precious` committed on main, and the workspace a clone of it.
+    git(&origin, &env, &["init", "-q", "--bare", "-b", "main"]);
+    git(&seed, &env, &["init", "-q", "-b", "main"]);
+    std::fs::write(seed.join("precious"), "keep me").unwrap();
+    git(&seed, &env, &["add", "precious"]);
+    git(&seed, &env, &["commit", "-q", "-m", "first"]);
+    git(
+        &seed,
+        &env,
+        &["push", "-q", origin.to_str().unwrap(), "main"],
+    );
+    git(
+        &base,
+        &env,
+        &["clone", "-q", origin.to_str().unwrap(), "app"],
+    );
+    // The victim is a worktree of the workspace outside the managed root, on a branch at origin/main: clean and merged,
+    // so nothing about its status would stop a removal or its hooks.
+    let victim_arg = victim.to_str().unwrap();
     git(
         &app,
         &env,
-        &["commit", "-q", "--allow-empty", "-m", "first"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "victim",
+            victim_arg,
+            "origin/main",
+        ],
     );
-    // The victim is a clean checkout of its own, so nothing about it looks unsafe to remove.
-    git(&victim, &env, &["init", "-q", "-b", "main"]);
-    std::fs::write(victim.join("precious"), "keep me").unwrap();
     std::os::unix::fs::symlink(&victim, root.join("app").join("link")).unwrap();
+    let probe = GitWorktrees::new(&root).with_isolated_env(env.clone());
+    let victim_status = probe.status(&WorktreePath::new(&victim)).unwrap();
+    assert!(victim_status.losses().is_empty(), "{victim_status:?}");
 
     for recorded in [
         root.join("app").join("..").join("..").join("victim"),
@@ -382,7 +440,7 @@ fn removal_never_touches_a_recorded_path_outside_the_managed_root() {
         assert!(runtime.run_until_settled(LIMIT));
         client.request(ClientRequest::SessionClose(SessionClose {
             session: SessionId::new("s1"),
-            worktree: CloseWorktree::Remove,
+            worktree: CloseWorktree::IfSafe,
         }));
         assert!(runtime.run_until_settled(LIMIT));
 

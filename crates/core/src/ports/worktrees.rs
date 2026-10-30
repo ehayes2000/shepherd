@@ -184,6 +184,27 @@ impl WorktreeStatus {
     }
 }
 
+impl WorktreeStatus {
+    /// What removing the worktree would lose beyond what `confirmed` (an earlier status) said it would: uncommitted
+    /// changes it didn't have, or more unpushed commits than it had.
+    pub fn losses_beyond(&self, confirmed: &WorktreeStatus) -> Vec<Loss> {
+        let unpushed = |s: &WorktreeStatus| {
+            s.losses().into_iter().find_map(|l| match l {
+                Loss::Unpushed { commits } => Some(commits),
+                Loss::UncommittedChanges => None,
+            })
+        };
+        let shown = unpushed(confirmed);
+        self.losses()
+            .into_iter()
+            .filter(|l| match l {
+                Loss::UncommittedChanges => !confirmed.dirty,
+                Loss::Unpushed { commits } => shown.is_none_or(|shown| *commits > shown),
+            })
+            .collect()
+    }
+}
+
 /// Something removing a worktree would lose, see [`WorktreeStatus::losses`]. Its text is for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loss {
