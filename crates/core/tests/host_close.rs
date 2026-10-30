@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, Inspect, Inspection, PreRemove, ResumeUnavailable,
+    Host, HostCommand, HostEvent, Inspect, Inspection, PreRemove, Remover, ResumeUnavailable,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{
@@ -98,7 +98,7 @@ fn inspected(
     result: Result<Inspection, WorktreeError>,
 ) -> Vec<HostCommand> {
     host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: path(),
         purpose,
         result,
@@ -150,7 +150,7 @@ fn hook(script: &str) -> CommandSpec {
 
 fn run_pre_remove(script: &str, rest: &[&str], force: bool) -> HostCommand {
     HostCommand::RunPreRemove {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         command: hook(script),
         rest: pre_remove(rest),
         path: path(),
@@ -166,7 +166,7 @@ fn hook_finished(
     result: Result<CommandOutput, CommandError>,
 ) -> Vec<HostCommand> {
     host.handle(HostEvent::PreRemoveFinished {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         command: hook(script),
         rest: pre_remove(rest),
         path: path(),
@@ -189,7 +189,7 @@ fn removed_with(
     exists: bool,
 ) -> Vec<HostCommand> {
     host.handle(HostEvent::WorktreeRemoved {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: path(),
         result,
         exists,
@@ -203,7 +203,7 @@ fn removed(host: &mut HostDriver, result: Result<(), WorktreeError>) -> Vec<Host
 
 fn remove(force: bool) -> HostCommand {
     HostCommand::RemoveWorktree {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: path(),
         force,
     }
@@ -236,7 +236,7 @@ fn closing_a_worktree_session_kills_its_pty_records_the_removal_and_inspects_the
                 json!({ "path": WORKTREE, "pre_remove": ["make clean"] })
             ),
             HostCommand::InspectWorktree {
-                session: sid("s1"),
+                remover: Remover::Session(sid("s1")),
                 repo: RepoRef::new(REPO),
                 path: path(),
                 purpose: close_purpose(None, &["make clean"]),
@@ -267,7 +267,7 @@ fn removing_anyway_records_a_forced_removal() {
         json!({ "path": WORKTREE, "force": true })
     )));
     assert!(commands.contains(&HostCommand::InspectWorktree {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         repo: RepoRef::new(REPO),
         path: path(),
         purpose: close_purpose(Some(everything()), &[]),
@@ -466,6 +466,18 @@ fn removing_anyway_forces_only_when_the_user_confirmed_uncommitted_changes() {
 }
 
 #[test]
+fn removing_anyway_doesnt_force_a_worktree_that_is_clean_by_now() {
+    // The user confirmed losing uncommitted changes, but they were committed since: nothing needs forcing.
+    let (mut host, _) = closing(remove_anyway(), &[]);
+    let found = inspected(
+        &mut host,
+        close_purpose(Some(everything()), &[]),
+        Ok(listed(Ok(status(false, 3, false, false)))),
+    );
+    assert_eq!(found, vec![remove(false)]);
+}
+
+#[test]
 fn removing_anyway_keeps_a_worktree_that_has_more_to_lose_than_the_user_confirmed() {
     // (confirmed, found now, why it's kept)
     let cases = [
@@ -494,14 +506,14 @@ fn removing_anyway_keeps_a_worktree_that_has_more_to_lose_than_the_user_confirme
         );
         assert_eq!(commands, vec![closed(false, Some(why))], "{now:?}");
     }
-    // Less to lose than confirmed is fine.
+    // Less to lose than confirmed is fine, and with nothing uncommitted left nothing needs forcing (T25b).
     let (mut host, _) = closing(remove_anyway(), &[]);
     let found = inspected(
         &mut host,
         close_purpose(Some(everything()), &[]),
         Ok(listed(Ok(clean_merged()))),
     );
-    assert_eq!(found, vec![remove(true)]);
+    assert_eq!(found, vec![remove(false)]);
 }
 
 #[test]
@@ -653,7 +665,7 @@ fn not_a_repo_with_something_still_at_the_path_keeps_it_and_says_why() {
         exists: true,
     };
     let answer = host.handle(HostEvent::WorktreeInspected {
-        session: sid("s1"),
+        remover: Remover::Session(sid("s1")),
         path: path(),
         purpose: Inspect::Ask(reply),
         result: Ok(found),
@@ -723,7 +735,7 @@ fn asking_for_a_worktrees_status_inspects_it_and_answers_what_it_finds() {
     let commands = ask(&mut host, "s1");
     let [
         HostCommand::InspectWorktree {
-            session,
+            remover: Remover::Session(session),
             repo,
             path: at,
             purpose: purpose @ Inspect::Ask(reply),

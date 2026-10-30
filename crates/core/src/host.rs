@@ -71,6 +71,14 @@
 //! Pull requests: a session's branch's pull request is polled by [`pr::PrWatch`] beside the host, which appends
 //! `session/pr` when it changes; the host folds the latest into [`HostSession::pr`].
 //!
+//! Cleanup (T25b): a client can ask for the orphans (as the finder finds them) with each one's status
+//! ([`HostEvent::ListCleanup`]), and ask to remove one ([`HostEvent::RemoveOrphan`]). Removing an orphan takes the
+//! closing path above, with a [`Remover::Orphan`] in place of the session: `worktree/removing` in the host log records
+//! that it started (nothing may start in it until it ends), it is inspected, removed only if that loses nothing (never
+//! forced), after the workspace's pre-remove hooks, and kept if a session uses it by then; `worktree/removed` in the
+//! host log records how it went, and the client's request is answered with that. A host that restarts meanwhile records
+//! it kept. A stale session is cleaned up by closing it.
+//!
 //! Host state is only a fold over `_shepherd/*` frames and sessions' first user prompts (`docs/acpp.md`, "State is a
 //! fold"). [`Host::handle`] reads state and decides what to do. It never changes state: every change is a
 //! [`HostCommand::Append`] that the runtime seals, appends, and hands back to [`Host::apply`].
@@ -91,7 +99,7 @@ use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, Pr, SessionClosed, SessionCreated,
     SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
-    WorktreeCreated, WorktreeHook, WorktreeRemoving,
+    WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
 };
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
@@ -103,8 +111,8 @@ use crate::ports::worktrees::{
     WorktreePath, WorktreeStatus,
 };
 use crate::wire::{
-    CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeInfo, WorktreeListOk,
-    WorktreeStatusOk,
+    CleanupInfo, CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeCleanupOk,
+    WorktreeInfo, WorktreeListOk, WorktreeRemoveOk, WorktreeStatusOk,
 };
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
@@ -167,13 +175,30 @@ pub struct PreRemove {
     pub timeout: Duration,
 }
 
+/// Each listed worktree a [`HostCommand::InspectOrphans`] didn't skip, with its status or why it has none.
+pub type InspectedOrphans = Vec<(Worktree, Result<WorktreeStatus, WorktreeError>)>;
+
+/// Who is removing a worktree, and so who hears how it went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remover {
+    /// Closing this session: its `session/closed` records how it went.
+    Session(SessionId),
+    /// The cleanup view, removing an orphan worktree (one no open session uses) of workspace `repo` on `branch` (as
+    /// listed): `worktree/removed` in the host log records how it went, and `reply` is answered with it.
+    Orphan {
+        reply: ReplyTo,
+        repo: PathBuf,
+        branch: Option<String>,
+    },
+}
+
 /// Why a worktree is inspected ([`HostCommand::InspectWorktree`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inspect {
     /// A client asked what removing it would lose: answer it.
     Ask(ReplyTo),
-    /// Its session is closing: remove it after `hooks` if that loses nothing, or, with `confirmed` (what the user was
-    /// shown and chose to remove anyway), if it loses nothing beyond that.
+    /// Its session is closing (or the cleanup view is removing it): remove it after `hooks` if that loses nothing, or,
+    /// with `confirmed` (what the user was shown and chose to remove anyway), if it loses nothing beyond that.
     Close {
         confirmed: Option<WorktreeStatus>,
         hooks: PreRemove,
@@ -285,6 +310,23 @@ pub enum HostEvent {
         reply: ReplyTo,
         result: Result<Vec<Worktree>, WorktreeError>,
     },
+    /// A client asked for the current workspace's orphan worktrees with their status (the cleanup view). `after_days`
+    /// is the config's `cleanup_after_days`, passed back in the answer.
+    ListCleanup { reply: ReplyTo, after_days: u32 },
+    /// The answer to a [`HostCommand::InspectOrphans`]: each listed worktree it didn't skip, with its status.
+    OrphansInspected {
+        reply: ReplyTo,
+        after_days: u32,
+        result: Result<InspectedOrphans, WorktreeError>,
+    },
+    /// A client asked to remove `path`, an orphan worktree of the current workspace on `branch`, if that loses nothing.
+    /// `hooks` are the workspace's hooks, whose `pre_remove` run first.
+    RemoveOrphan {
+        reply: ReplyTo,
+        path: PathBuf,
+        branch: Option<String>,
+        hooks: WorkspaceHooks,
+    },
     /// Bytes a client typed into a session, and what made them. A notification: never answered.
     Input {
         session: SessionId,
@@ -340,14 +382,14 @@ pub enum HostEvent {
     /// The answer to a [`HostCommand::InspectWorktree`], with everything it carried. The outer error is the port
     /// failing to list the repo's worktrees.
     WorktreeInspected {
-        session: SessionId,
+        remover: Remover,
         path: WorktreePath,
         purpose: Inspect,
         result: Result<Inspection, WorktreeError>,
     },
     /// The answer to a [`HostCommand::RunPreRemove`], with everything it carried.
     PreRemoveFinished {
-        session: SessionId,
+        remover: Remover,
         command: CommandSpec,
         rest: PreRemove,
         path: WorktreePath,
@@ -356,7 +398,7 @@ pub enum HostEvent {
     },
     /// The answer to a [`HostCommand::RemoveWorktree`]. `exists`: something is still at the path afterwards.
     WorktreeRemoved {
-        session: SessionId,
+        remover: Remover,
         path: WorktreePath,
         result: Result<(), WorktreeError>,
         exists: bool,
@@ -439,12 +481,12 @@ pub enum HostCommand {
         spawn: SpawnSpec,
     },
     /// Find out whether `path` is one of `repo`'s managed worktrees (`Worktrees::list_managed`), and if so its status,
-    /// and feed the answer back as [`HostEvent::WorktreeInspected`] with the same `session`, `path` and `purpose`.
+    /// and feed the answer back as [`HostEvent::WorktreeInspected`] with the same `remover`, `path` and `purpose`.
     /// Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`]. A close's inspection ([`Inspect::Close`]) of a
     /// session whose hook is running (cancelled by that close) starts only once the hook has answered, so it sees
     /// what the hook left.
     InspectWorktree {
-        session: SessionId,
+        remover: Remover,
         repo: RepoRef,
         path: WorktreePath,
         purpose: Inspect,
@@ -456,11 +498,20 @@ pub enum HostCommand {
         reply: ReplyTo,
         repo: RepoRef,
     },
+    /// List `repo`'s managed worktrees (`Worktrees::list_managed`), find the status of each one not in `skip` (the
+    /// worktrees and cwds of sessions that aren't closed), and feed them back as [`HostEvent::OrphansInspected`] with
+    /// the same `reply` and `after_days`. Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    InspectOrphans {
+        reply: ReplyTo,
+        repo: RepoRef,
+        skip: Vec<PathBuf>,
+        after_days: u32,
+    },
     /// Run a pre-remove hook with the `Commands` port, and feed the result back as [`HostEvent::PreRemoveFinished`]
-    /// with the same `session`, `command`, `rest` (the hooks after it), `path` and `force` (how to remove the worktree
+    /// with the same `remover`, `command`, `rest` (the hooks after it), `path` and `force` (how to remove the worktree
     /// once they are done). Runs off the runtime thread, like [`HostCommand::RunHook`].
     RunPreRemove {
-        session: SessionId,
+        remover: Remover,
         command: CommandSpec,
         rest: PreRemove,
         path: WorktreePath,
@@ -469,7 +520,7 @@ pub enum HostCommand {
     /// Remove worktree `path` (`Worktrees::remove`), and feed the result back as [`HostEvent::WorktreeRemoved`]. Runs
     /// off the runtime thread, like [`HostCommand::ProbeWorkspace`].
     RemoveWorktree {
-        session: SessionId,
+        remover: Remover,
         path: WorktreePath,
         force: bool,
     },
@@ -556,6 +607,8 @@ struct Entry {
     removing: bool,
     /// From the latest `session/pr`.
     pr: Option<Pr>,
+    /// When its PTY exited (or it failed to start), while it is exited: the `ts` of that entry.
+    exited_at: Option<Timestamp>,
 }
 
 impl Entry {
@@ -625,6 +678,9 @@ pub struct Host {
     workspaces: Vec<PathBuf>,
     /// Every branch a session was given (`session/created`) or got (`worktree/created`), closed sessions' included.
     branches: BTreeSet<String>,
+    /// Orphan worktrees the cleanup view is removing: a `worktree/removing` in the host log, until its
+    /// `worktree/removed`.
+    cleaning: BTreeSet<PathBuf>,
 }
 
 impl Host {
@@ -675,6 +731,12 @@ impl Host {
     /// What resuming open session `id` runs, or why it can't be resumed. `None` for a session that isn't open.
     pub fn resume_target(&self, id: &SessionId) -> Option<Result<ResumeTarget, ResumeUnavailable>> {
         self.open(id).map(Entry::resume_target)
+    }
+
+    /// When open session `id`'s PTY exited, or it failed to start: the `ts` of that entry. `None` while it isn't exited
+    /// (a resume runs it again), and for a session that isn't open.
+    pub fn exited_at(&self, id: &SessionId) -> Option<&Timestamp> {
+        self.open(id).and_then(|e| e.exited_at.as_ref())
     }
 
     /// The workspace open session `id` was created in, if any. `None` for a session that isn't open.
@@ -738,6 +800,13 @@ impl Host {
                 {
                     let error = WireError::InvalidParams(format!(
                         "{} is being removed by closing {closing}",
+                        spec.spawn.cwd.display()
+                    ));
+                    return vec![reply_err(reply, error)];
+                }
+                if spec.explicit_cwd && self.cleaning.contains(&spec.spawn.cwd) {
+                    let error = WireError::InvalidParams(format!(
+                        "{} is being removed by cleanup",
                         spec.spawn.cwd.display()
                     ));
                     return vec![reply_err(reply, error)];
@@ -814,7 +883,7 @@ impl Host {
                     return vec![reply_err(reply, error)];
                 };
                 vec![HostCommand::InspectWorktree {
-                    session,
+                    remover: Remover::Session(session),
                     repo: RepoRef::new(repo),
                     path: WorktreePath::new(path),
                     purpose: Inspect::Ask(reply),
@@ -837,6 +906,40 @@ impl Host {
                     Err(error) => Err(WireError::InvalidParams(error.to_string())),
                 },
             }],
+            HostEvent::ListCleanup { reply, after_days } => match self.workspace() {
+                Some(repo) => vec![HostCommand::InspectOrphans {
+                    reply,
+                    repo: RepoRef::new(repo),
+                    skip: self.in_use(),
+                    after_days,
+                }],
+                None => vec![HostCommand::Reply {
+                    to: reply,
+                    result: Ok(HostResult::WorktreeCleanup(WorktreeCleanupOk {
+                        worktrees: Vec::new(),
+                        cleanup_after_days: after_days,
+                    })),
+                }],
+            },
+            HostEvent::OrphansInspected {
+                reply,
+                after_days,
+                result,
+            } => vec![HostCommand::Reply {
+                to: reply,
+                result: match result {
+                    Ok(found) => Ok(HostResult::WorktreeCleanup(
+                        self.cleanup_list(found, after_days),
+                    )),
+                    Err(error) => Err(WireError::InvalidParams(error.to_string())),
+                },
+            }],
+            HostEvent::RemoveOrphan {
+                reply,
+                path,
+                branch,
+                hooks,
+            } => self.remove_orphan(reply, path, branch, hooks),
             HostEvent::Hook {
                 reply,
                 session,
@@ -960,7 +1063,7 @@ impl Host {
             } => self.hook_finished(session, command, rest, spawn, result),
             HostEvent::HookTranslated { session } => self.auto_rename(session),
             HostEvent::WorktreeInspected {
-                session: _,
+                remover: _,
                 path,
                 purpose: Inspect::Ask(reply),
                 result,
@@ -969,44 +1072,52 @@ impl Host {
                 result: status_answer(&path, result),
             }],
             HostEvent::WorktreeInspected {
-                session,
+                remover,
                 path,
                 purpose: Inspect::Close { confirmed, hooks },
                 result,
-            } => self.worktree_inspected(session, path, confirmed, hooks, result),
+            } => self.worktree_inspected(remover, path, confirmed, hooks, result),
             HostEvent::PreRemoveFinished {
-                session,
+                remover,
                 command,
                 rest,
                 path,
                 force,
                 result,
-            } => self.pre_remove_finished(session, command, rest, path, force, result),
+            } => self.pre_remove_finished(remover, command, rest, path, force, result),
             HostEvent::WorktreeRemoved {
-                session,
-                path: _,
+                remover,
+                path,
                 result,
                 exists,
             } => {
-                if !self.removing(&session) {
+                if !self.removal_live(&remover, &path) {
                     return Vec::new();
                 }
                 match result {
-                    Ok(()) => vec![closed(&session, true, None)],
+                    Ok(()) => finish(&remover, &path, true, None),
                     // Already gone: nothing was lost and nothing is left.
-                    Err(error) if is_gone(&error, exists) => vec![closed(&session, false, None)],
-                    Err(error) => vec![closed(&session, false, Some(error.to_string()))],
+                    Err(error) if is_gone(&error, exists) => finish(&remover, &path, false, None),
+                    Err(error) => finish(&remover, &path, false, Some(error.to_string())),
                 }
             }
-            HostEvent::Restarted => self
-                .sessions
-                .iter()
-                .filter(|(_, e)| e.removing && !e.closed)
-                .map(|(id, _)| {
-                    let why = "the host stopped before the worktree was removed";
-                    closed(id, false, Some(why.to_owned()))
-                })
-                .collect(),
+            HostEvent::Restarted => {
+                let why = || Some("the host stopped before the worktree was removed".to_owned());
+                let sessions = self
+                    .sessions
+                    .iter()
+                    .filter(|(_, e)| e.removing && !e.closed)
+                    .map(|(id, _)| closed(id, false, why()));
+                // The cleanup view's requests went with the old host: only the record is left to end.
+                let orphans = self.cleaning.iter().map(|path| {
+                    append_host(ShepherdFrame::WorktreeRemoved(WorktreeRemoved {
+                        path: path.to_string_lossy().into_owned(),
+                        removed: false,
+                        kept: why(),
+                    }))
+                });
+                sessions.chain(orphans).collect()
+            }
         }
     }
 
@@ -1058,7 +1169,7 @@ impl Host {
         });
         commands.push(append(&session, removing));
         commands.push(HostCommand::InspectWorktree {
-            session: session.clone(),
+            remover: Remover::Session(session.clone()),
             repo: RepoRef::new(repo),
             path: WorktreePath::new(path),
             purpose: Inspect::Close {
@@ -1073,23 +1184,73 @@ impl Host {
         commands
     }
 
-    /// Decides on a closing session's worktree from what inspecting it found: remove it (its pre-remove hooks first),
-    /// or close keeping it. Without `confirmed` it is removed only if that loses nothing; with it, only if that loses
-    /// nothing the user wasn't shown, and the removal is forced only if the user confirmed losing uncommitted changes.
+    /// Asks to remove orphan worktree `path` of the current workspace: records that it is being removed, then inspects it
+    /// like a closing session's worktree. Refused while no workspace is selected, while a session that isn't closed uses
+    /// it, or while it is being removed already.
+    fn remove_orphan(
+        &self,
+        reply: ReplyTo,
+        path: PathBuf,
+        branch: Option<String>,
+        hooks: WorkspaceHooks,
+    ) -> Vec<HostCommand> {
+        let refuse = |why: String| vec![reply_err(reply, WireError::InvalidParams(why))];
+        let Some(repo) = self.workspace() else {
+            return refuse("no workspace is selected".to_owned());
+        };
+        let Some(text) = path.to_str() else {
+            return refuse(format!("{} is not a UTF-8 path", path.display()));
+        };
+        if let Some(user) = self.used_by(None, &path) {
+            return refuse(format!("{text} is in use by {user}"));
+        }
+        if self.cleaning.contains(&path) || self.removing_at(&path).is_some() {
+            return refuse(format!("{text} is already being removed"));
+        }
+        let removing = ShepherdFrame::WorktreeRemoving(WorktreeRemoving {
+            path: text.to_owned(),
+            force: false,
+            pre_remove: hooks.pre_remove.clone(),
+        });
+        vec![
+            append_host(removing),
+            HostCommand::InspectWorktree {
+                remover: Remover::Orphan {
+                    reply,
+                    repo: repo.to_path_buf(),
+                    branch,
+                },
+                repo: RepoRef::new(repo),
+                path: WorktreePath::new(path),
+                purpose: Inspect::Close {
+                    confirmed: None,
+                    hooks: PreRemove {
+                        hooks: hooks.pre_remove,
+                        timeout: hooks.timeout,
+                    },
+                },
+            },
+        ]
+    }
+
+    /// Decides on a worktree being removed from what inspecting it found: remove it (its pre-remove hooks first), or
+    /// keep it. Without `confirmed` it is removed only if that loses nothing; with it, only if that loses nothing the
+    /// user wasn't shown, and the removal is forced only past uncommitted changes the user confirmed losing that are
+    /// still there.
     fn worktree_inspected(
         &self,
-        session: SessionId,
+        remover: Remover,
         path: WorktreePath,
         confirmed: Option<WorktreeStatus>,
         hooks: PreRemove,
         result: Result<Inspection, WorktreeError>,
     ) -> Vec<HostCommand> {
-        if !self.removing(&session) {
+        if !self.removal_live(&remover, &path) {
             return Vec::new();
         }
-        // Another session may have started in it since the close began.
-        if let Some(why) = self.still_used(&session, path.as_path()) {
-            return vec![closed(&session, false, Some(why))];
+        // Another session may have started in it since the removal began.
+        if let Some(why) = self.still_in_use(&remover, path.as_path()) {
+            return finish(&remover, &path, false, Some(why));
         }
         let status = match result {
             Ok(Inspection::Listed {
@@ -1099,20 +1260,20 @@ impl Host {
                 status: Err(error),
                 exists,
             }) if is_gone(&error, exists) => {
-                return vec![closed(&session, false, None)];
+                return finish(&remover, &path, false, None);
             }
             Ok(Inspection::Unlisted { exists: false }) => {
-                return vec![closed(&session, false, None)];
+                return finish(&remover, &path, false, None);
             }
             Ok(Inspection::Unlisted { exists: true }) => {
                 let why = format!("{path} isn't a worktree shepherd manages");
-                return vec![closed(&session, false, Some(why))];
+                return finish(&remover, &path, false, Some(why));
             }
             Err(error)
             | Ok(Inspection::Listed {
                 status: Err(error), ..
             }) => {
-                return vec![closed(&session, false, Some(error.to_string()))];
+                return finish(&remover, &path, false, Some(error.to_string()));
             }
         };
         let (unconfirmed, why) = match confirmed {
@@ -1125,74 +1286,91 @@ impl Host {
         if !unconfirmed.is_empty() {
             let lost: Vec<String> = unconfirmed.iter().map(ToString::to_string).collect();
             let why = format!("it has {}{why}", lost.join(" and "));
-            return vec![closed(&session, false, Some(why))];
+            return finish(&remover, &path, false, Some(why));
         }
-        let force = confirmed.is_some_and(|c| c.dirty);
-        vec![self.next_pre_remove(session, path, force, hooks)]
+        // Forced only past uncommitted changes the user confirmed losing and that are still there.
+        let force = confirmed.is_some_and(|c| c.dirty) && status.dirty;
+        self.next_pre_remove(remover, path, force, hooks)
     }
 
-    /// Runs the first of `hooks` in closing session `session`'s worktree at `path`, or with none left removes it, unless
-    /// another session uses it by then, which keeps it.
+    /// Runs the first of `hooks` in the worktree at `path` being removed, or with none left removes it, unless a
+    /// session (another one, for a closing session) uses it by then, which keeps it.
     fn next_pre_remove(
         &self,
-        session: SessionId,
+        remover: Remover,
         path: WorktreePath,
         force: bool,
         mut hooks: PreRemove,
-    ) -> HostCommand {
+    ) -> Vec<HostCommand> {
         if hooks.hooks.is_empty() {
-            if let Some(why) = self.still_used(&session, path.as_path()) {
-                return closed(&session, false, Some(why));
+            if let Some(why) = self.still_in_use(&remover, path.as_path()) {
+                return finish(&remover, &path, false, Some(why));
             }
-            return HostCommand::RemoveWorktree {
-                session,
+            return vec![HostCommand::RemoveWorktree {
+                remover,
                 path,
                 force,
-            };
+            }];
         }
         let script = hooks.hooks.remove(0);
-        let entry = self.sessions.get(&session);
-        let branch = entry
-            .and_then(|e| e.worktree.as_ref())
-            .map(|(_, branch)| branch.as_str())
-            .unwrap_or_default();
-        let workspace = entry.and_then(|e| e.workspace.as_deref());
+        let env = match &remover {
+            Remover::Session(session) => {
+                let entry = self.sessions.get(session);
+                let branch = entry
+                    .and_then(|e| e.worktree.as_ref())
+                    .map(|(_, branch)| branch.as_str())
+                    .unwrap_or_default();
+                let workspace = entry.and_then(|e| e.workspace.as_deref());
+                hook_env(Some(session), &path.to_string(), branch, workspace)
+            }
+            Remover::Orphan { repo, branch, .. } => hook_env(
+                None,
+                &path.to_string(),
+                branch.as_deref().unwrap_or_default(),
+                Some(repo),
+            ),
+        };
         let command = CommandSpec {
             script,
             cwd: path.as_path().to_path_buf(),
-            env: hook_env(&session, &path.to_string(), branch, workspace),
+            env,
             timeout: hooks.timeout,
         };
-        HostCommand::RunPreRemove {
-            session,
+        vec![HostCommand::RunPreRemove {
+            remover,
             command,
             rest: hooks,
             path,
             force,
-        }
+        }]
     }
 
-    /// Records a pre-remove hook's result, then runs the next one or removes the worktree, or, if it failed, closes the
-    /// session keeping its worktree. Only a closing session takes a result.
+    /// Records a pre-remove hook's result (in the closing session's log, or the host log for an orphan), then runs the
+    /// next one or removes the worktree, or, if it failed, keeps the worktree. Only a removal still under way takes a
+    /// result.
     fn pre_remove_finished(
         &self,
-        session: SessionId,
+        remover: Remover,
         command: CommandSpec,
         rest: PreRemove,
         path: WorktreePath,
         force: bool,
         result: Result<CommandOutput, CommandError>,
     ) -> Vec<HostCommand> {
-        if !self.removing(&session) {
+        if !self.removal_live(&remover, &path) {
             return Vec::new();
         }
         let recorded = hook_record(&command, result);
         let failure = hook_failure(&recorded);
         let why = failure.map(|why| format!("pre_remove hook failed ({why}): {}", recorded.hook));
-        let mut commands = vec![append(&session, ShepherdFrame::WorktreeHook(recorded))];
+        let hook = ShepherdFrame::WorktreeHook(recorded);
+        let mut commands = vec![match &remover {
+            Remover::Session(session) => append(session, hook),
+            Remover::Orphan { .. } => append_host(hook),
+        }];
         match why {
-            Some(why) => commands.push(closed(&session, false, Some(why))),
-            None => commands.push(self.next_pre_remove(session, path, force, rest)),
+            Some(why) => commands.extend(finish(&remover, &path, false, Some(why))),
+            None => commands.extend(self.next_pre_remove(remover, path, force, rest)),
         }
         commands
     }
@@ -1273,7 +1451,7 @@ impl Host {
             return commands;
         }
         let env = hook_env(
-            &session,
+            Some(&session),
             &path,
             created.branch.as_str(),
             entry.workspace.as_deref(),
@@ -1388,10 +1566,20 @@ impl Host {
             _ => return,
         };
         let Some(id) = env.session() else {
-            if let ShepherdFrame::WorkspaceSelected(selected) = message.body() {
-                let repo = PathBuf::from(&selected.repo);
-                self.workspaces.retain(|w| *w != repo);
-                self.workspaces.insert(0, repo);
+            match message.body() {
+                ShepherdFrame::WorkspaceSelected(selected) => {
+                    let repo = PathBuf::from(&selected.repo);
+                    self.workspaces.retain(|w| *w != repo);
+                    self.workspaces.insert(0, repo);
+                }
+                // In the host log: the cleanup view removing an orphan worktree, until it says how that went.
+                ShepherdFrame::WorktreeRemoving(removing) => {
+                    self.cleaning.insert(PathBuf::from(&removing.path));
+                }
+                ShepherdFrame::WorktreeRemoved(removed) => {
+                    self.cleaning.remove(Path::new(&removed.path));
+                }
+                _ => {}
             }
             return;
         };
@@ -1429,6 +1617,7 @@ impl Host {
                     branch: created.branch.clone(),
                     removing: false,
                     pr: None,
+                    exited_at: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -1488,6 +1677,7 @@ impl Host {
                     && matches!(entry.phase, Phase::Starting | Phase::Hooks { .. })
                 {
                     entry.phase = Phase::Failed(failed.reason.clone());
+                    entry.exited_at = Some(env.ts().clone());
                 }
             }
             ShepherdFrame::AgentExited(_) if env.source().kind == SourceKind::Shepherd => {
@@ -1495,12 +1685,14 @@ impl Host {
                     && entry.phase == Phase::Running
                 {
                     entry.phase = Phase::Exited;
+                    entry.exited_at = Some(env.ts().clone());
                 }
             }
             ShepherdFrame::AgentStarted(started) => {
                 if let Some(entry) = self.sessions.get_mut(id) {
                     if env.source().kind == SourceKind::Shepherd && entry.phase == Phase::Exited {
                         entry.phase = Phase::Running;
+                        entry.exited_at = None;
                     }
                     if let Some(agent_session) = &started.agent_session_id {
                         entry.agent_session_id = Some(agent_session.clone());
@@ -1511,26 +1703,32 @@ impl Host {
         }
     }
 
-    /// The worktrees in `listed` (the current workspace's managed ones) that no session that isn't closed uses: as its
-    /// worktree or cwd ([`Host::used_by`]), or, for a worktree still being made in this workspace, by the branch it was
-    /// given. A path that isn't UTF-8 can't be a client's cwd, so it is left out.
-    fn orphans(&self, listed: Vec<Worktree>) -> WorktreeListOk {
+    /// Whether `w`, one of the current workspace's managed worktrees, is an orphan: no session that isn't closed uses it
+    /// (as its worktree or cwd, [`Host::used_by`]), or, while it is still being made in this workspace, by the branch it
+    /// was given; and the cleanup view isn't removing it.
+    fn is_orphan(&self, w: &Worktree) -> bool {
         let workspace = self.workspace();
-        let being_made = |w: &Worktree| {
-            self.sessions.values().any(|e| {
-                let same_branch = match (&e.branch, &w.branch) {
-                    (Some(theirs), Some(branch)) => theirs == branch.as_str(),
-                    _ => false,
-                };
-                !e.closed
-                    && e.phase == Phase::Starting
-                    && e.workspace.as_deref() == workspace
-                    && same_branch
-            })
-        };
+        let being_made = self.sessions.values().any(|e| {
+            let same_branch = match (&e.branch, &w.branch) {
+                (Some(theirs), Some(branch)) => theirs == branch.as_str(),
+                _ => false,
+            };
+            !e.closed
+                && e.phase == Phase::Starting
+                && e.workspace.as_deref() == workspace
+                && same_branch
+        });
+        self.used_by(None, w.path.as_path()).is_none()
+            && !being_made
+            && !self.cleaning.contains(w.path.as_path())
+    }
+
+    /// The orphans in `listed` (the current workspace's managed worktrees, [`Host::is_orphan`]). A path that isn't UTF-8
+    /// can't be a client's cwd, so it is left out.
+    fn orphans(&self, listed: Vec<Worktree>) -> WorktreeListOk {
         let worktrees = listed
             .into_iter()
-            .filter(|w| self.used_by(None, w.path.as_path()).is_none() && !being_made(w))
+            .filter(|w| self.is_orphan(w))
             .filter_map(|w| {
                 Some(WorktreeInfo {
                     path: w.path.as_path().to_str()?.to_owned(),
@@ -1569,6 +1767,68 @@ impl Host {
             .map(|other| format!("it is still in use by {other}"))
     }
 
+    /// Why `remover` keeps the worktree at `path`: a session (other than the one closing) uses it by now.
+    fn still_in_use(&self, remover: &Remover, path: &Path) -> Option<String> {
+        match remover {
+            Remover::Session(session) => self.still_used(session, path),
+            Remover::Orphan { .. } => self
+                .used_by(None, path)
+                .map(|user| format!("it is still in use by {user}")),
+        }
+    }
+
+    /// Whether `remover` is still removing the worktree at `path`: the session is closing, or the orphan is being
+    /// removed. A result for a removal that has ended does nothing.
+    fn removal_live(&self, remover: &Remover, path: &WorktreePath) -> bool {
+        match remover {
+            Remover::Session(session) => self.removing(session),
+            Remover::Orphan { .. } => self.cleaning.contains(path.as_path()),
+        }
+    }
+
+    /// Every path a session that isn't closed uses, as its worktree or its cwd: no orphans, so their status isn't asked.
+    fn in_use(&self) -> Vec<PathBuf> {
+        let used: BTreeSet<PathBuf> = self
+            .sessions
+            .values()
+            .filter(|e| !e.closed)
+            .flat_map(|e| {
+                let worktree = e.worktree.as_ref().map(|(path, _)| path.clone());
+                worktree.into_iter().chain(e.cwd.clone())
+            })
+            .collect();
+        used.into_iter().collect()
+    }
+
+    /// The cleanup view's list from the statuses found: the orphans among them ([`Host::is_orphan`]), each with its
+    /// status or why it has none.
+    fn cleanup_list(
+        &self,
+        found: Vec<(Worktree, Result<WorktreeStatus, WorktreeError>)>,
+        after_days: u32,
+    ) -> WorktreeCleanupOk {
+        let worktrees = found
+            .into_iter()
+            .filter(|(w, _)| self.is_orphan(w))
+            .filter_map(|(w, status)| {
+                let (status, error) = match status {
+                    Ok(status) => (Some(status), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                Some(CleanupInfo {
+                    path: w.path.as_path().to_str()?.to_owned(),
+                    branch: w.branch.map(|b| b.as_str().to_owned()),
+                    status,
+                    error,
+                })
+            })
+            .collect();
+        WorktreeCleanupOk {
+            worktrees,
+            cleanup_after_days: after_days,
+        }
+    }
+
     /// A session that exists and isn't closed or closing.
     fn open(&self, id: &SessionId) -> Option<&Entry> {
         self.sessions.get(id).filter(|e| !e.closed && !e.removing)
@@ -1593,18 +1853,21 @@ impl Host {
     }
 }
 
-/// The environment a worktree hook runs with, besides the host's own.
+/// The environment a worktree hook runs with, besides the host's own. An orphan's pre-remove hooks have no session.
 fn hook_env(
-    session: &SessionId,
+    session: Option<&SessionId>,
     path: &str,
     branch: &str,
     workspace: Option<&Path>,
 ) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("SHEPHERD_SESSION".to_owned(), session.to_string()),
+    let mut env: Vec<(String, String)> = session
+        .map(|s| ("SHEPHERD_SESSION".to_owned(), s.to_string()))
+        .into_iter()
+        .collect();
+    env.extend([
         ("SHEPHERD_WORKTREE".to_owned(), path.to_owned()),
         ("SHEPHERD_BRANCH".to_owned(), branch.to_owned()),
-    ];
+    ]);
     if let Some(repo) = workspace.and_then(Path::to_str) {
         env.push(("SHEPHERD_REPO".to_owned(), repo.to_owned()));
     }
@@ -1680,6 +1943,34 @@ fn status_answer(
         }
     };
     Ok(HostResult::WorktreeStatus(WorktreeStatusOk { status }))
+}
+
+/// What ends `remover`'s removal of the worktree at `path`: the session's `session/closed`, or for an orphan its
+/// `worktree/removed` in the host log and the answer to the cleanup view's request. Neither `removed` nor `kept`: it
+/// was already gone.
+fn finish(
+    remover: &Remover,
+    path: &WorktreePath,
+    removed: bool,
+    kept: Option<String>,
+) -> Vec<HostCommand> {
+    match remover {
+        Remover::Session(session) => vec![closed(session, removed, kept)],
+        Remover::Orphan { reply, .. } => vec![
+            append_host(ShepherdFrame::WorktreeRemoved(WorktreeRemoved {
+                path: path.as_path().to_string_lossy().into_owned(),
+                removed,
+                kept: kept.clone(),
+            })),
+            HostCommand::Reply {
+                to: *reply,
+                result: Ok(HostResult::WorktreeRemove(WorktreeRemoveOk {
+                    removed,
+                    kept,
+                })),
+            },
+        ],
+    }
 }
 
 /// The `session/closed` that ends session `id`.

@@ -73,8 +73,8 @@ use shepherd_core::host::pr::{PrEvent, PrWatch};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::upgrade::{Preflight, UpgradeFacts, UpgradeStep, Work, decide};
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, Inspect, Inspection, NewSessionSpec, ReplyTo, ResumeSpec,
-    WorkspaceAsk, expand_home,
+    Host, HostCommand, HostEvent, Inspect, InspectedOrphans, Inspection, NewSessionSpec, Remover,
+    ReplyTo, ResumeSpec, WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
@@ -391,6 +391,9 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
     /// `Commands` calls (hooks) running and not yet answered, by session (a session runs one hook at a time), for
     /// `Commands::cancel`.
     hooks: HashMap<SessionId, RunId>,
+    /// Pre-remove hooks of orphan worktrees the cleanup view is removing, running and not yet answered, by the request
+    /// they answer, so shutdown can cancel them too.
+    cleanup_hooks: HashMap<ReplyTo, RunId>,
     /// A close's inspection of a session whose hook (cancelled by that close) hasn't answered yet: it starts once the
     /// hook has, so it sees what the hook left.
     after_hook: HashMap<SessionId, HostCommand>,
@@ -524,6 +527,7 @@ impl<
             worktree_calls: 0,
             commands,
             hooks: HashMap::new(),
+            cleanup_hooks: HashMap::new(),
             after_hook: HashMap::new(),
             forge,
             forge_calls: 0,
@@ -778,7 +782,10 @@ impl<
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
             self.run_until_idle();
-            let calls = self.worktree_calls + self.hooks.len() + self.forge_calls;
+            let calls = self.worktree_calls
+                + self.hooks.len()
+                + self.cleanup_hooks.len()
+                + self.forge_calls;
             if calls == 0 && !self.preflighting || self.finished {
                 return true;
             }
@@ -851,7 +858,17 @@ impl<
             RuntimeEvent::Commands(event) => {
                 let session = match &event {
                     HostEvent::HookFinished { session, .. }
-                    | HostEvent::PreRemoveFinished { session, .. } => Some(session.clone()),
+                    | HostEvent::PreRemoveFinished {
+                        remover: Remover::Session(session),
+                        ..
+                    } => Some(session.clone()),
+                    HostEvent::PreRemoveFinished {
+                        remover: Remover::Orphan { reply, .. },
+                        ..
+                    } => {
+                        self.cleanup_hooks.remove(reply);
+                        None
+                    }
                     _ => None,
                 };
                 if let Some(session) = &session {
@@ -1144,20 +1161,20 @@ impl<
                     }
                 }
                 HostCommand::InspectWorktree {
-                    ref session,
+                    remover: Remover::Session(ref session),
                     purpose: Inspect::Close { .. },
                     ..
                 } if self.hooks.contains_key(session) => {
                     self.after_hook.insert(session.clone(), command);
                 }
                 HostCommand::InspectWorktree {
-                    session,
+                    remover,
                     repo,
                     path,
                     purpose,
                 } => {
                     let panicked = HostEvent::WorktreeInspected {
-                        session: session.clone(),
+                        remover: remover.clone(),
                         path: path.clone(),
                         purpose: purpose.clone(),
                         result: Err(WorktreeError::Other(format!(
@@ -1166,7 +1183,7 @@ impl<
                     };
                     let call = move |worktrees: &W| HostEvent::WorktreeInspected {
                         result: inspect_worktree(worktrees, &repo, &path),
-                        session,
+                        remover,
                         path,
                         purpose,
                     };
@@ -1197,15 +1214,41 @@ impl<
                         }
                     }
                 }
+                HostCommand::InspectOrphans {
+                    reply,
+                    repo,
+                    skip,
+                    after_days,
+                } => {
+                    let panicked = HostEvent::OrphansInspected {
+                        reply,
+                        after_days,
+                        result: Err(WorktreeError::Other(format!(
+                            "inspecting the worktrees of {repo} failed unexpectedly"
+                        ))),
+                    };
+                    let call = move |worktrees: &W| HostEvent::OrphansInspected {
+                        reply,
+                        after_days,
+                        result: inspect_orphans(worktrees, &repo, &skip),
+                    };
+                    match self.worktrees.submit(call, panicked) {
+                        Ok(()) => self.worktree_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the worktrees thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
                 HostCommand::RunPreRemove {
-                    session,
+                    remover,
                     command,
                     rest,
                     path,
                     force,
                 } => {
                     let panicked = HostEvent::PreRemoveFinished {
-                        session: session.clone(),
+                        remover: remover.clone(),
                         command: command.clone(),
                         rest: rest.clone(),
                         path: path.clone(),
@@ -1214,30 +1257,42 @@ impl<
                             "running it failed unexpectedly".into(),
                         )),
                     };
-                    let (id, thread) = self.next_hook(&session);
-                    let running = session.clone();
+                    let id = self.commands.port().new_run();
+                    let (thread, running) = match &remover {
+                        Remover::Session(session) => {
+                            (format!("hook-{session}"), Remover::Session(session.clone()))
+                        }
+                        Remover::Orphan { reply, .. } => {
+                            (format!("pre-remove-{}", reply.get()), remover.clone())
+                        }
+                    };
                     let call = move |commands: &C| HostEvent::PreRemoveFinished {
                         result: commands.run(id, &command),
-                        session,
+                        remover,
                         command,
                         rest,
                         path,
                         force,
                     };
                     match self.commands.run_alone(&thread, call, panicked) {
-                        Ok(()) => {
-                            self.hooks.insert(running, id);
-                        }
+                        Ok(()) => match running {
+                            Remover::Session(session) => {
+                                self.hooks.insert(session, id);
+                            }
+                            Remover::Orphan { reply, .. } => {
+                                self.cleanup_hooks.insert(reply, id);
+                            }
+                        },
                         Err(unanswered) => follow_up.push_back(*unanswered),
                     }
                 }
                 HostCommand::RemoveWorktree {
-                    session,
+                    remover,
                     path,
                     force,
                 } => {
                     let panicked = HostEvent::WorktreeRemoved {
-                        session: session.clone(),
+                        remover: remover.clone(),
                         path: path.clone(),
                         result: Err(WorktreeError::Other(format!(
                             "removing worktree {path} failed unexpectedly"
@@ -1249,7 +1304,7 @@ impl<
                         HostEvent::WorktreeRemoved {
                             exists: anything_at(&path),
                             result,
-                            session,
+                            remover,
                             path,
                         }
                     };
@@ -1649,6 +1704,25 @@ impl<
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::ListWorktrees { reply });
             }
+            ClientRequest::WorktreeCleanup(_) => {
+                let reply = self.reply_to(conn, id);
+                let after_days = self.settings.config.cleanup_after_days();
+                self.dispatch(HostEvent::ListCleanup { reply, after_days });
+            }
+            ClientRequest::WorktreeRemove(remove) => {
+                let reply = self.reply_to(conn, id);
+                // The hooks of the current workspace, whose worktree it is, as the config says now.
+                let hooks = match self.host.workspace() {
+                    Some(workspace) => self.settings.config.workspace_hooks(workspace),
+                    None => WorkspaceHooks::default(),
+                };
+                self.dispatch(HostEvent::RemoveOrphan {
+                    reply,
+                    path: PathBuf::from(remove.path),
+                    branch: remove.branch,
+                    hooks,
+                });
+            }
             ClientRequest::WorkspaceSelect(select) => {
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::SelectWorkspace {
@@ -1711,7 +1785,7 @@ impl<
             installed,
             force: pending.force,
             work: Work {
-                port_calls: self.worktree_calls + self.hooks.len(),
+                port_calls: self.worktree_calls + self.hooks.len() + self.cleanup_hooks.len(),
                 run_files: self.pending_run_files(),
             },
             failed,
@@ -2149,7 +2223,7 @@ impl<
         }
         // Hooks run in sessions of their own, so one left running would outlive the host too. Each answers once its
         // process group is gone, and the shutdown waits for that.
-        for id in self.hooks.values() {
+        for id in self.hooks.values().chain(self.cleanup_hooks.values()) {
             self.commands.port().cancel(*id);
         }
         let live: Vec<SessionId> = self.screens.keys().cloned().collect();
@@ -2162,7 +2236,11 @@ impl<
     }
 
     fn check_shutdown_done(&mut self) {
-        if self.shutdown_by.is_some() && self.screens.is_empty() && self.hooks.is_empty() {
+        if self.shutdown_by.is_some()
+            && self.screens.is_empty()
+            && self.hooks.is_empty()
+            && self.cleanup_hooks.is_empty()
+        {
             self.finish();
         }
     }
@@ -2216,6 +2294,23 @@ fn inspect_worktree(
     }
     let exists = anything_at(path);
     Ok(Inspection::Unlisted { exists })
+}
+
+/// `repo`'s managed worktrees that aren't in `skip`, each with its status. Runs on the worker thread.
+fn inspect_orphans(
+    worktrees: &impl Worktrees,
+    repo: &RepoRef,
+    skip: &[PathBuf],
+) -> Result<InspectedOrphans, WorktreeError> {
+    let listed = worktrees.list_managed(repo)?;
+    Ok(listed
+        .into_iter()
+        .filter(|w| !skip.iter().any(|s| s == w.path.as_path()))
+        .map(|w| {
+            let status = worktrees.status(&w.path);
+            (w, status)
+        })
+        .collect())
 }
 
 /// Whether anything (a symlink included, not followed) is at `path`.

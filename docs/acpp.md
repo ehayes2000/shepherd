@@ -81,7 +81,8 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
 | `_shepherd/worktree/created`  | `{ path, branch, base, fetch_error?, post_create? }` (`path` is the session's cwd from then on; `fetch_error`: `base` is as last fetched, or local; `post_create`: the hooks run there before the PTY spawns, each then a `worktree/hook`) |
 | `_shepherd/worktree/hook`     | `{ hook, exit_code?, output_tail, error? }` (`output_tail`: the last 4 KiB, control characters stripped; `error`: why it didn't exit normally or couldn't run, e.g. a timeout) |
-| `_shepherd/worktree/removing` | `{ path, force?, pre_remove? }` (closing is removing the session's worktree: `force` even if that loses work; `pre_remove`: the hooks run there first, each then a `worktree/hook`; `session/closed` ends it) |
+| `_shepherd/worktree/removing` | `{ path, force?, pre_remove? }` (closing is removing the session's worktree: `force` even if that loses work; `pre_remove`: the hooks run there first, each then a `worktree/hook`; `session/closed` ends it. In the host log: the cleanup view is removing an orphan worktree, its hooks' `worktree/hook`s in the host log too, and `worktree/removed` ends it) |
+| `_shepherd/worktree/removed`  | `{ path, removed: bool, kept? }` (host log: how removing the orphan worktree at `path` went; neither `removed` nor `kept`: it was already gone) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.

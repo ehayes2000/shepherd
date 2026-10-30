@@ -10,10 +10,10 @@ expression: "text(&buffer(&confirming(status(false, 1, false)), WIDE))"
                        │
                        │
                        │
-                       │
                 ┌ close session ───────────────────────────────┐
                 │Close refactor? Its agent is stopped.         │
                 │1 commit not pushed — the branch is kept.     │
+                │Its ignored files are removed too.            │
                 │enter keeps the worktree · esc cancels        │
                 │   [Remove anyway]  [Keep worktree]  [Cancel] │
                 └──────────────────────────────────────────────┘
@@ -25,4 +25,4 @@ expression: "text(&buffer(&confirming(status(false, 1, false)), WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Cleanup       Detach ?│

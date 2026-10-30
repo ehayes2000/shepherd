@@ -256,9 +256,15 @@ impl FakeHost {
                     )),
                 }
             }
-            // Nor has it any to list.
+            // Nor has it any to list, or to remove.
             ClientRequest::WorktreeList(_) => Ok(HostResult::WorktreeList(
                 shepherd_core::wire::WorktreeListOk::default(),
+            )),
+            ClientRequest::WorktreeCleanup(_) => Ok(HostResult::WorktreeCleanup(
+                shepherd_core::wire::WorktreeCleanupOk::default(),
+            )),
+            ClientRequest::WorktreeRemove(_) => Ok(HostResult::WorktreeRemove(
+                shepherd_core::wire::WorktreeRemoveOk::default(),
             )),
         };
         let fresh = self.driver.log()[before..].to_vec();

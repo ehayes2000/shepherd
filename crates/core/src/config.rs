@@ -34,6 +34,8 @@ pub struct RawDefaults {
     pub agent: Option<String>,
     /// Applied to every profile, underneath the profile's own `env`.
     pub env: Option<BTreeMap<String, String>>,
+    /// How many days after its PTY exited a session whose branch is merged counts as stale in the cleanup view.
+    pub cleanup_after_days: Option<u32>,
 }
 
 /// `[agents.<name>]`.
@@ -273,8 +275,12 @@ pub struct Config {
     profiles: BTreeMap<String, AgentProfile>,
     key_prefix: KeyPrefix,
     notify_bell: bool,
+    cleanup_after_days: u32,
     workspaces: Vec<(WorkspaceKey, WorkspaceHooks)>,
 }
+
+/// How many days after its PTY exited a session whose branch is merged counts as stale, when the config doesn't say.
+pub const DEFAULT_CLEANUP_AFTER_DAYS: u32 = 7;
 
 /// The built-in default agent.
 pub const DEFAULT_AGENT: &str = "claude";
@@ -297,6 +303,7 @@ impl Config {
     /// - `[defaults] agent` defaults to `claude` and must name a resulting profile.
     /// - `[keys] prefix` defaults to `ctrl-b` and must be `ctrl-<a..z>` or `ctrl-space`.
     /// - `[notify] bell` defaults to off.
+    /// - `[defaults] cleanup_after_days` defaults to [`DEFAULT_CLEANUP_AFTER_DAYS`].
     /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
     /// - `[workspaces."<key>"]`: `<key>` is an absolute repo path (it has a `/`) or a repo directory's name. Hooks
     ///   must not be empty, and `hook_timeout_s` defaults to [`DEFAULT_HOOK_TIMEOUT`] and must be more than 0.
@@ -324,6 +331,9 @@ impl Config {
             profile.env = env;
         }
 
+        let cleanup_after_days = defaults
+            .cleanup_after_days
+            .unwrap_or(DEFAULT_CLEANUP_AFTER_DAYS);
         let default_name = defaults.agent.unwrap_or_else(|| DEFAULT_AGENT.to_owned());
         let default_agent = profiles
             .get(&default_name)
@@ -347,6 +357,7 @@ impl Config {
             profiles,
             key_prefix,
             notify_bell: raw.notify.and_then(|n| n.bell).unwrap_or(false),
+            cleanup_after_days,
             workspaces,
         })
     }
@@ -380,6 +391,12 @@ impl Config {
     /// Whether a client rings the bell when a session starts wanting the user (`[notify] bell`).
     pub fn notify_bell(&self) -> bool {
         self.notify_bell
+    }
+
+    /// How many days after its PTY exited a session whose branch is merged counts as stale in the cleanup view
+    /// (`[defaults] cleanup_after_days`).
+    pub fn cleanup_after_days(&self) -> u32 {
+        self.cleanup_after_days
     }
 
     /// The hooks of the workspace whose repo is at `repo` (as resolved, symlinks followed): the table whose key is

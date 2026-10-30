@@ -7,7 +7,8 @@
 //! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a press of the same button
 //! that went down on the same control ([`Pointer`] remembers it). A left click presses the control; a right click on a
 //! session opens its context menu at the click. Under an open popup, a click outside it dismisses it. The wheel
-//! scrolls the sidebar when no popup is open, and the profile picker, the workspace switcher or the finder over it. Only a session
+//! scrolls the sidebar when no popup is open, and the profile picker, the workspace switcher, the finder or the cleanup
+//! view over it. Only a session
 //! that tracks the mouse gets mouse events in its pane.
 //!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
@@ -23,7 +24,7 @@ use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
 use crate::layout::{Target, hit, layout, pane_size, sidebar_rows};
-use crate::{finder, popup};
+use crate::{cleanup, finder, popup};
 
 /// The prefix key. Configurable later.
 pub const PREFIX: char = 'b';
@@ -166,6 +167,7 @@ fn map_mouse(
                 | Target::RemoveWorktree
                 | Target::KeepWorktree
                 | Target::RestartHost
+                | Target::CleanupRemoveSafe
         )
     );
     let scroll_popup = |by| match client.popup() {
@@ -180,6 +182,10 @@ fn map_mouse(
         Some(Popup::Finder { .. }) if over_popup => {
             let shown = finder::rows(client, window);
             vec![Intent::ScrollFinder { by, shown }]
+        }
+        Some(Popup::Cleanup) if over_popup => {
+            let shown = cleanup::rows(client, window);
+            vec![Intent::ScrollCleanup { by, shown }]
         }
         _ => Vec::new(),
     };
@@ -237,6 +243,8 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::RestartHost => vec![Intent::RestartHost],
         Target::OfferRestart => vec![Intent::OfferRestart],
         Target::ShowHostWarning => vec![Intent::ShowHostWarning],
+        Target::Cleanup => vec![Intent::BeginCleanup],
+        Target::CleanupRemoveSafe => vec![Intent::CleanupRemoveSafe],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::Popup => Vec::new(),
@@ -298,7 +306,8 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
             KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
             _ => None,
         },
-        Popup::Menu { .. } | Popup::PickProfile => {
+        // Only a click removes anything.
+        Popup::Menu { .. } | Popup::PickProfile | Popup::Cleanup => {
             (key.code == KeyCode::Esc).then_some(Intent::Dismiss)
         }
         // Only a click restarts the host.

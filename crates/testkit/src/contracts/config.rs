@@ -123,6 +123,7 @@ pre_remove = ["make clean"]
             defaults: Some(RawDefaults {
                 agent: Some("yolo".into()),
                 env: Some(map(&[("TERM_PROGRAM", "shepherd")])),
+                cleanup_after_days: None,
             }),
             agents: Some(BTreeMap::from([
                 (

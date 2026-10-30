@@ -90,6 +90,10 @@ pub enum Target {
     OfferRestart,
     /// The sidebar footer's `Host warning`, while the host warns about something: shows it again.
     ShowHostWarning,
+    /// The sidebar footer's `Cleanup`: opens the cleanup view.
+    Cleanup,
+    /// The cleanup view's `[Remove safe]`.
+    CleanupRemoveSafe,
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

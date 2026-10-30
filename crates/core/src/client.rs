@@ -39,12 +39,25 @@
 //! ([`Popup::StartInWorktree`]), which asks for one with that worktree as its cwd and its branch, so the host makes no
 //! new worktree and records the branch.
 //!
+//! Cleanup (T25b): the sidebar's `Cleanup` button opens the cleanup view ([`Popup::Cleanup`]), which asks the host for
+//! the workspace's orphan worktrees with their status (`_shepherd/worktree/cleanup`), then for the status of each stale
+//! session: one with a worktree in the current workspace whose PTY exited at least the host's `cleanup_after_days`
+//! before the latest [`ClientEvent::Tick`], listed only if its branch is merged. Removing the safe rows
+//! ([`CleanupRow::safe`]) removes them one at a time, each through the host's own checks: an orphan with
+//! `_shepherd/worktree/remove`, a stale session by closing it (its `session/closed` says how that went). Each row says
+//! how its removal went. Closing the view stops nothing; when the removals end while it is closed, a notice sums them
+//! up. A dropped link ends the removal under way and unqueues the rest.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
+pub mod cleanup;
 pub mod finder;
 
+pub use cleanup::{CleanupCheck, CleanupItem, CleanupListing, CleanupOutcome, CleanupRow};
 pub use finder::{FinderItem, Orphan, Orphans};
+
+use cleanup::{Cleanup, Removal};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -62,7 +75,7 @@ use crate::wire::{
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
     ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename,
     SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, WireError,
-    WorkspaceSelect, WorktreeCheck, WorktreeList,
+    WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeList, WorktreeRemove,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -185,6 +198,17 @@ pub enum Intent {
     CloseRemovingWorktree,
     /// Close the session of the open close confirmation, keeping its worktree.
     CloseKeepingWorktree,
+    /// Open the cleanup view (the sidebar's `Cleanup` button), and ask the host what there is to clean, unless removals
+    /// are still running, whose rows it shows instead.
+    BeginCleanup,
+    /// Remove every safe row of the open cleanup view, one at a time. Ignored when it isn't open.
+    CleanupRemoveSafe,
+    /// Scroll the open cleanup view's rows by `by` (down for positive), when it shows `shown` at once, from the TUI's
+    /// layout. Ignored when it isn't open.
+    ScrollCleanup {
+        by: i32,
+        shown: usize,
+    },
     /// Close the open popup or menu without doing anything.
     Dismiss,
     /// Reopen the restart dialog, when the host should be restarted ([`Client::restart_offer`]); ignored otherwise.
@@ -293,6 +317,8 @@ pub enum Popup {
     StartInWorktree {
         worktree: Orphan,
     },
+    /// The cleanup view: [`Client::cleanup_rows`].
+    Cleanup,
 }
 
 /// Why the restart dialog offers to restart the host (spike T36's table).
@@ -447,6 +473,10 @@ pub struct Client {
     default_profile: Option<String>,
     /// Alert when a session newly wants the user, from the host's hello answer.
     bell: bool,
+    /// The cleanup view's rows and removals.
+    cleanup: Cleanup,
+    /// The latest tick's time: what stale sessions are measured against.
+    now: Option<jiff::Timestamp>,
 }
 
 /// Asking a stale host to update itself in place.
@@ -516,6 +546,8 @@ impl Client {
             profiles: Vec::new(),
             default_profile: None,
             bell: false,
+            cleanup: Cleanup::default(),
+            now: None,
         }
     }
 
@@ -637,6 +669,27 @@ impl Client {
         }
     }
 
+    /// The cleanup view's rows: orphans in the host's order, then stale sessions. They stay while removals run, the view
+    /// closed or not, until it is opened again with none running.
+    pub fn cleanup_rows(&self) -> &[CleanupRow] {
+        &self.cleanup.rows
+    }
+
+    /// Where listing the cleanup view's rows is, once it has been opened.
+    pub fn cleanup_listing(&self) -> Option<&CleanupListing> {
+        self.cleanup.listing.as_ref()
+    }
+
+    /// How many rows [`Intent::CleanupRemoveSafe`] would remove.
+    pub fn cleanup_safe(&self) -> usize {
+        self.cleanup.rows.iter().filter(|r| r.safe()).count()
+    }
+
+    /// The index of the first row the cleanup view shows, before clamping to the rows.
+    pub fn cleanup_scroll(&self) -> usize {
+        self.cleanup.scroll
+    }
+
     /// The machine of the connected host, once it has answered the hello.
     pub fn host_machine(&self) -> Option<&MachineId> {
         self.host_machine.as_ref()
@@ -712,6 +765,7 @@ impl Client {
                 Vec::new()
             }
             ClientEvent::Tick { at } => {
+                self.now = Some(at.instant());
                 self.age_notice(at.instant());
                 let mut commands = self.tick_upgrade(at.instant());
                 commands.extend(self.tick(at));
@@ -820,6 +874,7 @@ impl Client {
                 if self.orphans_request.take().is_some() {
                     self.orphans = Some(Orphans::Failed(NOT_CONNECTED.to_owned()));
                 }
+                self.cleanup_disconnected();
                 // It was about the host that just went: the next hello decides afresh.
                 self.close_restart_dialog();
                 self.restart_offer = None;
@@ -868,6 +923,9 @@ impl Client {
         // A host that doesn't know a request is older than this client: restarting it is offered.
         if let Err(WireError::MethodNotFound(_)) = &result {
             self.restart_offer.get_or_insert(HostOutdated::Older);
+        }
+        if self.cleanup_asked(&id) {
+            return self.cleanup_response(&id, result);
         }
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
@@ -1125,6 +1183,7 @@ impl Client {
             .collect();
         let mut commands = self.refresh();
         commands.extend(self.alerts(&wanted));
+        commands.extend(self.cleanup_closed(env));
         commands
     }
 
@@ -1570,6 +1629,11 @@ impl Client {
                     self.popup = Some(restart);
                     Vec::new()
                 }
+                // Only a click removes anything.
+                Some(Popup::Cleanup) => {
+                    self.popup = Some(Popup::Cleanup);
+                    Vec::new()
+                }
                 Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
             Intent::CloseRemovingWorktree | Intent::CloseKeepingWorktree => {
@@ -1588,6 +1652,23 @@ impl Client {
                     return Vec::new();
                 };
                 self.close(session, worktree)
+            }
+            Intent::BeginCleanup => self.begin_cleanup(),
+            Intent::CleanupRemoveSafe => {
+                if self.popup != Some(Popup::Cleanup) {
+                    return Vec::new();
+                }
+                for row in self.cleanup.rows.iter_mut().filter(|r| r.safe()) {
+                    row.outcome = Some(CleanupOutcome::Queued);
+                }
+                self.next_removal()
+            }
+            Intent::ScrollCleanup { by, shown } => {
+                if self.popup == Some(Popup::Cleanup) {
+                    let max = self.cleanup.rows.len().saturating_sub(shown);
+                    self.cleanup.scroll = scrolled(self.cleanup.scroll, by, max);
+                }
+                Vec::new()
             }
             Intent::Dismiss => {
                 self.popup = None;
@@ -1665,6 +1746,296 @@ impl Client {
             cwd: Some(cwd.to_owned()),
             branch: worktree.branch,
         }))
+    }
+
+    // ---------- cleanup ----------
+
+    /// Opens the cleanup view. With removals running it shows their rows; otherwise it asks the host for the orphans.
+    fn begin_cleanup(&mut self) -> Vec<ClientCommand> {
+        self.popup = Some(Popup::Cleanup);
+        if self.cleanup.busy() {
+            return Vec::new();
+        }
+        self.cleanup = Cleanup::default();
+        if self.connection != Connection::Ready {
+            self.cleanup.listing = Some(CleanupListing::Failed(NOT_CONNECTED.to_owned()));
+            return Vec::new();
+        }
+        let (id, ask) =
+            self.request_with_id(ClientRequest::WorktreeCleanup(WorktreeCleanup::default()));
+        self.cleanup.listing = Some(CleanupListing::Loading);
+        self.cleanup.list_request = Some(id);
+        vec![ask]
+    }
+
+    /// Whether the answer to `id` is meant for the cleanup view: its list, a stale session's status, or a removal.
+    fn cleanup_asked(&self, id: &RequestId) -> bool {
+        let removal = match &self.cleanup.running {
+            Some(Removal::Orphan(asked)) => Some(asked),
+            Some(Removal::Session { request, .. }) => request.as_ref(),
+            None => None,
+        };
+        self.cleanup.list_request.as_ref() == Some(id)
+            || self.cleanup.checks.contains_key(id)
+            || removal == Some(id)
+    }
+
+    /// Takes an answer meant for the cleanup view ([`Client::cleanup_asked`]).
+    fn cleanup_response(
+        &mut self,
+        id: &RequestId,
+        result: Result<HostResult, WireError>,
+    ) -> Vec<ClientCommand> {
+        if self.cleanup.list_request.as_ref() == Some(id) {
+            self.cleanup.list_request = None;
+            return self.cleanup_listed(result);
+        }
+        if let Some(session) = self.cleanup.checks.remove(id) {
+            self.cleanup_checked(&session, result);
+            return Vec::new();
+        }
+        match &mut self.cleanup.running {
+            Some(Removal::Orphan(asked)) if asked == id => {
+                let outcome = match result {
+                    Ok(HostResult::WorktreeRemove(ok)) => match (ok.removed, ok.kept) {
+                        (true, _) => CleanupOutcome::Removed,
+                        (false, Some(why)) => CleanupOutcome::Kept(why),
+                        (false, None) => CleanupOutcome::Gone,
+                    },
+                    Ok(other) => CleanupOutcome::Kept(format!("unexpected answer {other:?}")),
+                    Err(e) => CleanupOutcome::Kept(refusal(e)),
+                };
+                self.cleanup.finish(outcome);
+                self.next_removal()
+            }
+            Some(Removal::Session { request, .. }) if request.as_ref() == Some(id) => {
+                *request = None;
+                match result {
+                    // Closing: its `session/closed` says how it went.
+                    Ok(_) => Vec::new(),
+                    Err(e) => {
+                        self.cleanup.finish(CleanupOutcome::Kept(refusal(e)));
+                        self.next_removal()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The host's list of orphans: their rows, then a status request for each stale session.
+    fn cleanup_listed(&mut self, result: Result<HostResult, WireError>) -> Vec<ClientCommand> {
+        let ok = match result {
+            Ok(HostResult::WorktreeCleanup(ok)) => ok,
+            Ok(other) => {
+                let why = format!("unexpected answer {other:?}");
+                self.cleanup.listing = Some(CleanupListing::Failed(why));
+                return Vec::new();
+            }
+            Err(e) => {
+                self.cleanup.listing = Some(CleanupListing::Failed(refusal(e)));
+                return Vec::new();
+            }
+        };
+        self.cleanup.listing = Some(CleanupListing::Listed);
+        self.cleanup.rows = ok
+            .worktrees
+            .into_iter()
+            .map(|w| CleanupRow {
+                item: CleanupItem::Orphan(Orphan {
+                    path: PathBuf::from(w.path),
+                    branch: w.branch,
+                }),
+                check: match (w.status, w.error) {
+                    (Some(status), _) => CleanupCheck::Checked(status),
+                    (None, Some(why)) => CleanupCheck::Failed(why),
+                    (None, None) => CleanupCheck::Failed("no status".to_owned()),
+                },
+                outcome: None,
+            })
+            .collect();
+        let stale: Vec<ClientSession> = self
+            .sessions
+            .iter()
+            .filter(|s| self.stale(s, ok.cleanup_after_days))
+            .cloned()
+            .collect();
+        let mut commands = Vec::new();
+        for s in stale {
+            let (id, ask) = self.request_with_id(ClientRequest::WorktreeStatus(WorktreeCheck {
+                session: s.id.clone(),
+            }));
+            self.cleanup.checks.insert(id, s.id.clone());
+            self.cleanup.rows.push(CleanupRow {
+                item: CleanupItem::Session {
+                    id: s.id,
+                    name: s.name,
+                    branch: s.branch,
+                },
+                check: CleanupCheck::Checking,
+                outcome: None,
+            });
+            commands.push(ask);
+        }
+        commands
+    }
+
+    /// Whether `s` might be stale: it has a worktree in the current workspace and isn't closing, and its PTY exited at
+    /// least `days` days before the latest tick. Whether its branch is merged is asked of the host.
+    fn stale(&self, s: &ClientSession, days: u32) -> bool {
+        let (Some(now), Some(exited)) = (self.now, self.registry.exited_at(&s.id)) else {
+            return false;
+        };
+        let wait = SignedDuration::from_hours(i64::from(days).saturating_mul(24));
+        let due = exited
+            .instant()
+            .checked_add(wait)
+            .is_ok_and(|due| due <= now);
+        s.exited
+            && due
+            && !s.removing_worktree
+            && !s.creating_worktree
+            && s.worktree.is_some()
+            && s.workspace.is_some()
+            && s.workspace.as_deref() == self.registry.workspace()
+    }
+
+    /// A stale session's status: its row stays only if its branch is merged.
+    fn cleanup_checked(&mut self, session: &SessionId, result: Result<HostResult, WireError>) {
+        let check = match result {
+            Ok(HostResult::WorktreeStatus(ok)) => match ok.status {
+                Some(status) if status.merged_into_default => Some(CleanupCheck::Checked(status)),
+                // Not merged, or its worktree is gone: not stale.
+                _ => None,
+            },
+            Ok(other) => Some(CleanupCheck::Failed(format!("unexpected answer {other:?}"))),
+            Err(e) => Some(CleanupCheck::Failed(refusal(e))),
+        };
+        let is_it =
+            |r: &CleanupRow| matches!(&r.item, CleanupItem::Session { id, .. } if id == session);
+        match check {
+            Some(check) => {
+                if let Some(row) = self.cleanup.rows.iter_mut().find(|r| is_it(r)) {
+                    row.check = check;
+                }
+            }
+            None => self.cleanup.rows.retain(|r| !is_it(r)),
+        }
+    }
+
+    /// Starts removing the next queued row, if none is being removed. When none is left and the view is closed, a
+    /// notice sums up how the removals went.
+    fn next_removal(&mut self) -> Vec<ClientCommand> {
+        if self.cleanup.running.is_some() {
+            return Vec::new();
+        }
+        let ready = self.connection == Connection::Ready;
+        let Some(row) = self
+            .cleanup
+            .rows
+            .iter_mut()
+            .find(|r| r.outcome == Some(CleanupOutcome::Queued))
+        else {
+            if self.popup != Some(Popup::Cleanup) {
+                self.notice_cleaned();
+            }
+            return Vec::new();
+        };
+        let body = match &row.item {
+            _ if !ready => Err(NOT_CONNECTED.to_owned()),
+            CleanupItem::Orphan(orphan) => match orphan.path.to_str() {
+                Some(path) => Ok(ClientRequest::WorktreeRemove(WorktreeRemove {
+                    path: path.to_owned(),
+                    branch: orphan.branch.clone(),
+                })),
+                None => Err("its path is not UTF-8".to_owned()),
+            },
+            CleanupItem::Session { id, .. } => Ok(ClientRequest::SessionClose(SessionClose {
+                session: id.clone(),
+                worktree: CloseWorktree::IfSafe,
+            })),
+        };
+        let body = match body {
+            Ok(body) => body,
+            Err(why) => {
+                row.outcome = Some(CleanupOutcome::Kept(why));
+                return self.next_removal();
+            }
+        };
+        row.outcome = Some(CleanupOutcome::Removing);
+        let session = match &row.item {
+            CleanupItem::Session { id, .. } => Some(id.clone()),
+            CleanupItem::Orphan(_) => None,
+        };
+        let (id, ask) = self.request_with_id(body);
+        self.cleanup.running = Some(match session {
+            Some(session) => Removal::Session {
+                id: session,
+                request: Some(id),
+            },
+            None => Removal::Orphan(id),
+        });
+        vec![ask]
+    }
+
+    /// The `session/closed` of the stale session being removed, if `env` is it: its row's outcome, then the next.
+    fn cleanup_closed(&mut self, env: &Envelope) -> Vec<ClientCommand> {
+        let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
+            return Vec::new();
+        };
+        let ShepherdFrame::SessionClosed(closed) = message.body() else {
+            return Vec::new();
+        };
+        let waited = matches!(
+            &self.cleanup.running,
+            Some(Removal::Session { id: waited, .. }) if waited == id
+        );
+        if !waited {
+            return Vec::new();
+        }
+        let outcome = match (closed.worktree_removed, &closed.worktree_kept) {
+            (true, _) => CleanupOutcome::Removed,
+            (false, Some(why)) => CleanupOutcome::Kept(why.clone()),
+            (false, None) => CleanupOutcome::Gone,
+        };
+        self.cleanup.finish(outcome);
+        self.next_removal()
+    }
+
+    /// The link dropped: the removal under way can't be heard of, the queued ones don't start, and the checks and the
+    /// list asked for won't be answered.
+    fn cleanup_disconnected(&mut self) {
+        if self.cleanup.running.is_some() {
+            let why = "the connection to the host dropped".to_owned();
+            self.cleanup.finish(CleanupOutcome::Kept(why));
+        }
+        for row in &mut self.cleanup.rows {
+            if row.outcome == Some(CleanupOutcome::Queued) {
+                row.outcome = None;
+            }
+            if row.check == CleanupCheck::Checking {
+                row.check = CleanupCheck::Failed(NOT_CONNECTED.to_owned());
+            }
+        }
+        self.cleanup.checks.clear();
+        if self.cleanup.list_request.take().is_some() {
+            self.cleanup.listing = Some(CleanupListing::Failed(NOT_CONNECTED.to_owned()));
+        }
+    }
+
+    /// A notice summing up the removals, for a view closed while they ran.
+    fn notice_cleaned(&mut self) {
+        let (mut removed, mut kept) = (0, 0);
+        for row in &self.cleanup.rows {
+            match row.outcome {
+                Some(CleanupOutcome::Removed | CleanupOutcome::Gone) => removed += 1,
+                Some(CleanupOutcome::Kept(_)) => kept += 1,
+                _ => {}
+            }
+        }
+        if removed + kept > 0 {
+            self.set_notice(format!("cleanup: removed {removed}, kept {kept}"));
+        }
     }
 
     /// Opens the rename popup for `session`, starting from its current name, if it's listed.

@@ -25,4 +25,4 @@ expression: "text(&buffer(&confirming(Some(Ok(json!({})))), WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Cleanup       Detach ?│

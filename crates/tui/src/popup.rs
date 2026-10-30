@@ -1,6 +1,6 @@
 //! Popups drawn over everything: help, the rename input, the close confirmation, a session's context menu, the
 //! profile picker for a new session, the workspace switcher, the offer to restart an outdated host, the finder
-//! ([`crate::finder`]), and the offer to start a session in an orphan worktree.
+//! ([`crate::finder`]), the offer to start a session in an orphan worktree, and the cleanup view ([`crate::cleanup`]).
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
@@ -20,9 +20,9 @@ use shepherd_core::ports::Loss;
 use shepherd_core::wire::ProfileInfo;
 
 use crate::draw::{self, shown};
-use crate::finder;
 use crate::layout::Target;
 use crate::width::{columns, cut, cut_left, pad, tail};
+use crate::{cleanup, finder};
 
 /// The prefix bindings, as the help lists them.
 pub const BINDINGS: [(&str, &str); 8] = [
@@ -58,6 +58,8 @@ const WORKTREE_DIALOG_WIDTH: u16 = 48;
 const CLOSE_HINT: &str = "y / enter to close · n / esc to keep";
 /// What removing a dirty worktree anyway deletes.
 const DELETED_FILES: &str = "  · uncommitted, untracked and ignored files";
+/// What removing a clean worktree deletes all the same.
+const IGNORED_FILES: &str = "Its ignored files are removed too.";
 /// Its hint when removing the worktree would lose work: confirming keeps it.
 const AT_RISK_HINT: &str = "enter keeps the worktree · esc cancels";
 const HELP_WIDTH: u16 = 56;
@@ -145,6 +147,7 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
             )
         }
         Popup::Finder { .. } => finder::place(client, window),
+        Popup::Cleanup => cleanup::place(client, window),
         Popup::StartInWorktree { worktree } => {
             let height = u16::try_from(start_lines(worktree).len())
                 .unwrap_or(u16::MAX)
@@ -426,6 +429,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::RestartHost { .. } => " restart the host ",
         Popup::Finder { .. } => " find ",
         Popup::StartInWorktree { .. } => " start a session ",
+        Popup::Cleanup => " cleanup ",
     };
     frame(placed.area, title, buf);
     let inside = inner(placed.area);
@@ -468,6 +472,10 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::Finder { query } => finder::render(client, query, &placed, buf),
         Popup::StartInWorktree { worktree } => {
             draw::paragraph(start_lines(worktree)).render(body, buf);
+            None
+        }
+        Popup::Cleanup => {
+            cleanup::render(client, &placed, buf);
             None
         }
     };
@@ -571,6 +579,7 @@ fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<Line<'static>> {
         Some(CloseCheck::Checking) => lines.push(worktree("Checking its worktree…")),
         Some(CloseCheck::Safe) => {
             lines.push(worktree("Its worktree is removed: nothing is lost."));
+            lines.push(worktree(IGNORED_FILES));
         }
         Some(CloseCheck::Gone) => lines.push(worktree("Its worktree is already gone.")),
         Some(CloseCheck::Failed(why)) => {
@@ -599,6 +608,10 @@ fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<Line<'static>> {
                         ));
                     }
                 }
+            }
+            // Removing a clean worktree still deletes its ignored files (the dirty case lists them above).
+            if !status.dirty {
+                lines.push(styled(IGNORED_FILES, gray));
             }
             lines.push(styled(AT_RISK_HINT, gray));
             return lines;

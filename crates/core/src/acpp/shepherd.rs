@@ -24,6 +24,7 @@ pub enum ShepherdFrame {
     WorktreeCreated(WorktreeCreated),
     WorktreeHook(WorktreeHook),
     WorktreeRemoving(WorktreeRemoving),
+    WorktreeRemoved(WorktreeRemoved),
     WorkspaceSelected(WorkspaceSelected),
 }
 
@@ -41,6 +42,7 @@ impl ShepherdFrame {
             Self::WorktreeCreated(_) => "_shepherd/worktree/created",
             Self::WorktreeHook(_) => "_shepherd/worktree/hook",
             Self::WorktreeRemoving(_) => "_shepherd/worktree/removing",
+            Self::WorktreeRemoved(_) => "_shepherd/worktree/removed",
             Self::WorkspaceSelected(_) => "_shepherd/workspace/selected",
         }
     }
@@ -60,6 +62,7 @@ impl ShepherdFrame {
             Self::WorktreeCreated(p) => to_params(p),
             Self::WorktreeHook(p) => to_params(p),
             Self::WorktreeRemoving(p) => to_params(p),
+            Self::WorktreeRemoved(p) => to_params(p),
             Self::WorkspaceSelected(p) => to_params(p),
         };
         Frame::notification(self.method(), params)
@@ -83,6 +86,7 @@ impl ShepherdFrame {
             "_shepherd/worktree/created" => Self::WorktreeCreated(p(params)?),
             "_shepherd/worktree/hook" => Self::WorktreeHook(p(params)?),
             "_shepherd/worktree/removing" => Self::WorktreeRemoving(p(params)?),
+            "_shepherd/worktree/removed" => Self::WorktreeRemoved(p(params)?),
             "_shepherd/workspace/selected" => Self::WorkspaceSelected(p(params)?),
             _ => return None,
         })
@@ -258,7 +262,8 @@ pub struct WorktreeHook {
 }
 
 /// Closing the session is removing its worktree: the session stays listed, its PTY gone, until its `session/closed`
-/// says how that went.
+/// says how that went. In the host log (no session): the cleanup view is removing an orphan worktree, one no open
+/// session uses, until a `worktree/removed` for the same path says how that went.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeRemoving {
     pub path: String,
@@ -269,6 +274,16 @@ pub struct WorktreeRemoving {
     /// `worktree/hook`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre_remove: Vec<String>,
+}
+
+/// Host log only: how removing the orphan worktree at `path` (a `worktree/removing` in the host log) went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRemoved {
+    pub path: String,
+    pub removed: bool,
+    /// Why it was kept, for the user. Absent when it was removed, or was already gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

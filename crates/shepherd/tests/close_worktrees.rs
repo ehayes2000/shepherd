@@ -16,7 +16,7 @@ use shepherd::host::{HostRuntime, runtime_channel};
 use shepherd_adapters::GitWorktrees;
 use shepherd_core::acpp::{Envelope, Frame, RequestId, Seq, ShepherdFrame};
 use shepherd_core::config::{RawConfig, RawHooks, RawWorkspace};
-use shepherd_core::host::{HostEvent, Inspect, Inspection, PreRemove};
+use shepherd_core::host::{HostEvent, Inspect, Inspection, PreRemove, Remover};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::WorktreeStatus;
 use shepherd_core::ports::{
@@ -286,6 +286,37 @@ fn a_plain_close_keeps_a_dirty_worktree_and_says_why() {
 }
 
 #[test]
+fn a_listed_worktree_that_is_not_a_repo_but_whose_directory_exists_is_kept() {
+    let mut s = Setup::new();
+    let not_a_repo = shepherd_core::ports::WorktreeError::NotARepo(s.path.clone());
+    s.worktrees.fail_status(&s.path, not_a_repo);
+    s.close(CloseWorktree::IfSafe);
+    s.h.step();
+    assert!(s.path.exists(), "nothing touched its directory");
+    assert!(s.listed(), "kept");
+    assert!(s.commands.runs().is_empty(), "no hook ran");
+    let closed = last_closed(&s.frames());
+    assert!(!closed.worktree_removed);
+    assert_eq!(
+        closed.worktree_kept,
+        Some(format!("{} is not a git repository", s.path.display()))
+    );
+}
+
+#[test]
+fn a_listed_worktree_that_is_not_a_repo_and_whose_directory_is_gone_closes_normally() {
+    let mut s = Setup::new();
+    let not_a_repo = shepherd_core::ports::WorktreeError::NotARepo(s.path.clone());
+    s.worktrees.fail_status(&s.path, not_a_repo);
+    std::fs::remove_dir(&s.path).unwrap();
+    s.close(CloseWorktree::IfSafe);
+    s.h.step();
+    let closed = last_closed(&s.frames());
+    assert!(!closed.worktree_removed);
+    assert_eq!(closed.worktree_kept, None, "already gone: nothing kept");
+}
+
+#[test]
 fn a_host_restarting_while_a_session_closes_closes_it_keeping_its_worktree() {
     let mut s = Setup::new();
     let (_, hold) = s.close_with_hook_held();
@@ -525,7 +556,7 @@ fn a_hook_due_after_shutdown_began_never_starts() {
     s.h.runtime_mut()
         .handle(shepherd::host::RuntimeEvent::Worktrees(
             HostEvent::WorktreeInspected {
-                session: s.id.clone(),
+                remover: Remover::Session(s.id.clone()),
                 path: WorktreePath::new(&s.path),
                 purpose: Inspect::Close {
                     confirmed: None,
