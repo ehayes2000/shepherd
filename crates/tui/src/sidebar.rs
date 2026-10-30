@@ -8,8 +8,9 @@
 //! the prefix and its bindings while it's pending; otherwise the latest notice, else a reconnecting note, else a hint
 //! for help, then the `Detach` and `?` buttons on the right.
 //!
-//! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, and the footer shows `^B` while
-//! the prefix is pending.
+//! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
+//! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
+//! a right click opens the row's menu, which has Close.
 //!
 //! [`crate::hit`] reads the same geometry ([`new_session_button`], [`visible_rows`], [`close_button`],
 //! [`footer_buttons`]) that drawing uses.
@@ -74,6 +75,13 @@ pub(crate) fn new_session_button(layout: &Layout) -> Rect {
 const CLOSE: &str = "×";
 const DETACH: &str = "Detach";
 const HELP: &str = "?";
+/// The collapsed sidebar's `Detach` button.
+const DETACH_COLLAPSED: &str = "⏏";
+
+/// Lines below the list: the footer, and in the collapsed sidebar the `⏏` line above it.
+fn footer_height(layout: &Layout) -> u16 {
+    if layout.collapsed { 2 } else { 1 }
+}
 
 /// Where the close button of the session drawn on `row` is: the last cell of its first line. The collapsed sidebar
 /// has none.
@@ -84,19 +92,33 @@ pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
     Rect::new(row.right() - 1, row.y, 1, 1)
 }
 
-/// The footer's buttons, left to right: `Detach`, then `?` in the last column. Not shown in the collapsed sidebar, nor
-/// while the prefix is pending, when the footer lists the bindings instead.
+/// The footer's buttons, left to right: `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
+/// glyph column: `⏏` just above `?` on the last line. Not shown while the prefix is pending, when the footer shows
+/// it instead.
 pub(crate) fn footer_buttons(
     client: &Client,
     layout: &Layout,
 ) -> Vec<(Rect, Target, &'static str)> {
     let inner = inner(layout);
+    if client.focus() == Focus::Command {
+        return Vec::new();
+    }
+    if layout.collapsed {
+        if inner.height < 3 || inner.width < 2 {
+            return Vec::new();
+        }
+        let help = Rect::new(inner.x + 1, inner.bottom() - 1, 1, 1);
+        let detach = Rect {
+            y: help.y - 1,
+            ..help
+        };
+        return vec![
+            (detach, Target::Detach, DETACH_COLLAPSED),
+            (help, Target::Help, HELP),
+        ];
+    }
     let width = DETACH.chars().count() as u16;
-    if layout.collapsed
-        || client.focus() == Focus::Command
-        || inner.height < 2
-        || inner.width < width + 6
-    {
+    if inner.height < 2 || inner.width < width + 6 {
         return Vec::new();
     }
     let y = inner.bottom() - 1;
@@ -105,14 +127,14 @@ pub(crate) fn footer_buttons(
     vec![(detach, Target::Detach, DETACH), (help, Target::Help, HELP)]
 }
 
-/// The session rows, between the header line and the footer line.
+/// The session rows, between the header line and the footer.
 fn list(layout: &Layout) -> Rect {
     let inner = inner(layout);
     Rect::new(
         inner.x,
         inner.y.saturating_add(1),
         inner.width,
-        inner.height.saturating_sub(2),
+        inner.height.saturating_sub(1 + footer_height(layout)),
     )
 }
 
@@ -214,6 +236,10 @@ fn render_collapsed(client: &Client, layout: &Layout, buf: &mut Buffer) {
         let (symbol, color) = glyph(session);
         buf.set_string(line.x + 1, line.y, symbol, Style::new().fg(color));
     });
+    let button = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    for (at, _, label) in footer_buttons(client, layout) {
+        buf.set_stringn(at.x, at.y, label, usize::from(at.width), button);
+    }
     let area = inner(layout);
     if client.focus() == Focus::Command && area.height >= 2 {
         let style = Style::new().add_modifier(Modifier::REVERSED);
