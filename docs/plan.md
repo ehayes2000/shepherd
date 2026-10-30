@@ -9,9 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18b quiet idle fallback | re-review | task/t18b-quiet-idle @ f57c2db (on 30296e4) | 2 | hot loop fixed in core; next_deadline asserted; input-based permission rule per amended spec |
 | T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
-| F25 failed worktree create cleanup | building (fresh builder) | task/f25-worktree-fail-cleanup @ e58c9a2 | 0 | First builder silent 2.5 h inside a load round; stopped. Its uncommitted WIP saved as scratchpad/pm-f25-wip.patch (on 62e768e) |
+| F25 failed worktree create cleanup | in review | task/f25-worktree-fail-cleanup @ 7764841 (on 49fb064) | 1 | Fresh builder finished saved WIP; load 24/24 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T18b | 2 | append-failure hot loop; next_deadline wiring untested; spec defect: output-as-answer would clear untouched dialogs (amended) |
 | F14 | 3 (+1 hung) | post-kill drop, shutdown ack, excess-ack banking untested; first reviewer hung 4 h |
 | F30 | 2 | width-0 cut returned 1 column; added helper property table |
 | F29 | 1 | cut/cut_left count chars not columns (→ F30) |
@@ -505,6 +505,20 @@ acceptance:
   grapheme, and keeps the `(current)`/`(default)` marks and the repo name visible. Tests with a CJK path and an emoji name in
   the switcher, picker and sidebar rows. Column sizing (`name_width`, agent column) uses display width too.
 scope: crates/tui
+
+### F31: Only real answers count as answering a permission dialog
+status: todo
+depends: T18b
+touches: core::wire (input), core::host::quiet, tui::keys
+goal: T18b counts any client input after a permission request as an answer. Focus reports (`CSI I`/`CSI O`, forwarded when the
+app enabled DECSET 1004), mouse reports and in-dialog navigation keys aren't answers; a 3 s pause after them shows an open dialog
+as idle.
+acceptance:
+- The client tags input it sends (`/input` gains an additive `kind`: `keys` | `paste` | `focus` | `mouse`). Only `keys` and
+  `paste` that contain Enter (or a printable key, decide and document) count as an answer for the quiet watch. Core table tests.
+- Screen query replies never count (already true; add the scenario check: the fake Claude prints a terminal query on resize and
+  the dialog stays put).
+scope: crates/core, crates/tui, crates/shepherd
 
 ## Out of scope for the initial feature set
 
@@ -1057,7 +1071,7 @@ Attention for a session that becomes selected is cleared immediately; a session 
 focused is not marked.
 
 ### T18b: Quiet-output idle fallback
-status: in-progress
+status: done (76b5bae)
 depends: T11, T15
 touches: core::session (or core::agents), core::host, shepherd::host
 goal: A session interrupted with Esc (no `Stop` hook fires) stops showing Working within seconds, not minutes.
