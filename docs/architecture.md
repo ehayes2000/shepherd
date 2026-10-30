@@ -259,3 +259,15 @@ change serialization, defaults or any normal-path behavior remain banned by 0012
 Consequences: fault-injection tests stay simple. Never ship or smoke-test a binary from `cargo test`'s target dir; the smoke
 script uses `cargo build --release`.
 
+### 0016: Codex hooks are trusted per hook via a session-flags `hooks.state` override; `sha2` allowed in core (2026-10-30)
+Context: T19. Codex (rust-v0.166.0) loads hooks passed with `-c hooks.<Event>=[...]` from its SessionFlags config layer, so
+nothing touches `~/.codex`, but it skips non-managed hooks until trusted (`hooks.state."<key>".trusted_hash`). The two ways
+to get trust: `--dangerously-bypass-hook-trust`, which also runs the user's own untrusted hooks in those sessions, or passing
+our own hooks' trust state with `-c hooks.state=...`, which requires computing Codex's hook hash (sha256 over a canonical
+JSON of the hook) and key format, both internal to Codex.
+Decision: trust only our hooks (the `hooks.state` override). Never pass `--dangerously-bypass-hook-trust`: it weakens the
+user's own hook review. `sha2` joins the core allowlist (pure, established, decision 0008) so the launch plan stays pure.
+A test pins the hash and key for a fixed hook against values derived from Codex's source, citing the file and version.
+Consequences: if Codex changes the format, our hooks are skipped (fails safe: no status, Codex asks the user to review them
+in `/hooks`, and trusting once persists because our command string is stable). Recheck on Codex upgrades.
+
