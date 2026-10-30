@@ -18,6 +18,12 @@ of work. Read with `CLAUDE.md`, `docs/architecture.md`, `docs/plan.md` and the `
      exists), then `git branch -D task/<id>` **only after** its merge commit is on main.
 4. Tell the user what you found and what you're resuming.
 
+## The user's inbox
+
+`docs/inbox.md` is where the user writes requests without knowing where they belong. Check it at the start of every
+session and after every merge. File each item (new task via `write-task`, a spec amendment, the manifesto, or a decision),
+move it to "Filed" with a pointer, and tell the user where it went.
+
 ## The loop
 
 `write-task` spec → `dispatch` builder → builder report → `reviewer` (spec plus branch only, never the builder's report) →
