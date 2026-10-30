@@ -21,7 +21,8 @@ use std::sync::Mutex;
 
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    GitWorktrees, JsonlEventLog, PortablePty, TomlConfigSource, UnixLinkError, UnixListenLink,
+    GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError,
+    UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
 use shepherd_core::ports::{ConfigSource, LogError, LogId};
@@ -34,7 +35,8 @@ pub use runtime::{
 };
 
 /// The host runtime on the real adapters.
-pub type RealHost = HostRuntime<PortablePty, GitWorktrees, UnixListenLink, JsonlEventLog, RealEnv>;
+pub type RealHost =
+    HostRuntime<PortablePty, GitWorktrees, ShellCommands, UnixListenLink, JsonlEventLog, RealEnv>;
 
 /// Files under the root.
 pub const SOCKET_FILE: &str = "host.sock";
@@ -157,7 +159,11 @@ fn open_inner(
         shepherd,
         socket: root.join(SOCKET_FILE),
     };
-    HostRuntime::start(pty, worktrees, link, log, RealEnv, settings, tx, rx).map_err(|e| match e {
+    let commands = ShellCommands::new();
+    HostRuntime::start(
+        pty, worktrees, commands, link, log, RealEnv, settings, tx, rx,
+    )
+    .map_err(|e| match e {
         StartError::Log(e) => log_error(root, e),
         StartError::Worker(e) => HostStartError::Thread(e.to_string()),
     })

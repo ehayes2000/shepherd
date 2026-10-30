@@ -2066,3 +2066,23 @@ fn a_session_shows_while_its_worktree_is_made_and_why_it_failed() {
         ]
     );
 }
+
+#[test]
+fn a_session_whose_post_create_hook_failed_shows_a_warning_once_it_runs() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/app");
+    c.host().new_session("s1");
+    c.host().worktree_ready_with_hooks("s1", &["npm ci"]);
+    c.sync();
+    let state = |c: &ClientDriver| {
+        let s = &c.client().sessions()[0];
+        (s.creating_worktree, s.warning.clone())
+    };
+    assert_eq!(state(&c), (true, None));
+    c.host().hook_exited("s1", "npm ci", 1);
+    c.sync();
+    assert_eq!(
+        state(&c),
+        (false, Some("hook failed (exit 1): npm ci".to_owned()))
+    );
+}

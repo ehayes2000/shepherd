@@ -22,6 +22,13 @@
 //! PTY. A result for a session closed meanwhile is recorded the same way but spawns nothing; a created worktree is left
 //! in place for cleanup to find through its record.
 //!
+//! Hooks: the workspace's post-create hooks ([`PostCreate`], from the config) run in a new worktree before its PTY
+//! spawns. `worktree/created` records them, and the session stays starting while they run, one at a time, each a
+//! [`HostCommand::RunHook`] off the runtime thread whose result comes back as [`HostEvent::HookFinished`] and is
+//! recorded in `worktree/hook`. The first that fails (non-zero exit, timeout, signal, couldn't run) stops the rest and
+//! marks the session with a warning, and the PTY spawns either way once the hooks are done. A session closed meanwhile
+//! records the result it was waiting for and runs and spawns nothing more.
+//!
 //! Host state is only a fold over `_shepherd/*` frames (`docs/acpp.md`, "State is a fold"). [`Host::handle`] reads
 //! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
 //! seals, appends, and hands back to [`Host::apply`].
@@ -32,17 +39,19 @@ pub mod quiet;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
     SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
-    WorktreeCreated,
+    WorktreeCreated, WorktreeHook,
 };
 use crate::agents::Translators;
-use crate::config::AgentKind;
+use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
 use crate::ids::SessionId;
+use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{BaseSpec, BaseUsed, Created, RepoRef, WorktreeError, WorktreeName};
 use crate::wire::{HostResult, SessionNewOk, WireError};
@@ -75,6 +84,25 @@ pub struct NewSessionSpec {
     /// The client asked for `spawn.cwd`. Otherwise a session in a workspace runs in a new worktree instead.
     pub explicit_cwd: bool,
     pub spawn: SpawnSpec,
+    /// The current workspace's hooks (`Config::workspace_hooks`). A new worktree runs their `post_create`.
+    pub hooks: WorkspaceHooks,
+}
+
+/// Post-create hooks to run in a new worktree, in order, before its PTY spawns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostCreate {
+    pub hooks: Vec<String>,
+    /// How long each may run.
+    pub timeout: Duration,
+}
+
+impl Default for PostCreate {
+    fn default() -> Self {
+        Self {
+            hooks: Vec::new(),
+            timeout: DEFAULT_HOOK_TIMEOUT,
+        }
+    }
 }
 
 /// What to resume an exited session with. The runtime builds it from the profile in [`Host::resume_target`]
@@ -191,11 +219,20 @@ pub enum HostEvent {
         ask: WorkspaceAsk,
         repo: Result<PathBuf, String>,
     },
-    /// The answer to a [`HostCommand::CreateWorktree`], with the `spawn` it carried.
+    /// The answer to a [`HostCommand::CreateWorktree`], with the `spawn` and `hooks` it carried.
     WorktreeCreated {
         session: SessionId,
         spawn: SpawnSpec,
+        hooks: PostCreate,
         result: Result<Created, WorktreeError>,
+    },
+    /// The answer to a [`HostCommand::RunHook`], with everything it carried.
+    HookFinished {
+        session: SessionId,
+        command: CommandSpec,
+        rest: PostCreate,
+        spawn: SpawnSpec,
+        result: Result<CommandOutput, CommandError>,
     },
 }
 
@@ -239,13 +276,24 @@ pub enum HostCommand {
         path: PathBuf,
     },
     /// Create worktree `name` of `repo` from `base`, and feed the result back as [`HostEvent::WorktreeCreated`] with
-    /// the same `session` and `spawn`: what to spawn once the worktree exists (its cwd is replaced by the worktree's
-    /// path). Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    /// the same `session`, `spawn` and `hooks`: what to spawn once the worktree exists (its cwd is replaced by the
+    /// worktree's path), and the hooks to run there first. Runs off the runtime thread, like
+    /// [`HostCommand::ProbeWorkspace`].
     CreateWorktree {
         session: SessionId,
         repo: RepoRef,
         name: WorktreeName,
         base: BaseSpec,
+        spawn: SpawnSpec,
+        hooks: PostCreate,
+    },
+    /// Run a post-create hook with the `Commands` port, and feed the result back as [`HostEvent::HookFinished`] with
+    /// the same `session`, `command`, `rest` (the hooks after it) and `spawn` (what to spawn once they are done). Runs
+    /// off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    RunHook {
+        session: SessionId,
+        command: CommandSpec,
+        rest: PostCreate,
         spawn: SpawnSpec,
     },
 }
@@ -265,8 +313,10 @@ pub struct HostSession {
     pub workspace: Option<PathBuf>,
     /// Why it failed to start (`session/failed`), for the user.
     pub failed: Option<String>,
-    /// It is waiting for its worktree to be made, and has no PTY yet.
+    /// It is waiting for its worktree to be made or its post-create hooks to run, and has no PTY yet.
     pub creating_worktree: bool,
+    /// Something went wrong that didn't stop it starting, e.g. a post-create hook failed, for the user.
+    pub warning: Option<String>,
 }
 
 /// Where a session is in its life, as far as its PTY goes.
@@ -274,6 +324,10 @@ pub struct HostSession {
 enum Phase {
     /// Waiting for its worktree. No PTY yet.
     Starting,
+    /// Its worktree exists, and this many of its post-create hooks have yet to finish. No PTY yet.
+    Hooks {
+        left: usize,
+    },
     Running,
     Exited,
     /// It never got a PTY, for this reason.
@@ -294,12 +348,13 @@ struct Entry {
     /// The agent's own session id, from the latest `agent/started` that had one.
     agent_session_id: Option<String>,
     workspace: Option<PathBuf>,
+    warning: Option<String>,
 }
 
 impl Entry {
     fn resume_target(&self) -> Result<ResumeTarget, ResumeUnavailable> {
         match self.phase {
-            Phase::Starting => return Err(ResumeUnavailable::Starting),
+            Phase::Starting | Phase::Hooks { .. } => return Err(ResumeUnavailable::Starting),
             Phase::Running => return Err(ResumeUnavailable::Running),
             Phase::Failed(_) => return Err(ResumeUnavailable::Failed),
             Phase::Exited => {}
@@ -375,7 +430,8 @@ impl Host {
                     Phase::Failed(reason) => Some(reason.clone()),
                     _ => None,
                 },
-                creating_worktree: e.phase == Phase::Starting,
+                creating_worktree: matches!(e.phase, Phase::Starting | Phase::Hooks { .. }),
+                warning: e.warning.clone(),
             })
             .collect()
     }
@@ -414,6 +470,10 @@ impl Host {
                     .unwrap_or_else(|| format!("{}-{}", spec.profile, self.sessions.len() + 1));
                 let workspace = self.workspace().and_then(Path::to_str);
                 // A worktree is made in the workspace unless the client chose where to run.
+                let hooks = PostCreate {
+                    hooks: spec.hooks.post_create,
+                    timeout: spec.hooks.timeout,
+                };
                 let worktree = workspace.filter(|_| !spec.explicit_cwd).map(|repo| {
                     (
                         RepoRef::new(repo),
@@ -442,6 +502,7 @@ impl Host {
                         name,
                         base: BaseSpec::OriginDefault,
                         spawn: spec.spawn,
+                        hooks,
                     },
                     None => HostCommand::SpawnPty {
                         session: id.clone(),
@@ -512,8 +573,14 @@ impl Host {
             }
             // The runtime's restart sweep: a session still waiting for its worktree lost it with the old host.
             HostEvent::PtyExited { session, .. } if self.starting(&session) => {
+                let reason = match self.open(&session).map(|e| &e.phase) {
+                    Some(Phase::Hooks { .. }) => {
+                        "the host stopped before the worktree hooks finished"
+                    }
+                    _ => "the host stopped before the worktree was ready",
+                };
                 let failed = ShepherdFrame::SessionFailed(SessionFailed {
-                    reason: "the host stopped before the worktree was ready".to_owned(),
+                    reason: reason.to_owned(),
                 });
                 vec![append(&session, failed)]
             }
@@ -582,17 +649,26 @@ impl Host {
             HostEvent::WorktreeCreated {
                 session,
                 spawn,
+                hooks,
                 result,
-            } => self.worktree_created(session, spawn, result),
+            } => self.worktree_created(session, spawn, hooks, result),
+            HostEvent::HookFinished {
+                session,
+                command,
+                rest,
+                spawn,
+                result,
+            } => self.hook_finished(session, command, rest, spawn, result),
         }
     }
 
-    /// Records what came of a session's worktree, and spawns its PTY there if the session is still open. Only a
-    /// session waiting for its worktree takes a result.
+    /// Records what came of a session's worktree, and if the session is still open runs its first post-create hook
+    /// there, or with none spawns its PTY there. Only a session waiting for its worktree takes a result.
     fn worktree_created(
         &self,
         session: SessionId,
         mut spawn: SpawnSpec,
+        hooks: PostCreate,
         result: Result<Created, WorktreeError>,
     ) -> Vec<HostCommand> {
         let Some(entry) = self.sessions.get(&session) else {
@@ -629,14 +705,101 @@ impl Host {
             } => (branch.to_string(), Some(fetch_error)),
         };
         let recorded = ShepherdFrame::WorktreeCreated(WorktreeCreated {
-            path,
+            path: path.clone(),
             branch: created.branch.to_string(),
             base,
             fetch_error,
+            post_create: hooks.hooks.clone(),
         });
         let mut commands = vec![append(&session, recorded)];
-        if !entry.closed {
-            spawn.cwd = created.path.as_path().to_path_buf();
+        if entry.closed {
+            return commands;
+        }
+        spawn.cwd = created.path.as_path().to_path_buf();
+        let mut rest = hooks;
+        if rest.hooks.is_empty() {
+            commands.push(HostCommand::SpawnPty {
+                session,
+                spec: spawn,
+            });
+            return commands;
+        }
+        let mut env = vec![
+            ("SHEPHERD_SESSION".to_owned(), session.to_string()),
+            ("SHEPHERD_WORKTREE".to_owned(), path),
+            ("SHEPHERD_BRANCH".to_owned(), created.branch.to_string()),
+        ];
+        if let Some(repo) = entry.workspace.as_deref().and_then(Path::to_str) {
+            env.push(("SHEPHERD_REPO".to_owned(), repo.to_owned()));
+        }
+        let script = rest.hooks.remove(0);
+        commands.push(HostCommand::RunHook {
+            session,
+            command: CommandSpec {
+                script,
+                cwd: spawn.cwd.clone(),
+                env,
+                timeout: rest.timeout,
+            },
+            rest,
+            spawn,
+        });
+        commands
+    }
+
+    /// Records a post-create hook's result, then if the session is still open runs the next hook, or once they are
+    /// done (or this one failed) spawns its PTY. Only a session running its hooks takes a result.
+    fn hook_finished(
+        &self,
+        session: SessionId,
+        command: CommandSpec,
+        mut rest: PostCreate,
+        spawn: SpawnSpec,
+        result: Result<CommandOutput, CommandError>,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.sessions.get(&session) else {
+            return Vec::new();
+        };
+        if !matches!(entry.phase, Phase::Hooks { .. }) {
+            return Vec::new();
+        }
+        let (exit_code, output_tail, error) = match result {
+            Ok(CommandOutput { exit, tail }) => {
+                let tail = display_tail(&tail);
+                match exit {
+                    CommandExit::Code(code) => (Some(code), tail, None),
+                    CommandExit::Signal(signal) => {
+                        (None, tail, Some(format!("killed by signal {signal}")))
+                    }
+                    CommandExit::TimedOut => (
+                        None,
+                        tail,
+                        Some(format!("timed out after {}s", command.timeout.as_secs())),
+                    ),
+                }
+            }
+            Err(error) => (None, String::new(), Some(error.to_string())),
+        };
+        let succeeded = exit_code == Some(0);
+        let recorded = ShepherdFrame::WorktreeHook(WorktreeHook {
+            hook: command.script.clone(),
+            exit_code,
+            output_tail,
+            error,
+        });
+        let mut commands = vec![append(&session, recorded)];
+        if entry.closed {
+            return commands;
+        }
+        if succeeded && !rest.hooks.is_empty() {
+            let script = rest.hooks.remove(0);
+            commands.push(HostCommand::RunHook {
+                session,
+                command: CommandSpec { script, ..command },
+                rest,
+                spawn,
+            });
+        } else {
             commands.push(HostCommand::SpawnPty {
                 session,
                 spec: spawn,
@@ -715,6 +878,7 @@ impl Host {
                     cwd: created.cwd.as_ref().map(PathBuf::from),
                     agent_session_id: None,
                     workspace: created.workspace.as_ref().map(PathBuf::from),
+                    warning: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -733,13 +897,35 @@ impl Host {
                 if let Some(entry) = self.sessions.get_mut(id)
                     && entry.phase == Phase::Starting
                 {
-                    entry.phase = Phase::Running;
+                    entry.phase = match worktree.post_create.len() {
+                        0 => Phase::Running,
+                        left => Phase::Hooks { left },
+                    };
                     entry.cwd = Some(PathBuf::from(&worktree.path));
+                }
+            }
+            ShepherdFrame::WorktreeHook(hook) => {
+                if let Some(entry) = self.sessions.get_mut(id)
+                    && let Phase::Hooks { left } = entry.phase
+                {
+                    let succeeded = hook.exit_code == Some(0);
+                    entry.phase = match left {
+                        2.. if succeeded => Phase::Hooks { left: left - 1 },
+                        _ => Phase::Running,
+                    };
+                    if !succeeded {
+                        let why = match (&hook.error, hook.exit_code) {
+                            (Some(error), _) => error.clone(),
+                            (None, Some(code)) => format!("exit {code}"),
+                            (None, None) => "no exit code".to_owned(),
+                        };
+                        entry.warning = Some(format!("hook failed ({why}): {}", hook.hook));
+                    }
                 }
             }
             ShepherdFrame::SessionFailed(failed) => {
                 if let Some(entry) = self.sessions.get_mut(id)
-                    && entry.phase == Phase::Starting
+                    && matches!(entry.phase, Phase::Starting | Phase::Hooks { .. })
                 {
                     entry.phase = Phase::Failed(failed.reason.clone());
                 }
@@ -775,10 +961,31 @@ impl Host {
         self.open(id).is_some_and(|e| e.phase == Phase::Running)
     }
 
-    /// An open session waiting for its worktree.
+    /// An open session waiting for its worktree or its post-create hooks.
     fn starting(&self, id: &SessionId) -> bool {
-        self.open(id).is_some_and(|e| e.phase == Phase::Starting)
+        self.open(id)
+            .is_some_and(|e| matches!(e.phase, Phase::Starting | Phase::Hooks { .. }))
     }
+}
+
+/// A hook's output tail as recorded: decoded lossily, with control characters other than newlines and tabs removed.
+/// A full tail ([`OUTPUT_TAIL`]) was cut from longer output, so a character it starts in the middle of is dropped.
+fn display_tail(tail: &[u8]) -> String {
+    let tail = match tail.len() {
+        OUTPUT_TAIL => {
+            let partial = tail
+                .iter()
+                .take(3)
+                .take_while(|&&b| b & 0b1100_0000 == 0b1000_0000)
+                .count();
+            &tail[partial..]
+        }
+        _ => tail,
+    };
+    String::from_utf8_lossy(tail)
+        .chars()
+        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .collect()
 }
 
 /// An `Append` of a frame the host produces about session `id`.

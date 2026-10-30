@@ -255,6 +255,8 @@ pub struct ClientSession {
     pub creating_worktree: bool,
     /// Why it failed to start, e.g. its worktree couldn't be made.
     pub failed: Option<String>,
+    /// Something went wrong that didn't stop it starting, e.g. a post-create hook failed.
+    pub warning: Option<String>,
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -778,6 +780,7 @@ impl Client {
                     workspace: s.workspace,
                     creating_worktree: s.creating_worktree,
                     failed: s.failed,
+                    warning: s.warning,
                 }
             })
             .collect();

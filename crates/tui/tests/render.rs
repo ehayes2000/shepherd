@@ -794,6 +794,7 @@ fn status_glyphs_follow_the_documented_table() {
         elsewhere: false,
         creating_worktree: false,
         failed: None,
+        warning: None,
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),
@@ -855,6 +856,24 @@ fn a_session_making_its_worktree_and_one_whose_worktree_failed() {
     c.host().worktree_result("s2", Err(error));
     c.sync();
     // The reason is cut to the row's width.
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 8));
+}
+
+#[test]
+fn a_session_running_its_hooks_and_one_whose_hook_failed() {
+    let mut c = ClientDriver::with_sessions(&[]);
+    c.host().select_workspace("/src/shepherd");
+    c.host().new_session("s1");
+    c.host().rename("s1", "docs");
+    c.host().worktree_ready_with_hooks("s1", &["npm ci"]);
+    c.host().new_session("s2");
+    c.host().rename("s2", "refactor");
+    c.host()
+        .worktree_ready_with_hooks("s2", &["cp \"$SHEPHERD_REPO/.envrc\" ."]);
+    c.host()
+        .hook_exited("s2", "cp \"$SHEPHERD_REPO/.envrc\" .", 1);
+    c.sync();
+    // The warning is cut to the row's width.
     insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 8));
 }
 

@@ -4,9 +4,10 @@
 //! switcher, then a `+ New session` button (`⌂` and `+` when collapsed). Each session is two lines: its status glyph,
 //! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
 //! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
-//! failed to start is the reason, in red, and of one whose worktree is being made, `creating worktree…`; a second line
-//! too long for the row ends in `…`. The selected session has a
-//! highlighted background, and a session that wants the user has a yellow bar on its left edge.
+//! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
+//! of one that started with a warning (a post-create hook failed), the warning, in yellow. A second line too long for
+//! the row ends in `…`. The selected session has a highlighted background, and a session that wants the user has a
+//! yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width, else a
@@ -291,10 +292,11 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             Style::new().fg(Color::Gray),
         );
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let (text, style) = match (&session.failed, &session.workspace) {
-            (Some(reason), _) => (reason.clone(), dim.fg(Color::Red)),
+        let (text, style) = match (&session.failed, &session.warning, &session.workspace) {
+            (Some(reason), _, _) => (reason.clone(), dim.fg(Color::Red)),
             _ if session.creating_worktree => (CREATING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
-            (None, Some(workspace)) if session.elsewhere => (
+            (None, Some(warning), _) => (warning.clone(), dim.fg(Color::Yellow)),
+            (None, None, Some(workspace)) if session.elsewhere => (
                 format!("in {}", workspace_name(workspace)),
                 dim.fg(Color::Gray),
             ),
