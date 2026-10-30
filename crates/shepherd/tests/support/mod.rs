@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use shepherd::build::InstalledExe;
 use shepherd::host::{Env, HostRuntime, RuntimeEvent, RuntimeSettings, runtime_channel};
 use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
@@ -19,7 +20,7 @@ use shepherd_core::host::Host;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink, PtyEventSink};
 use shepherd_core::wire::{
-    ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
+    BuildId, ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
     SessionInput, SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
     encode_client_notification, encode_request,
 };
@@ -169,6 +170,8 @@ pub type Runtime =
 /// Builds a [`HostHarness`].
 pub struct HarnessBuilder {
     programs: Vec<(String, Program)>,
+    /// The build the host runs, and the path whose file is what it says is installed.
+    build: Option<(BuildId, PathBuf)>,
     log: FakeEventLog,
     env: TestEnv,
     net: FakeNetwork,
@@ -208,6 +211,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Runs build `build`, started from `exe`: the host says the file there now is what is installed.
+    pub fn build(mut self, build: BuildId, exe: impl Into<PathBuf>) -> Self {
+        self.build = Some((build, exe.into()));
+        self
+    }
+
     /// Uses `commands` (a handle on shared fake state, e.g. with scripts added) instead of a fake that knows none.
     pub fn commands(mut self, commands: FakeCommands) -> Self {
         self.commands = commands;
@@ -223,9 +232,14 @@ impl HarnessBuilder {
             config,
             worktrees,
             commands,
+            build,
         } = self;
         let dir = tempfile::tempdir().expect("tempdir for run files");
-        let settings = settings(config, dir.path().join("run"));
+        let mut settings = settings(config, dir.path().join("run"));
+        if let Some((build, exe)) = build {
+            settings.build = Some(build);
+            settings.installed = InstalledExe::new(exe);
+        }
         let runtime = build_runtime(
             &net,
             &programs,
@@ -257,6 +271,8 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
         run_root,
         shepherd: SHEPHERD_EXE.into(),
         socket: SOCKET.into(),
+        build: None,
+        installed: InstalledExe::new(SHEPHERD_EXE),
     }
 }
 
@@ -350,6 +366,7 @@ impl HostHarness {
     pub fn builder() -> HarnessBuilder {
         HarnessBuilder {
             programs: vec![(SHELL.to_owned(), echo_shell())],
+            build: None,
             log: FakeEventLog::new(),
             env: TestEnv::new(),
             net: FakeNetwork::new(),

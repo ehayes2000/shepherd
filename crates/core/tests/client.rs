@@ -1354,6 +1354,7 @@ fn connecting_says_hello_with_this_version_and_machine() {
             version: PROTOCOL_VERSION,
             machine: shepherd_core::ids::MachineId::new("m_client"),
             cwd: None,
+            build: None,
         })]
     );
 }
@@ -1370,16 +1371,18 @@ fn a_hello_answer_subscribes_to_everything_and_is_ready() {
 }
 
 #[test]
-fn a_version_mismatch_is_fatal() {
+fn a_hello_refused_for_another_reason_than_the_version_is_fatal() {
+    // A version mismatch is no longer fatal (T36a): see `client_build.rs`.
     let mut c = ClientDriver::new();
     c.handle(ClientEvent::Start);
     let hello = c.handle(connected());
-    let cmds = c.answer(
-        &hello,
-        Err(WireError::VersionMismatch { host: 2, client: 1 }),
-    );
+    let cmds = c.answer(&hello, Err(WireError::Internal("no machine id".into())));
     assert_eq!(cmds, [ClientCommand::Quit]);
-    assert!(c.client().fatal().is_some_and(|m| m.contains("version")));
+    assert!(
+        c.client()
+            .fatal()
+            .is_some_and(|m| m.contains("no machine id"))
+    );
 }
 
 #[test]

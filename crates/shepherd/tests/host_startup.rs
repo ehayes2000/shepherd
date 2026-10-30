@@ -214,6 +214,7 @@ fn a_client_can_attach_to_a_history_bigger_than_the_link_queue() {
                         version: shepherd_core::wire::PROTOCOL_VERSION,
                         machine: shepherd_core::ids::MachineId::new("probe"),
                         cwd: None,
+                        build: None,
                     }),
                 });
                 probe

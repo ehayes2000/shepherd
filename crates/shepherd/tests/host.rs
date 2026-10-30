@@ -315,6 +315,7 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("laptop"),
         cwd: None,
+        build: None,
     }));
     h.step();
     assert_eq!(
@@ -333,6 +334,45 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
 }
 
 #[test]
+fn hello_says_which_build_the_host_runs_and_what_is_installed_at_its_path_now() {
+    let digest = |bytes: &[u8]| {
+        let mut hasher = shepherd_core::wire::DigestHasher::new();
+        hasher.update(bytes);
+        hasher.finish()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("shepherd");
+    std::fs::write(&exe, b"the build the host started as").unwrap();
+    let running = shepherd_core::wire::BuildId {
+        version: "0.1.0".into(),
+        digest: digest(b"the build the host started as"),
+    };
+    let mut h = HostHarness::builder().build(running.clone(), &exe).start();
+    let hello = |h: &mut HostHarness| {
+        let mut client = h.connect();
+        let req = client.request(ClientRequest::Hello(Hello {
+            version: PROTOCOL_VERSION,
+            machine: MachineId::new("laptop"),
+            cwd: None,
+            build: None,
+        }));
+        h.step();
+        let answer = response(&client.take(), &req).unwrap();
+        let ok: shepherd_core::wire::HelloOk = serde_json::from_value(answer).unwrap();
+        (ok.build, ok.installed)
+    };
+    assert_eq!(hello(&mut h), (Some(running.clone()), Some(running.digest)));
+
+    let next = dir.path().join("shepherd.new");
+    std::fs::write(&next, b"a newer build").unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+    assert_eq!(
+        hello(&mut h),
+        (Some(running), Some(digest(b"a newer build")))
+    );
+}
+
+#[test]
 fn hello_tells_the_client_to_ring_the_bell_when_the_config_says_so() {
     let config = shepherd_core::config::RawConfig {
         notify: Some(shepherd_core::config::RawNotify { bell: Some(true) }),
@@ -344,6 +384,7 @@ fn hello_tells_the_client_to_ring_the_bell_when_the_config_says_so() {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("laptop"),
         cwd: None,
+        build: None,
     }));
     h.step();
     let result = response(&client.take(), &req).expect("hello ok");
@@ -358,6 +399,7 @@ fn hello_with_another_version_is_a_version_mismatch() {
         version: 99,
         machine: MachineId::new("laptop"),
         cwd: None,
+        build: None,
     }));
     h.step();
     assert_eq!(

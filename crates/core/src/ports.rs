@@ -12,7 +12,7 @@ pub mod worktrees;
 pub use commands::{CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL};
 pub use config::{ConfigError, ConfigSource, RawConfig};
 pub use event_log::{EventLog, LogError, LogId};
-pub use launcher::{HostLauncher, LaunchError};
+pub use launcher::{HostLauncher, LaunchError, TerminateError};
 pub use link::{ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED};
 pub use pty::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,

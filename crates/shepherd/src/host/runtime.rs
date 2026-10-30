@@ -59,7 +59,7 @@ use shepherd_core::ports::{
     WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
-    self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
+    self, BuildId, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
     HostResponse, HostResult, LogEntry, PtyOutput, SessionNew, SubscribeFrom, WireError,
 };
 use shepherd_term::Screen;
@@ -67,6 +67,7 @@ use shepherd_term::Screen;
 use super::env::Env;
 use super::run_files;
 use super::worker::Worker;
+use crate::build::InstalledExe;
 use crate::screen_guard;
 
 /// The machine id every entry is stamped with until machines get names (T29).
@@ -184,6 +185,10 @@ pub struct RuntimeSettings {
     pub shepherd: PathBuf,
     /// The host socket, for `shepherd hook`.
     pub socket: PathBuf,
+    /// The build this host runs, read from `shepherd` at startup. `None` if it couldn't be read.
+    pub build: Option<BuildId>,
+    /// What is installed at `shepherd` now, for the hello: what a restart would run.
+    pub installed: InstalledExe,
 }
 
 #[derive(Debug, Default)]
@@ -1092,9 +1097,13 @@ impl<
         };
         match body {
             ClientRequest::Hello(hello) => {
-                let config = &self.settings.config;
-                let result = wire::negotiate(&hello, &self.machine)
-                    .map(|ok| HostResult::Hello(ok.with_profiles(config).with_notify(config)));
+                let installed = self.settings.installed.digest();
+                let settings = &self.settings;
+                let config = &settings.config;
+                let result = wire::negotiate(&hello, &self.machine).map(|ok| {
+                    let ok = ok.with_profiles(config).with_notify(config);
+                    HostResult::Hello(ok.with_build(settings.build.clone(), installed))
+                });
                 let accepted = result.is_ok();
                 self.respond(conn, &respond_now(result));
                 // A selection from it reaches this conn either in its catch-up or live, whenever the probe ends.

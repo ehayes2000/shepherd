@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
 
+use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
     GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError,
@@ -150,12 +151,21 @@ fn open_inner(
     let config = Config::resolve(raw, login_shell).map_err(config_error)?;
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
+    // A host that can't read its own executable says no build: clients take it for an older host.
+    // Hashed once: the first hello finds the same file there and reuses the digest.
+    let mut installed = InstalledExe::new(&shepherd);
+    let build = installed.digest().map(build_of);
+    if build.is_none() {
+        tracing::warn!(path = %shepherd.display(), "cannot read this executable's build");
+    }
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(root.join(WORKTREES_DIR));
     let settings = RuntimeSettings {
         config,
         home,
         run_root: root.join(RUN_DIR),
+        build,
+        installed,
         shepherd,
         socket: root.join(SOCKET_FILE),
     };

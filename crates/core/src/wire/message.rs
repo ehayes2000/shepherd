@@ -27,6 +27,7 @@ use serde_json::{Map, Value};
 
 use super::WireError;
 use super::base64::serde_bytes;
+use super::build::{BuildId, ExeDigest};
 use super::codec::frame;
 use crate::acpp::{Envelope, RequestId, Seq};
 use crate::config::{AgentKind, Config};
@@ -162,6 +163,10 @@ pub struct Hello {
     /// repo. Absent from clients older than workspaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The build the client runs. Absent from clients older than builds, or one that couldn't read its own
+    /// executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildId>,
 }
 
 /// Start a session. Answered with [`SessionNewOk`].
@@ -376,6 +381,14 @@ pub struct HelloOk {
     /// a host older than notify, and left off the wire while off.
     #[serde(default, skip_serializing_if = "Notify::is_off")]
     pub notify: Notify,
+    /// The build the host runs. `None` from a host older than builds (spike T36's "host older" row), or one that
+    /// couldn't read its own executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildId>,
+    /// The digest of the file now at the path the host's executable was started from: what restarting it would run.
+    /// `None` from a host older than builds, or when that file can't be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<ExeDigest>,
 }
 
 /// `notify` in [`HelloOk`].
@@ -404,6 +417,15 @@ impl HelloOk {
                 })
                 .collect(),
             default_profile: Some(config.default_agent().name.clone()),
+            ..self
+        }
+    }
+
+    /// This answer, saying which build the host runs and what is installed at its executable's path.
+    pub fn with_build(self, build: Option<BuildId>, installed: Option<ExeDigest>) -> Self {
+        Self {
+            build,
+            installed,
             ..self
         }
     }
@@ -590,6 +612,8 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
         profiles: Vec::new(),
         default_profile: None,
         notify: Notify::default(),
+        build: None,
+        installed: None,
     })
 }
 

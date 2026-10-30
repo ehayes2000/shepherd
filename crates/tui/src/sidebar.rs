@@ -11,8 +11,9 @@
 //! yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
-//! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width, else a
-//! reconnecting note or a hint for help with the `Detach` and `?` buttons on the right.
+//! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
+//! for it is drawn across the window's last lines instead), else a reconnecting note or a hint for help with the
+//! `Detach` and `?` buttons on the right.
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
@@ -26,6 +27,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Clear, Widget, Wrap};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::display::DisplayText;
 use shepherd_core::session::Activity;
@@ -33,6 +35,9 @@ use shepherd_core::session::Activity;
 use crate::draw::{self, shown};
 use crate::layout::{Layout, Target};
 use crate::width::columns;
+
+/// The most lines a notice too long for the footer takes at the bottom of the window.
+const MAX_NOTICE_LINES: u16 = 3;
 
 /// Lines per session.
 const ROW_HEIGHT: u16 = 2;
@@ -400,6 +405,35 @@ fn rows(
         }
         draw(session, is_selected, line, buf);
     }
+}
+
+/// A notice too long for the full sidebar's footer: drawn across the window's last lines instead (as many as it
+/// takes, up to [`MAX_NOTICE_LINES`]), over the footer and the pane. Not while the prefix is pending (the footer
+/// shows that), nor beside the collapsed sidebar, which keeps its buttons and shows no notice.
+pub(crate) fn wide_notice(client: &Client, layout: &Layout, buf: &mut Buffer) {
+    let Some(notice) = client.notice().map(shown) else {
+        return;
+    };
+    let window = layout.sidebar.union(layout.pane);
+    if client.focus() == Focus::Command || window.width < 2 || window.height == 0 {
+        return;
+    }
+    let room = usize::from(inner(layout).width.saturating_sub(1));
+    if layout.collapsed || columns(notice.as_str()) <= room {
+        return;
+    }
+    // A blank column on the left, like the footer.
+    let width = window.width - 1;
+    let wanted = columns(notice.as_str()).div_ceil(usize::from(width));
+    let height = u16::try_from(wanted)
+        .unwrap_or(u16::MAX)
+        .min(MAX_NOTICE_LINES)
+        .min(window.height);
+    let area = Rect::new(window.x, window.bottom() - height, window.width, height);
+    Clear.render(area, buf);
+    draw::paragraph(vec![draw::line(notice, Style::new().fg(ATTENTION))])
+        .wrap(Wrap { trim: true })
+        .render(Rect::new(area.x + 1, area.y, width, height), buf);
 }
 
 fn footer(client: &Client, area: Rect, buf: &mut Buffer) {

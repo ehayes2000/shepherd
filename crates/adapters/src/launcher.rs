@@ -19,21 +19,29 @@
 //! The rule this rests on: until it calls [`release_stderr`], the host writes nothing to stderr except its fatal
 //! startup error. Any byte written before that (a warning, a progress line) makes `launch` report
 //! [`LaunchError::HostFailed`] once the pipe closes, even if the host is serving.
+//!
+//! `terminate` finds the serving host by its socket ([`ProcessHostLauncher::socket`]): it connects, reads the listening
+//! process's pid from the connection's peer credentials (`LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux) and sends
+//! it `SIGTERM`, which a host of any build handles by shutting down cleanly.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{ChildStderr, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shepherd_core::ports::{HostLauncher, LaunchError};
+use shepherd_core::ports::{HostLauncher, LaunchError, TerminateError};
 
 pub struct ProcessHostLauncher {
     program: PathBuf,
     args: Vec<OsString>,
     startup_timeout: Duration,
+    /// The socket the host serves on, by which [`HostLauncher::terminate`] finds it.
+    socket: Option<PathBuf>,
 }
 
 /// How long `launch` waits for the host to report or hand off its stderr. A liveness bound, not a measurement:
@@ -52,6 +60,7 @@ impl ProcessHostLauncher {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             startup_timeout: STARTUP_TIMEOUT,
+            socket: None,
         }
     }
 
@@ -61,9 +70,15 @@ impl ProcessHostLauncher {
         self
     }
 
-    /// Launches this executable's `host` subcommand.
-    pub fn shepherd_host() -> io::Result<Self> {
-        Ok(Self::new(std::env::current_exe()?, ["host"]))
+    /// Finds the host to terminate by `socket`, the socket it serves on. Without one, `terminate` fails.
+    pub fn socket(mut self, socket: impl Into<PathBuf>) -> Self {
+        self.socket = Some(socket.into());
+        self
+    }
+
+    /// Launches this executable's `host` subcommand, which serves on `socket`.
+    pub fn shepherd_host(socket: impl Into<PathBuf>) -> io::Result<Self> {
+        Ok(Self::new(std::env::current_exe()?, ["host"]).socket(socket))
     }
 }
 
@@ -121,6 +136,53 @@ impl HostLauncher for ProcessHostLauncher {
             None => Ok(()),
         }
     }
+
+    /// Connects to the socket, reads the pid of the process listening on it from the connection's peer credentials,
+    /// and sends it `SIGTERM`. This needs nothing from the host's protocol, so it works on a host of any build.
+    fn terminate(&self) -> Result<(), TerminateError> {
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            TerminateError::Failed("no host socket to find the host by".to_owned())
+        })?;
+        let conn = match UnixStream::connect(socket) {
+            Ok(conn) => conn,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Err(TerminateError::NotRunning);
+            }
+            Err(e) => {
+                return Err(TerminateError::Failed(format!(
+                    "cannot connect to {}: {e}",
+                    socket.display()
+                )));
+            }
+        };
+        let failed = |e: io::Error| TerminateError::Failed(format!("cannot find the host: {e}"));
+        let pid = peer_pid(&conn).map_err(failed)?;
+        // SAFETY: plain libc call.
+        let own = unsafe { libc::getpid() };
+        // Never 0 or negative (a process group, or every process), and never this process.
+        if pid <= 0 || pid == own {
+            return Err(TerminateError::Failed(format!(
+                "{} is served by pid {pid}",
+                socket.display()
+            )));
+        }
+        // SAFETY: plain syscall, on a positive pid that isn't ours.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == -1 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                return Err(TerminateError::NotRunning);
+            }
+            return Err(TerminateError::Failed(format!(
+                "cannot stop the host (pid {pid}): {e}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Reads the host's stderr until it closes: with nothing written the host started, otherwise what it wrote is why
@@ -174,6 +236,56 @@ pub fn release_stderr() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// The pid of the process that listens on the socket `conn` is connected to, from the connection's peer credentials
+/// (recorded when that process called `listen`).
+#[cfg(target_vendor = "apple")]
+fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
+    let mut pid: libc::pid_t = 0;
+    let mut len =
+        libc::socklen_t::try_from(std::mem::size_of::<libc::pid_t>()).map_err(io::Error::other)?;
+    // SAFETY: `pid` and `len` are valid for writes of the sizes given, and the fd is open for the call.
+    let got = unsafe {
+        libc::getsockopt(
+            conn.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut len,
+        )
+    };
+    if got == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid)
+}
+
+/// The pid of the process that listens on the socket `conn` is connected to, from the connection's peer credentials
+/// (recorded when that process called `listen`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len =
+        libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(io::Error::other)?;
+    // SAFETY: `cred` and `len` are valid for writes of the sizes given, and the fd is open for the call.
+    let got = unsafe {
+        libc::getsockopt(
+            conn.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if got == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cred.pid)
 }
 
 /// Signals the host starts with at their default action, whatever the client had.
@@ -277,6 +389,8 @@ wait
         /// A write end of the fifo, so the reader never sees EOF between writers, and can be told to stop.
         stop: File,
         pids: Vec<i32>,
+        /// The stand-in listener [`LauncherFixture::running`] started, until it exits.
+        listener: Option<std::process::Child>,
     }
 
     impl StandInFixture {
@@ -301,6 +415,7 @@ wait
                 reports,
                 stop,
                 pids: Vec::new(),
+                listener: None,
             }
         }
 
@@ -354,6 +469,11 @@ wait
 
     impl Drop for StandInFixture {
         fn drop(&mut self) {
+            if let Some(mut listener) = self.listener.take() {
+                // Our own child: kill it by its handle, never by name.
+                let _ = listener.kill();
+                let _ = listener.wait();
+            }
             // Stand-ins that reported after a failed test stopped reading.
             while let Ok(report) = self.reports.recv_timeout(Duration::from_millis(100)) {
                 if let Report::Started { pid, .. } = report {
@@ -390,6 +510,21 @@ wait
             for _ in 0..n {
                 assert!(matches!(self.next_within(timeout), Report::Started { .. }));
             }
+        }
+
+        fn running(&mut self) -> ProcessHostLauncher {
+            let socket = self.dir.path().join("host.sock");
+            self.listener = Some(spawn_listener(&socket));
+            self.broken().socket(socket)
+        }
+
+        fn idle(&mut self) -> ProcessHostLauncher {
+            self.broken().socket(self.dir.path().join("nothing.sock"))
+        }
+
+        fn wait_terminated(&mut self, timeout: Duration) {
+            let mut listener = self.listener.take().expect("a running stand-in listener");
+            assert_eq!(exit_signal(&mut listener, timeout), Some(libc::SIGTERM));
         }
     }
 
@@ -644,5 +779,114 @@ wait
         assert_eq!(launch_result(launcher), Ok(()));
         // Recorded, so the fixture kills it.
         assert!(matches!(f.next(), Report::Started { .. }));
+    }
+
+    /// Set in the re-run of [`stand_in_listener`]: the socket it listens on.
+    const LISTEN_VAR: &str = "SHEPHERD_LAUNCHER_TEST_LISTEN";
+    /// What the stand-in listener prints once it listens.
+    const LISTENING: &str = "stand-in listening";
+
+    /// A stand-in for a running host, of any build: re-run with [`LISTEN_VAR`] set, it listens on that socket and
+    /// accepts connections until a signal stops it. It knows nothing of shepherd's protocol, like a host older than
+    /// `terminate`. Run normally, it does nothing.
+    #[test]
+    fn stand_in_listener() {
+        let Some(socket) = std::env::var_os(LISTEN_VAR) else {
+            return;
+        };
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        let mut out = std::io::stdout();
+        writeln!(out, "{LISTENING}").unwrap();
+        out.flush().unwrap();
+        // At most 2 minutes, in case a failed test leaks it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        // Kept open, as a host keeps its clients': a connection closed at once can't be asked for its peer.
+        let mut conns = Vec::new();
+        for conn in listener.incoming() {
+            conns.push(conn);
+            if std::time::Instant::now() > deadline {
+                return;
+            }
+        }
+    }
+
+    /// Starts [`stand_in_listener`] on `socket` and waits until it listens.
+    fn spawn_listener(socket: &Path) -> std::process::Child {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launcher::tests::stand_in_listener",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(LISTEN_VAR, socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                if line.contains(LISTENING) {
+                    let _ = tx.send(());
+                }
+            }
+        });
+        if rx.recv_timeout(TIMEOUT).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the stand-in listener never listened");
+        }
+        child
+    }
+
+    /// The signal that ended `child`, waiting at most `timeout` for it to end. Kills it if it doesn't.
+    fn exit_signal(child: &mut std::process::Child, timeout: Duration) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        use wait_timeout::ChildExt;
+        match child.wait_timeout(timeout).unwrap() {
+            Some(status) => status.signal(),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the stand-in listener is still running");
+            }
+        }
+    }
+
+    #[test]
+    fn terminate_signals_the_process_listening_on_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("host.sock");
+        let mut listener = spawn_listener(&socket);
+        let launcher = ProcessHostLauncher::new("/nonexistent", ["host"]).socket(&socket);
+        assert_eq!(launcher.terminate(), Ok(()));
+        assert_eq!(exit_signal(&mut listener, TIMEOUT), Some(libc::SIGTERM));
+    }
+
+    #[test]
+    fn terminate_without_a_socket_says_so() {
+        let launcher = ProcessHostLauncher::new("/nonexistent", ["host"]);
+        assert!(matches!(
+            launcher.terminate(),
+            Err(TerminateError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn terminate_on_a_socket_nothing_listens_on_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("host.sock");
+        // Left by a listener that was killed, as after a host that crashed: the file stays. Bound in another process,
+        // because a child another test forks from this one could still hold a listener bound here.
+        let mut listener = spawn_listener(&socket);
+        listener.kill().unwrap();
+        listener.wait().unwrap();
+        assert!(socket.exists());
+        let launcher = ProcessHostLauncher::new("/nonexistent", ["host"]).socket(&socket);
+        assert_eq!(launcher.terminate(), Err(TerminateError::NotRunning));
     }
 }

@@ -95,6 +95,7 @@ impl Setup {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("laptop"),
             cwd: Some(app.to_str().unwrap().to_owned()),
+            build: None,
         }));
         h.step();
         assert_eq!(h.host().workspace(), Some(app.as_path()));

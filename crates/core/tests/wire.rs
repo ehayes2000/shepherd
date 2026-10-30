@@ -9,13 +9,13 @@ use shepherd_core::acpp::{
 use shepherd_core::config::{AgentKind, Config};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
-    ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, Hello, HelloOk,
-    HookFrame, HostMessage, HostNotification, HostResponse, HostResult, InputKind, LogEntry,
-    Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request, RequestError, SessionClose,
-    SessionInput, SessionNew, SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe,
-    SubscribeFrom, WireError, WorkspaceSelect, code, decode_client_message, decode_host_message,
-    encode_client_notification, encode_host_notification, encode_request, encode_response,
-    negotiate,
+    BuildId, ClientMessage, ClientNotification, ClientRequest, DecodeError, Decoder, DigestHasher,
+    ExeDigest, Hello, HelloOk, HookFrame, HostMessage, HostNotification, HostResponse, HostResult,
+    InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, ProfileInfo, PtyOutput, Request,
+    RequestError, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionRename,
+    SessionResize, SessionResume, Subscribe, SubscribeFrom, WireError, WorkspaceSelect, code,
+    decode_client_message, decode_host_message, encode_client_notification,
+    encode_host_notification, encode_request, encode_response, negotiate,
 };
 
 fn sid(s: &str) -> SessionId {
@@ -50,11 +50,13 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_1"),
             cwd: None,
+            build: None,
         }),
         ClientRequest::Hello(Hello {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_1"),
             cwd: Some("/src/shepherd/crates".into()),
+            build: None,
         }),
         ClientRequest::SessionNew(SessionNew {
             profile: Some("claude".into()),
@@ -239,6 +241,7 @@ fn hello_params_are_version_and_machine() {
             version: 1,
             machine: MachineId::new("m_7f"),
             cwd: None,
+            build: None,
         }),
     });
     assert_eq!(
@@ -255,6 +258,7 @@ fn hello_carries_the_clients_cwd_and_a_hello_without_one_still_parses() {
             version: 1,
             machine: MachineId::new("m_7f"),
             cwd: Some("/src/app".into()),
+            build: None,
         }),
     });
     assert_eq!(
@@ -590,6 +594,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("m_client"),
         cwd: None,
+        build: None,
     };
     assert_eq!(
         negotiate(&hello, &MachineId::new("m_host")),
@@ -599,6 +604,8 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
             profiles: Vec::new(),
             default_profile: None,
             notify: Notify::default(),
+            build: None,
+            installed: None,
         })
     );
 }
@@ -673,6 +680,8 @@ fn a_hello_ok_from_an_older_host_has_no_profiles() {
             profiles: Vec::new(),
             default_profile: None,
             notify: Notify::default(),
+            build: None,
+            installed: None,
         }))
     );
 }
@@ -711,6 +720,7 @@ fn hello() -> Hello {
         version: PROTOCOL_VERSION,
         machine: MachineId::new("m_client"),
         cwd: None,
+        build: None,
     }
 }
 
@@ -720,6 +730,7 @@ fn hello_with_other_version_gets_a_typed_version_mismatch_response() {
         version: PROTOCOL_VERSION + 1,
         machine: MachineId::new("m_client"),
         cwd: None,
+        build: None,
     };
     let result = negotiate(&hello, &MachineId::new("m_host")).map(HostResult::Hello);
     let mismatch = WireError::VersionMismatch {
@@ -757,6 +768,8 @@ fn successful_responses_round_trip_by_method() {
                 }],
                 default_profile: Some("codex".into()),
                 notify: Notify { bell: true },
+                build: None,
+                installed: None,
             }),
         ),
         (
@@ -1056,4 +1069,115 @@ fn host_stream_split_at_every_byte_boundary_decodes_unchanged() {
         };
         assert_eq!(raw.typed(Method::SessionClose).unwrap(), resp);
     }
+}
+
+// ---------- build identity ----------
+
+fn digest(byte: u8) -> ExeDigest {
+    ExeDigest::from_bytes([byte; 32])
+}
+
+fn build(byte: u8) -> BuildId {
+    BuildId {
+        version: "0.1.0".into(),
+        digest: digest(byte),
+    }
+}
+
+#[test]
+fn a_digest_is_the_sha256_of_the_bytes_fed_to_it_in_any_chunks() {
+    // FIPS 180-2's "abc" vector.
+    let expected: [u8; 32] = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
+    ];
+    let mut hasher = DigestHasher::new();
+    hasher.update(b"a");
+    hasher.update(b"bc");
+    assert_eq!(hasher.finish(), ExeDigest::from_bytes(expected));
+}
+
+#[test]
+fn hello_carries_the_clients_build_and_round_trips() {
+    let req = Request {
+        id: 1.into(),
+        body: ClientRequest::Hello(Hello {
+            build: Some(build(7)),
+            ..hello()
+        }),
+    };
+    let line = encode_request(&req);
+    assert_eq!(
+        wire_json(&line)["params"]["build"],
+        json!({ "version": "0.1.0", "digest": shepherd_core::wire::base64::encode(&[7; 32]) })
+    );
+    assert_eq!(request(&line), req);
+}
+
+#[test]
+fn a_hello_from_a_client_older_than_builds_has_none_and_one_without_leaves_it_off_the_wire() {
+    let older = request_line(
+        "_shepherd/hello",
+        json!({ "version": 1, "machine": "m_7f" }),
+    );
+    let ClientRequest::Hello(hello_in) = request(&older).body else {
+        panic!("not a hello");
+    };
+    assert_eq!(hello_in.build, None);
+    let line = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::Hello(hello()),
+    });
+    assert_eq!(wire_json(&line)["params"].get("build"), None);
+}
+
+#[test]
+fn hello_ok_carries_the_hosts_build_and_installed_digest_and_round_trips() {
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_build(Some(build(1)), Some(digest(2)));
+    assert_eq!(
+        (ok.build.clone(), ok.installed),
+        (Some(build(1)), Some(digest(2)))
+    );
+    let resp = HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    };
+    let line = encode_response(&resp);
+    let result = &wire_json(&line)["result"];
+    assert_eq!(
+        result["installed"],
+        json!(shepherd_core::wire::base64::encode(&[2; 32]))
+    );
+    assert_eq!(result["build"]["version"], "0.1.0");
+    assert_eq!(response(&line, Method::Hello), resp);
+}
+
+#[test]
+fn a_hello_ok_from_a_host_older_than_builds_has_no_build_or_installed() {
+    let line = json!({ "jsonrpc": "2.0", "id": 1,
+                       "result": { "version": PROTOCOL_VERSION, "machine": "m_host" } })
+    .to_string();
+    let Ok(HostResult::Hello(ok)) = response(line.as_bytes(), Method::Hello).result else {
+        panic!("not a hello answer");
+    };
+    assert_eq!((ok.build, ok.installed), (None, None));
+}
+
+#[test]
+fn a_digest_that_is_not_32_bytes_is_an_invalid_hello_answer() {
+    let short = shepherd_core::wire::base64::encode(&[1; 31]);
+    let line = json!({ "jsonrpc": "2.0", "id": 1,
+                       "result": { "version": PROTOCOL_VERSION, "machine": "m_host", "installed": short } })
+    .to_string();
+    let raw = match decode_host_message(line.as_bytes()) {
+        Ok(HostMessage::Response(raw)) => raw,
+        other => panic!("not a response: {other:?}"),
+    };
+    assert!(matches!(
+        raw.typed(Method::Hello),
+        Err(DecodeError::InvalidResult { .. })
+    ));
 }

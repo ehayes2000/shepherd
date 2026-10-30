@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/restart_host.rs
+expression: "text(&buffer(&answered(hello_ok(Some(2), Some(2))), WIDE))"
+---
+ ⌂ choose a workspace  │
+ + New session         │
+ ◌ docs               ×│
+   local · —           │
+ ◌ fix-login          ×│
+   local · —           │
+ ✕ old                ×│
+   local · —           │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ this window runs a different shepherd build than the host; restart it to use
+ the installed one

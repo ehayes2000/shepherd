@@ -161,6 +161,7 @@ fn map_mouse(
                 | Target::Dismiss
                 | Target::RemoveWorktree
                 | Target::KeepWorktree
+                | Target::RestartHost
         )
     );
     let scroll_popup = |by| match client.popup() {
@@ -223,6 +224,7 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::Confirm => vec![Intent::Confirm],
         Target::RemoveWorktree => vec![Intent::CloseRemovingWorktree],
         Target::KeepWorktree => vec![Intent::CloseKeepingWorktree],
+        Target::RestartHost => vec![Intent::RestartHost],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::Popup => Vec::new(),
@@ -286,6 +288,11 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
         Popup::Menu { .. } | Popup::PickProfile => {
             (key.code == KeyCode::Esc).then_some(Intent::Dismiss)
         }
+        // Only a click restarts the host.
+        Popup::RestartHost { .. } => match key.code {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc if plain => Some(Intent::Dismiss),
+            _ => None,
+        },
     }
 }
 
