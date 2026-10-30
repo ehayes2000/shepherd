@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F36 display-safe gaps (minus ZWJ) | in review | task/f36-display-gaps @ efeae89 (on a971711) | 1 | PM-accepted: 16 chars/cluster; Line/Text/Span::from banned outside draw.rs; stderr_safe per line |
 | F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
-| F42 new session wrong size | building | task/f42-spawn-size @ 95d0821 | 0 | user bug; diagnosis in spec |
+| F42 new session wrong size | in review | task/f42-spawn-size @ 19f5f48 (on b4d68f6) | 1 | PM-accepted: core host::sizes::Sizes wraps Host::handle; SessionNew.size; exited sizes not carried across swap |
 | F37 worktree lock/shutdown leftovers | re-review | task/f37-worktree-leftovers @ 7f7e811 (on b821b28) | 2 | private fetch ref + pinned update-ref; grace test; group wait probes with SIGKILL (PM asked reviewer: pgid reuse?) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
