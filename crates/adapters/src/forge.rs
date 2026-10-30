@@ -343,7 +343,6 @@ impl GhPr {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -358,8 +357,8 @@ mod tests {
     /// A stand-in `gh`, never the real one. It records its arguments, environment, cwd, pid and process group in its
     /// directory, then answers by `mode`: as gh does for `pr list --head <branch> --json ...` (the JSON in
     /// `prs/<branch>.json`, else `[]`), signed out (exit 4), failing (exit 1), or hanging (a `sleep` it records).
-    const STAND_IN: &str = r#"#!/bin/sh
-dir="${0%/*}/.."
+    /// Installed with [`crate::stand_in`], so its `$0` is `bin/gh` in the fixture's directory.
+    const STAND_IN: &str = r#"dir="${0%/*}/.."
 mode="$(/bin/cat "$dir/mode")"
 if [ "$mode" = hanging ]; then /bin/sleep 300 & echo $! > "$dir/sleep.pid"; wait; exit 0; fi
 printf '%s\n' "$@" > "$dir/args"
@@ -399,9 +398,7 @@ if [ -f "$dir/prs/$head.json" ]; then /bin/cat "$dir/prs/$head.json"; else echo 
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::create_dir_all(tmp.path().join("prs")).unwrap();
             std::fs::create_dir_all(tmp.path().join("checkout")).unwrap();
-            let gh = bin.join("gh");
-            std::fs::write(&gh, STAND_IN).unwrap();
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::stand_in::install(&bin.join("gh"), STAND_IN);
             let fixture = Self {
                 // A generous liveness bound: under parallel load a shell script can take long to start.
                 // Nothing of this process's environment reaches the stand-in, which writes what it gets to disk.

@@ -12,6 +12,8 @@ pub mod link;
 pub mod private_fs;
 mod process_group;
 pub mod pty;
+#[cfg(test)]
+mod stand_in;
 pub mod worktrees;
 
 pub use commands::ShellCommands;

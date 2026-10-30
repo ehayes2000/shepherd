@@ -534,11 +534,9 @@ wait
     impl Drop for StandInFixture {
         fn drop(&mut self) {
             for pid in self.recorded_pids() {
-                // SAFETY: plain syscall.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-                // Each stand-in leads its own process group (`setsid`), its watchdog included. Killed until it is
-                // empty, because a child forked while the group is signalled can miss the signal and outlive its
-                // parent. Bounded, as a liveness check: the watchdog ends anything left.
+                // Each stand-in leads its own process group (`setsid`), its watchdog included, so this reaches the
+                // stand-in itself too. Killed until the group is empty, as a precaution (untested) against a child
+                // forked while the group is signalled. Bounded: the watchdog ends anything left.
                 let deadline = std::time::Instant::now() + TIMEOUT;
                 // SAFETY: plain syscall.
                 while unsafe { libc::kill(-pid, libc::SIGKILL) } == 0
@@ -661,6 +659,25 @@ wait
             ppid as u32,
             std::process::id(),
             "the host would be our zombie"
+        );
+    }
+
+    /// A stand-in that answers `SIGUSR1` takes its watchdog with it, long before its lifetime would end it.
+    #[test]
+    fn a_stand_in_that_answers_ends_with_its_watchdog() {
+        let mut f = StandInFixture::new();
+        launch(f.stand_in());
+        let Report::Started { pid, .. } = f.next() else {
+            panic!("expected started");
+        };
+        assert!(
+            matches!(f.ask_alive(pid), Some(Report::Alive { .. })),
+            "the host didn't answer"
+        );
+        assert!(TIMEOUT < STAND_IN_LIFETIME);
+        assert!(
+            group_gone(pid),
+            "stand-in {pid}'s group outlived its answer"
         );
     }
 
