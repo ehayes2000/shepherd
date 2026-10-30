@@ -11,7 +11,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T25b cleanup view | building | task/t25b-cleanup @ 7b15652 | 0 | – |
 | F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ 7b15652 | 0 | – |
-| T27 PR status | re-review | task/t27-pr-status @ b04f815 (on d831077) | 2 | rebased over F33; env isolated; colour vars stripped; real_worktrees forge without gh |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T27 | 2 | conflicted with F33; fixture leaked env to disk; CLICOLOR_FORCE broke JSON; real_worktrees could reach real gh |
 | F33 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | T26 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
 | T36b | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
@@ -778,6 +778,18 @@ orphaned for 5 hours on the PM's machine after load rounds; the PM stopped them 
 acceptance:
 - Every stand-in a launcher test spawns is reaped or killed by a guard on every path (panics, timeouts), the shell exits when
   its child does (no orphaned `wait`), and a load round leaves no stand-in processes (checked by recorded pids).
+scope: crates/adapters
+
+### F41: T27 leftovers
+status: todo
+depends: T27
+touches: adapters::forge (tests)
+goal: Two test gaps from the T27 final review.
+acceptance:
+- `gh_reads_nothing_from_stdin` passes regardless of the test run's own stdin: run the port from a helper whose stdin is a
+  pipe with data, so `.stdin(Stdio::inherit())` fails it under the gate's `/dev/null` stdin too.
+- `variables_that_point_gh_or_git_elsewhere_are_not_passed_on` also asserts an always-present variable (e.g. HOME) doesn't
+  reach the stand-in, so deleting `env_clear()` fails it.
 scope: crates/adapters
 
 ## Out of scope for the initial feature set
@@ -1562,7 +1574,7 @@ height, hit tests on rendered cells, every-popup tiny-window test). Typing filte
 pure, Unicode-aware (graphemes, case-insensitive via `to_lowercase`), never hand-rolled tables.
 
 ### T27: PR status in the sidebar
-status: in-progress
+status: done (6936444)
 depends: T13, T22
 touches: ports::forge, core::host, adapters::forge, tui::sidebar
 goal: Sidebar line 2 shows the session's PR.
