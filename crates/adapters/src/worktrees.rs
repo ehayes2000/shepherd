@@ -26,6 +26,8 @@
 //!   `remote.origin.tagOpt`, `fetch.prune`, `fetch.pruneTags`, `fetch.recurseSubmodules`, `gc.auto`).
 //! - `worktree add`: `--no-guess-remote` (beats `worktree.guessRemote`). The branch it checks out is made with
 //!   `update-ref`, which never sets an upstream (so `branch.autoSetupMerge` doesn't apply).
+//! - `update-ref` (making and deleting the new branch) and `worktree add`: `-c core.filesRefLockTimeout=0`, so they
+//!   never wait on another process's lock of the new branch, and a lock left after one of them is killed is its own.
 //! - Config injected through the environment (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its
 //!   `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`) is removed, as are variables that point git at another repo
 //!   (`GIT_DIR`, ...).
@@ -54,6 +56,11 @@ use shepherd_core::ports::{
 /// For every git call except fetch. Generous, because `worktree add` checks out files and runs the user's hooks.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// For the calls that lock the new branch (`update-ref`, `worktree add`, deleting it in cleanup): fail at once on a
+/// lock that is already taken instead of waiting (`core.filesRefLockTimeout`), so a lock left after such a call is
+/// killed is always its own, and cleanup doesn't hang on someone else's.
+const NO_REF_LOCK_WAIT: &str = "core.filesRefLockTimeout=0";
 
 /// Variables that would point git at some other repo than the `-C` directory (e.g. when shepherd itself runs from a
 /// git hook), or inject config.
@@ -238,7 +245,8 @@ impl GitWorktrees {
     ) -> Result<(), WorktreeError> {
         let full_ref = format!("refs/heads/{branch}");
         // The empty old value means "must not exist yet".
-        match self.git(dir, &["update-ref", &full_ref, oid, ""]) {
+        let args = ["-c", NO_REF_LOCK_WAIT, "update-ref", &full_ref, oid, ""];
+        match self.git(dir, &args) {
             Ok(_) => Ok(()),
             Err(Failure::Exit { code: Some(_), .. }) if self.ref_exists(dir, &full_ref)? => {
                 Err(WorktreeError::BranchExists(branch.clone()))
@@ -250,8 +258,9 @@ impl GitWorktrees {
                     "can't create branch {branch}: git update-ref: {failure}"
                 )))
             }
-            // Killed, so it may have died holding the branch's lock, which would block any retry. Nobody else can
-            // have taken the lock while it held it.
+            // Killed, so it may have died holding the branch's lock, which would block any retry. It never waits for
+            // a lock (`NO_REF_LOCK_WAIT`), so a lock there now is one it took, not another process's it was waiting
+            // on.
             Err(failure) => {
                 let lock = common.join("refs/heads").join(format!("{branch}.lock"));
                 match std::fs::remove_file(&lock) {
@@ -325,7 +334,10 @@ impl GitWorktrees {
         }
         // Deleted only if it still points where `create` put it.
         let full_ref = format!("refs/heads/{branch}");
-        let delete: [&OsStr; 4] = [
+        // Without waiting on a lock someone else holds: that fails the delete, and the user is told.
+        let delete: [&OsStr; 6] = [
+            "-c".as_ref(),
+            NO_REF_LOCK_WAIT.as_ref(),
             "update-ref".as_ref(),
             "-d".as_ref(),
             full_ref.as_ref(),
@@ -517,8 +529,8 @@ impl GitWorktrees {
         let Ok(main) = self.checkout_of(Path::new(listed)) else {
             return Ok(None);
         };
-        // The same-repo check is defensive: git derives the entry from the common dir, so a checkout found there
-        // always uses it.
+        // The git-dir and same-repo checks are defensive: git derives the entry from the common dir, so a checkout
+        // found there always uses that dir as both its git dir and its common dir.
         let is_main = main.git_dir == main.common
             && main.common == place.common
             && std::fs::canonicalize(listed).is_ok_and(|p| p == main.top);
@@ -706,7 +718,9 @@ impl Worktrees for GitWorktrees {
             .registered(&common, &path)
             .map_err(WorktreeError::Other)?;
         self.create_branch(dir, &common, &branch, base_oid)?;
-        let args: [&OsStr; 6] = [
+        let args: [&OsStr; 8] = [
+            "-c".as_ref(),
+            NO_REF_LOCK_WAIT.as_ref(),
             "worktree".as_ref(),
             "add".as_ref(),
             "--quiet".as_ref(),
@@ -726,7 +740,8 @@ impl Worktrees for GitWorktrees {
         };
         // A git that exits on its own releases its locks, so a lock of the new branch left after that belongs to
         // another git process. One killed by a timeout or a signal may have died holding it: the add updates the
-        // branch (to where it already points) as it checks it out.
+        // branch (to where it already points) as it checks it out. It never waits for another process's lock
+        // (`NO_REF_LOCK_WAIT`), so it can't have been killed while waiting on one.
         let ours = Leftovers {
             worktree: !registered_before,
             branch_lock: matches!(failure, Failure::Timeout | Failure::Exit { code: None, .. }),
@@ -1646,6 +1661,54 @@ mod tests {
         assert!(!message.contains("clean"), "{message}");
         assert!(lock.exists());
         assert_nothing_left(&f, "busy");
+    }
+
+    /// With `core.filesRefLockTimeout=-1` git would wait forever on another process's lock of the new branch, be
+    /// killed by the timeout, and that lock would look like one it died holding.
+    #[test]
+    fn a_create_blocked_by_a_foreign_branch_lock_leaves_it_alone_whatever_the_lock_timeout() {
+        let f = GitFixture::new();
+        f.git(&f.app(), &["config", "core.filesRefLockTimeout", "-1"]);
+        let lock = f.app().join(".git/refs/heads/busy.lock");
+        std::fs::write(&lock, "").unwrap();
+        let result = slow_port(&f).create(&f.repo(), &name("busy"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("can't create branch busy"), "{message}");
+        assert!(lock.exists());
+        assert_nothing_left(&f, "busy");
+    }
+
+    /// The same for the add: another process locks the new branch right after `create` made it (here a
+    /// `reference-transaction` hook run as the branch is committed). The add must not wait on that lock and then be
+    /// killed, which would make the lock look like its own.
+    #[test]
+    fn an_add_blocked_by_a_foreign_branch_lock_leaves_it_alone_whatever_the_lock_timeout() {
+        let f = GitFixture::new();
+        f.git(&f.app(), &["config", "core.filesRefLockTimeout", "-1"]);
+        let lock = f.app().join(".git/refs/heads/held.lock");
+        let once = f.tmp().join("held.once");
+        hook(
+            &f,
+            "reference-transaction",
+            &format!(
+                "[ \"$1\" = committed ] || exit 0\n\
+                 grep -q ' refs/heads/held$' || exit 0\n\
+                 [ -e '{once}' ] && exit 0\n\
+                 touch '{once}' '{lock}'",
+                once = once.display(),
+                lock = lock.display()
+            ),
+        );
+        let result = slow_port(&f).create(&f.repo(), &name("held"), BaseSpec::OriginDefault);
+        let Err(WorktreeError::Other(message)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(message.contains("worktree add failed"), "{message}");
+        assert!(message.contains("can't delete branch held"), "{message}");
+        assert!(lock.exists(), "{message}");
+        assert!(!worktree_path(&f, "held").exists(), "{message}");
     }
 
     /// Someone else's worktree used to be at the path and its directory is gone, but git still lists it, so the add
