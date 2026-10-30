@@ -110,6 +110,315 @@ new session → agent goes idle → sidebar shows idle". Write one scenario per 
 - Assert on outcomes the user would notice: commands emitted, state visible through public accessors, rendered output.
 - No `#[ignore]`. No `sleep`. No real network. Real-adapter tests use `tempfile`.
 
+## Spike T36: host hot-swap
+
+Findings of the T36 spike (2026-10-30). This is not a decision yet: the PM records one (proposed text at the end of this
+section). The prototypes were throwaway C and Python programs. They ran on macOS (Darwin 24.6, arm64, cargo 1.96) in a
+scratch directory with a throwaway `HOME`. Linux claims come from documented behavior and were **not** run. Citations
+are `file:line` in this repo, and `herdr:file:line` in herdr at commit `ee5bfb5`.
+
+### What happens today
+
+- Besides the machine and cwd, the hello carries only `version: PROTOCOL_VERSION`. That is still `1`, the value it had when the wire landed
+  (`crates/core/src/wire/message.rs:36-37`, `Hello` at `:158-165`, `HelloOk` at `:366-379`). `negotiate` only checks
+  that the versions are equal (`:579-593`). Nothing identifies the build, so a host from before T21 accepts a newer
+  client, and the first new method fails with `-32601 method not found` (`crates/core/src/wire/error.rs:26-27`).
+  Prototype (c) reproduced this against today's binary: hello v1 is accepted, an unknown method gets `-32601`, hello
+  v2 gets `1000 protocol version mismatch`, and a second `shepherd host` fails with "already running" because of the
+  log lock (`crates/shepherd/src/host/mod.rs:138`, `:172-174`).
+- Bumping `PROTOCOL_VERSION` alone makes things worse: the client treats any hello error as fatal and quits ("the
+  shepherd host refused us", `crates/core/src/client.rs:681`, `:631-634`).
+- Today, updating the host is option (c). Shutdown kills every PTY (`start_shutdown`,
+  `crates/shepherd/src/host/runtime.rs:1541-1551`; `PortablePty::drop`, `crates/adapters/src/pty.rs:173-184`). A new
+  host marks every session that hasn't exited as exited (`runtime.rs:348-363`) and sweeps every run directory
+  (`runtime.rs:365-366`).
+- What a swap has to carry. Host state is a fold of the logs, and `start` rebuilds it (`runtime.rs:312-317`). The
+  runtime also keeps state that isn't a fold (`runtime.rs:5-33`, struct at `:250-286`):
+  - screens
+  - per-conn subscriptions and replies
+  - worker calls in flight (`worktree_calls`, `hook_calls`, `:255-258`)
+  - pending and awaiting run files (`:277-279`)
+  - sync-update deadlines
+  - the quiet watch, which is rebuilt from the log at start (`:313-316`)
+  - translators and the hook seed (`:273-275`). Both translation types already derive `Serialize`/`Deserialize`
+    (`crates/core/src/agents/claude.rs:68-71`, `crates/core/src/agents/codex.rs:179-182`). `Translators` itself does
+    not (`crates/core/src/agents.rs:43-56`).
+
+### Prior art: herdr's live handoff
+
+- **Opt-in, not automatic.** The user runs `herdr update --handoff` (`herdr:src/update.rs:1155-1164`). Without the
+  flag, running servers are left alone (`:1233-1241`). The capability is advertised as `live_handoff: cfg!(unix)`
+  (`herdr:src/platform/mod.rs:308-320`) and checked from the runtime status (`herdr:src/update.rs:896-901`).
+- **Mechanism (b).** The old server spawns the updated exe as `server --handoff-import <socket> <token>`, detached
+  (`herdr:src/server/handoff.rs:69-112`), on a private one-shot socket (`:64-66`, `:141-148`). The exchange runs:
+  1. token
+  2. JSON manifest: version, source and expected version and protocol, a layout snapshot, and per pane the child pid,
+     size, input modes, title and history ANSI (`:36-54`, `herdr:src/handoff_runtime.rs:11-32`)
+  3. `validated`
+  4. fds over `SCM_RIGHTS` in batches of 64 (`handoff.rs:25-29`, `:386-426`)
+  5. `restored`, then `ready`, then `committed`, then `owned` (`:182-230`, `:279-305`)
+
+  The importer rejects a mismatched handoff, protocol or version before it takes any fd (`:233-277`).
+- **Old side** (`herdr:src/server/headless/lifecycle.rs:25-225`):
+  1. disconnects every client (`:57-59`)
+  2. pauses each PTY reader, which first drains queued writes (`:61-70`; `herdr:src/pty/actor/unix.rs:250-290`,
+     `:737-780`)
+  3. captures state and spawns the importer
+  4. validates and sends the fds
+  5. removes its public sockets (`:176-181`)
+  6. waits for `ready` and commits
+  7. only then marks its runtimes "preserve processes on drop" (`:215-222`; `herdr:src/pane.rs:2254-2266`)
+
+  Any failure before the commit rolls back: readers resume and the sockets are restored (`:182-213`, `:275-288`).
+- **New side** (`herdr:src/server/headless/bootstrap.rs:138-217`). It rebuilds panes from the fds and keeps the child
+  pid only as a number (`herdr:src/pane.rs:2502-2560`). It polls until the old public sockets stop answering, then
+  **binds fresh ones** (`bootstrap.rs:179-186`, `lifecycle.rs:386-403`), so there is a window in which connects fail.
+  It nudges each child to redraw on the first attach (`bootstrap.rs:204`, `lifecycle.rs:290-299`,
+  `herdr:src/pty/actor/unix.rs:228-247`). It carries terminal history only for panes without an agent session
+  (`lifecycle.rs:98-100`).
+- **Failure UX.** herdr checks which server is now answering (`herdr:src/update.rs:1427-1438`), then asks before it
+  stops the old server, defaulting to No (`:1442-1490`). It never kills panes without asking.
+- **Install.** The new binary is renamed over the old one (`herdr:src/update.rs:730-745`). The wire protocol is
+  checked for strict equality (`herdr:src/protocol/wire.rs:20`, `:1749-1767`).
+- **What to take:** the version check before any fd moves, quiescing readers, the redraw nudge, asking before killing,
+  and rollback where possible. **What to avoid:** the rebind gap (a shepherd hook would lose its frame, and a client
+  would launch a second host, `client.rs:604-608`), and losing the agent as a child (exit codes).
+
+### Prototype results
+
+| prototype | what it did | result |
+|---|---|---|
+| (a) re-exec | v1 holds a PTY master and slave (agent: `sh`), a listening unix socket and a `flock`. A v2 build is renamed over its path. v1 clears `FD_CLOEXEC` on those four fds, writes a handoff file and `execv`s the path. | Same pid after exec. All 4 fds are open in v2. The lock was never free: another process's `LOCK_NB` fails both before and after the exec. Output the agent wrote that v1 never read is read by v2. Input still echoes. A hook-like client that connected, sent a line and hung up **before any accept** was accepted and read by v2, because the listen backlog survives exec. `waitpid(agent)` in v2 returned exit code 7: **the agent is still our child.** |
+| (a) in-place overwrite | Same, but the binary is overwritten with `cp`, so it keeps the same inode. | The exec'd image is SIGKILLed (`Killed: 9`), its PTYs close and the agent dies. A fresh spawn of that file is SIGKILLed too (exit 137), while the old process keeps running. **A preflight spawn catches this before the exec.** |
+| replace | `cargo build` and `cargo install --force` rebuild a binary while a copy of it runs. | Both replace it with a **new inode**. The running copies keep running. |
+| (b) SCM_RIGHTS | The old process passes the same four fds to a `setsid`'d second process, then exits. | The fds work, and the lock survives the old process exiting. **But** an explicit `flock(LOCK_UN)` in the old process before it exits (what `JsonlEventLog::drop` does, `crates/adapters/src/event_log.rs:127-133`) unlocks the new host's lock too, because both hold one open file description. The new host can't `waitpid` the agent (`ECHILD`). kqueue `NOTE_EXIT` fires for a non-child, but without the exit status (`NOTE_EXITSTATUS` unset, data 0), so exit codes become `None`. |
+| (c) restart | Today's binary, a throwaway `HOME`, a Python probe. | See "What happens today". |
+
+Other facts the prototypes confirmed:
+- On macOS, a dying child can block in `exit` until its tty output is read. This is the same effect noted in
+  `pty.rs:222-223`, so an adopted pump must keep draining.
+- `File::try_lock` is `flock(2)` on Linux and Apple (std 1.96, `library/std/src/sys/fs/unix.rs:1530-1543`). A lock
+  belongs to the open file description, so it survives an exec when `CLOEXEC` is cleared, and it is shared with any
+  fd received over `SCM_RIGHTS`.
+
+### What breaks, and the answer for each
+
+- **Exe replaced on disk.**
+  - macOS: a rename is safe. An in-place overwrite gets every new exec of that file SIGKILLed (prototypes).
+  - Linux (documented, not run): writing in place to a running exe fails with `ETXTBSY`, and a rename is fine. After
+    a replace, `current_exe()` (`/proc/self/exe`) reads `<path> (deleted)`.
+  - The swap must therefore exec the path recorded at startup (`settings.shepherd`, `host/mod.rs:151-152`, `:155-161`),
+    never `current_exe()` called at swap time.
+  - A preflight spawn rejects a binary that can't run.
+- **Executing an unverified binary.** `main.rs` ignores extra arguments after `host` (`crates/shepherd/src/main.rs:8`).
+  A pre-T36b binary exec'd as `host --adopt …` would start a fresh host, mark every session exited and leak the
+  inherited masters, which leaves the agents hung. So the preflight must use a **new subcommand**:
+  `shepherd handoff-check`. Old binaries answer it with "unknown command" and exit 1 (`main.rs:14`), which counts as
+  "can't hand off".
+- **Log lock.** The lock fd is carried across the exec with `CLOEXEC` cleared. Exec doesn't run `Drop`, so the lock is
+  never released. The runtime must never drop the `JsonlEventLog` before the exec: its `Drop` unlocks the shared
+  description (shown in the (b) prototype). The new image adopts the fd and calls `try_lock` on it again, which is a
+  no-op on the same description. At no point can a racing `shepherd host` (launched by another client's reconnect)
+  take the lock and declare every session dead (`runtime.rs:348-363`).
+- **Listening socket.** The listening socket fd is carried and the socket file is never unlinked. The link's `Drop`
+  would unlink it (`crates/adapters/src/link.rs:170-185`), but exec skips `Drop`. Clients and hooks that connect
+  during the exec wait in the backlog (shown in the prototype), so no connect fails and no client launches a second
+  host.
+- **Half-written frames.** Client conns are `CLOEXEC`, so the exec closes them.
+  - The link reader only emits whole lines (`link.rs:468-499`, `crates/core/src/wire/codec.rs:15-20`), so a client
+    never acts on a torn line.
+  - The client reconnects from `Ready` (`client.rs:618-627`) and subscribes again from its last seqs (`:749-760`):
+    no gap and no duplicate (decision 0013).
+  - Before the exec, the runtime still stops sending and closes the conns itself.
+  - A hook frame on an already-accepted conn is read and appended while the runtime drains its channel. What's left
+    is a tiny race in which one hook frame is lost. `shepherd hook` still exits 0 (`crates/shepherd/src/hook.rs:5-6`),
+    and the next hook corrects the status. Accepted.
+- **PTY output in flight.** Pumps are paused, and each acks before the runtime drains its channel into the screens.
+  Output still in the kernel buffer survives the exec (shown in the prototype).
+- **Screens.** Each session's `snapshot_ansi` is carried. It includes an unfinished escape sequence and an open sync
+  hold (`crates/term/src/lib.rs:213-247`, which also lists the gaps: scrollback, the primary screen under the alt
+  screen, and so on). The new image feeds it into `Screen::new(cols, rows)`, then nudges a redraw with a same-size
+  resize, as herdr does.
+- **Work in flight.** The swap waits for worker calls, run-file writes and closes to finish (Busy) instead of carrying
+  them.
+- **Translators.** Translators are carried serialized. A translator the new build can't parse is dropped. A fresh one
+  gets a new seed, so ids stay unique (`agents.rs:43-50`).
+- **A handoff that fails midway.**
+  - *Before the exec* (busy, preflight fails, the handoff file can't be written, or `execv` returns an error): nothing
+    has changed. The old image restores `CLOEXEC`, resumes its pumps and keeps serving, and the client says why.
+  - *After the exec*, if the new image can't adopt a session, it kills that session's process group (as
+    `pty.rs:308-314` does) and appends its exit. If the new image dies outright, the masters close and the agents get
+    SIGHUP. The next client launches a host, which records their exits (`runtime.rs:348-363`).
+  - The log is intact in every case. Appends are whole lines written only on the runtime thread (`runtime.rs:17`,
+    decision 0009), and the swap runs on that thread between appends. This is the one case where sessions die without
+    being asked about, and the preflight limits it to bugs in the adopt code.
+- **Downgrade and two clients of different builds.** The swap target is always *the binary now at the host's own exe
+  path*.
+  - An older client can't pull the host back. It is told it's the odd one out.
+  - A real downgrade (an older binary installed at that path) is an ordinary swap, gated by the preflight. An older
+    binary without handoff support fails the preflight and falls back to (c), with consent.
+  - Because the target is never a client's binary, two clients can't ping-pong the host.
+
+### Options compared
+
+| | (a) re-exec in place | (b) second host + SCM_RIGHTS | (c) restart |
+|---|---|---|---|
+| sessions survive | yes | yes | no |
+| agent stays our child (waitpid, exit codes, pump unchanged) | yes, same pid | no: `ECHILD`, and kqueue/pidfd give no exit status | n/a |
+| rollback if the new binary fails | preflight before exec; none after | full, until commit | n/a |
+| socket gap (hooks lost, client relaunches) | none, the listener fd is carried | none if the listener fd is passed; herdr rebinds, so it has a gap | yes |
+| log lock | carried, never free | shared description: the old host must not unlock, and two runtimes overlap | released, then retaken |
+| moving parts | one process, one handoff file, `execv` | two live runtimes, a 5-step commit protocol, a detached spawn, per-OS exit watching | exists today |
+
+### Recommendation
+
+**(a) re-exec in place, gated by a preflight, with (c) as the fallback the user consents to. Don't build (b).**
+
+(a) keeps the agents as our children, so `waitpid` and exit codes keep working, and `pty.rs` keeps its reaping model.
+It has no socket gap and no window on the lock, and it adds the fewest states. Its weakness is that it can't roll back
+after the exec. The preflight covers the real failures seen here: a binary overwritten in place, an old binary, an
+incompatible handoff format. An `execv` that fails returns to the intact old image. (b)'s rollback costs exit codes,
+two overlapping runtimes and per-OS process watching. That price is too high for a local daemon whose log already
+survives losing every PTY.
+
+**Mismatch detection: what the hello carries.**
+- `BuildId { version: String, digest: [u8; 32] }`:
+  - `version` is `CARGO_PKG_VERSION`, for display only.
+  - `digest` is the sha256 of the process's own executable, read once at startup.
+- Why not a git hash: the workspace version is fixed (`Cargo.toml:5-6`), and a dirty rebuild keeps the commit, which
+  is exactly the "rebuilding" case.
+- Why not path plus mtime/inode: a client and host started from different paths (the installed binary and
+  `target/debug`) can't be compared that way. The digest is exact and doesn't depend on the path.
+- Where it's computed: in the `shepherd` crate (IO), then passed to core as data. Digests are compared as bytes.
+- `Hello.build`, `HelloOk.build` (running) and `HelloOk.installed` (the digest of the file now at the host's startup
+  exe path) are all additive serde-default fields. The host recomputes `installed` only when that file's
+  `(dev, ino, size, mtime)` changes.
+- A `HelloOk` without `build` means the host predates T36a.
+- `PROTOCOL_VERSION` stays the hard compatibility gate, but a mismatch no longer quits the client.
+
+**Who decides.** The client's pure core decides, from the hello answer. The host never swaps unless asked, because a
+swap disconnects every client and the user should see it happen.
+
+| case | meaning | client does |
+|---|---|---|
+| host `build` == client `build` | same build | nothing |
+| host has no `build`, or version mismatch | host older than T36a | dialog: "The shepherd host is older and can't update itself. Restart it? N running sessions will stop." [Restart host] [Not now] |
+| host `installed` == client ≠ host `build` | host is stale | T36a: same restart dialog. T36b: `_shepherd/host/upgrade`, "host is older — updating…", then "host updated" once the reconnect hello matches |
+| host `build` == host `installed` ≠ client | this client is the odd one out | notice: "this window runs a different shepherd build than the host; restart it to use the installed one". No swap |
+| all three differ | e.g. client from `target/debug`, host from `~/.cargo/bin` | notice only |
+
+"Restart host" (c) has to work against hosts older than T36a, which have no shutdown method. The client reads the
+host's pid from the connected socket's peer credentials (`LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux) and sends it
+SIGTERM. The host shuts down cleanly (`host/mod.rs:241-259`). The existing reconnect loop then launches the client's
+binary (`client.rs:604-608`). A `-32601` from an old host turns into the notice "the shepherd host is older than this
+client: restart it to use this".
+
+**Swap sequence (T36b).**
+1. The host answers `_shepherd/host/upgrade` with one of:
+   - `NothingToDo`: installed == running.
+   - `Busy { reason }`: worker calls, run files or closes are pending.
+   - `Unavailable { reason }`: the preflight failed.
+   - `Accepted`, and then it swaps.
+
+   The decision is a pure function.
+2. Preflight: run `<settings.shepherd> handoff-check` as a bounded child process. It prints
+   `{build, handoff_versions}`, or it fails: "unknown command", or killed by SIGKILL ("overwritten in place; reinstall
+   it").
+3. Quiesce: pause every pump (new `Control::Pause`, acked), drain the runtime channel through `handle`, close every
+   conn.
+4. Write `<root>/run/handoff-<pid>.json` (0600). It holds the handoff version and the source build. For each session
+   it holds the session id, pid, master and slave fds, size, `snapshot_ansi` (base64) and the translator. It also
+   holds the listener and lock fds.
+5. Clear `CLOEXEC` on exactly those fds, then `execv(settings.shepherd, ["shepherd", "host", "--adopt", file])`. If
+   `execv` returns, undo step 5, resume the pumps and keep serving.
+6. The new image reads and then deletes the file, and adopts in this order: lock, listener, PTYs (before folding the
+   logs, so the agents' output keeps draining). Then it starts the runtime with the adopted set: no orphan exits for
+   those sessions, no sweep of their run directories, translators restored. Last, it nudges a redraw.
+
+**Ports.** This needs a port change, a PM call. Proposal: a new core trait `PtyHandoff` with an associated
+serializable `Token`:
+- `export(&mut self) -> Result<Vec<(SessionId, Token)>, _>` quiesces and returns the tokens.
+- `resume(&mut self)` undoes a failed export.
+- `adopt(sink, tokens)` is a constructor on the adapter.
+- The fake's token is its in-memory session. The real token is `(pid, master fd, slave fd, size)`.
+- portable-pty can't wrap an existing fd: `UnixMasterPty` is private (portable-pty 0.9.0 `src/unix.rs:303-308`). So
+  adopted sessions use the raw fds directly: read and write, `TIOCSWINSZ`, `waitpid`.
+- `JsonlEventLog::adopt(root, lock_fd)` and `UnixListenLink::adopt(path, listener_fd)` are concrete adapter
+  constructors, not trait changes.
+
+### Follow-up tasks (for `docs/plan.md`)
+
+#### T36a: Build identity in the hello, and a clear mismatch UX
+status: todo
+depends: –
+touches: core::wire, core::client, ports::launcher, adapters::launcher, shepherd (build id, host hello), tui::popup
+goal: When the client and host are different builds, the user finds out at hello and is told what to do, instead of a
+later "method not found". Restarting the host is offered with a count of the sessions it will stop, and never happens
+without the user's click.
+acceptance:
+- Each process computes a `BuildId { version, digest }` once at startup. `digest` is the sha256 of the file at
+  `current_exe()`, and the host keeps that path. `Hello.build`, `HelloOk.build` and `HelloOk.installed` are additive,
+  defaulted fields. Wire tests: the old shapes (no build) still decode, and the new shapes round-trip.
+- The host answers `installed`: the digest of the file now at its startup exe path. It recomputes the digest only
+  when the file's `(dev, ino, size, mtime)` changes. Test: rename a different file over a tempdir path and count the
+  digests computed (no timing).
+- The client's core decides each row of the spike T36 table, with one unit test per row: same build, host without
+  build (and `VersionMismatch`, which no longer quits), host stale, client odd one out, all differ.
+- The restart dialog has clickable [Restart host] and [Not now] buttons (decision 0014) and says how many sessions
+  will stop. Restart calls a new `HostLauncher::terminate`: it reads the host's pid from the socket's peer
+  credentials (`LOCAL_PEERPID`, `SO_PEERCRED`) and sends SIGTERM. It works against a pre-T36a host. Real-adapter test:
+  a stand-in listener process gets the signal.
+- A `-32601` answer shows "the shepherd host is older than this client: restart it to use this" (unit test).
+- Scenario: host build A, client build B → dialog → Restart → host shuts down → the reconnect loop relaunches (the
+  fake launcher records the launch). Snapshots of the dialog and the notice; hit tests click the buttons.
+scope: crates/core, crates/tui, crates/adapters, crates/testkit, crates/shepherd
+notes: This ships before T36b. Its stale-host row is replaced by the swap in T36b.
+
+#### T36b: Hot-swap the host by re-exec, keeping sessions running
+status: todo
+depends: T36a
+touches: ports::pty (new `PtyHandoff` port, needs PM approval: new-port skill), adapters::{pty, event_log, link},
+shepherd::host (swap, `host --adopt`, `handoff-check`), core::wire (`_shepherd/host/upgrade`), core::client
+goal: When the host is stale, the client asks it to upgrade, and it re-execs the installed binary in place. The agents
+keep running, and screens and status carry over. If that isn't possible, the user is asked before anything is killed.
+acceptance:
+- `shepherd handoff-check` prints one JSON line `{build, handoff_versions}` and exits 0. A binary without it counts as
+  "can't hand off" (test with a stand-in exe that prints "unknown command" and exits 1).
+- `_shepherd/host/upgrade` answers `NothingToDo`, `Busy { reason }`, `Unavailable { reason }` or `Accepted`, decided
+  by a pure core function with one unit test per answer. A preflight child killed by a signal is reported as
+  "overwritten in place? reinstall it".
+- The swap runs in the order given in spike T36: preflight, pause and ack the pumps, drain, close conns, handoff file
+  (0600), clear `CLOEXEC` on exactly the carried fds, then `execv` of the startup path (never `current_exe()` at
+  swap time). If `execv` returns an error, the host restores `CLOEXEC`, resumes its pumps and keeps serving (test with
+  a nonexistent path).
+- The log is never dropped before the exec. The new image adopts the lock fd and the listener fd. Real-adapter
+  tests: a second `JsonlEventLog::open` fails `Locked` while a lock is adopted, and a connect made during the
+  hand-over is accepted by the adopter.
+- `PtyHandoff` comes with a fake, a contract suite and the real adapter. Export then adopt into a fresh instance: a
+  write echoes, resize works, kill works, and the exit code is reported. Export then resume: nothing changes. The real
+  adopted sessions use the carried fds and `waitpid`.
+- The new image adopts the PTYs before folding the logs. It feeds each `snapshot_ansi` into a `Screen` of the carried
+  size and restores the translators (one that doesn't parse is dropped, tested). It records no exit for an adopted
+  session and doesn't sweep its run directory. It nudges a redraw. A session it can't adopt is killed (`killpg`) and
+  its exit is appended.
+- End to end, with the built binary (`CARGO_BIN_EXE_shepherd`) and a tempdir `HOME`: start a shell session, send
+  `upgrade { force: true }` (same-binary swap, for tests). Then check: same host pid; the shell's pid alive and
+  echoing; a reconnecting client resubscribes with no missing or duplicate entries; no exit in the log for that
+  session. Timeouts are liveness bounds only.
+- Client: the stale row sends upgrade and shows "host is older — updating…", then "host updated". `Busy` retries on a
+  deadline. `Unavailable` falls back to T36a's dialog, which asks first. Snapshots of both notices.
+scope: crates/core, crates/adapters, crates/testkit, crates/shepherd, crates/tui
+notes: Not verified on Linux in the spike (`ETXTBSY`, `/proc/self/exe` "(deleted)"). Run the end-to-end test in CI on
+Linux too.
+
+### Proposed decision (for the PM to record)
+
+`### 0018: The host updates itself by re-exec in place`. Context: spike T36. Decision: hellos carry a `BuildId` (exe
+digest). The client decides from the hello. The host re-execs the binary at its startup path, carrying the PTY, lock
+and listener fds and a handoff file, and only after a `handoff-check` preflight passes. A restart that kills sessions
+happens only with the user's click. Consequences: one new port (`PtyHandoff`). A handoff format that is versioned and
+read by older and newer builds. Agents survive host updates on unix.
+
 ## Decision log
 
 Append-only. Format: `### NNNN: title (YYYY-MM-DD)`, then context, decision, consequences.
