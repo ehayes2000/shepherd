@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| T22 new session creates worktree | in review | task/t22-session-worktree @ bf9ced1 (on 1c52039) | 1 | PM-accepted: all profiles get worktrees; spawn spec round-trip; closed-meanwhile recorded; restart → failed; host-wide branch uniqueness; sidebar line 2 |
+| T22 new session creates worktree | fixing (CHANGES) | task/t22-session-worktree @ bf9ced1 | 1 | Blocking: worktree spawn cwd unchecked → PM: validate cwd in the single SpawnPty handler. Minors: run-file cleanup test, worker-gone leak, fold phase guards, slug '___' |
 | F24 profile picker polish | in review | task/f24-picker-polish @ d49739d (on 1c52039) | 1 | PM-accepted: core owns picker scroll (ScrollPicker), shared scrolled() helper |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
