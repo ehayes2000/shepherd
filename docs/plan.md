@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T21 workspaces | fixing (CHANGES) | task/t21-workspaces @ a2986c3 | 1 | Blocking: absolute-path refusal passes for wrong reason. Minors: refused-hello cwd, is_dir |
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T21 | 2 | relative-path refusal passed for the wrong reason; refused-hello cwd and is_dir untested |
 | T19b | 2 | resume ignored a deleted cwd (portable-pty falls back to $HOME); exited guard untested |
 | F08 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
 | T19 | 2 | translator matching/resets/kind replacement untested; seed reuse across replaced translators |
@@ -438,7 +438,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F27: Worktrees calls run off the host runtime thread
-status: todo (must land before T22)
+status: ready (must land before T22)
 depends: T21
 touches: ports::worktrees (or a runtime worker), shepherd::host
 goal: `Worktrees` calls (`default_branch` may run `git remote set-head --auto` over the network; T22's `create` fetches) run
@@ -456,7 +456,7 @@ notes: Decide in the report whether this is an async port shape (`start_*` + eve
 sync port; prefer the wrapper if it keeps the port trait and its contract suite unchanged.
 
 ### F28: Workspace from a subdirectory, and `~` in typed paths
-status: todo
+status: ready
 depends: T21
 touches: ports::worktrees, adapters::worktrees, core::host (workspace)
 goal: Running `shepherd` in `<repo>/crates` should pick `<repo>`, and typing `~/Code/x` in the switcher should work.
@@ -1100,7 +1100,7 @@ especially), returning a typed error. Path safety: `remove` refuses any path out
 `..` escapes and symlinks.
 
 ### T21: Workspaces
-status: in-progress
+status: done (a05e6ae)
 depends: T06, T13
 touches: core::host (workspace), core::client, tui::header
 goal: Choose a workspace (repo) once and have it remembered, visible, and easy to swap.
