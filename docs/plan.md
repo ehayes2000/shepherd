@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T25b cleanup view | building | task/t25b-cleanup @ 7b15652 | 0 | – |
+| T25b cleanup view | in review | task/t25b-cleanup @ bd5d303 (on 1e38b0c) | 1 | PM-accepted: N days from exit time + merged now; [defaults] cleanup_after_days; Cleanup replaces help hint; batch continues after close; Remover::{Session,Orphan}; new worktree/cleanup, remove, removed frames |
 | F37 worktree lock/shutdown leftovers | in review | task/f37-worktree-leftovers @ 15e96c9 (on 292908d) | 1 | PM-accepted: 30 s create grace at shutdown; shared process_group helpers. Reviewer judges the foreign-lock-during-killed-fetch gap |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
