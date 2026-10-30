@@ -359,6 +359,35 @@ fn a_claude_session_whose_pty_exits_has_its_run_files_removed() {
 }
 
 #[test]
+fn a_session_end_hook_keeps_the_run_files_until_the_pty_exits() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    let dir = c.h.run_root().join(session.as_str());
+
+    // Claude's own `agent/exited` (source `hook`): its process, and the settings it reads, may live on.
+    let mut line = serde_json::to_vec(&fixture("SessionEnd.other")).unwrap();
+    line.push(b'\r');
+    client.input(&session, &line);
+    c.h.step();
+    assert_eq!(c.run_hooks(), vec![Ok(())]);
+    let log =
+        c.h.log()
+            .read(LogId::Session(session.clone()), Seq::ZERO)
+            .unwrap();
+    assert!(
+        log.iter()
+            .any(|e| e.frame().method() == Some("_shepherd/agent/exited")),
+        "the hook recorded no exit: {log:?}"
+    );
+    assert!(dir.join("settings.json").exists());
+
+    client.input(&session, b"/exit\r");
+    c.h.step();
+    assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
 fn stale_run_directories_are_swept_at_startup_without_following_symlinks() {
     let mut c = Claude::start();
     let run_root = c.h.run_root().to_path_buf();

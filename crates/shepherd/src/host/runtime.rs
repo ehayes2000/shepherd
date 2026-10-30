@@ -288,10 +288,8 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 code: None,
             });
         }
-        let live = &runtime.screens;
-        run_files::sweep(&runtime.settings.run_root, |name| {
-            live.keys().any(|s| s.as_str() == name)
-        });
+        // Every run directory is stale: the log lock is held and nothing has been spawned yet.
+        run_files::sweep(&runtime.settings.run_root);
         Ok(runtime)
     }
 

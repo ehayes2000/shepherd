@@ -56,11 +56,12 @@ pub fn remove(run_root: &Path, session: &SessionId) -> io::Result<()> {
     }
 }
 
-/// Removes every session directory in `run_root` whose name `live` doesn't claim, logging what it can't. Never
-/// follows a symlink and never leaves `run_root`: a run root that isn't a real directory is left alone, an entry
-/// that isn't one (a symlink, a file) is skipped, and `remove_dir_all` removes links inside a directory without
-/// following them.
-pub fn sweep(run_root: &Path, live: impl Fn(&str) -> bool) {
+/// Removes every session directory in `run_root`, logging what it can't. Only for host startup: the runtime calls it
+/// in `HostRuntime::start`, which runs with the root's log lock held (so no other host is using these) and before
+/// anything is spawned (so no session of this host is either). Never follows a symlink and never leaves `run_root`:
+/// a run root that isn't a real directory is left alone, an entry that isn't one (a symlink, a file) is skipped, and
+/// `remove_dir_all` removes links inside a directory without following them.
+pub fn sweep(run_root: &Path) {
     match std::fs::symlink_metadata(run_root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(error) => {
@@ -90,9 +91,7 @@ pub fn sweep(run_root: &Path, live: impl Fn(&str) -> bool) {
         };
         let path = entry.path();
         // `DirEntry::file_type` doesn't follow a symlink.
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        let name = entry.file_name();
-        if !is_dir || name.to_str().is_some_and(&live) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         match std::fs::remove_dir_all(&path) {
