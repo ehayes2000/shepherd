@@ -30,6 +30,7 @@ use shepherd_core::wire::{
 };
 use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
+use shepherd_testkit::fakes::forge::FakeForge;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::{FakePty, FakePtyToken, ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
@@ -169,7 +170,7 @@ pub fn echo_shell() -> Program {
 }
 
 pub type Runtime =
-    HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, FakeEventLog, TestEnv>;
+    HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, FakeEventLog, TestEnv>;
 
 /// Builds a [`HostHarness`].
 pub struct HarnessBuilder {
@@ -182,6 +183,7 @@ pub struct HarnessBuilder {
     config: RawConfig,
     worktrees: FakeWorktrees,
     commands: FakeCommands,
+    forge: FakeForge,
     preflight: Option<PreflightRunner>,
 }
 
@@ -228,6 +230,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Uses `forge` (a handle on shared fake state, e.g. with pull requests opened) instead of a forge with none.
+    pub fn forge(mut self, forge: FakeForge) -> Self {
+        self.forge = forge;
+        self
+    }
+
     /// Uses `commands` (a handle on shared fake state, e.g. with scripts added) instead of a fake that knows none.
     pub fn commands(mut self, commands: FakeCommands) -> Self {
         self.commands = commands;
@@ -243,6 +251,7 @@ impl HarnessBuilder {
             config,
             worktrees,
             commands,
+            forge,
             build,
             preflight,
         } = self;
@@ -258,7 +267,7 @@ impl HarnessBuilder {
         let runtime = build_runtime(
             &net,
             &programs,
-            (worktrees.clone(), commands.clone()),
+            (worktrees.clone(), commands.clone(), forge.clone()),
             log,
             env.clone(),
             settings.clone(),
@@ -269,6 +278,7 @@ impl HarnessBuilder {
             programs,
             worktrees,
             commands,
+            forge,
             env,
             settings,
             _dir: dir,
@@ -332,7 +342,7 @@ pub fn runtime_with<E: EventLog>(
     log: E,
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv> {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
@@ -344,15 +354,19 @@ pub fn runtime_with_sinks<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv> {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
-    let workers = (FakeWorktrees::new(WORKTREE_ROOT), FakeCommands::new());
+    let workers = (
+        FakeWorktrees::new(WORKTREE_ROOT),
+        FakeCommands::new(),
+        FakeForge::new(),
+    );
     let sinks = (link_sink, pty_sink);
     runtime_in(net, programs, workers, log, env, sinks, settings)
 }
 
-/// The ports that run on worker threads: `Worktrees` and `Commands`.
-type WorkerPorts = (FakeWorktrees, FakeCommands);
+/// The ports that run on worker threads: `Worktrees`, `Commands` and `Forge`.
+type WorkerPorts = (FakeWorktrees, FakeCommands, FakeForge);
 
 /// The link's and the PTY's event sink wrappers.
 type Sinks<FL, FP> = (FL, FP);
@@ -360,12 +374,12 @@ type Sinks<FL, FP> = (FL, FP);
 fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
-    (worktrees, commands): WorkerPorts,
+    (worktrees, commands, forge): WorkerPorts,
     log: E,
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv>
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv>
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
@@ -379,8 +393,10 @@ where
     let link = net
         .listen(link_sink(tx.link_sink()))
         .expect("fake host listens");
-    HostRuntime::start(pty, worktrees, commands, link, log, env, settings, tx, rx)
-        .expect("host runtime starts")
+    HostRuntime::start(
+        pty, worktrees, commands, forge, link, log, env, settings, tx, rx,
+    )
+    .expect("host runtime starts")
 }
 
 /// A host runtime on fakes. Everything the fakes do is synchronous, so [`HostHarness::step`] runs the loop until
@@ -391,6 +407,7 @@ pub struct HostHarness {
     programs: Vec<(String, Program)>,
     worktrees: FakeWorktrees,
     commands: FakeCommands,
+    forge: FakeForge,
     env: TestEnv,
     settings: RuntimeSettings,
     /// Holds the run root; removed with the harness.
@@ -408,6 +425,7 @@ impl HostHarness {
             config: shell_default_config(),
             worktrees: FakeWorktrees::new(WORKTREE_ROOT),
             commands: FakeCommands::new(),
+            forge: FakeForge::new(),
             preflight: None,
         }
     }
@@ -476,6 +494,11 @@ impl HostHarness {
         client
     }
 
+    /// The harness's fake `Forge` (shared state), e.g. to open a pull request or count calls.
+    pub fn forge(&self) -> &FakeForge {
+        &self.forge
+    }
+
     /// The harness's fake `Worktrees` (shared state), e.g. to hold its next call.
     pub fn worktrees(&self) -> &FakeWorktrees {
         &self.worktrees
@@ -501,6 +524,7 @@ impl HostHarness {
             pty,
             self.worktrees.clone(),
             self.commands.clone(),
+            self.forge.clone(),
             link,
             log,
             self.env.clone(),
@@ -522,7 +546,11 @@ impl HostHarness {
         let runtime = build_runtime(
             &self.net,
             &self.programs,
-            (self.worktrees.clone(), self.commands.clone()),
+            (
+                self.worktrees.clone(),
+                self.commands.clone(),
+                self.forge.clone(),
+            ),
             log,
             self.env.clone(),
             self.settings.clone(),

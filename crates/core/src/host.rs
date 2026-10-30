@@ -68,12 +68,16 @@
 //! keeping its worktree ([`HostEvent::Restarted`]). A client can ask what closing would lose first
 //! ([`HostEvent::WorktreeStatus`]).
 //!
+//! Pull requests: a session's branch's pull request is polled by [`pr::PrWatch`] beside the host, which appends
+//! `session/pr` when it changes; the host folds the latest into [`HostSession::pr`].
+//!
 //! Host state is only a fold over `_shepherd/*` frames and sessions' first user prompts (`docs/acpp.md`, "State is a
 //! fold"). [`Host::handle`] reads state and decides what to do. It never changes state: every change is a
 //! [`HostCommand::Append`] that the runtime seals, appends, and hands back to [`Host::apply`].
 
 pub mod launch;
 pub mod naming;
+pub mod pr;
 pub mod quiet;
 pub mod upgrade;
 
@@ -85,7 +89,7 @@ use serde_json::Value;
 
 use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
-    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
+    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, Pr, SessionClosed, SessionCreated,
     SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
     WorktreeCreated, WorktreeHook, WorktreeRemoving,
 };
@@ -95,8 +99,8 @@ use crate::ids::SessionId;
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{
-    BaseSpec, BaseUsed, Created, RepoRef, Worktree, WorktreeError, WorktreeName, WorktreePath,
-    WorktreeStatus,
+    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
+    WorktreePath, WorktreeStatus,
 };
 use crate::wire::{
     CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeInfo, WorktreeListOk,
@@ -469,6 +473,14 @@ pub enum HostCommand {
         path: WorktreePath,
         force: bool,
     },
+    /// Ask the `Forge` port which pull request `branch` of `repo` has (`Forge::pr_for_branch`), and feed the answer to
+    /// the [`PrWatch`](pr::PrWatch) as [`PrEvent::Checked`](pr::PrEvent::Checked) with the same `session`. Runs off
+    /// the runtime thread, like [`HostCommand::ProbeWorkspace`]. Only the watch asks for it.
+    CheckPr {
+        session: SessionId,
+        repo: RepoRef,
+        branch: BranchName,
+    },
 }
 
 /// A session as [`Host::sessions`] lists it.
@@ -496,6 +508,8 @@ pub struct HostSession {
     pub branch: Option<String>,
     /// It is closing, and its worktree is being dealt with. Its PTY is gone.
     pub removing_worktree: bool,
+    /// Its branch's pull request, from the latest `session/pr`.
+    pub pr: Option<Pr>,
 }
 
 /// Where a session is in its life, as far as its PTY goes.
@@ -540,6 +554,8 @@ struct Entry {
     branch: Option<String>,
     /// Closing it is removing its worktree (`worktree/removing`), until its `session/closed`.
     removing: bool,
+    /// From the latest `session/pr`.
+    pr: Option<Pr>,
 }
 
 impl Entry {
@@ -641,6 +657,7 @@ impl Host {
                     None => e.branch.clone(),
                 },
                 removing_worktree: e.removing,
+                pr: e.pr.clone(),
             })
             .collect()
     }
@@ -1411,6 +1428,7 @@ impl Host {
                         .zip(created.branch.clone()),
                     branch: created.branch.clone(),
                     removing: false,
+                    pr: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -1423,6 +1441,11 @@ impl Host {
             ShepherdFrame::SessionClosed(_) => {
                 if let Some(entry) = self.sessions.get_mut(id) {
                     entry.closed = true;
+                }
+            }
+            ShepherdFrame::SessionPr(pr) => {
+                if let Some(entry) = self.sessions.get_mut(id) {
+                    entry.pr = pr.pr.clone();
                 }
             }
             ShepherdFrame::WorktreeCreated(worktree) => {

@@ -50,6 +50,10 @@
 //! - **Quiet watch.** A [`QuietWatch`] (the quiet-output idle fallback) sees every entry appended, and the logs on
 //!   start. Output of, and client input to, the sessions it watches are fed to it stamped with `Env::now`; its
 //!   deadline is serviced like the others: when it is due, a tick stamped with `Env::now` returns the idles to append.
+//! - **PR watch.** A [`PrWatch`] (T27) sees every entry appended, and the logs on start. Its deadline is serviced the
+//!   same way: a tick stamped with `Env::now` returns the `Forge` calls to make, which run on a worker of their own (each
+//!   bounded, since `gh` waits on the network), their answers coming back as [`RuntimeEvent::Forge`] and going to the
+//!   watch, which returns the `session/pr` frames to append. An upgrade doesn't wait for them: the new image polls again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -65,6 +69,7 @@ use shepherd_core::acpp::{
 use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
+use shepherd_core::host::pr::{PrEvent, PrWatch};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::upgrade::{Preflight, UpgradeFacts, UpgradeStep, Work, decide};
 use shepherd_core::host::{
@@ -73,9 +78,9 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId,
-    WorktreeError, WorktreeName, WorktreePath, Worktrees,
+    CommandError, Commands, ConnId, EventLog, Forge, ForgeError, Link, LinkEvent, LinkEventSink,
+    LogError, LogId, MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef,
+    RunId, WorktreeError, WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -117,6 +122,8 @@ pub enum RuntimeEvent {
     Worktrees(HostEvent),
     /// The result of a `Commands` call (a hook) that ran on its worker thread, for core.
     Commands(HostEvent),
+    /// The answer to a `Forge` call that ran on its worker thread, for the PR watch.
+    Forge(PrEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
     /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
@@ -374,7 +381,7 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
+pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
@@ -387,6 +394,9 @@ pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
     /// A close's inspection of a session whose hook (cancelled by that close) hasn't answered yet: it starts once the
     /// hook has, so it sees what the hook left.
     after_hook: HashMap<SessionId, HostCommand>,
+    forge: Worker<F, PrEvent>,
+    /// `Forge` calls submitted and not yet answered.
+    forge_calls: usize,
     link: L,
     log: E,
     env: V,
@@ -416,6 +426,11 @@ pub struct HostRuntime<P: PtyHandoff, W, C, L, E, V> {
     quiet: QuietWatch,
     /// When the quiet watch's deadline is due on the monotonic clock.
     quiet_due: Option<Instant>,
+    pr: PrWatch,
+    /// When the PR watch's deadline is due on the monotonic clock.
+    pr_due: Option<Instant>,
+    /// The wall-clock and monotonic time of the PR watch's last tick, to schedule from when an answer comes back.
+    pr_ticked: Option<(Timestamp, Instant)>,
     upgrade: Option<PendingUpgrade>,
     /// The preflight is running.
     preflighting: bool,
@@ -431,19 +446,21 @@ impl<
     P: PtyHandoff,
     W: Worktrees + Send + Sync + 'static,
     C: Commands + Send + Sync + 'static,
+    F: Forge + Send + Sync + 'static,
     L: Link,
     E: EventLog,
     V: Env,
-> HostRuntime<P, W, C, L, E, V>
+> HostRuntime<P, W, C, F, L, E, V>
 {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
-    /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`
-    /// and `commands` each move to a worker thread of their own.
+    /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`,
+    /// `commands` and `forge` each move to a worker thread of their own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
         worktrees: W,
         commands: C,
+        forge: F,
         link: L,
         log: E,
         env: V,
@@ -451,7 +468,7 @@ impl<
         tx: RuntimeTx,
         rx: RuntimeRx,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, link, log, env);
+        let ports = (pty, worktrees, commands, forge, link, log, env);
         Self::start_with(ports, settings, tx, rx, Adoption::default())
     }
 
@@ -464,6 +481,7 @@ impl<
         pty: P,
         worktrees: W,
         commands: C,
+        forge: F,
         link: L,
         log: E,
         env: V,
@@ -472,12 +490,12 @@ impl<
         rx: RuntimeRx,
         adoption: Adoption,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, link, log, env);
+        let ports = (pty, worktrees, commands, forge, link, log, env);
         Self::start_with(ports, settings, tx, rx, adoption)
     }
 
     fn start_with(
-        (pty, worktrees, commands, link, log, env): (P, W, C, L, E, V),
+        (pty, worktrees, commands, forge, link, log, env): (P, W, C, F, L, E, V),
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
@@ -485,15 +503,19 @@ impl<
     ) -> Result<Self, StartError> {
         let mut host = Host::new();
         let mut quiet = QuietWatch::new(&settings.config);
+        let mut pr = PrWatch::new();
         for id in log.logs()? {
             for envelope in log.read(id, Seq::ZERO)? {
                 host.apply(&resolved_paths(&envelope));
                 quiet.apply(&envelope);
+                pr.apply(&envelope);
             }
         }
         let worktrees = Worker::spawn("worktrees", worktrees, tx.clone(), RuntimeEvent::Worktrees)
             .map_err(StartError::Worker)?;
         let commands = Worker::spawn("hooks", commands, tx.clone(), RuntimeEvent::Commands)
+            .map_err(StartError::Worker)?;
+        let forge = Worker::spawn("forge", forge, tx.clone(), RuntimeEvent::Forge)
             .map_err(StartError::Worker)?;
         let mut runtime = Self {
             host,
@@ -503,6 +525,8 @@ impl<
             commands,
             hooks: HashMap::new(),
             after_hook: HashMap::new(),
+            forge,
+            forge_calls: 0,
             link,
             log,
             env,
@@ -524,6 +548,9 @@ impl<
             finished: false,
             quiet,
             quiet_due: None,
+            pr,
+            pr_due: None,
+            pr_ticked: None,
             upgrade: None,
             preflighting: false,
             swapping: false,
@@ -549,6 +576,10 @@ impl<
         // Every other run directory is stale: the log lock is held and nothing else has been spawned yet.
         run_files::sweep_except(&runtime.settings.run_root, &adopted);
         runtime.restore(adoption);
+        // Polled sessions are looked at on the first iteration, which reads the clock and schedules what is due later.
+        if runtime.pr_due.is_none() && runtime.pr.deadline().is_some() {
+            runtime.pr_due = Some(runtime.env.instant());
+        }
         Ok(runtime)
     }
 
@@ -649,6 +680,7 @@ impl<
             )
             .chain(self.shutdown_by)
             .chain(self.quiet_due)
+            .chain(self.pr_due)
             .min()
     }
 
@@ -741,12 +773,13 @@ impl<
         handled
     }
 
-    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees` or `Commands` call is still unanswered, waits for
+    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees`, `Commands` or `Forge` call is still unanswered, waits for
     /// the next event and goes on. For tests. `limit` bounds each wait, for liveness; false if one ran out.
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
             self.run_until_idle();
-            if self.worktree_calls + self.hooks.len() == 0 && !self.preflighting || self.finished {
+            let calls = self.worktree_calls + self.hooks.len() + self.forge_calls;
+            if calls == 0 && !self.preflighting || self.finished {
                 return true;
             }
             match self.rx.0.recv_timeout(limit) {
@@ -839,6 +872,19 @@ impl<
                 // The hook is gone: a close waiting for it inspects the worktree now.
                 if let Some(inspect) = session.and_then(|s| self.after_hook.remove(&s)) {
                     self.run_commands(vec![inspect]);
+                }
+            }
+            RuntimeEvent::Forge(answer) => {
+                self.forge_calls = self.forge_calls.saturating_sub(1);
+                // Taken even while swapping or shutting down, so the session isn't left waiting on it if the swap fails.
+                let commands = self.pr.handle(answer);
+                self.execute_all(commands);
+                // The session answered is due again: schedule from the tick that asked.
+                if let Some((at, then)) = self.pr_ticked.clone() {
+                    self.pr_due = self
+                        .pr
+                        .deadline()
+                        .map(|deadline| then + until(&at, deadline));
                 }
             }
             RuntimeEvent::Shutdown => self.start_shutdown(),
@@ -950,6 +996,28 @@ impl<
                     }
                 }
                 HostCommand::Reply { to, result } => self.reply(to, result),
+                HostCommand::CheckPr {
+                    session,
+                    repo,
+                    branch,
+                } => {
+                    let failed = |why: String| PrEvent::Checked {
+                        session: session.clone(),
+                        result: Err(ForgeError::Other(why)),
+                    };
+                    let panicked =
+                        failed(format!("asking about {branch}'s PR failed unexpectedly"));
+                    let call = move |forge: &F| PrEvent::Checked {
+                        result: forge.pr_for_branch(&repo, &branch),
+                        session,
+                    };
+                    // Counted either way: an unanswered call is answered through the channel, as a failure.
+                    self.forge_calls += 1;
+                    if let Err(unanswered) = self.forge.submit(call, panicked) {
+                        tracing::error!("the forge thread is gone");
+                        self.tx.send(RuntimeEvent::Forge(*unanswered));
+                    }
+                }
                 HostCommand::ProbeWorkspace { ask, path } => {
                     let panicked = HostEvent::WorkspaceProbed {
                         ask,
@@ -1265,6 +1333,8 @@ impl<
         self.host.apply(&envelope);
         self.quiet.apply(&envelope);
         self.schedule_quiet(envelope.ts());
+        self.pr.apply(&envelope);
+        self.schedule_pr(envelope.ts());
         self.release_if_ended(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
@@ -1390,6 +1460,9 @@ impl<
         if self.quiet_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
             self.tick_quiet();
         }
+        if self.pr_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
+            self.tick_pr();
+        }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
             tracing::warn!(
                 left = self.screens.len(),
@@ -1409,6 +1482,32 @@ impl<
             self.dispatch(event);
         }
         self.schedule_quiet(&at);
+    }
+
+    /// Asks the forge about every session whose check is due, and schedules the PR watch's next deadline.
+    fn tick_pr(&mut self) {
+        let at = self.env.now();
+        self.pr_ticked = Some((at.clone(), self.env.instant()));
+        let commands = self.pr.handle(PrEvent::Tick { at: at.clone() });
+        self.execute_all(commands);
+        self.schedule_pr(&at);
+    }
+
+    /// Puts the PR watch's deadline on the monotonic clock, `at` being the wall-clock time now.
+    fn schedule_pr(&mut self, at: &Timestamp) {
+        self.pr_due = self
+            .pr
+            .deadline()
+            .map(|deadline| self.env.instant() + until(at, deadline));
+    }
+
+    /// Executes `commands` from a watch beside core, then the events that produced for core.
+    fn execute_all(&mut self, commands: Vec<HostCommand>) {
+        let mut follow_up = VecDeque::new();
+        self.execute(commands, &mut follow_up);
+        for event in follow_up {
+            self.dispatch(event);
+        }
     }
 
     /// Puts the quiet watch's deadline on the monotonic clock, `at` being the wall-clock time now.
@@ -2137,6 +2236,11 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 fn canonical(dir: &Path) -> Result<PathBuf, WireError> {
     std::fs::canonicalize(dir)
         .map_err(|e| WireError::InvalidParams(format!("cwd `{}`: {e}", dir.display())))
+}
+
+/// How long from `at` until `deadline`: zero if it has passed.
+fn until(at: &Timestamp, deadline: jiff::Timestamp) -> Duration {
+    Duration::try_from(deadline.duration_since(at.instant())).unwrap_or(Duration::ZERO)
 }
 
 /// `envelope` as core folds it at start: a `session/created` or `worktree/created` recorded before paths were resolved

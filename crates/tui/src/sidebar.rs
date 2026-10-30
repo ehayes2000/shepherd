@@ -3,7 +3,9 @@
 //! The first three lines are the header: the search field (`⌕ Search…` across the sidebar), which opens the finder,
 //! the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the switcher, then a `+ New session` button
 //! (`⌕`, `⌂` and `+` when collapsed). Each session is two lines: its status glyph,
-//! name and a `×` close button at the right edge, then `machine · PR` (placeholders until M3 / M4). A session from
+//! name and a `×` close button at the right edge, then `machine · PR` (the machine is `local` until M4): the PR's number
+//! and its checks (`#123 ✓` passing, `✗` failing, `…` pending, nothing without checks), or its state when it isn't open
+//! (`#123 merged`), or `—` without one. A session from
 //! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
 //! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
 //! of one that is closing while its worktree is removed, `removing worktree…`;
@@ -29,6 +31,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Clear, Widget, Wrap};
+use shepherd_core::acpp::{PrChecks, PrState};
 use shepherd_core::client::{Client, ClientSession, Connection, Focus};
 use shepherd_core::display::DisplayText;
 use shepherd_core::session::Activity;
@@ -47,12 +50,34 @@ const HEADER_HEIGHT: u16 = 3;
 const SELECTED_BG: Color = Color::DarkGray;
 const ATTENTION: Color = Color::Yellow;
 const ATTENTION_BAR: &str = "▌";
-/// What line 2 says until sessions know their machine (M4) and PR (M3).
-const PLACEHOLDER_DETAIL: &str = "local · —";
+/// What line 2 names the machine as, until sessions know theirs (M4).
+const MACHINE: &str = "local";
+/// What line 2 says of a session without a PR.
+const NO_PR: &str = "—";
 /// What line 2 says while a session's worktree is being made.
 const CREATING_WORKTREE: &str = "creating worktree…";
 /// What line 2 says while a closing session's worktree is being removed.
 const REMOVING_WORKTREE: &str = "removing worktree…";
+
+/// A session's PR as line 2 shows it: `#123 ✓`, `#123 merged`, or `—`.
+fn pr_label(session: &ClientSession) -> String {
+    let Some(pr) = &session.pr else {
+        return NO_PR.to_owned();
+    };
+    let mark = match (&pr.state, &pr.checks) {
+        (PrState::Open, PrChecks::Passing) => Some("✓"),
+        (PrState::Open, PrChecks::Failing) => Some("✗"),
+        (PrState::Open, PrChecks::Pending) => Some("…"),
+        (PrState::Open, PrChecks::None | PrChecks::Other(_)) => None,
+        (PrState::Merged, _) => Some("merged"),
+        (PrState::Closed, _) => Some("closed"),
+        (PrState::Other(state), _) => Some(state.as_str()),
+    };
+    match mark {
+        Some(mark) => format!("#{} {mark}", pr.number),
+        None => format!("#{}", pr.number),
+    }
+}
 
 /// A session's status glyph and its colour. See the table in the crate docs.
 pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
@@ -356,7 +381,10 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
                 format!("in {}", workspace_name(workspace)),
                 dim.fg(Color::Gray),
             ),
-            _ => (PLACEHOLDER_DETAIL.to_owned(), dim.fg(Color::Gray)),
+            _ => (
+                format!("{MACHINE} · {}", pr_label(session)),
+                dim.fg(Color::Gray),
+            ),
         };
         draw::set_cut(buf, line.x + 3, line.y + 1, &shown(&text), width, style);
     });

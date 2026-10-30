@@ -5,6 +5,7 @@
 pub mod commands;
 pub mod config;
 pub mod event_log;
+pub mod forge;
 pub mod handoff;
 pub mod launcher;
 pub mod link;
@@ -16,6 +17,7 @@ pub mod worktrees;
 pub use commands::ShellCommands;
 pub use config::TomlConfigSource;
 pub use event_log::{JsonlEventLog, TornTail};
+pub use forge::GhForge;
 pub use launcher::ProcessHostLauncher;
 pub use link::{UnixConnectLink, UnixLinkError, UnixListenLink};
 pub use pty::{PortablePty, PtyToken};

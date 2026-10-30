@@ -17,6 +17,7 @@ pub enum ShepherdFrame {
     SessionRenamed(SessionRenamed),
     SessionClosed(SessionClosed),
     SessionFailed(SessionFailed),
+    SessionPr(SessionPr),
     AgentStarted(AgentStarted),
     AgentIdle(AgentIdle),
     AgentExited(AgentExited),
@@ -33,6 +34,7 @@ impl ShepherdFrame {
             Self::SessionRenamed(_) => "_shepherd/session/renamed",
             Self::SessionClosed(_) => "_shepherd/session/closed",
             Self::SessionFailed(_) => "_shepherd/session/failed",
+            Self::SessionPr(_) => "_shepherd/session/pr",
             Self::AgentStarted(_) => "_shepherd/agent/started",
             Self::AgentIdle(_) => "_shepherd/agent/idle",
             Self::AgentExited(_) => "_shepherd/agent/exited",
@@ -51,6 +53,7 @@ impl ShepherdFrame {
             Self::SessionRenamed(p) => to_params(p),
             Self::SessionClosed(p) => to_params(p),
             Self::SessionFailed(p) => to_params(p),
+            Self::SessionPr(p) => to_params(p),
             Self::AgentStarted(p) => to_params(p),
             Self::AgentIdle(p) => to_params(p),
             Self::AgentExited(p) => to_params(p),
@@ -73,6 +76,7 @@ impl ShepherdFrame {
             "_shepherd/session/renamed" => Self::SessionRenamed(p(params)?),
             "_shepherd/session/closed" => Self::SessionClosed(p(params)?),
             "_shepherd/session/failed" => Self::SessionFailed(p(params)?),
+            "_shepherd/session/pr" => Self::SessionPr(p(params)?),
             "_shepherd/agent/started" => Self::AgentStarted(p(params)?),
             "_shepherd/agent/idle" => Self::AgentIdle(p(params)?),
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
@@ -136,6 +140,51 @@ pub struct SessionClosed {
 pub struct SessionFailed {
     /// Why, for the user.
     pub reason: String,
+}
+
+/// The session's branch has a different pull request than last recorded, or none any more. The latest one is current.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPr {
+    /// `None`: the branch has no pull request, or none can be found out (e.g. no `gh`, or not signed in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<Pr>,
+}
+
+/// A pull request for a session's branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pr {
+    pub number: u64,
+    pub state: PrState,
+    pub checks: PrChecks,
+}
+
+/// Where a pull request is in its life. Open: a value this build doesn't know is kept as [`PrState::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrState {
+    Open,
+    /// Closed without being merged.
+    Closed,
+    Merged,
+    #[serde(untagged)]
+    Other(String),
+}
+
+/// How a pull request's checks stand, taken together. Open: a value this build doesn't know is kept as
+/// [`PrChecks::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrChecks {
+    /// It has no checks.
+    None,
+    /// Some haven't finished, and none has failed.
+    Pending,
+    /// Every one finished, and none failed.
+    Passing,
+    /// At least one failed.
+    Failing,
+    #[serde(untagged)]
+    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

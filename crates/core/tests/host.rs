@@ -441,6 +441,7 @@ fn pty_exit_appends_agent_exited() {
             worktree: None,
             branch: None,
             removing_worktree: false,
+            pr: None,
         }]
     );
 }

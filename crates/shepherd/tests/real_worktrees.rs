@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use shepherd::host::{self, RuntimeEvent, SOCKET_FILE};
+use shepherd_adapters::GhForge;
 use shepherd_core::acpp::{Frame, RequestId, ShepherdFrame};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{
@@ -129,7 +130,12 @@ fn a_worktree_the_host_made_under_a_linked_root_is_no_orphan_and_cant_be_adopted
     // The root, and so the worktrees under it, is reached through the symlink.
     let root = alias.join("shepherd");
 
-    let mut host = host::open(&root, PathBuf::from("/"), Some("/bin/sh".into())).unwrap();
+    // Its sessions have branches, so it polls their PRs: through an empty search path, never the real `gh`.
+    let no_gh = real.join("no-gh");
+    std::fs::create_dir(&no_gh).unwrap();
+    let forge = GhForge::new().with_search_path(&no_gh);
+    let mut host =
+        host::open_with_forge(&root, PathBuf::from("/"), Some("/bin/sh".into()), forge).unwrap();
     let tx = host.sender();
     let socket = root.join(SOCKET_FILE);
     let client = std::thread::spawn(move || {

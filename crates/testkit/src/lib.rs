@@ -184,6 +184,12 @@ pub mod builders {
             self.seal(draft)
         }
 
+        /// Seals and applies `draft`, e.g. one a watch beside the host decided on (`quiet`, `pr`), as the runtime's
+        /// append path would.
+        pub fn append_draft(&mut self, draft: FrameDraft) -> Envelope {
+            self.seal(draft)
+        }
+
         fn seal(&mut self, draft: FrameDraft) -> Envelope {
             let stamp = Stamp {
                 id: EntryId::new(format!("e{}", self.log.len() + 1)),
@@ -645,6 +651,7 @@ pub mod contracts {
     pub mod commands;
     pub mod config;
     pub mod event_log;
+    pub mod forge;
     pub mod launcher;
     pub mod link;
     pub mod pty;
@@ -657,6 +664,7 @@ pub mod fakes {
     pub mod commands;
     pub mod config;
     pub mod event_log;
+    pub mod forge;
     pub mod hold;
     pub mod launcher;
     pub mod link;
