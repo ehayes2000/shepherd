@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T11 host runtime | builder fixing round-3 findings | `task/T11-host-runtime` @ 15ad661 | 3 | Fix: add `EventLog::read_batch(log, from, max)` (port, adapter, fake, contract) and batch the catch-up cursor (no quadratic re-reads); forget the conn when `queued_bytes` is None. PM-accepted: F14 for the `yes` backlog; the stall metric is per-line coarse (noted on T31) |
-| T13 TUI layout, sidebar, keys (finishes M1) | builder fixing round-1 findings | `task/T13-tui` @ 98fe2a3 | 1 | Fix: ctrl-\ ] ^ _ / encode as digits; push kitty flags to the outer terminal (Shift+Enter); paste end-marker stripping; pane_size min clamp; non-main panic shuts down; vacuous scenario assertion; 7 surviving mutations. PM-accepted deviations stand |
+| F16 terminal setup hardening | building | `task/F16-terminal-hardening` | 0 | From the T13 review: guard before enter/push; panic exit status; ctrl+alt legacy remap |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
 
@@ -32,6 +32,7 @@ Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the P
 | F06 | 3 | quadratic stall |
 | F09 | 1 | – |
 | F10 | 2 | symlinked log truncated an outside file |
+| T13 | 2 | ctrl-symbol keys typed digits, Shift+Enter submitted, paste end-marker, 7 surviving mutations |
 | T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
 
 ## Milestones
@@ -257,6 +258,19 @@ acceptance:
 - `ClientState::notice()` is cleared on the next user action or after a deadline. Core table test.
 - The cursor shape and blink from the session's `Screen` are passed to the real terminal.
 scope: crates/core, crates/tui, crates/shepherd
+
+### F16: Terminal setup hardening
+status: in-progress
+depends: T13
+touches: shepherd::terminal, shepherd::client, tui::keys
+goal: Close the T13 review's last gaps.
+acceptance:
+- The restore guard exists before `enter` and `push_keyboard` run, so a panic inside either still restores the terminal. There's a
+  test with a fake whose push panics, and one whose enter panics partway.
+- A panic on a non-main thread makes `shepherd` exit non-zero (a dedicated event, not the detach path). Test it.
+- `from_legacy_terminal` remaps whenever CONTROL is present (so ctrl+alt+\ reaches a kitty session as `CSI 92;7u`). Update the
+  CONTROL|ALT row.
+scope: crates/shepherd, crates/tui
 
 ## Out of scope for the initial feature set
 
@@ -595,7 +609,7 @@ The client runtime in `crates/shepherd/src/client.rs` is generic over `Link` and
 `core::host` (or a scripted fake host).
 
 ### T13: TUI layout, sidebar, and keys
-status: in-progress
+status: done (918fdd4)
 depends: T05, T09, T12
 touches: tui::layout, tui::sidebar, tui::keys, tui::help
 goal: The visible app: a left sidebar of sessions and the selected session's terminal on the right.
