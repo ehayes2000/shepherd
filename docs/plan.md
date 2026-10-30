@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
-| F25 failed worktree create cleanup | fixing (CHANGES) | task/f25-worktree-fail-cleanup @ 7764841 | 1 | Blocking: cleanup can delete another process's branch created during the fetch. Minors: signal-kill wait-for-group; error text |
+| F25 failed worktree create cleanup | re-review | task/f25-worktree-fail-cleanup @ c4d9865 (on da1f29e) | 2 | Branch re-checked right before add (early BranchExists); signal-kill waits for group; message fixed. Residual window → F32 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -519,6 +519,19 @@ acceptance:
 - Screen query replies never count (already true; add the scenario check: the fake Claude prints a terminal query on resize and
   the dialog stays put).
 scope: crates/core, crates/tui, crates/shepherd
+
+### F32: Create the worktree branch atomically
+status: todo
+depends: F25
+touches: adapters::worktrees
+goal: F25 re-checks that the branch is absent right before `worktree add -b`, but a branch created in the instant between that
+check and git's own branch step would still be deleted by cleanup.
+acceptance:
+- Create the branch with `git update-ref refs/heads/<b> <base-oid> ""` (fails atomically if it exists → BranchExists, nothing
+  to clean), then `git worktree add <path> <b>` without `-b`. Cleanup deletes the branch only if this create made it (and
+  only with `update-ref -d refs/heads/<b> <base-oid>`, i.e. only if it still points where we put it). Regression tests: a branch
+  appearing just before update-ref → BranchExists, untouched; a branch moved by someone after we created it → not deleted.
+scope: crates/adapters
 
 ## Out of scope for the initial feature set
 
