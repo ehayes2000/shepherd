@@ -292,6 +292,12 @@ fn every_popup() -> Vec<(&'static str, ClientDriver)> {
     refused.user(Intent::BeginWorkspace);
     refused.user(Intent::Confirm);
     popups.push(("workspace switcher with an error", refused));
+    let mut scrolled = workspaces_used(20);
+    scrolled.host().select_workspace(LONG_PATH);
+    scrolled.sync();
+    scrolled.user(Intent::BeginWorkspace);
+    scrolled.user(Intent::ScrollSwitcher { by: 3, shown: 5 });
+    popups.push(("workspace switcher scrolled, with a long path", scrolled));
     popups
 }
 
@@ -877,6 +883,58 @@ fn workspace_switcher_with_a_refused_path() {
         Err(WireError::InvalidParams("/tmp/x is not a repo".into())),
     );
     insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 80, 24));
+}
+
+/// A host that has used `n` workspaces, `/src/repo-01` (the oldest) to `/src/repo-<n>` (current).
+fn workspaces_used(n: usize) -> ClientDriver {
+    let mut c = ClientDriver::with_sessions(&[]);
+    for i in 1..=n {
+        c.host().select_workspace(&format!("/src/repo-{i:02}"));
+    }
+    c.sync();
+    c
+}
+
+/// A path longer than the switcher has room for.
+const LONG_PATH: &str = "/Users/someone/a/deeply/nested/directory/full/of/many/projects/shepherd";
+
+/// The switcher over twenty workspaces in a short window, scrolled down three rows.
+#[test]
+fn workspace_switcher_scrolled() {
+    let mut c = workspaces_used(20);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::ScrollSwitcher { by: 3, shown: 5 });
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 12));
+}
+
+/// The switcher whose current workspace's path is longer than the dialog has room for.
+#[test]
+fn workspace_switcher_with_a_long_path() {
+    let mut c = workspaces_used(1);
+    c.host().select_workspace(LONG_PATH);
+    c.sync();
+    c.user(Intent::BeginWorkspace);
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 12));
+}
+
+/// The switcher scrolled to its end in a short window, then drawn in a taller one: it shows more rows, and the oldest
+/// workspace still fills the bottom row of the list.
+#[test]
+fn a_switcher_scrolled_to_its_end_fills_a_taller_window_to_its_last_row() {
+    let mut c = workspaces_used(30);
+    c.user(Intent::BeginWorkspace);
+    // A 12-row window shows 5 workspaces; the end is 25 rows down.
+    c.user(Intent::ScrollSwitcher { by: 100, shown: 5 });
+    // A 24-row window shows 17: repo-17 to repo-01.
+    let buf = buffer(c.client(), &Screens::new(), 80, 24);
+    let last = position_of(&buf, "/src/repo-01");
+    let prompt = position_of(&buf, "Open a repo by path:");
+    assert_eq!(
+        last.y + 1,
+        prompt.y,
+        "no blank rows below the last: {buf:?}"
+    );
+    assert_eq!(position_of(&buf, "/src/repo-17").y, last.y - 16, "{buf:?}");
 }
 
 #[test]

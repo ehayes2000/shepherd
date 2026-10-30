@@ -90,6 +90,12 @@ pub enum Intent {
         by: i32,
         shown: usize,
     },
+    /// Scroll the open workspace switcher's list by `by` rows (down for positive), when it shows `shown` workspaces at
+    /// once, from the TUI's layout. Ignored when the switcher isn't open.
+    ScrollSwitcher {
+        by: i32,
+        shown: usize,
+    },
     /// Start a session with the default profile.
     NewSession,
     /// The `+ New session` button: open the profile picker, or, with at most one profile, start a session at once.
@@ -289,6 +295,8 @@ pub struct Client {
     sidebar_rows: Option<usize>,
     /// The index of the first profile the open picker shows.
     picker_scroll: usize,
+    /// The index of the first workspace the open switcher shows.
+    switcher_scroll: usize,
     notice: Option<Notice>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
@@ -331,6 +339,7 @@ impl Client {
             scroll: 0,
             sidebar_rows: None,
             picker_scroll: 0,
+            switcher_scroll: 0,
             notice: None,
             profiles: Vec::new(),
             default_profile: None,
@@ -406,6 +415,11 @@ impl Client {
     /// The index of the first profile the open picker shows, before the TUI fits it to the picker's height.
     pub fn picker_scroll(&self) -> usize {
         self.picker_scroll
+    }
+
+    /// The index of the first workspace the open switcher shows, before the TUI fits it to the switcher's height.
+    pub fn switcher_scroll(&self) -> usize {
+        self.switcher_scroll
     }
 
     /// The terminal view's size, once the runtime has reported it.
@@ -942,6 +956,13 @@ impl Client {
                 }
                 Vec::new()
             }
+            Intent::ScrollSwitcher { by, shown } => {
+                if matches!(self.popup, Some(Popup::Workspace { .. })) {
+                    let max = self.workspaces().len().saturating_sub(shown);
+                    self.switcher_scroll = scrolled(self.switcher_scroll.min(max), by, max);
+                }
+                Vec::new()
+            }
             Intent::NewSession => self.new_session(None),
             Intent::BeginNewSession => match &self.profiles[..] {
                 [] => self.new_session(None),
@@ -1012,6 +1033,7 @@ impl Client {
                     path: String::new(),
                     error: None,
                 });
+                self.switcher_scroll = 0;
                 Vec::new()
             }
             Intent::EditWorkspacePath(text) => {

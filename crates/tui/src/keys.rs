@@ -7,8 +7,8 @@
 //! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a press of the same button
 //! that went down on the same control ([`Pointer`] remembers it). A left click presses the control; a right click on a
 //! session opens its context menu at the click. Under an open popup, a click outside it dismisses it. The wheel
-//! scrolls the sidebar when no popup is open, and the profile picker over it. Only a session that tracks the mouse
-//! gets mouse events in its pane.
+//! scrolls the sidebar when no popup is open, and the profile picker or the workspace switcher over it. Only a session
+//! that tracks the mouse gets mouse events in its pane.
 //!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
 //! be handled in order.
@@ -105,7 +105,8 @@ pub fn map_event(
 
 /// A mouse event. In the pane of a session that tracks the mouse (with keys going to it), it goes to the session.
 /// Otherwise a press and release of one button on the same control clicks it, and the wheel scrolls the sidebar, or
-/// the profile picker while the pointer is over it. An open popup covers everything under it ([`hit`]).
+/// the profile picker or workspace switcher while the pointer is over it. An open popup covers everything under it
+/// ([`hit`]).
 fn map_mouse(
     mouse: &MouseEvent,
     client: &Client,
@@ -130,14 +131,26 @@ fn map_mouse(
         && layout
             .sidebar
             .contains(Position::new(mouse.column, mouse.row));
-    let over_picker = client.popup() == Some(&Popup::PickProfile)
-        && matches!(
-            target,
-            Some(Target::Profile(_) | Target::Popup | Target::Dismiss)
-        );
-    let scroll_picker = |by| {
-        let shown = popup::picker_rows(client, window);
-        vec![Intent::ScrollPicker { by, shown }]
+    let over_popup = matches!(
+        target,
+        Some(
+            Target::Profile(_)
+                | Target::WorkspaceRow(_)
+                | Target::Popup
+                | Target::Confirm
+                | Target::Dismiss
+        )
+    );
+    let scroll_popup = |by| match client.popup() {
+        Some(Popup::PickProfile) if over_popup => {
+            let shown = popup::picker_rows(client, window);
+            vec![Intent::ScrollPicker { by, shown }]
+        }
+        Some(Popup::Workspace { .. }) if over_popup => {
+            let shown = popup::switcher_rows(client, window);
+            vec![Intent::ScrollSwitcher { by, shown }]
+        }
+        _ => Vec::new(),
     };
     match mouse.kind {
         MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) => {
@@ -159,8 +172,8 @@ fn map_mouse(
         },
         MouseEventKind::ScrollDown if over_sidebar => vec![Intent::ScrollSidebar(1)],
         MouseEventKind::ScrollUp if over_sidebar => vec![Intent::ScrollSidebar(-1)],
-        MouseEventKind::ScrollDown if over_picker => scroll_picker(1),
-        MouseEventKind::ScrollUp if over_picker => scroll_picker(-1),
+        MouseEventKind::ScrollDown => scroll_popup(1),
+        MouseEventKind::ScrollUp => scroll_popup(-1),
         _ => Vec::new(),
     }
 }
