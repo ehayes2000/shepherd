@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T24 auto-naming | building | task/t24-auto-naming @ 83746d2 | 0 | – |
+| T24 auto-naming | in review | task/t24-auto-naming @ 9145fc7 (on 9197e58) | 1 | PM-accepted: HookTranslated event; built-in stopwords; explicit-name sessions follow-up |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | building | task/f28-repo-root @ 8e92a8a | 0 | – |
 | F31 real answers only | in review | task/f31-answer-input @ 4acc88f (on ec8b1b5) | 1 | PM-accepted: Enter/printable/paste answer; ESC-prefixed etc don't; Esc/Ctrl-C dismissal → F34 |
