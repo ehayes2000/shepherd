@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | in review | task/t37-worktree-nocap @ 8934970 (on 2609fd7) | 1 | PM-accepted: Worktrees::cancel_create + Cancelled; run_alone per create; narrowed repo lock. Builder disclosed one squashed --no-verify WIP commit |
-| T36a build id + mismatch UX | building | task/t36a-build-id @ c4bfd3b | 0 | – |
+| T36a build id + mismatch UX | in review | task/t36a-build-id @ 1c19ec0 (on 6b24c38) | 1 | PM-accepted: terminate via peer creds; click-only restart; Incompatible no quit; wide notices; PM to add dev opt-level for sha2 after merge |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -95,7 +95,7 @@ dependencies are done.
 | `Pty` | host | T08 | portable-pty |
 | `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
-| `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid) |
+| `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid); `terminate` via socket peer creds (T36a) |
 | `Worktrees` | host | T20 | git CLI (`repo_root` added in F28) |
 | `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
