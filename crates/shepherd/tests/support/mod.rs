@@ -17,7 +17,7 @@ use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
 use shepherd_core::host::Host;
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink};
+use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink, PtyEventSink};
 use shepherd_core::wire::{
     ClientNotification, ClientRequest, HostMessage, HostNotification, Request, SessionInput,
     SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
@@ -250,7 +250,8 @@ fn build_runtime(
     env: TestEnv,
     settings: RuntimeSettings,
 ) -> Runtime {
-    runtime_in(net, programs, worktrees, log, env, |sink| sink, settings)
+    let sinks = (|sink| sink, |sink| sink);
+    runtime_in(net, programs, worktrees, log, env, sinks, settings)
 }
 
 /// A host runtime on fakes with any `EventLog` (e.g. a wrapper that counts reads), listening on `net`, its link's
@@ -263,22 +264,42 @@ pub fn runtime_with<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
 ) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv> {
-    let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
-    let worktrees = FakeWorktrees::new(WORKTREE_ROOT);
-    runtime_in(net, programs, worktrees, log, env, link_sink, settings)
+    runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
-fn runtime_in<E: EventLog>(
+/// Like [`runtime_with`], with the PTY's events passing through `pty_sink` too (e.g. to count them).
+pub fn runtime_with_sinks<E: EventLog>(
+    net: &FakeNetwork,
+    programs: &[(String, Program)],
+    log: E,
+    env: TestEnv,
+    link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
+    pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
+) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv> {
+    let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
+    let worktrees = FakeWorktrees::new(WORKTREE_ROOT);
+    let sinks = (link_sink, pty_sink);
+    runtime_in(net, programs, worktrees, log, env, sinks, settings)
+}
+
+/// The link's and the PTY's event sink wrappers.
+type Sinks<FL, FP> = (FL, FP);
+
+fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
     worktrees: FakeWorktrees,
     log: E,
     env: TestEnv,
-    link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
+    (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv>
+where
+    FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
+    FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
+{
     let (tx, rx) = runtime_channel();
-    let mut pty = FakePty::new(tx.pty_sink());
+    let mut pty = FakePty::new(pty_sink(tx.pty_sink()));
     for (command, program) in programs {
         let program = program.clone();
         pty = pty.with_program(command.clone(), move |input, p| program(input, p));

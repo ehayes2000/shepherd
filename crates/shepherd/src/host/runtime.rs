@@ -47,8 +47,8 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyEvent,
-    PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
+    ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyError,
+    PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -418,13 +418,22 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
     /// Handles every event already queued and every deadline already due, until there is none. For tests, where
     /// the fakes queue their events synchronously. Doesn't wait for `Worktrees` calls on the worker thread.
     pub fn run_until_idle(&mut self) {
-        loop {
+        self.run_events(usize::MAX);
+    }
+
+    /// Like [`run_until_idle`](Self::run_until_idle), but handles at most `max` events. Returns how many it
+    /// handled. For tests whose fakes never go idle, such as a flooding PTY.
+    pub fn run_events(&mut self, max: usize) -> usize {
+        let mut handled = 0;
+        while handled < max {
             self.service();
             match self.rx.0.try_recv() {
                 Ok(event) => self.handle(event),
                 Err(_) => break,
             }
+            handled += 1;
         }
+        handled
     }
 
     /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees` call is still unanswered, waits for the next
@@ -449,10 +458,17 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         }
         match event {
             // Output while shutting down is dropped unread, so a flooding PTY's backlog drains fast and the exits
-            // queued behind it are reached.
-            RuntimeEvent::Pty(PtyEvent::Output { .. }) if self.shutdown_by.is_some() => {}
+            // queued behind it are reached. All output is acknowledged once handled, which is what bounds a
+            // flooding session's share of the channel (the `Pty` port's credit).
+            RuntimeEvent::Pty(PtyEvent::Output { session, bytes })
+                if self.shutdown_by.is_some() =>
+            {
+                self.ack(&session, bytes.len());
+            }
             RuntimeEvent::Pty(PtyEvent::Output { session, bytes }) => {
-                self.pty_output(session, bytes)
+                let n = bytes.len();
+                self.pty_output(session.clone(), bytes);
+                self.ack(&session, n);
             }
             RuntimeEvent::Pty(PtyEvent::Exited { session, code }) => {
                 self.screens.remove(&session);
@@ -694,6 +710,15 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
     }
 
     // ---------- PTY output and screens ----------
+
+    /// Returns `bytes` of credit to `session` once its output is processed, so the PTY reads more (the port's flow
+    /// control). A session that has exited since is no longer known to the port; that's expected.
+    fn ack(&mut self, session: &SessionId, bytes: usize) {
+        match self.pty.ack(session, bytes) {
+            Ok(()) | Err(PtyError::UnknownSession) => {}
+            Err(error) => tracing::warn!(%session, %error, "ack failed"),
+        }
+    }
 
     fn pty_output(&mut self, session: SessionId, bytes: Vec<u8>) {
         if let Some(screen) = self.screens.get_mut(&session) {

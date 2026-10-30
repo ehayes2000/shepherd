@@ -1,13 +1,18 @@
 //! An in-memory `Pty` that runs scripted programs instead of processes. A test registers a program per
 //! command name; spawning any other command fails with `SpawnFailed`.
 //!
-//! Events are sent synchronously, from inside the `Pty` call that caused them.
+//! Events are sent synchronously, from inside the `Pty` call that caused them. Output follows the port's credit
+//! rules: it goes out in chunks of at most [`MAX_OUTPUT_CHUNK`], and once a session's unacknowledged output reaches
+//! [`OUTPUT_CREDIT`] the rest waits, like a child blocked on a full pty, until [`Pty::ack`] makes room. A program
+//! that exits with output still waiting exits once it's all sent. A kill drops what was waiting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec};
+use shepherd_core::ports::{
+    MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, SpawnSpec,
+};
 
 /// What a scripted program is reacting to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +27,7 @@ pub struct ScriptedProcess<'a> {
     spec: &'a SpawnSpec,
     size: PtySize,
     output: Vec<u8>,
+    flood: Option<Vec<u8>>,
     exit: Option<i32>,
 }
 
@@ -38,6 +44,11 @@ impl ScriptedProcess<'_> {
         self.output.extend_from_slice(bytes.as_ref());
     }
 
+    /// After this step's output, prints `pattern` over and over until killed, as fast as credit allows (`yes`).
+    pub fn flood(&mut self, pattern: impl AsRef<[u8]>) {
+        self.flood = Some(pattern.as_ref().to_vec()).filter(|p| !p.is_empty());
+    }
+
     /// Exits after this step's output is sent.
     pub fn exit(&mut self, code: i32) {
         self.exit = Some(code);
@@ -50,6 +61,39 @@ struct Running {
     spec: SpawnSpec,
     size: PtySize,
     program: Program,
+    /// Printed and not sent yet, for want of credit.
+    pending: VecDeque<u8>,
+    /// Printed forever once `pending` is empty, and where in the pattern the next byte comes from.
+    flood: Option<(Vec<u8>, usize)>,
+    /// Output sent and not acknowledged.
+    unacked: usize,
+    /// The program has exited; its `Exited` goes out once `pending` is.
+    exited: Option<i32>,
+}
+
+impl Running {
+    /// The next chunk to send, if there is something to send and credit for it.
+    fn next_chunk(&mut self) -> Option<Vec<u8>> {
+        if self.unacked >= OUTPUT_CREDIT {
+            return None;
+        }
+        let chunk: Vec<u8> = if !self.pending.is_empty() {
+            let n = self.pending.len().min(MAX_OUTPUT_CHUNK);
+            self.pending.drain(..n).collect()
+        } else if let Some((pattern, at)) = &mut self.flood {
+            (0..MAX_OUTPUT_CHUNK)
+                .map(|_| {
+                    let byte = pattern[*at];
+                    *at = (*at + 1) % pattern.len();
+                    byte
+                })
+                .collect()
+        } else {
+            return None;
+        };
+        self.unacked += chunk.len();
+        Some(chunk)
+    }
 }
 
 pub struct FakePty {
@@ -79,7 +123,8 @@ impl FakePty {
         self
     }
 
-    /// The next `Pty` call returns `error` without doing anything.
+    /// The next `Pty` call returns `error` without doing anything. `ack` doesn't count: the runtime acks after
+    /// every output, so it would take a failure meant for another call.
     pub fn fail_next(&mut self, error: PtyError) {
         self.fail_next = Some(error);
     }
@@ -92,6 +137,11 @@ impl FakePty {
         self.sessions.get(session).map(|r| r.size)
     }
 
+    /// How much of `session`'s output has been sent and not acknowledged.
+    pub fn unacked(&self, session: &SessionId) -> Option<usize> {
+        self.sessions.get(session).map(|r| r.unacked)
+    }
+
     fn injected(&mut self) -> Result<(), PtyError> {
         self.fail_next.take().map_or(Ok(()), Err)
     }
@@ -102,27 +152,51 @@ impl FakePty {
             .ok_or(PtyError::UnknownSession)
     }
 
-    /// Runs one step of `session`'s program and sends what it produced.
+    /// Runs one step of `session`'s program and sends what it produced, as far as credit allows. A program that
+    /// has exited, its last output still waiting, takes no more steps.
     fn step(&mut self, session: &SessionId, input: ProgramInput<'_>) {
-        let Some(running) = self.sessions.get(session) else {
+        let Some(running) = self.sessions.get_mut(session) else {
             return;
         };
+        if running.exited.is_some() {
+            return;
+        }
         let mut process = ScriptedProcess {
             spec: &running.spec,
             size: running.size,
             output: Vec::new(),
+            flood: None,
             exit: None,
         };
         (running.program)(input, &mut process);
-        let ScriptedProcess { output, exit, .. } = process;
+        let ScriptedProcess {
+            output,
+            flood,
+            exit,
+            ..
+        } = process;
+        running.pending.extend(output);
+        if let Some(pattern) = flood {
+            running.flood = Some((pattern, 0));
+        }
+        running.exited = exit;
+        self.deliver(session);
+    }
 
-        if !output.is_empty() {
+    /// Sends `session`'s waiting output while it has credit, then its exit if it has exited and nothing waits.
+    fn deliver(&mut self, session: &SessionId) {
+        let Some(running) = self.sessions.get_mut(session) else {
+            return;
+        };
+        while let Some(bytes) = running.next_chunk() {
             self.sink.send(PtyEvent::Output {
                 session: session.clone(),
-                bytes: output,
+                bytes,
             });
         }
-        if let Some(code) = exit {
+        if running.pending.is_empty()
+            && let Some(code) = running.exited
+        {
             self.exit(session, Some(code));
         }
     }
@@ -152,6 +226,10 @@ impl Pty for FakePty {
                 spec,
                 size,
                 program,
+                pending: VecDeque::new(),
+                flood: None,
+                unacked: 0,
+                exited: None,
             },
         );
         self.step(&session, ProgramInput::Start);
@@ -176,6 +254,13 @@ impl Pty for FakePty {
         self.injected()?;
         self.running(session)?;
         self.exit(session, None);
+        Ok(())
+    }
+
+    fn ack(&mut self, session: &SessionId, bytes: usize) -> Result<(), PtyError> {
+        let running = self.running(session)?;
+        running.unacked = running.unacked.saturating_sub(bytes);
+        self.deliver(session);
         Ok(())
     }
 }
@@ -218,6 +303,19 @@ mod tests {
                             cat(input, p);
                         }
                     }
+                    // No SIGHUP here either.
+                    "trap '' HUP; exec yes" => {
+                        if input == ProgramInput::Start {
+                            p.flood("y\r\n");
+                        }
+                    }
+                    "stty -opost; exec seq 1 400000" => {
+                        if input == ProgramInput::Start {
+                            let text: String = (1..=400_000).map(|i| format!("{i}\n")).collect();
+                            p.print(text);
+                            p.exit(0);
+                        }
+                    }
                     _ => p.exit(127),
                 }
             })
@@ -244,6 +342,11 @@ mod tests {
                     let cwd = p.spec().cwd.display().to_string();
                     p.print(format!("{cwd}\r\n"));
                     p.exit(0);
+                }
+            })
+            .with_program("yes", |input, p| {
+                if input == ProgramInput::Start {
+                    p.flood("y\r\n");
                 }
             })
     }

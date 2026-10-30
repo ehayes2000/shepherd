@@ -12,7 +12,10 @@ use shepherd::host::{
 };
 use shepherd_core::acpp::{Envelope, Seq};
 use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{EventLog, LogId, MAX_QUEUED, PtyError, PtyEvent};
+use shepherd_core::ports::{
+    EventLog, LinkEvent, LinkEventSink, LogId, MAX_OUTPUT_CHUNK, MAX_QUEUED, OUTPUT_CREDIT,
+    PtyError, PtyEvent, PtyEventSink,
+};
 use shepherd_core::wire::{ClientRequest, HostMessage, SessionRename};
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
@@ -587,4 +590,191 @@ fn shutdown_stops_at_its_deadline_even_while_the_loop_is_flooded() {
     // Stopped first thing, without working through the flood.
     assert!(output(&client.take(), &id).is_empty());
     assert!(client.is_disconnected());
+}
+
+// ---------- PTY backpressure ----------
+
+/// Counts every event a port pushes into the loop's channel, and the PTY output bytes among them.
+#[derive(Clone, Default)]
+struct Pushed {
+    events: Arc<AtomicUsize>,
+    output: Arc<AtomicUsize>,
+}
+
+struct CountLink(Arc<dyn LinkEventSink>, Pushed);
+
+impl LinkEventSink for CountLink {
+    fn send(&self, event: LinkEvent) {
+        self.1.events.fetch_add(1, Ordering::SeqCst);
+        self.0.send(event);
+    }
+}
+
+struct CountPty(Arc<dyn PtyEventSink>, Pushed);
+
+impl PtyEventSink for CountPty {
+    fn send(&self, event: PtyEvent) {
+        self.1.events.fetch_add(1, Ordering::SeqCst);
+        if let PtyEvent::Output { bytes, .. } = &event {
+            self.1.output.fetch_add(bytes.len(), Ordering::SeqCst);
+        }
+        self.0.send(event);
+    }
+}
+
+/// A host whose loop is stepped one event at a time, checking after each that the channel and the flooding
+/// session's unacknowledged output stay bounded.
+struct Flooded {
+    rt: Runtime,
+    client: FakeClient,
+    msgs: Vec<HostMessage>,
+    pushed: Pushed,
+    handled: usize,
+    flooder: SessionId,
+}
+
+impl Flooded {
+    /// A flood holds at most a credit's worth of chunks in the channel (plus the one read past it), and each other
+    /// event waits behind at most that many. The slack is for the client's own events.
+    const BOUND: usize = OUTPUT_CREDIT / MAX_OUTPUT_CHUNK + 1 + 4;
+
+    /// Handles one event at a time until `done`, which must happen within `trips` passes through a full queue
+    /// ([`Self::BOUND`] events each).
+    fn run_until(&mut self, trips: usize, mut done: impl FnMut(&[HostMessage]) -> bool) {
+        let mut steps = 0;
+        while !done(&self.msgs) {
+            assert!(
+                steps < trips * Self::BOUND,
+                "starved: not done after {steps} events"
+            );
+            steps += 1;
+            self.step();
+        }
+    }
+
+    fn step(&mut self) {
+        self.handled += self.rt.run_events(1);
+        let queued = self.pushed.events.load(Ordering::SeqCst) - self.handled;
+        assert!(queued <= Self::BOUND, "{queued} events queued");
+        if let Some(unacked) = self.rt.pty().unacked(&self.flooder) {
+            assert!(
+                unacked < OUTPUT_CREDIT + MAX_OUTPUT_CHUNK,
+                "{unacked} bytes unacked"
+            );
+        }
+        self.msgs.extend(self.client.take());
+    }
+
+    fn answered(msgs: &[HostMessage], id: &shepherd_core::acpp::RequestId) -> bool {
+        msgs.iter().any(|m| is_response(m, id))
+    }
+}
+
+#[test]
+fn a_flooding_session_is_paced_by_acks_and_starves_no_other_session_or_client() {
+    // The first session floods forever. The second asks for DA1 whenever it is typed "query", and records what
+    // the terminal answers.
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let record = replies.clone();
+    let spawned = Arc::new(AtomicUsize::new(0));
+    let program: Program = Arc::new(move |input, p| match input {
+        ProgramInput::Start => {
+            if spawned.fetch_add(1, Ordering::SeqCst) == 0 {
+                p.flood("y\r\n");
+            }
+        }
+        ProgramInput::Stdin(b"query") => p.print(b"\x1b[c"),
+        ProgramInput::Stdin(bytes) => record.lock().unwrap().extend_from_slice(bytes),
+        ProgramInput::Resized => {}
+    });
+    let pushed = Pushed::default();
+    let net = shepherd_testkit::fakes::link::FakeNetwork::new();
+    let (for_link, for_pty) = (pushed.clone(), pushed.clone());
+    let rt = runtime_with_sinks(
+        &net,
+        &[(SHELL.to_owned(), program)],
+        FakeEventLog::new(),
+        TestEnv::new(),
+        |sink| Arc::new(CountLink(sink, for_link)),
+        |sink| Arc::new(CountPty(sink, for_pty)),
+    );
+    let client = FakeClient::connect_with(&net, false);
+    let mut h = Flooded {
+        rt,
+        client,
+        msgs: Vec::new(),
+        pushed,
+        handled: 0,
+        flooder: SessionId::new("s_t1"),
+    };
+
+    let first = h.client.new_session();
+    h.run_until(1, |m| Flooded::answered(m, &first));
+    assert_eq!(new_session_id(&h.msgs, &first), h.flooder);
+
+    // A client request is still handled while the flood goes on.
+    let second = h.client.new_session();
+    h.run_until(1, |m| Flooded::answered(m, &second));
+    let quiet = new_session_id(&h.msgs, &second);
+
+    // The other session's terminal query is still answered: its input waits behind the flood once, and the query
+    // it prints once more.
+    h.client.input(&quiet, b"query");
+    h.run_until(2, |_| replies.lock().unwrap().starts_with(b"\x1b[?"));
+
+    // And the flood keeps going, a chunk per chunk the runtime has processed and acknowledged.
+    for _ in 0..3 * Flooded::BOUND {
+        h.step();
+    }
+    let flooded = h.pushed.output.load(Ordering::SeqCst);
+    assert!(
+        flooded > 2 * OUTPUT_CREDIT,
+        "the flood stalled after {flooded} bytes"
+    );
+}
+
+#[test]
+fn output_dropped_during_shutdown_is_still_acknowledged() {
+    let program: Program = Arc::new(|input, p| {
+        if input == ProgramInput::Start {
+            p.flood("y\r\n");
+        }
+    });
+    let pushed = Pushed::default();
+    let net = shepherd_testkit::fakes::link::FakeNetwork::new();
+    let (for_link, for_pty) = (pushed.clone(), pushed.clone());
+    let rt = runtime_with_sinks(
+        &net,
+        &[(SHELL.to_owned(), program)],
+        FakeEventLog::new(),
+        TestEnv::new(),
+        |sink| Arc::new(CountLink(sink, for_link)),
+        |sink| Arc::new(CountPty(sink, for_pty)),
+    );
+    let client = FakeClient::connect_with(&net, false);
+    let mut h = Flooded {
+        rt,
+        client,
+        msgs: Vec::new(),
+        pushed,
+        handled: 0,
+        flooder: SessionId::new("s_t1"),
+    };
+    let first = h.client.new_session();
+    h.run_until(1, |m| Flooded::answered(m, &first));
+
+    // The kill fails, so the flooder lives on through the shutdown, its output dropped unread.
+    h.rt.pty_mut().fail_next(PtyError::Io("stuck".into()));
+    h.rt.handle(RuntimeEvent::Shutdown);
+    assert!(!h.rt.is_finished());
+    let before = h.pushed.output.load(Ordering::SeqCst);
+    for _ in 0..3 * Flooded::BOUND {
+        h.step();
+    }
+    // Still acknowledged, so the flood isn't stuck at its credit and the backlog keeps draining.
+    let during = h.pushed.output.load(Ordering::SeqCst) - before;
+    assert!(
+        during > 2 * OUTPUT_CREDIT,
+        "only {during} bytes read during shutdown"
+    );
 }
