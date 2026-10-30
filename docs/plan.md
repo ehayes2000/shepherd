@@ -12,7 +12,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | F22 agent session polish | in review | task/f22-agent-session-polish @ 8b98124 (on f019c37) | 1 | PM-accepted: relative cwd refused; global counter; pending_run_files() accessor; sweep race |
 | T18 attention | building | task/t18-attention @ 0fa5b1e | 0 | – |
 | T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | PM: hook trust via session-flags hooks.state + sha2 in core (decision 0016); never bypass-hook-trust |
-| F23 kitty push panic | re-review | task/f23-kitty-push-panic @ 18b0986 (on a18bc42) | 2 | 4 blocking fixed (mutation-verified by builder). PM: host expire_sync guard untested OK; panic-trigger OK (0015) |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -50,6 +49,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F23 | 2 | sync-timeout path unguarded; pop count, guard-flag reset untested; missing_trait_methods lint added |
 
 ## Milestones
 
@@ -374,7 +374,7 @@ acceptance:
 scope: crates/core, crates/shepherd, crates/testkit
 
 ### F23: A program's output can panic the emulator (and the host)
-status: in-progress (high priority)
+status: done (74e2abb)
 depends: T09
 touches: term (feed), shepherd::host (screen feed), shepherd::client (screen feed)
 goal: Feeding `\x1b[>1u` about 5,000 times panics alacritty_terminal 0.26 (`term/mod.rs:1296`): when the kitty keyboard

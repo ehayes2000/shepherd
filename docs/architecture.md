@@ -268,6 +268,8 @@ JSON of the hook) and key format, both internal to Codex.
 Decision: trust only our hooks (the `hooks.state` override). Never pass `--dangerously-bypass-hook-trust`: it weakens the
 user's own hook review. `sha2` joins the core allowlist (pure, established, decision 0008) so the launch plan stays pure.
 A test pins the hash and key for a fixed hook against values derived from Codex's source, citing the file and version.
+Codex parses every `-c` value as TOML, so `toml` also joins the core allowlist: the launch plan builds overrides as serde values
+and encodes them with `toml`, never by hand, keeping `Launch.spawn.args` complete.
 Consequences: if Codex changes the format, our hooks are skipped (fails safe: no status, Codex asks the user to review them
 in `/hooks`, and trusting once persists because our command string is stable). Recheck on Codex upgrades.
 
