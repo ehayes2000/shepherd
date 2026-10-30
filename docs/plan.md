@@ -15,6 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | F36 Close the display-safe gaps from F35's review | [display-safety](features/display-safety.md) | review | task/f36-display-gaps @ 5333595 (on 24f1b49) | 3 | buffer/cell mutators and border_set/shadow banned; with_lines allowed for test assertions |
+| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ HEAD | 0 | notes added |
 | F37 A killed fetch can leave a stale remote-ref lock | [worktrees](features/worktrees.md) | fixing | task/f37-worktree-leftovers @ b0867bd | 3 | approved r3; merge broke on F42's SessionNew.size; rebasing + --no-deref + absent-ref test |
 
 ## Ready to start
@@ -28,7 +29,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F45 Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | [host-and-client](features/host-and-client.md) | todo | T36a, T27 |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | todo | T36b |
-| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | todo | T28, T11 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F43 Tab next to wide chars stored as a '\t' spacer | [terminal](features/terminal.md) | todo | T03 |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | todo | T20 |
