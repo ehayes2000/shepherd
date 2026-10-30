@@ -69,8 +69,8 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
-    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, Worktree,
-    WorktreeError, WorktreeName, WorktreePath, Worktrees,
+    MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, WorktreeError,
+    WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -1062,7 +1062,7 @@ impl<
                     };
                     let call = move |worktrees: &W| HostEvent::WorktreesListed {
                         reply,
-                        result: worktrees.list_managed(&repo).map(canonical_worktrees),
+                        result: worktrees.list_managed(&repo),
                     };
                     match self.worktrees.submit(call, panicked) {
                         Ok(()) => self.worktree_calls += 1,
@@ -2069,18 +2069,6 @@ fn log_screen_panic(session: &SessionId, result: Result<(), String>) {
 fn canonical(dir: &Path) -> Result<PathBuf, WireError> {
     std::fs::canonicalize(dir)
         .map_err(|e| WireError::InvalidParams(format!("cwd `{}`: {e}", dir.display())))
-}
-
-/// Listed worktrees with their paths resolved as an explicit cwd is, so core can tell which ones sessions use. A path
-/// that can't be resolved (gone meanwhile) is kept as listed.
-fn canonical_worktrees(listed: Vec<Worktree>) -> Vec<Worktree> {
-    listed
-        .into_iter()
-        .map(|w| Worktree {
-            path: std::fs::canonicalize(w.path.as_path()).map_or(w.path, WorktreePath::new),
-            ..w
-        })
-        .collect()
 }
 
 fn existing_dir(path: &Path) -> Result<PathBuf, WireError> {

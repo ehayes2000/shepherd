@@ -9,12 +9,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
+use shepherd::host::resolve_worktrees_root;
 use shepherd_core::acpp::{Envelope, Frame, Seq, ShepherdFrame};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     BaseSpec, EventLog, LogId, RepoRef, WorktreeError, WorktreeName, Worktrees,
 };
-use shepherd_core::wire::{ClientRequest, Hello, PROTOCOL_VERSION, SessionNew, WireError};
+use shepherd_core::wire::{
+    ClientRequest, CloseWorktree, Hello, PROTOCOL_VERSION, SessionClose, SessionNew, WireError,
+};
 use shepherd_testkit::fakes::pty::ProgramInput;
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 use support::*;
@@ -66,7 +69,8 @@ fn setup() -> Setup {
     setup_with(false)
 }
 
-/// Like [`setup`], with the worktrees' root reached through a symlink, so the port lists paths that aren't resolved.
+/// Like [`setup`], with the worktrees' root configured through a symlink, resolved as the host resolves its own
+/// before building the port on it.
 fn setup_linked() -> Setup {
     setup_with(true)
 }
@@ -82,7 +86,7 @@ fn setup_with(linked_root: bool) -> Setup {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &root).unwrap();
     }
-    let worktrees = FakeWorktrees::new(&root);
+    let worktrees = FakeWorktrees::new(resolve_worktrees_root(&root).unwrap());
     worktrees.add_repo(&app, "main");
     let mut h = HostHarness::builder()
         .program(SHELL, pwd_shell())
@@ -175,6 +179,51 @@ fn a_worktree_list_the_port_fails_to_give_is_refused_with_the_reason() {
     assert!(why.contains("git worktree list"), "{why}");
 }
 
+#[test]
+fn under_a_linked_root_a_host_made_worktree_is_no_orphan_and_cant_be_adopted() {
+    let mut s = setup_linked();
+    std::fs::create_dir_all(s.root.join("app").join("shell-1")).unwrap();
+    let req = s.client.new_session();
+    s.h.step();
+    new_session_id(&s.client.take(), &req);
+    assert_eq!(s.list(), Ok(json!({ "worktrees": [] })));
+    for spelling in [
+        s.root.join("app").join("shell-1"),
+        std::fs::canonicalize(s.root.join("app").join("shell-1")).unwrap(),
+    ] {
+        let Err(WireError::InvalidParams(why)) = start_in(&mut s, &spelling, "shell-1") else {
+            panic!("{} was adopted", spelling.display());
+        };
+        assert!(why.contains("already in use"), "{why}");
+    }
+}
+
+#[test]
+fn under_a_linked_root_closing_an_adopted_session_removes_its_worktree() {
+    let mut s = setup_linked();
+    let old = s.orphan("old-idea");
+    let linked = s.root.join("app").join("old-idea");
+    let Ok(answer) = start_in(&mut s, &linked, "old-idea") else {
+        panic!("not started");
+    };
+    let id = SessionId::new(answer["session"].as_str().unwrap());
+    s.client.request(ClientRequest::SessionClose(SessionClose {
+        session: id.clone(),
+        worktree: CloseWorktree::IfSafe,
+    }));
+    s.h.step();
+    let frames = frames(&s.h, &id);
+    assert!(
+        matches!(frames.last(), Some(ShepherdFrame::SessionClosed(c)) if c.worktree_removed),
+        "{frames:?}"
+    );
+    let managed = s.worktrees.list_managed(&RepoRef::new(&s.app)).unwrap();
+    assert!(
+        managed.iter().all(|w| w.path.as_path() != old),
+        "{managed:?}"
+    );
+}
+
 /// Asks for a session in worktree `path` on `branch`, and returns the answer.
 fn start_in(s: &mut Setup, path: &Path, branch: &str) -> Result<serde_json::Value, WireError> {
     let asked = s.client.request(ClientRequest::SessionNew(SessionNew {
@@ -189,10 +238,11 @@ fn start_in(s: &mut Setup, path: &Path, branch: &str) -> Result<serde_json::Valu
 #[test]
 fn every_spelling_of_a_worktree_in_use_is_the_same_worktree() {
     let mut s = setup_linked();
-    // Made, and listed by the port, through the symlinked root.
-    let linked = s.orphan("old-idea");
-    let real = std::fs::canonicalize(&linked).unwrap();
+    let real = s.orphan("old-idea");
+    // The same directory through the configured, symlinked root.
+    let linked = s.root.join("app").join("old-idea");
     assert_ne!(linked, real);
+    assert_eq!(std::fs::canonicalize(&linked).unwrap(), real);
     assert_eq!(
         s.list(),
         Ok(json!({ "worktrees": [{ "path": real.to_str().unwrap(), "branch": "old-idea" }] }))
