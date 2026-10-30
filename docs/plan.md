@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
 | F27 worktrees off runtime thread | building | task/f27-worktrees-worker @ 1d2513a | 0 | – |
-| F15 client display polish | building | task/f15-display-polish @ 1d2513a | 0 | – |
+| F15 client display polish | in review | task/f15-display-polish @ 8542e4c (on d92af88) | 1 | PM-accepted: steady block → user shape; notice cleared by intents except layout; 50 ms tick for holds |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
