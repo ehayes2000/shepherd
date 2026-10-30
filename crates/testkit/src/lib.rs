@@ -350,6 +350,41 @@ pub mod builders {
                 code,
             })
         }
+
+        /// Appends a hook-sourced `session/prompt` with `text` to session `id`'s log, as the Claude Code translator
+        /// does on `UserPromptSubmit`, with `_meta.shepherd.continuation` set if `continuation`. Only appends: see
+        /// [`HostDriver::user_prompt`] for the whole hook.
+        pub fn prompt_frame(&mut self, id: &str, text: &str, continuation: bool) -> Envelope {
+            let mut params = json!({
+                "sessionId": "c1",
+                "prompt": [{ "type": "text", "text": text }],
+            });
+            if continuation {
+                params["_meta"] = json!({ "shepherd": { "continuation": true } });
+            }
+            let frame = json!({
+                "jsonrpc": "2.0",
+                "id": format!("p{}", self.log.len() + 1),
+                "method": "session/prompt",
+                "params": params,
+            });
+            let source = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+            self.append(Some(id), source, frame)
+        }
+
+        /// A user prompt hook, as the runtime runs it: the translated `session/prompt` is appended, then
+        /// `HookTranslated` is handled. Returns that event's commands.
+        pub fn user_prompt(&mut self, id: &str, text: &str) -> Vec<HostCommand> {
+            self.prompt_frame(id, text, false);
+            self.hook_translated(id)
+        }
+
+        /// A `HookTranslated` for `id`: the runtime has appended a hook's frames.
+        pub fn hook_translated(&mut self, id: &str) -> Vec<HostCommand> {
+            self.handle(HostEvent::HookTranslated {
+                session: SessionId::new(id),
+            })
+        }
     }
 
     /// Drives a [`Client`] against a [`HostDriver`]: sessions are made on the host, and [`ClientDriver::sync`] delivers

@@ -29,9 +29,18 @@
 //! marks the session with a warning, and the PTY spawns either way once the hooks are done. A session closed meanwhile
 //! records the result it was waiting for and runs and spawns nothing more.
 //!
-//! Host state is only a fold over `_shepherd/*` frames (`docs/acpp.md`, "State is a fold"). [`Host::handle`] reads
-//! state and decides what to do. It never changes state: every change is a [`HostCommand::Append`] that the runtime
-//! seals, appends, and hands back to [`Host::apply`].
+//! Auto-naming: a session keeps the name it was created with (the runtime always asks for the placeholder,
+//! `<profile>-<n>`) until its first user prompt (a `session/prompt` that isn't a continuation) is in its log. Once the
+//! runtime has appended a hook's frames it feeds [`HostEvent::HookTranslated`], and if the session has a first prompt
+//! that gives a name ([`naming::auto_name`]) and has never had a `session/renamed`, the host appends
+//! `session/renamed { auto: true }`. Only the first prompt counts, so one with no meaningful words leaves the session
+//! unnamed for good. Any rename, the user's own included, stops auto-naming, and since all of it is decided from the
+//! log, a restart never names a session again. Only the display name changes: the branch keeps the name it was made
+//! with.
+//!
+//! Host state is only a fold over `_shepherd/*` frames and sessions' first user prompts (`docs/acpp.md`, "State is a
+//! fold"). [`Host::handle`] reads state and decides what to do. It never changes state: every change is a
+//! [`HostCommand::Append`] that the runtime seals, appends, and hands back to [`Host::apply`].
 
 pub mod launch;
 pub mod naming;
@@ -43,6 +52,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, SessionClosed, SessionCreated,
     SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
@@ -198,6 +208,11 @@ pub enum HostEvent {
         agent: AgentKind,
         payload: Value,
     },
+    /// The runtime appended (and applied) the frames a [`HostCommand::TranslateHook`] for `session` gave. A
+    /// notification from the runtime: never answered.
+    HookTranslated {
+        session: SessionId,
+    },
     /// A session's PTY process ended. `code` is `None` when a signal ended it.
     PtyExited {
         session: SessionId,
@@ -352,6 +367,12 @@ struct Entry {
     agent_session_id: Option<String>,
     workspace: Option<PathBuf>,
     warning: Option<String>,
+    /// It has a `session/renamed`, by the user or by shepherd: it is never auto-named again.
+    renamed: bool,
+    /// Its first user prompt (not a continuation) has been folded.
+    prompted: bool,
+    /// The name its first user prompt gives it ([`naming::auto_name`]), if any.
+    auto_name: Option<String>,
 }
 
 impl Entry {
@@ -670,7 +691,21 @@ impl Host {
                 spawn,
                 result,
             } => self.hook_finished(session, command, rest, spawn, result),
+            HostEvent::HookTranslated { session } => self.auto_rename(session),
         }
+    }
+
+    /// Names an open session after its first user prompt, once that prompt is in the log, unless it was ever renamed.
+    fn auto_rename(&self, session: SessionId) -> Vec<HostCommand> {
+        let Some(name) = self
+            .open(&session)
+            .filter(|e| !e.renamed)
+            .and_then(|e| e.auto_name.clone())
+        else {
+            return Vec::new();
+        };
+        let renamed = ShepherdFrame::SessionRenamed(SessionRenamed { name, auto: true });
+        vec![append(&session, renamed)]
     }
 
     /// Records what came of a session's worktree, and if the session is still open runs its first post-create hook
@@ -851,14 +886,28 @@ impl Host {
         commands
     }
 
-    /// Folds one log entry into the state. Entries the registry doesn't read change nothing, and no entry panics.
+    /// Folds one log entry into the state. Entries the registry doesn't read change nothing, and no entry panics. Of
+    /// the ACP frames, only a session's first user prompt is read, for auto-naming.
     ///
     /// Only the host's own `agent/exited` (source `shepherd`) marks a PTY exited: one from a hook is about an agent
     /// the shell ran, and the shell is still running. Likewise only the host's own `agent/started` (a resume) marks
     /// it running again. An `agent/started` from any source records its agent session id.
     pub fn apply(&mut self, env: &Envelope) {
-        let Frame::Shepherd(message) = env.frame() else {
-            return;
+        let message = match env.frame() {
+            Frame::Shepherd(message) => message,
+            Frame::Acp(message) => {
+                if let (AcpFrame::Prompt(prompt), Some(_), Some(id)) =
+                    (message.body(), message.id(), env.session())
+                    && !env.frame().is_continuation()
+                    && let Some(entry) = self.sessions.get_mut(id)
+                    && !entry.prompted
+                {
+                    entry.prompted = true;
+                    entry.auto_name = naming::auto_name(&prompt_text(prompt));
+                }
+                return;
+            }
+            _ => return,
         };
         let Some(id) = env.session() else {
             if let ShepherdFrame::WorkspaceSelected(selected) = message.body() {
@@ -890,12 +939,16 @@ impl Host {
                     agent_session_id: None,
                     workspace: created.workspace.as_ref().map(PathBuf::from),
                     warning: None,
+                    renamed: false,
+                    prompted: false,
+                    auto_name: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
             ShepherdFrame::SessionRenamed(renamed) => {
                 if let Some(entry) = self.sessions.get_mut(id).filter(|e| !e.closed) {
                     entry.name = renamed.name.clone();
+                    entry.renamed = true;
                 }
             }
             ShepherdFrame::SessionClosed(_) => {
@@ -997,6 +1050,19 @@ fn display_tail(tail: &[u8]) -> String {
         .chars()
         .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
         .collect()
+}
+
+/// The text blocks of a prompt, joined by newlines.
+fn prompt_text(prompt: &PromptRequest) -> String {
+    let text: Vec<&str> = prompt
+        .prompt
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.as_str()),
+            ContentBlock::Other(_) => None,
+        })
+        .collect();
+    text.join("\n")
 }
 
 /// An `Append` of a frame the host produces about session `id`.

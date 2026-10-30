@@ -11,8 +11,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd::hook::{self, HookError};
 use shepherd_core::acpp::acp::AcpFrame;
-use shepherd_core::acpp::{Frame, RequestId, Seq};
+use shepherd_core::acpp::{Frame, RequestId, Seq, ShepherdFrame};
 use shepherd_core::config::AgentKind;
+use shepherd_core::host::Host;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LinkEvent, LinkEventSink, LogId};
 use shepherd_core::session::{Activity, SessionState};
@@ -165,6 +166,62 @@ fn hook_request_ids_do_not_collide_across_a_host_restart() {
     let ids = prompt_ids(&h, &session);
     assert_eq!(ids.len(), 2, "{ids:?}");
     assert_ne!(ids[0], ids[1]);
+}
+
+fn session_name(host: &Host, session: &SessionId) -> Option<String> {
+    host.sessions()
+        .into_iter()
+        .find(|s| &s.id == session)
+        .map(|s| s.name)
+}
+
+#[test]
+fn the_first_prompt_hook_names_the_session_once_and_a_restart_keeps_it() {
+    let mut h = HostHarness::new();
+    let mut client = h.connect();
+    let id = client.new_session();
+    h.step();
+    let session = new_session_id(&client.take(), &id);
+    assert_eq!(session_name(h.host(), &session).as_deref(), Some("shell-1"));
+
+    for text in ["Fix the login redirect bug", "Now add a regression test"] {
+        let sent = client.request(ClientRequest::HookFrame(Box::new(claude_hook(
+            &session,
+            prompt(text),
+        ))));
+        h.step();
+        assert_eq!(response(&client.take(), &sent), Ok(json!({})));
+    }
+    assert_eq!(
+        session_name(h.host(), &session).as_deref(),
+        Some("fix-login-redirect-bug")
+    );
+
+    h.restart();
+    let mut client = h.connect();
+    let sent = client.request(ClientRequest::HookFrame(Box::new(claude_hook(
+        &session,
+        prompt("Something else"),
+    ))));
+    h.step();
+    assert_eq!(response(&client.take(), &sent), Ok(json!({})));
+    let renames = h
+        .log()
+        .read(LogId::Session(session.clone()), Seq::ZERO)
+        .unwrap()
+        .iter()
+        .filter(|env| {
+            matches!(
+                env.frame(),
+                Frame::Shepherd(m) if matches!(m.body(), ShepherdFrame::SessionRenamed(r) if r.auto)
+            )
+        })
+        .count();
+    assert_eq!(renames, 1);
+    assert_eq!(
+        session_name(h.host(), &session).as_deref(),
+        Some("fix-login-redirect-bug")
+    );
 }
 
 /// Creates a session and sends it one Claude Code hook, so it has a translator.
