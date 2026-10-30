@@ -10,7 +10,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| F29 workspace switcher scroll | in review | task/f29-switcher-scroll @ 95c1dd9 | 1 | PM-accepted: separate ScrollSwitcher; overflow tested to 2,000; no scenario |
 | F14 pty backpressure | rebasing (builder) | task/f14-pty-backpressure @ 1abe0c8 (on 03c6d2f, stale) | 1 | First reviewer hung 4 h in one tool call and was stopped with no verdict. Rebase onto main, then fresh review with time-bounded load. Earlier accepts stand |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -48,6 +47,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| F29 | 1 | cut/cut_left count chars not columns (→ F30) |
 | T22 | 2 | worktree spawn cwd unchecked → cwd check made structural in SpawnPty; run-file cleanup untested |
 | F24 | 2 | picker panicked in 0/1-row windows → every-popup tiny-window test |
 | F26 | 1 | – |
@@ -481,7 +481,7 @@ acceptance:
 scope: crates/core, crates/adapters, crates/testkit, crates/shepherd
 
 ### F29: Workspace switcher list scrolls and fits the window
-status: in-progress
+status: done (a27fa98)
 depends: T21, F24
 touches: tui::popup, core::client
 goal: The T21 workspace switcher has the same unscrolled, uncapped list the profile picker had before F24.
@@ -490,6 +490,18 @@ acceptance:
   reachable by wheel then click, long paths truncated from the left so the repo name stays visible). Hit tests click rendered
   cells; snapshot of a scrolled switcher; a huge list doesn't overflow.
 scope: crates/core (client), crates/tui
+
+### F30: Truncation measures display width
+status: todo
+depends: F29
+touches: tui::popup, tui::sidebar
+goal: `cut` (picker, F24) and `cut_left` (switcher, F29), and any other truncation in the tui, count characters, not terminal
+columns, so paths and names with double-width characters (CJK, emoji) overflow and push the mark/repo name off.
+acceptance:
+- All tui truncation measures display width via ratatui's `Span::width` / unicode-width (no new dependency), never splits a
+  grapheme, and keeps the `(current)`/`(default)` marks and the repo name visible. Tests with a CJK path and an emoji name in
+  the switcher, picker and sidebar rows. Column sizing (`name_width`, agent column) uses display width too.
+scope: crates/tui
 
 ## Out of scope for the initial feature set
 
