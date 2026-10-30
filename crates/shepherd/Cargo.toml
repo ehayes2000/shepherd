@@ -11,10 +11,15 @@ shepherd-term.workspace = true
 shepherd-adapters.workspace = true
 jiff.workspace = true
 ratatui.workspace = true
+thiserror.workspace = true
+ulid = "1.2"
 signal-hook = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]
 shepherd-testkit.workspace = true
+tempfile.workspace = true
 serde_json.workspace = true
 
 [lints]

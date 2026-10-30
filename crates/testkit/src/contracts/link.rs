@@ -35,6 +35,9 @@ macro_rules! link_contract {
             no_lines_arrive_after_close_returns,
             line_over_the_limit_is_a_protocol_error,
             other_conns_survive_a_disconnect,
+            queued_bytes_rise_while_the_peer_does_not_read,
+            queued_bytes_fall_to_zero_once_the_peer_has_read_everything,
+            queued_bytes_of_an_unknown_or_closed_conn_is_none,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -614,4 +617,56 @@ pub fn other_conns_survive_a_disconnect<F: LinkFixture>(mut h: LinkHarness<F>) {
     );
     h.send(stays.host_conn, "pong");
     assert_eq!(stays.events.lines_of(stays.conn, 1), [b"pong".to_vec()]);
+}
+
+/// Spins until `done` holds. Panics after [`TIMEOUT`]: a liveness bound, not a timing assertion.
+fn spin_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        thread::yield_now();
+    }
+}
+
+const CHUNK: usize = 64 * 1024;
+/// Well over what a socket and a writer's batch can hold, well under [`MAX_QUEUED`].
+const BACKLOG: usize = 32 * CHUNK;
+
+pub fn queued_bytes_rise_while_the_peer_does_not_read<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let (_peer, conn) = h.stalled_peer();
+    assert_eq!(h.host.queued_bytes(conn), Some(0));
+    let chunk = vec![b'x'; CHUNK];
+    for _ in 0..BACKLOG / CHUNK {
+        h.send(conn, &chunk);
+    }
+    // Some of it may sit in the socket or the writer's batch, but most has nowhere to go.
+    spin_until("most of the backlog is queued", || {
+        h.host.queued_bytes(conn).is_some_and(|q| q >= BACKLOG / 2)
+    });
+    let queued = h.host.queued_bytes(conn).unwrap();
+    assert!(queued <= BACKLOG + BACKLOG / CHUNK, "{queued} bytes queued");
+}
+
+pub fn queued_bytes_fall_to_zero_once_the_peer_has_read_everything<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let c = h.connect();
+    let chunk = vec![b'x'; CHUNK];
+    for _ in 0..BACKLOG / CHUNK {
+        h.send(c.host_conn, &chunk);
+    }
+    assert!(h.host.queued_bytes(c.host_conn).is_some());
+    c.events.lines_of(c.conn, BACKLOG / CHUNK);
+    spin_until("the queue is empty", || {
+        h.host.queued_bytes(c.host_conn) == Some(0)
+    });
+}
+
+pub fn queued_bytes_of_an_unknown_or_closed_conn_is_none<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let c = h.connect();
+    assert_eq!(h.host.queued_bytes(ConnId::new(u64::MAX)), None);
+    assert_eq!(c.link.queued_bytes(ConnId::new(u64::MAX)), None);
+    assert_eq!(c.link.queued_bytes(c.conn), Some(0));
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(h.host.queued_bytes(c.host_conn), None);
 }

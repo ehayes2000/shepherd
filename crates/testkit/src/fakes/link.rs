@@ -4,9 +4,10 @@
 //! Events are sent synchronously, from inside the call that caused them, while the network's lock is held, so
 //! sinks must not call back into a link. A [`StalledPeer`] never reads: lines sent to it pile up in its queue
 //! until [`MAX_QUEUED`] is passed, which disconnects it as a slow consumer, just like a socket peer that stops
-//! reading.
+//! reading. A paced client ([`FakeNetwork::connect_paced`]) reads only when the test says so
+//! ([`FakeNetwork::deliver`]), so a test can play a slow reader and watch [`Link::queued_bytes`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use shepherd_core::ports::{
@@ -23,9 +24,26 @@ struct End {
     owner: LinkId,
     /// `None` for a stalled peer, which never reads.
     sink: Option<Arc<dyn LinkEventSink>>,
+    /// Holds lines until [`FakeNetwork::deliver`] reads them, instead of delivering them at once.
+    paced: bool,
     peer: ConnId,
-    /// Bytes sent to this end and not yet read. Only a stalled peer leaves bytes unread.
+    /// Lines sent to a paced end and not yet delivered.
+    pending: VecDeque<Vec<u8>>,
+    /// Bytes sent to this end and not yet read. Only a stalled or paced peer leaves bytes unread.
     unread: usize,
+}
+
+impl End {
+    fn new(owner: LinkId, sink: Option<Arc<dyn LinkEventSink>>, peer: ConnId) -> Self {
+        Self {
+            owner,
+            sink,
+            paced: false,
+            peer,
+            pending: VecDeque::new(),
+            unread: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -46,6 +64,7 @@ impl Net {
     fn connect(
         &mut self,
         sink: Option<Arc<dyn LinkEventSink>>,
+        paced: bool,
     ) -> Result<(LinkId, ConnId), LinkError> {
         let (host, host_sink) = self
             .host
@@ -56,22 +75,11 @@ impl Net {
         let client_end = ConnId::new(self.next_id());
         self.ends.insert(
             host_end,
-            End {
-                owner: host,
-                sink: Some(host_sink.clone()),
-                peer: client_end,
-                unread: 0,
-            },
+            End::new(host, Some(host_sink.clone()), client_end),
         );
-        self.ends.insert(
-            client_end,
-            End {
-                owner: link,
-                sink,
-                peer: host_end,
-                unread: 0,
-            },
-        );
+        let mut client = End::new(link, sink, host_end);
+        client.paced = paced;
+        self.ends.insert(client_end, client);
         host_sink.send(LinkEvent::Connected { conn: host_end });
         Ok((link, client_end))
     }
@@ -97,20 +105,52 @@ impl Net {
             return Ok(());
         };
         match &to.sink {
-            Some(sink) => sink.send(LinkEvent::Line {
+            Some(sink) if !to.paced => sink.send(LinkEvent::Line {
                 conn: peer,
                 line: line.to_vec(),
             }),
-            None if to.unread > 0 && to.unread + line.len() > MAX_QUEUED => {
+            _ if to.unread > 0 && to.unread + line.len() > MAX_QUEUED => {
                 self.disconnect(
                     conn,
                     DisconnectReason::SlowConsumer,
                     DisconnectReason::PeerGone,
                 );
             }
-            None => to.unread += line.len(),
+            _ => {
+                to.unread += line.len();
+                if to.paced {
+                    to.pending.push_back(line.to_vec());
+                }
+            }
         }
         Ok(())
+    }
+
+    /// What `conn`'s peer hasn't read yet.
+    fn queued_bytes(&self, link: LinkId, conn: ConnId) -> Option<usize> {
+        let end = self.ends.get(&conn).filter(|end| end.owner == link)?;
+        Some(self.ends.get(&end.peer).map_or(0, |peer| peer.unread))
+    }
+
+    /// Delivers lines pending for the paced end `conn`, oldest first, up to `max_bytes` (always at least one
+    /// line if any is pending). Returns the bytes delivered.
+    fn deliver(&mut self, conn: ConnId, max_bytes: usize) -> usize {
+        let Some(end) = self.ends.get_mut(&conn) else {
+            return 0;
+        };
+        let mut delivered = 0;
+        while let Some(line) = end.pending.front() {
+            if delivered > 0 && delivered + line.len() > max_bytes {
+                break;
+            }
+            let line = end.pending.pop_front().unwrap_or_default();
+            delivered += line.len();
+            end.unread -= line.len();
+            if let Some(sink) = &end.sink {
+                sink.send(LinkEvent::Line { conn, line });
+            }
+        }
+        delivered
     }
 
     fn close(&mut self, link: LinkId, conn: ConnId) -> Result<(), LinkError> {
@@ -179,13 +219,29 @@ impl FakeNetwork {
 
     /// Connects a client end to the listening host. Fails if no host is listening.
     pub fn connect(&self, sink: Arc<dyn LinkEventSink>) -> Result<(FakeLink, ConnId), LinkError> {
-        let (id, conn) = self.lock().connect(Some(sink))?;
+        let (id, conn) = self.lock().connect(Some(sink), false)?;
         Ok((FakeLink::new(self.clone(), id), conn))
+    }
+
+    /// Connects a client that reads only when [`FakeNetwork::deliver`] is called: a slow reader. Lines sent to it
+    /// count towards the sender's [`Link::queued_bytes`] and its [`MAX_QUEUED`] bound until delivered.
+    pub fn connect_paced(
+        &self,
+        sink: Arc<dyn LinkEventSink>,
+    ) -> Result<(FakeLink, ConnId), LinkError> {
+        let (id, conn) = self.lock().connect(Some(sink), true)?;
+        Ok((FakeLink::new(self.clone(), id), conn))
+    }
+
+    /// Lets the paced client end `conn` read up to `max_bytes` of what was sent to it (at least one line, if any
+    /// is waiting). Returns the bytes read.
+    pub fn deliver(&self, conn: ConnId, max_bytes: usize) -> usize {
+        self.lock().deliver(conn, max_bytes)
     }
 
     /// Connects a peer that never reads. Dropping it is an abrupt disconnect.
     pub fn stalled_peer(&self) -> Result<StalledPeer, LinkError> {
-        let (id, _) = self.lock().connect(None)?;
+        let (id, _) = self.lock().connect(None, false)?;
         Ok(StalledPeer {
             net: self.clone(),
             id,
@@ -232,6 +288,10 @@ impl Link for FakeLink {
             return Err(error);
         }
         self.net.lock().close(self.id, conn)
+    }
+
+    fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
+        self.net.lock().queued_bytes(self.id, conn)
     }
 }
 
@@ -305,6 +365,48 @@ mod tests {
         );
         client.send(conn, b"kept").unwrap();
         assert_eq!(host_events.lines_of(host_conn, 1), [b"kept".to_vec()]);
+    }
+
+    /// A host and one paced client, with the client's conn on both ends.
+    fn paced() -> (FakeLink, Events, FakeLink, ConnId, ConnId, FakeNetwork) {
+        let net = FakeNetwork::new();
+        let (host_sink, host_events) = Events::channel();
+        let (client_sink, client_events) = Events::channel();
+        let host = net.listen(host_sink).unwrap();
+        let (client, conn) = net.connect_paced(client_sink).unwrap();
+        let host_conn = match host_events.wait_for(|_| true, std::time::Duration::ZERO)[..] {
+            [LinkEvent::Connected { conn }] => conn,
+            _ => unreachable!(),
+        };
+        (host, client_events, client, conn, host_conn, net)
+    }
+
+    #[test]
+    fn a_paced_client_reads_only_what_it_is_given_in_order() {
+        let (mut host, events, _client, conn, host_conn, net) = paced();
+        for line in [&b"one"[..], b"two", b"three"] {
+            host.send(host_conn, line).unwrap();
+        }
+        assert_eq!(host.queued_bytes(host_conn), Some(11));
+        events.assert_quiet(std::time::Duration::ZERO);
+
+        assert_eq!(net.deliver(conn, 6), 6);
+        assert_eq!(host.queued_bytes(host_conn), Some(5));
+        assert_eq!(events.lines_of(conn, 2), [b"one".to_vec(), b"two".to_vec()]);
+        // At least one line, even past the budget.
+        assert_eq!(net.deliver(conn, 1), 5);
+        assert_eq!(events.lines_of(conn, 1), [b"three".to_vec()]);
+        assert_eq!(host.queued_bytes(host_conn), Some(0));
+    }
+
+    #[test]
+    fn a_paced_client_that_falls_too_far_behind_is_a_slow_consumer() {
+        let (mut host, _events, _client, _conn, host_conn, _net) = paced();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..=MAX_QUEUED / chunk.len() {
+            host.send(host_conn, &chunk).unwrap();
+        }
+        assert_eq!(host.queued_bytes(host_conn), None);
     }
 
     #[test]

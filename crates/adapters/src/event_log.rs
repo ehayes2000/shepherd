@@ -286,14 +286,25 @@ impl EventLog for JsonlEventLog {
     }
 
     fn read(&self, log: LogId, from: Seq) -> Result<Vec<Envelope>, LogError> {
+        self.read_batch(log, from, usize::MAX)
+    }
+
+    /// Seeks with the offset index to the first entry after `from`, and reads and parses only the next `max`.
+    fn read_batch(&self, log: LogId, from: Seq, max: usize) -> Result<Vec<Envelope>, LogError> {
         log.validate()?;
         let Some(index) = self.logs.get(&log) else {
             return Ok(Vec::new());
         };
         let skip = usize::try_from(from.get()).unwrap_or(usize::MAX);
-        let Some(&start) = index.starts.get(skip) else {
+        let Some(&start) = index.starts.get(skip).filter(|_| max > 0) else {
             return Ok(Vec::new());
         };
+        // Where the batch ends: the start of the entry after it, or the end of the log.
+        let stop = index
+            .starts
+            .get(skip.saturating_add(max))
+            .copied()
+            .unwrap_or(index.end);
 
         let mut file = open_existing(&self.path(&log), OpenOptions::new().read(true))?;
         let found = file.metadata().map_err(io_err)?.len();
@@ -307,7 +318,7 @@ impl EventLog for JsonlEventLog {
         }
         let mut bytes = Vec::new();
         file.seek(SeekFrom::Start(start)).map_err(io_err)?;
-        file.take(index.end - start)
+        file.take(stop - start)
             .read_to_end(&mut bytes)
             .map_err(io_err)?;
         Ok(scan(&log, &bytes, from.get() + 1, Mode::Strict)?.entries)
@@ -475,6 +486,20 @@ mod tests {
             .sum::<usize>();
         bytes[start] = b'X';
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn read_batch_parses_only_the_entries_it_returns() {
+        let dir = private_tempdir();
+        let log = three_entries(dir.path());
+        // Line 3 is unreadable now, but a batch that stops before it never parses it.
+        scribble_on_line(&s1_path(dir.path()), 3);
+        let batch = log.read_batch(session("s1"), Seq::ZERO, 2).unwrap();
+        assert_eq!(
+            batch.iter().map(|e| e.seq().get()).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_corrupt(log.read_batch(session("s1"), Seq::new(2), 1), 3);
     }
 
     fn assert_corrupt<T: std::fmt::Debug>(result: Result<T, LogError>, at: u64) {

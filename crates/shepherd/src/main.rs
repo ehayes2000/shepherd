@@ -5,6 +5,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let result = match std::env::args().nth(1).as_deref() {
         None => client(),
+        Some("host") => return shepherd::host::main(),
         Some(other) => Err(format!("unknown command `{other}`")),
     };
     match result {

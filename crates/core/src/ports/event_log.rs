@@ -118,6 +118,11 @@ pub trait EventLog {
     /// already has, so [`Seq::ZERO`] reads the whole log. A log with no entries reads as empty.
     fn read(&self, log: LogId, from: Seq) -> Result<Vec<Envelope>, LogError>;
 
+    /// Like [`read`](Self::read), but at most `max` entries: the first `max` with a seq greater than `from`. Only
+    /// those are read and parsed, so a reader can walk a long log in batches, resuming from the last seq it got,
+    /// without re-reading the rest each time. Empty at the end of the log, and for `max == 0`.
+    fn read_batch(&self, log: LogId, from: Seq, max: usize) -> Result<Vec<Envelope>, LogError>;
+
     /// Every log with at least one entry, sorted (the host log first, then sessions by id).
     fn logs(&self) -> Result<Vec<LogId>, LogError>;
 }

@@ -86,6 +86,18 @@ impl EventLog for FakeEventLog {
         Ok(entries.iter().filter(|e| e.seq() > from).cloned().collect())
     }
 
+    fn read_batch(&self, log: LogId, from: Seq, max: usize) -> Result<Vec<Envelope>, LogError> {
+        self.injected()?;
+        log.validate()?;
+        let entries = self.logs.get(&log).map_or(&[][..], Vec::as_slice);
+        Ok(entries
+            .iter()
+            .filter(|e| e.seq() > from)
+            .take(max)
+            .cloned()
+            .collect())
+    }
+
     fn logs(&self) -> Result<Vec<LogId>, LogError> {
         self.injected()?;
         Ok(self.logs.keys().cloned().collect())
