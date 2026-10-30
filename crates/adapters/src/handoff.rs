@@ -103,18 +103,16 @@ pub fn exec(exe: &Path, args: &[&OsStr]) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
+    use std::fs::File;
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use super::*;
 
-    /// A stand-in executable running `body` as a shell script.
+    /// A stand-in executable running `body` as a shell script (see [`crate::stand_in`]).
     fn stand_in(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("shepherd");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::install(&path, body);
         path
     }
 
