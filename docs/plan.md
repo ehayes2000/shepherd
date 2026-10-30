@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
-| F14 pty backpressure | fixing (CHANGES) | task/f14-pty-backpressure @ 2c48b2e | 2 | Blocking: post-kill drop past credit untested. Minors: shutdown ack, excess-ack not banked |
+| F14 pty backpressure | re-review | task/f14-pty-backpressure @ bc55d8d (on 2746f70) | 3 | 3 tests added (post-kill drop, excess ack, shutdown ack), mutation-verified by builder |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
