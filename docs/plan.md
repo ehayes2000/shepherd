@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T18b quiet idle fallback | in review | task/t18b-quiet-idle @ bb50fcf (on 8ce4bb4) | 1 | PM-accepted: QuietWatch outside Host; IdleInference with Other; wall-clock Timestamp. Reviewer to judge append-failure hot loop |
+| T18b quiet idle fallback | fixing (CHANGES) | task/t18b-quiet-idle @ bb50fcf | 1 | Blocking: append-failure hot loop (fix in core: record attempt); next_deadline wiring untested; spec amended: permission 'answered' = client input after request, then output, then quiet |
 | T23 worktree hooks | building | task/t23-worktree-hooks @ fbd8af6 | 0 | rebases after T18b |
 | F25 failed worktree create cleanup | building (fresh builder) | task/f25-worktree-fail-cleanup @ e58c9a2 | 0 | First builder silent 2.5 h inside a load round; stopped. Its uncommitted WIP saved as scratchpad/pm-f25-wip.patch (on 62e768e) |
 
@@ -1069,9 +1069,10 @@ acceptance:
 - Output after the inferred idle doesn't flip back to Working by itself. Only real turn signals (a prompt or a tool call) do,
   per T05's rules.
 - NeedsPermission: an untouched dialog is legitimately quiet, so quiet alone never clears it. But choosing "No" in Claude's
-  permission dialog fires **no hook** (`PermissionDenied` is auto-mode only). So: in NeedsPermission, if PTY output happens
-  *after* the permission request (the dialog was answered and redrawn) and then a quiet period follows, append
-  `_shepherd/agent/idle { inferred: "quiet-after-permission" }`.
+  permission dialog fires **no hook** (`PermissionDenied` is auto-mode only). So: in NeedsPermission, if client input is written
+  to that session's PTY *after* the permission request (someone answered), then output follows, then a quiet period, append
+  `_shepherd/agent/idle { inferred: "quiet-after-permission" }`. (Amended after T18b review: output alone isn't evidence —
+  the dialog's own first draw and resize redraws arrive after the request too.)
 - The same fallback covers the other no-signal cases from the T15 review: a prompt blocked by another `UserPromptSubmit` hook,
   and Esc during a hook.
 - Whatever sets NeedsInput (or idle-by-inference) must also set the session's `waiting_since` seq, or T18 attention never
