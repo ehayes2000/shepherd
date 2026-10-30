@@ -273,3 +273,11 @@ and encodes them with `toml`, never by hand, keeping `Launch.spawn.args` complet
 Consequences: if Codex changes the format, our hooks are skipped (fails safe: no status, Codex asks the user to review them
 in `/hooks`, and trusting once persists because our command string is stable). Recheck on Codex upgrades.
 
+### 0017: Text segmentation in core uses `unicode-segmentation` (2026-10-30)
+Context: T24's auto-name slug split words with `char::is_alphanumeric`, which breaks decomposed (NFD) accents and Indic
+viramas apart (`crème` typed as `cre\u{300}me` became `cre`), and macOS paths are often NFD.
+Decision: core may use `unicode-segmentation` (pure, established; already in the tree via ratatui) for word and grapheme
+segmentation (UAX #29). No hand-rolled Unicode tables.
+Consequences: word splitting matches Unicode's rules; control characters are still dropped because they are never part of a
+word segment.
+

@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T24 auto-naming | in review | task/t24-auto-naming @ 9145fc7 (on 9197e58) | 1 | PM-accepted: HookTranslated event; built-in stopwords; explicit-name sessions follow-up |
+| T24 auto-naming | fixing (CHANGES) | task/t24-auto-naming @ 9145fc7 | 1 | Blocking: control-char guarantee, 30-char boundary, stop-at-first-misfit, indented fences, multi-block join untested. PM: use unicode-segmentation words (decision 0017); keep CSI digits (recorded) |
 | T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
 | F28 workspace repo root + ~ | in review | task/f28-repo-root @ 15094a9 (on 9197e58) | 1 | PM-accepted: hand-written expand_home; hello cwd not expanded; Worker doc softened |
 | F31 real answers only | fixing (CHANGES) | task/f31-answer-input @ 4acc88f | 1 | Blocking: runtime kind forwarding untested → paste-answers-dialog scenario |
