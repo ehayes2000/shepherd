@@ -6,7 +6,8 @@ mod support {
     pub mod fake_terminal;
 }
 
-use std::sync::Arc;
+use std::io;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use shepherd::terminal::{TerminalGuard, TerminalSetup, with_terminal};
 use support::fake_terminal::FakeTerminal;
@@ -50,6 +51,86 @@ fn a_setup_that_fails_partway_is_undone() {
     let result = TerminalGuard::enter(setup(&terminal));
     assert!(result.is_err());
     assert_eq!(terminal.calls(), ["enter", "leave"]);
+}
+
+/// A terminal whose `enter` or `push_keyboard` panics after recording itself, as one that fails partway would.
+struct PanickingTerminal {
+    calls: Mutex<Vec<&'static str>>,
+    panic_in: &'static str,
+}
+
+impl PanickingTerminal {
+    fn new(panic_in: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::default(),
+            panic_in,
+        })
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record(&self, call: &'static str) {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call);
+        assert_ne!(call, self.panic_in, "{call} panicked");
+    }
+}
+
+impl TerminalSetup for PanickingTerminal {
+    fn enter(&self) -> io::Result<()> {
+        self.record("enter");
+        Ok(())
+    }
+
+    fn push_keyboard(&self) -> io::Result<bool> {
+        self.record("push keyboard");
+        Ok(true)
+    }
+
+    fn pop_keyboard(&self) -> io::Result<()> {
+        self.record("pop keyboard");
+        Ok(())
+    }
+
+    fn leave(&self) -> io::Result<()> {
+        self.record("leave");
+        Ok(())
+    }
+
+    fn set_mouse_capture(&self, _: bool) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn enter_panicking(terminal: &Arc<PanickingTerminal>) -> Vec<&'static str> {
+    let setup: Arc<dyn TerminalSetup> = terminal.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        with_terminal(setup, |_| ())
+    }));
+    assert!(result.is_err(), "the setup panicked");
+    terminal.calls()
+}
+
+#[test]
+fn a_setup_that_panics_partway_is_undone() {
+    let terminal = PanickingTerminal::new("enter");
+    assert_eq!(enter_panicking(&terminal), ["enter", "leave"]);
+}
+
+#[test]
+fn a_keyboard_push_that_panics_is_undone_without_a_pop() {
+    let terminal = PanickingTerminal::new("push keyboard");
+    assert_eq!(
+        enter_panicking(&terminal),
+        ["enter", "push keyboard", "leave"]
+    );
 }
 
 #[test]
