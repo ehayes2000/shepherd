@@ -149,9 +149,10 @@ fn an_unbound_key_after_the_prefix_cancels_it_and_is_dropped() {
 
 #[test]
 fn keys_without_the_prefix_go_to_the_terminal_encoded() {
-    assert_eq!(keys(&client(), ch('a')), [Intent::keys(b"a".to_vec())]);
-    assert_eq!(keys(&client(), ctrl('c')), [Intent::keys(vec![0x03])]);
-    assert_eq!(keys(&client(), ch('q')), [Intent::keys(b"q".to_vec())]);
+    let answer = |bytes: &[u8]| [Intent::Input(InputKind::Answer, bytes.to_vec())];
+    assert_eq!(keys(&client(), ch('a')), answer(b"a"));
+    assert_eq!(keys(&client(), ctrl('c')), answer(&[0x03]));
+    assert_eq!(keys(&client(), ch('q')), answer(b"q"));
 }
 
 #[test]
@@ -164,6 +165,62 @@ fn passthrough_follows_the_sessions_input_modes() {
         map_key(&press(KeyCode::Up), client().client(), &app_cursor),
         [Intent::keys(b"\x1bOA".to_vec())]
     );
+}
+
+/// The kind of input `key` is sent to the session as, in `modes`.
+fn kind_of(key: KeyEvent, modes: &Modes) -> InputKind {
+    match map_key(&key, client().client(), modes).as_slice() {
+        [Intent::Input(kind, _)] => *kind,
+        other => panic!("{key:?} in {modes:?} sent {other:?}"),
+    }
+}
+
+#[test]
+fn keys_that_can_answer_a_dialog_are_marked_as_answers_in_every_keyboard_mode() {
+    let kitty = |flags| Modes {
+        kitty_keyboard: flags,
+        ..Modes::default()
+    };
+    let modes = [Modes::default(), kitty(1), kitty(8), kitty(1 | 4 | 8)];
+    let with = |code, mods| KeyEvent::new(code, mods);
+    let answers = [
+        press(KeyCode::Enter),
+        press(KeyCode::Esc),
+        ctrl('c'),
+        ch('1'),
+        ch('y'),
+        ch('é'),
+        with(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    ];
+    let moves = [
+        press(KeyCode::Up),
+        press(KeyCode::Down),
+        press(KeyCode::Tab),
+        press(KeyCode::BackTab),
+        press(KeyCode::Backspace),
+        press(KeyCode::PageDown),
+        press(KeyCode::F(1)),
+        with(KeyCode::Enter, KeyModifiers::SHIFT),
+        with(KeyCode::Esc, KeyModifiers::ALT),
+        with(KeyCode::Char('y'), KeyModifiers::ALT),
+        with(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ),
+        ctrl('d'),
+    ];
+    for modes in &modes {
+        for key in answers {
+            assert_eq!(
+                kind_of(key, modes),
+                InputKind::Answer,
+                "{key:?} in {modes:?}"
+            );
+        }
+        for key in moves {
+            assert_eq!(kind_of(key, modes), InputKind::Keys, "{key:?} in {modes:?}");
+        }
+    }
 }
 
 #[test]

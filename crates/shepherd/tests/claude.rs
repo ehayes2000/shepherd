@@ -707,6 +707,32 @@ fn a_paste_answers_a_permission_dialog() {
 }
 
 #[test]
+fn an_esc_the_client_marks_as_an_answer_answers_a_permission_dialog() {
+    // Esc dismisses the dialog without a hook. Its bytes are an escape sequence like a cursor key: only its kind, as
+    // the client sent it, makes it an answer.
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("claude")).unwrap();
+    for hook in [
+        "UserPromptSubmit",
+        "PreToolUse.Bash",
+        "PermissionRequest.Bash",
+    ] {
+        c.hook(&mut client, &session, hook);
+    }
+
+    client.input_of(&session, InputKind::Answer, b"\x1b");
+    c.h.step();
+    // A redraw that isn't typed: the resize redraws the dialog.
+    client.resize(&session, 100, 30);
+    c.h.step();
+    c.h.clock().advance(Duration::from_secs(60));
+    c.h.step();
+    assert_eq!(status(c.activity(&session).activity()), "Idle");
+    assert_eq!(count(&c, &session, "_shepherd/agent/idle"), 1);
+}
+
+#[test]
 fn a_shell_session_is_never_inferred_idle() {
     let mut c = Claude::start();
     let mut client = c.h.connect();

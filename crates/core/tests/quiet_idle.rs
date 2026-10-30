@@ -516,6 +516,28 @@ fn only_enter_printable_keys_and_pastes_answer_a_permission_dialog() {
 }
 
 #[test]
+fn a_key_the_client_marks_as_an_answer_answers_a_permission_dialog_whatever_its_encoding() {
+    // Esc and Ctrl-C dismiss the dialog; in kitty keyboard modes every key may be `CSI … u`.
+    let cases: &[&[u8]] = &[
+        b"\x1b",
+        b"\x03",
+        b"\x1b[27u",
+        b"\x1b[99;5u",
+        b"\x1b[13u",
+        b"\x1b[121u",
+        b"y",
+        b"\r",
+    ];
+    for bytes in cases {
+        assert!(
+            answers(InputKind::Answer, bytes),
+            "{:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
+#[test]
 fn navigating_a_permission_dialog_then_pressing_enter_answers_it() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));
