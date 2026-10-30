@@ -180,6 +180,10 @@ pub struct WorktreeCreated {
     /// Set when fetching origin failed, so `base` is as of the last fetch (or local) and may be behind origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_error: Option<String>,
+    /// The workspace's post-create hooks, run in order in the worktree before the session's PTY spawns. Each one's
+    /// result is a `worktree/hook`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_create: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +194,10 @@ pub struct WorktreeHook {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub output_tail: String,
+    /// Why it didn't exit normally, or couldn't run (a timeout, a signal, a missing directory), for the user. Absent
+    /// when it exited with `exit_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

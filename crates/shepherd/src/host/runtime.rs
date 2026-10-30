@@ -20,12 +20,13 @@
 //! - **Worktrees calls.** The `Worktrees` port runs on a [`Worker`] thread, since its calls may wait on the network.
 //!   A command that needs it (a workspace probe, a new session's worktree) is submitted there and the loop carries
 //!   on; the result comes back as [`RuntimeEvent::Worktrees`] and goes to core, which decides whether it still
-//!   matters.
+//!   matters. The `Commands` port (a new worktree's post-create hooks) runs on a worker of its own the same way, its
+//!   results coming back as [`RuntimeEvent::Commands`], so a long hook never holds up git calls or the loop.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
-//!   `session/closed` is appended. A session waiting for its worktree keeps its files until the result comes back
-//!   (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
+//!   `session/closed` is appended. A session waiting for its worktree or its hooks keeps its files until the last
+//!   result comes back (they are written if it spawns, dropped if not). At startup, when no PTY is running, every leftover run directory is swept. A
 //!   resumed session's launch (`launch::plan_resume`) writes them again the same way.
 //! - **Quiet watch.** A [`QuietWatch`] (the quiet-output idle fallback) sees every entry appended, and the logs on
 //!   start. Output of, and client input to, the sessions it watches are fed to it stamped with `Env::now`; its
@@ -43,7 +44,7 @@ use shepherd_core::acpp::{
     Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp, Timestamp,
 };
 use shepherd_core::agents::Translators;
-use shepherd_core::config::{AgentKind, Config};
+use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::{
@@ -51,8 +52,8 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, Pty, PtyError,
-    PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
+    CommandError, Commands, ConnId, EventLog, Link, LinkEvent, LinkEventSink, LogError, LogId,
+    MAX_QUEUED, Pty, PtyError, PtyEvent, PtyEventSink, PtySize, RepoRef, WorktreeError, Worktrees,
 };
 use shepherd_core::wire::{
     self, ClientMessage, ClientNotification, ClientRequest, HookFrame, HostNotification,
@@ -90,6 +91,8 @@ pub enum RuntimeEvent {
     Link(LinkEvent),
     /// The result of a `Worktrees` call that ran on the worker thread, for core.
     Worktrees(HostEvent),
+    /// The result of a `Commands` call (a hook) that ran on its worker thread, for core.
+    Commands(HostEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
 }
@@ -162,7 +165,7 @@ pub fn runtime_channel() -> (RuntimeTx, RuntimeRx) {
 pub enum StartError {
     #[error(transparent)]
     Log(#[from] LogError),
-    #[error("cannot start the worktrees thread: {0}")]
+    #[error("cannot start a port's worker thread: {0}")]
     Worker(std::io::Error),
 }
 
@@ -241,12 +244,15 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P, W, L, E, V> {
+pub struct HostRuntime<P, W, C, L, E, V> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
     /// `Worktrees` calls submitted and not yet answered.
     worktree_calls: usize,
+    commands: Worker<C>,
+    /// `Commands` calls (hooks) submitted and not yet answered.
+    hook_calls: usize,
     link: L,
     log: E,
     env: V,
@@ -266,7 +272,7 @@ pub struct HostRuntime<P, W, L, E, V> {
     hook_seed: Option<String>,
     /// Run files of sessions being created, written just before their PTY is spawned.
     pending_run_files: HashMap<SessionId, Vec<RunFile>>,
-    /// Sessions whose worktree is being created, with the run files their spawn will write.
+    /// Sessions whose worktree is being created or whose hooks are running, with the run files their spawn will write.
     awaiting_worktree: HashMap<SessionId, Vec<RunFile>>,
     /// Set once shutdown starts: when it gives up waiting for PTY exits.
     shutdown_by: Option<Instant>,
@@ -276,16 +282,23 @@ pub struct HostRuntime<P, W, L, E, V> {
     quiet_due: Option<Instant>,
 }
 
-impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
-    HostRuntime<P, W, L, E, V>
+impl<
+    P: Pty,
+    W: Worktrees + Send + 'static,
+    C: Commands + Send + 'static,
+    L: Link,
+    E: EventLog,
+    V: Env,
+> HostRuntime<P, W, C, L, E, V>
 {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
     /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`
-    /// moves to a worker thread of its own.
+    /// and `commands` each move to a worker thread of their own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
         worktrees: W,
+        commands: C,
         link: L,
         log: E,
         env: V,
@@ -301,13 +314,17 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 quiet.apply(&envelope);
             }
         }
-        let worktrees =
-            Worker::spawn("worktrees", worktrees, tx.clone()).map_err(StartError::Worker)?;
+        let worktrees = Worker::spawn("worktrees", worktrees, tx.clone(), RuntimeEvent::Worktrees)
+            .map_err(StartError::Worker)?;
+        let commands = Worker::spawn("hooks", commands, tx.clone(), RuntimeEvent::Commands)
+            .map_err(StartError::Worker)?;
         let mut runtime = Self {
             host,
             pty,
             worktrees,
             worktree_calls: 0,
+            commands,
+            hook_calls: 0,
             link,
             log,
             env,
@@ -448,12 +465,12 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
         handled
     }
 
-    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees` call is still unanswered, waits for the next
-    /// event and goes on. For tests. `limit` bounds each wait, for liveness; false if one ran out.
+    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees` or `Commands` call is still unanswered, waits for
+    /// the next event and goes on. For tests. `limit` bounds each wait, for liveness; false if one ran out.
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
             self.run_until_idle();
-            if self.worktree_calls == 0 || self.finished {
+            if self.worktree_calls + self.hook_calls == 0 || self.finished {
                 return true;
             }
             match self.rx.0.recv_timeout(limit) {
@@ -461,6 +478,18 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 Err(_) => return false,
             }
         }
+    }
+
+    /// Waits up to `limit` (a liveness bound) for the next event and handles it, then everything already queued, as
+    /// [`run_until_idle`](Self::run_until_idle) does. For tests waiting on one port call while holding another. False if
+    /// nothing arrived in time.
+    pub fn run_next(&mut self, limit: Duration) -> bool {
+        match self.rx.0.recv_timeout(limit) {
+            Ok(event) => self.handle(event),
+            Err(_) => return false,
+        }
+        self.run_until_idle();
+        true
     }
 
     /// Handles one event.
@@ -504,6 +533,16 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                 self.worktree_calls = self.worktree_calls.saturating_sub(1);
                 match &event {
                     HostEvent::WorktreeCreated { session, .. } => {
+                        let session = session.clone();
+                        self.worktree_created(session, event);
+                    }
+                    _ => self.dispatch(event),
+                }
+            }
+            RuntimeEvent::Commands(event) => {
+                self.hook_calls = self.hook_calls.saturating_sub(1);
+                match &event {
+                    HostEvent::HookFinished { session, .. } => {
                         let session = session.clone();
                         self.worktree_created(session, event);
                     }
@@ -623,6 +662,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                     name,
                     base,
                     spawn,
+                    hooks,
                 } => {
                     // Its run files wait with it, for the spawn the result may bring.
                     let files = self.pending_run_files.remove(&session).unwrap_or_default();
@@ -630,6 +670,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                     let panicked = HostEvent::WorktreeCreated {
                         session: session.clone(),
                         spawn: spawn.clone(),
+                        hooks: hooks.clone(),
                         result: Err(WorktreeError::Other(format!(
                             "creating worktree {name} failed unexpectedly"
                         ))),
@@ -638,6 +679,7 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         result: worktrees.create(&repo, &name, base),
                         session,
                         spawn,
+                        hooks,
                     };
                     match self.worktrees.submit(call, panicked) {
                         Ok(()) => self.worktree_calls += 1,
@@ -651,11 +693,51 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
                         }
                     }
                 }
+                HostCommand::RunHook {
+                    session,
+                    command,
+                    rest,
+                    spawn,
+                } => {
+                    // Its run files wait with it, for the spawn after the hooks.
+                    let files = self.pending_run_files.remove(&session).unwrap_or_default();
+                    self.awaiting_worktree.insert(session.clone(), files);
+                    let panicked = HostEvent::HookFinished {
+                        session: session.clone(),
+                        command: command.clone(),
+                        rest: rest.clone(),
+                        spawn: spawn.clone(),
+                        result: Err(CommandError::Failed(
+                            "running it failed unexpectedly".into(),
+                        )),
+                    };
+                    let call = move |commands: &C| HostEvent::HookFinished {
+                        result: commands.run(&command),
+                        session,
+                        command,
+                        rest,
+                        spawn,
+                    };
+                    match self.commands.submit(call, panicked) {
+                        Ok(()) => self.hook_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the hooks thread is gone");
+                            // Core still spawns after a hook that couldn't run: its run files are ready for it.
+                            if let HostEvent::HookFinished { session, .. } = &*unanswered
+                                && let Some(files) = self.awaiting_worktree.remove(session)
+                            {
+                                self.pending_run_files.insert(session.clone(), files);
+                            }
+                            follow_up.push_back(*unanswered);
+                        }
+                    }
+                }
             }
         }
     }
 
-    /// Hands a session's worktree result (`event`) to core, with the run files that waited for it ready for its spawn.
+    /// Hands a session's worktree or hook result (`event`) to core, with the run files that waited for it ready for its
+    /// spawn. If core runs another hook instead, they go on waiting with it.
     fn worktree_created(&mut self, session: SessionId, event: HostEvent) {
         let files = self.awaiting_worktree.remove(&session).unwrap_or_default();
         if !files.is_empty() {
@@ -1029,12 +1111,17 @@ impl<P: Pty, W: Worktrees + Send + 'static, L: Link, E: EventLog, V: Env>
             socket: self.settings.socket.clone(),
         };
         let launch = launch::plan(profile, &ctx).map_err(|e| WireError::Internal(e.to_string()))?;
+        let hooks = match self.host.workspace() {
+            Some(workspace) => config.workspace_hooks(workspace),
+            None => WorkspaceHooks::default(),
+        };
         let spec = NewSessionSpec {
             name: None,
             profile: profile.name.clone(),
             agent: profile.kind,
             explicit_cwd: new.cwd.is_some(),
             spawn: launch.spawn,
+            hooks,
         };
         Ok((spec, launch.files))
     }

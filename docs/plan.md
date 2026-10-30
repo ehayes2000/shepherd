@@ -90,7 +90,7 @@ dependencies are done.
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
 | `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid) |
 | `Worktrees` | host | T20 | git CLI |
-| `Commands` (run hook scripts) | host | T23 | tokio::process |
+| `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
 | `Peers` | host | T29 | iroh |
 

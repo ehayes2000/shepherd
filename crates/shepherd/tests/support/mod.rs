@@ -23,6 +23,7 @@ use shepherd_core::wire::{
     SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
     encode_client_notification, encode_request,
 };
+use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::{FakePty, ProgramInput, ScriptedProcess};
@@ -162,7 +163,8 @@ pub fn echo_shell() -> Program {
     })
 }
 
-pub type Runtime = HostRuntime<FakePty, FakeWorktrees, FakeLink, FakeEventLog, TestEnv>;
+pub type Runtime =
+    HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, FakeEventLog, TestEnv>;
 
 /// Builds a [`HostHarness`].
 pub struct HarnessBuilder {
@@ -172,6 +174,7 @@ pub struct HarnessBuilder {
     net: FakeNetwork,
     config: RawConfig,
     worktrees: FakeWorktrees,
+    commands: FakeCommands,
 }
 
 impl HarnessBuilder {
@@ -205,6 +208,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Uses `commands` (a handle on shared fake state, e.g. with scripts added) instead of a fake that knows none.
+    pub fn commands(mut self, commands: FakeCommands) -> Self {
+        self.commands = commands;
+        self
+    }
+
     pub fn start(self) -> HostHarness {
         let HarnessBuilder {
             programs,
@@ -213,13 +222,14 @@ impl HarnessBuilder {
             net,
             config,
             worktrees,
+            commands,
         } = self;
         let dir = tempfile::tempdir().expect("tempdir for run files");
         let settings = settings(config, dir.path().join("run"));
         let runtime = build_runtime(
             &net,
             &programs,
-            worktrees.clone(),
+            (worktrees.clone(), commands.clone()),
             log,
             env.clone(),
             settings.clone(),
@@ -229,6 +239,7 @@ impl HarnessBuilder {
             net,
             programs,
             worktrees,
+            commands,
             env,
             settings,
             _dir: dir,
@@ -252,13 +263,13 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
 fn build_runtime(
     net: &FakeNetwork,
     programs: &[(String, Program)],
-    worktrees: FakeWorktrees,
+    workers: WorkerPorts,
     log: FakeEventLog,
     env: TestEnv,
     settings: RuntimeSettings,
 ) -> Runtime {
     let sinks = (|sink| sink, |sink| sink);
-    runtime_in(net, programs, worktrees, log, env, sinks, settings)
+    runtime_in(net, programs, workers, log, env, sinks, settings)
 }
 
 /// A host runtime on fakes with any `EventLog` (e.g. a wrapper that counts reads), listening on `net`, its link's
@@ -270,7 +281,7 @@ pub fn runtime_with<E: EventLog>(
     log: E,
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv> {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
@@ -282,12 +293,15 @@ pub fn runtime_with_sinks<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv> {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
-    let worktrees = FakeWorktrees::new(WORKTREE_ROOT);
+    let workers = (FakeWorktrees::new(WORKTREE_ROOT), FakeCommands::new());
     let sinks = (link_sink, pty_sink);
-    runtime_in(net, programs, worktrees, log, env, sinks, settings)
+    runtime_in(net, programs, workers, log, env, sinks, settings)
 }
+
+/// The ports that run on worker threads: `Worktrees` and `Commands`.
+type WorkerPorts = (FakeWorktrees, FakeCommands);
 
 /// The link's and the PTY's event sink wrappers.
 type Sinks<FL, FP> = (FL, FP);
@@ -295,12 +309,12 @@ type Sinks<FL, FP> = (FL, FP);
 fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
-    worktrees: FakeWorktrees,
+    (worktrees, commands): WorkerPorts,
     log: E,
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeLink, E, TestEnv>
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeLink, E, TestEnv>
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
@@ -314,7 +328,7 @@ where
     let link = net
         .listen(link_sink(tx.link_sink()))
         .expect("fake host listens");
-    HostRuntime::start(pty, worktrees, link, log, env, settings, tx, rx)
+    HostRuntime::start(pty, worktrees, commands, link, log, env, settings, tx, rx)
         .expect("host runtime starts")
 }
 
@@ -325,6 +339,7 @@ pub struct HostHarness {
     net: FakeNetwork,
     programs: Vec<(String, Program)>,
     worktrees: FakeWorktrees,
+    commands: FakeCommands,
     env: TestEnv,
     settings: RuntimeSettings,
     /// Holds the run root; removed with the harness.
@@ -340,6 +355,7 @@ impl HostHarness {
             net: FakeNetwork::new(),
             config: shell_default_config(),
             worktrees: FakeWorktrees::new(WORKTREE_ROOT),
+            commands: FakeCommands::new(),
         }
     }
 
@@ -415,7 +431,7 @@ impl HostHarness {
         let runtime = build_runtime(
             &self.net,
             &self.programs,
-            self.worktrees.clone(),
+            (self.worktrees.clone(), self.commands.clone()),
             log,
             self.env.clone(),
             self.settings.clone(),

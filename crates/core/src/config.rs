@@ -1,10 +1,12 @@
-//! Shepherd's configuration: global defaults, agent profiles, key bindings and notifications.
+//! Shepherd's configuration: global defaults, agent profiles, key bindings, notifications and workspace hooks.
 //!
 //! A [`ConfigSource`](crate::ports::ConfigSource) yields a [`RawConfig`], the file as written, with every field
 //! optional. [`Config::resolve`] merges it over the built-in defaults and validates it into a [`Config`].
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,8 @@ pub struct RawConfig {
     pub agents: Option<BTreeMap<String, RawAgent>>,
     pub keys: Option<RawKeys>,
     pub notify: Option<RawNotify>,
+    /// `[workspaces."<repo path or name>"]`.
+    pub workspaces: Option<BTreeMap<String, RawWorkspace>>,
 }
 
 /// `[defaults]`.
@@ -60,6 +64,25 @@ pub struct RawNotify {
     pub bell: Option<bool>,
 }
 
+/// `[workspaces."<repo path or name>"]`: settings for one repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawWorkspace {
+    pub hooks: Option<RawHooks>,
+    /// How long each of its hooks may run, in seconds.
+    pub hook_timeout_s: Option<u64>,
+}
+
+/// `[workspaces."<repo path or name>".hooks]`: shell commands run in a session's worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawHooks {
+    /// Run in order in a new worktree, before the agent starts.
+    pub post_create: Option<Vec<String>>,
+    /// Run in a worktree before it is removed.
+    pub pre_remove: Option<Vec<String>>,
+}
+
 // ---------- errors ----------
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -84,6 +107,15 @@ pub enum ConfigError {
     UnknownDefaultAgent(String),
     #[error("invalid key prefix `{0}` (expected ctrl-<a..z> or ctrl-space)")]
     InvalidKeyPrefix(String),
+    #[error("workspace `{0}`: expected an absolute repo path or a repo directory's name")]
+    InvalidWorkspaceKey(String),
+    #[error("workspace `{workspace}`: a `{list}` hook is empty")]
+    EmptyHook {
+        workspace: String,
+        list: &'static str,
+    },
+    #[error("workspace `{0}`: hook_timeout_s must be more than 0")]
+    ZeroHookTimeout(String),
 }
 
 // ---------- resolved ----------
@@ -180,6 +212,58 @@ impl fmt::Display for KeyPrefix {
     }
 }
 
+/// How long a hook may run when its workspace doesn't say.
+pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// A workspace's hooks: shell commands run in a session's worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceHooks {
+    /// Run in order in a new worktree, before the agent starts.
+    pub post_create: Vec<String>,
+    /// Run in a worktree before it is removed.
+    pub pre_remove: Vec<String>,
+    /// How long each hook may run.
+    pub timeout: Duration,
+}
+
+impl Default for WorkspaceHooks {
+    fn default() -> Self {
+        Self {
+            post_create: Vec::new(),
+            pre_remove: Vec::new(),
+            timeout: DEFAULT_HOOK_TIMEOUT,
+        }
+    }
+}
+
+/// What a `[workspaces."<key>"]` table applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceKey {
+    /// The repo at this absolute path.
+    Path(PathBuf),
+    /// Any repo whose directory has this name.
+    Name(String),
+}
+
+impl WorkspaceKey {
+    /// A key with a `/` is a path, which must be absolute; any other is a directory name.
+    fn parse(key: &str) -> Result<Self, ConfigError> {
+        let invalid = || ConfigError::InvalidWorkspaceKey(key.to_owned());
+        if key.contains('/') {
+            let path = Path::new(key);
+            return if path.is_absolute() {
+                Ok(Self::Path(path.to_path_buf()))
+            } else {
+                Err(invalid())
+            };
+        }
+        match key {
+            "" | "." | ".." => Err(invalid()),
+            _ => Ok(Self::Name(key.to_owned())),
+        }
+    }
+}
+
 /// A validated config. Always has at least the built-in profiles (unless overridden), and the default agent is
 /// always one of its profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +273,7 @@ pub struct Config {
     profiles: BTreeMap<String, AgentProfile>,
     key_prefix: KeyPrefix,
     notify_bell: bool,
+    workspaces: Vec<(WorkspaceKey, WorkspaceHooks)>,
 }
 
 /// The built-in default agent.
@@ -213,6 +298,8 @@ impl Config {
     /// - `[keys] prefix` defaults to `ctrl-b` and must be `ctrl-<a..z>` or `ctrl-space`.
     /// - `[notify] bell` defaults to off.
     /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
+    /// - `[workspaces."<key>"]`: `<key>` is an absolute repo path (it has a `/`) or a repo directory's name. Hooks
+    ///   must not be empty, and `hook_timeout_s` defaults to [`DEFAULT_HOOK_TIMEOUT`] and must be more than 0.
     pub fn resolve(
         raw: Option<RawConfig>,
         login_shell: Option<String>,
@@ -248,11 +335,19 @@ impl Config {
             None => KeyPrefix::DEFAULT,
         };
 
+        let workspaces = raw
+            .workspaces
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, workspace)| workspace_hooks(key, workspace))
+            .collect::<Result<_, _>>()?;
+
         Ok(Self {
             default_agent,
             profiles,
             key_prefix,
             notify_bell: raw.notify.and_then(|n| n.bell).unwrap_or(false),
+            workspaces,
         })
     }
 
@@ -286,6 +381,54 @@ impl Config {
     pub fn notify_bell(&self) -> bool {
         self.notify_bell
     }
+
+    /// The hooks of the workspace whose repo is at `repo` (as resolved, symlinks followed): the table whose key is
+    /// that path, compared as a path, else the one whose key is its directory's name, else none.
+    pub fn workspace_hooks(&self, repo: &Path) -> WorkspaceHooks {
+        let by_path = self.workspaces.iter().find(|(key, _)| match key {
+            WorkspaceKey::Path(path) => path == repo,
+            WorkspaceKey::Name(_) => false,
+        });
+        let by_name = || {
+            self.workspaces.iter().find(|(key, _)| match key {
+                WorkspaceKey::Name(name) => repo.file_name().is_some_and(|n| n == name.as_str()),
+                WorkspaceKey::Path(_) => false,
+            })
+        };
+        by_path
+            .or_else(by_name)
+            .map(|(_, hooks)| hooks.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn workspace_hooks(
+    key: String,
+    workspace: RawWorkspace,
+) -> Result<(WorkspaceKey, WorkspaceHooks), ConfigError> {
+    let parsed = WorkspaceKey::parse(&key)?;
+    let timeout = match workspace.hook_timeout_s {
+        Some(0) => return Err(ConfigError::ZeroHookTimeout(key)),
+        Some(secs) => Duration::from_secs(secs),
+        None => DEFAULT_HOOK_TIMEOUT,
+    };
+    let raw = workspace.hooks.unwrap_or_default();
+    let list = |hooks: Option<Vec<String>>, list| {
+        let hooks = hooks.unwrap_or_default();
+        match hooks.iter().any(|h| h.trim().is_empty()) {
+            true => Err(ConfigError::EmptyHook {
+                workspace: key.clone(),
+                list,
+            }),
+            false => Ok(hooks),
+        }
+    };
+    let hooks = WorkspaceHooks {
+        post_create: list(raw.post_create, "post_create")?,
+        pre_remove: list(raw.pre_remove, "pre_remove")?,
+        timeout,
+    };
+    Ok((parsed, hooks))
 }
 
 fn builtin_profiles(login_shell: Option<String>) -> impl Iterator<Item = AgentProfile> {

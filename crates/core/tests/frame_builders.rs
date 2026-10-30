@@ -492,26 +492,34 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             proptest::option::of(any::<i32>())
         )
             .prop_map(|(code, signal)| ShepherdFrame::AgentExited(AgentExited { code, signal })),
-        (arb_string(), arb_string(), arb_string(), arb_opt_string()).prop_map(
-            |(path, branch, base, fetch_error)| {
+        (
+            arb_string(),
+            arb_string(),
+            arb_string(),
+            arb_opt_string(),
+            proptest::collection::vec(arb_string(), 0..3)
+        )
+            .prop_map(|(path, branch, base, fetch_error, post_create)| {
                 ShepherdFrame::WorktreeCreated(WorktreeCreated {
                     path,
                     branch,
                     base,
                     fetch_error,
+                    post_create,
                 })
-            }
-        ),
+            }),
         (
             arb_string(),
             proptest::option::of(any::<i32>()),
-            arb_string()
+            arb_string(),
+            arb_opt_string()
         )
-            .prop_map(|(hook, exit_code, output_tail)| {
+            .prop_map(|(hook, exit_code, output_tail, error)| {
                 ShepherdFrame::WorktreeHook(WorktreeHook {
                     hook,
                     exit_code,
                     output_tail,
+                    error,
                 })
             }),
         arb_string().prop_map(|repo| ShepherdFrame::WorkspaceSelected(WorkspaceSelected { repo })),

@@ -15,11 +15,12 @@ pub mod builders {
         Dir, EntryId, Envelope, Frame, FrameDraft, Seq, Source, SourceKind, Stamp, Timestamp,
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
-    use shepherd_core::config::AgentKind;
+    use shepherd_core::config::{AgentKind, WorkspaceHooks};
     use shepherd_core::host::{
-        Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
+        Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ReplyTo, ResumeSpec, WorkspaceAsk,
     };
     use shepherd_core::ids::{MachineId, SessionId};
+    use shepherd_core::ports::commands::{CommandExit, CommandOutput, CommandSpec};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
     use shepherd_core::ports::worktrees::{
         BaseUsed, BranchName, Created, WorktreeError, WorktreePath,
@@ -281,6 +282,7 @@ pub mod builders {
             self.handle(HostEvent::WorktreeCreated {
                 session: SessionId::new(id),
                 spawn: shell_spawn(),
+                hooks: PostCreate::default(),
                 result,
             })
         }
@@ -297,6 +299,49 @@ pub mod builders {
                     },
                 }),
             )
+        }
+
+        /// Like [`HostDriver::worktree_ready`], for a session whose workspace has `hooks` as its post-create hooks:
+        /// the first of them runs next.
+        pub fn worktree_ready_with_hooks(&mut self, id: &str, hooks: &[&str]) -> Vec<HostCommand> {
+            self.handle(HostEvent::WorktreeCreated {
+                session: SessionId::new(id),
+                spawn: shell_spawn(),
+                hooks: PostCreate {
+                    hooks: hooks.iter().map(|h| (*h).to_owned()).collect(),
+                    ..PostCreate::default()
+                },
+                result: Ok(Created {
+                    path: WorktreePath::new(format!("/wt/{id}")),
+                    branch: BranchName::new(id),
+                    base: BaseUsed::Origin {
+                        branch: BranchName::new("main"),
+                    },
+                }),
+            })
+        }
+
+        /// Session `id`'s post-create hook `script`, its last, exited with `code` and no output.
+        pub fn hook_exited(&mut self, id: &str, script: &str, code: i32) -> Vec<HostCommand> {
+            let cwd = PathBuf::from(format!("/wt/{id}"));
+            self.handle(HostEvent::HookFinished {
+                session: SessionId::new(id),
+                command: CommandSpec {
+                    script: script.to_owned(),
+                    cwd: cwd.clone(),
+                    env: Vec::new(),
+                    timeout: PostCreate::default().timeout,
+                },
+                rest: PostCreate::default(),
+                spawn: SpawnSpec {
+                    cwd,
+                    ..shell_spawn()
+                },
+                result: Ok(CommandOutput {
+                    exit: CommandExit::Code(code),
+                    tail: Vec::new(),
+                }),
+            })
         }
 
         pub fn pty_exited(&mut self, id: &str, code: Option<i32>) -> Vec<HostCommand> {
@@ -500,6 +545,7 @@ pub mod builders {
             agent: AgentKind::Shell,
             explicit_cwd: false,
             spawn: shell_spawn(),
+            hooks: WorkspaceHooks::default(),
         }
     }
 
@@ -514,6 +560,7 @@ pub mod builders {
                 command: "claude".to_owned(),
                 ..shell_spawn()
             },
+            hooks: WorkspaceHooks::default(),
         }
     }
 
@@ -545,6 +592,7 @@ pub mod builders {
 /// One shared suite per port: `pub fn suite<P: Port>(make: impl Fn(..) -> P)`, run against the fake and the real
 /// adapter. `make` takes whatever the port is constructed with (e.g. an event sink).
 pub mod contracts {
+    pub mod commands;
     pub mod config;
     pub mod event_log;
     pub mod launcher;
@@ -555,8 +603,10 @@ pub mod contracts {
 
 /// One stateful in-memory fake per port. Each must pass its port's contract suite.
 pub mod fakes {
+    pub mod commands;
     pub mod config;
     pub mod event_log;
+    pub mod hold;
     pub mod launcher;
     pub mod link;
     pub mod pty;

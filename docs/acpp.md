@@ -78,8 +78,8 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command }` (source `shepherd`: a resume respawned the agent) |
 | `_shepherd/agent/idle`        | `{ inferred? }` (agent is at its prompt with nothing to do; `inferred`: no agent signal said so and the host inferred it, `"quiet"` or `"quiet-after-permission"`) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
-| `_shepherd/worktree/created`  | `{ path, branch, base, fetch_error? }` (`path` is the session's cwd from then on; `fetch_error`: `base` is as last fetched, or local) |
-| `_shepherd/worktree/hook`     | `{ hook, exit_code, output_tail }` |
+| `_shepherd/worktree/created`  | `{ path, branch, base, fetch_error?, post_create? }` (`path` is the session's cwd from then on; `fetch_error`: `base` is as last fetched, or local; `post_create`: the hooks run there before the PTY spawns, each then a `worktree/hook`) |
+| `_shepherd/worktree/hook`     | `{ hook, exit_code?, output_tail, error? }` (`output_tail`: the last 4 KiB, control characters stripped; `error`: why it didn't exit normally or couldn't run, e.g. a timeout) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.

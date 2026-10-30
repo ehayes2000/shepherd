@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
 use shepherd_core::host::naming::worktree_name;
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, NewSessionSpec, ResumeUnavailable, WorkspaceAsk,
+    Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ResumeUnavailable, WorkspaceAsk,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::{PtySize, SpawnSpec};
@@ -73,6 +73,7 @@ fn worktree_result(
     host.handle(HostEvent::WorktreeCreated {
         session: sid(id),
         spawn,
+        hooks: PostCreate::default(),
         result,
     })
 }
@@ -179,6 +180,7 @@ fn a_new_session_in_a_workspace_is_created_then_asks_for_a_worktree_instead_of_s
                 name: name("shell-1"),
                 base: BaseSpec::OriginDefault,
                 spawn: shell_spawn(),
+                hooks: PostCreate::default(),
             },
             HostCommand::Reply {
                 to: reply,

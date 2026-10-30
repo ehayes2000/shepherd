@@ -1,6 +1,6 @@
-//! Runs a synchronous port's calls on a thread of their own, so a slow one (git over the network) never stalls the
-//! runtime loop. Decision 0011's pattern: the call runs in the background and its result comes back into the loop's
-//! channel as an event ([`RuntimeEvent::Worktrees`]), which the loop hands to core like any other.
+//! Runs a synchronous port's calls on a thread of their own, so a slow one (git over the network, a user's hook) never
+//! stalls the runtime loop. Decision 0011's pattern: the call runs in the background and its result comes back into the
+//! loop's channel as an event (e.g. [`RuntimeEvent::Worktrees`]), which the loop hands to core like any other.
 //!
 //! One thread per port, taking calls in the order they were submitted, so results come back in that order too and
 //! two git calls on one repo never race each other.
@@ -27,9 +27,15 @@ pub struct Worker<W> {
 }
 
 impl<W: Send + 'static> Worker<W> {
-    /// Moves `port` to a new thread called `name`, which reports each call's result into `tx`.
-    pub fn spawn(name: &str, port: W, tx: RuntimeTx) -> io::Result<Self> {
+    /// Moves `port` to a new thread called `name`, which reports each call's result into `tx`, wrapped by `wrap`.
+    pub fn spawn(
+        name: &str,
+        port: W,
+        tx: RuntimeTx,
+        wrap: fn(HostEvent) -> RuntimeEvent,
+    ) -> io::Result<Self> {
         let (jobs, calls) = mpsc::channel::<Job<W>>();
+        let thread = name.to_owned();
         thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
@@ -37,17 +43,18 @@ impl<W: Send + 'static> Worker<W> {
                     let call = job.call;
                     let event =
                         catch_unwind(AssertUnwindSafe(|| call(&port))).unwrap_or_else(|_| {
-                            tracing::error!("a worktrees call panicked");
+                            tracing::error!(%thread, "a port call panicked");
                             job.panicked
                         });
-                    tx.send(RuntimeEvent::Worktrees(event));
+                    tx.send(wrap(event));
                 }
             })?;
         Ok(Self { jobs })
     }
 
-    /// Queues `call`. Never blocks. Its result arrives as [`RuntimeEvent::Worktrees`]; if it panics, `panicked` does
-    /// instead, so every call is answered. Hands `panicked` back if the thread is gone and the call can't run.
+    /// Queues `call`. Never blocks. Its result arrives wrapped as [`Worker::spawn`] was told; if it panics,
+    /// `panicked` does instead, so every call is answered. Hands `panicked` back if the thread is gone and the call
+    /// can't run.
     pub fn submit(
         &self,
         call: impl FnOnce(&W) -> HostEvent + Send + 'static,
@@ -82,7 +89,7 @@ mod tests {
     #[test]
     fn a_call_that_panics_is_answered_with_its_fallback_and_later_calls_still_run() {
         let (tx, rx) = runtime_channel();
-        let worker = Worker::spawn("f27-test-worker", (), tx).unwrap();
+        let worker = Worker::spawn("f27-test-worker", (), tx, RuntimeEvent::Worktrees).unwrap();
         worker
             .submit(|_| panic!("boom"), probed("fallback"))
             .unwrap();

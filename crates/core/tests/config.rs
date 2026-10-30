@@ -1,6 +1,8 @@
 //! Config resolution: built-in defaults, merge rules and validation, through `Config::resolve`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Duration;
 
 use jiff::SignedDuration;
 use serde_json::{Value, json};
@@ -332,4 +334,108 @@ fn idle_after_quiet_ms_sets_a_profiles_quiet_period() {
     assert_eq!(quiet("claude"), SignedDuration::from_millis(1500));
     assert_eq!(quiet("mine"), SignedDuration::from_secs(10));
     assert_eq!(quiet("codex"), SignedDuration::from_millis(3000));
+}
+
+// ---------- workspace hooks ----------
+
+fn hooks_config() -> Config {
+    resolve(json!({
+        "workspaces": {
+            "/src/app": {
+                "hook_timeout_s": 30,
+                "hooks": { "post_create": ["cp ../.envrc .", "npm ci"], "pre_remove": ["make clean"] },
+            },
+            "app": { "hooks": { "post_create": ["by name"] } },
+            "lib": { "hooks": { "pre_remove": ["only pre"] } },
+        }
+    }))
+    .unwrap_or_else(|e| panic!("{e}"))
+}
+
+#[test]
+fn a_workspace_with_no_table_has_no_hooks_and_the_default_timeout() {
+    let hooks = Config::resolve(None, None)
+        .unwrap()
+        .workspace_hooks(Path::new("/src/app"));
+    assert!(hooks.post_create.is_empty());
+    assert!(hooks.pre_remove.is_empty());
+    assert_eq!(hooks.timeout, Duration::from_secs(600));
+}
+
+#[test]
+fn workspace_hooks_match_the_repo_path() {
+    let hooks = hooks_config().workspace_hooks(Path::new("/src/app"));
+    assert_eq!(hooks.post_create, ["cp ../.envrc .", "npm ci"]);
+    assert_eq!(hooks.pre_remove, ["make clean"]);
+    assert_eq!(hooks.timeout, Duration::from_secs(30));
+}
+
+#[test]
+fn workspace_hooks_match_the_repo_directory_name_when_no_path_does() {
+    let config = hooks_config();
+    let by_name = config.workspace_hooks(Path::new("/elsewhere/app"));
+    assert_eq!(by_name.post_create, ["by name"]);
+    assert!(by_name.pre_remove.is_empty());
+    assert_eq!(by_name.timeout, Duration::from_secs(600));
+    let lib = config.workspace_hooks(Path::new("/x/lib"));
+    assert!(lib.post_create.is_empty());
+    assert_eq!(lib.pre_remove, ["only pre"]);
+    assert!(
+        config
+            .workspace_hooks(Path::new("/src/apple"))
+            .post_create
+            .is_empty()
+    );
+}
+
+#[test]
+fn workspace_keys_are_compared_as_paths() {
+    let config = resolve(json!({
+        "workspaces": { "/src/app/": { "hooks": { "post_create": ["x"] } } }
+    }))
+    .unwrap();
+    assert_eq!(
+        config.workspace_hooks(Path::new("/src/app")).post_create,
+        ["x"]
+    );
+    assert!(
+        config
+            .workspace_hooks(Path::new("/src/app/sub"))
+            .post_create
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_relative_or_empty_workspace_key_is_an_error() {
+    for key in ["src/app", "./app", "~/src/app", ""] {
+        let result =
+            resolve(json!({ "workspaces": { key: { "hooks": { "post_create": ["x"] } } } }));
+        assert_eq!(
+            result,
+            Err(ConfigError::InvalidWorkspaceKey(key.to_owned())),
+            "{key:?}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_hook_is_an_error() {
+    for list in ["post_create", "pre_remove"] {
+        let result =
+            resolve(json!({ "workspaces": { "app": { "hooks": { list: ["ok", "  "] } } } }));
+        assert_eq!(
+            result,
+            Err(ConfigError::EmptyHook {
+                workspace: "app".to_owned(),
+                list,
+            })
+        );
+    }
+}
+
+#[test]
+fn a_zero_hook_timeout_is_an_error() {
+    let result = resolve(json!({ "workspaces": { "app": { "hook_timeout_s": 0 } } }));
+    assert_eq!(result, Err(ConfigError::ZeroHookTimeout("app".to_owned())));
 }
