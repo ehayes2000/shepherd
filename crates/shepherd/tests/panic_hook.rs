@@ -1,6 +1,6 @@
-//! The panic hook restores the terminal before the panic message is printed, and stops the client loop, so a panic on
-//! another thread doesn't leave the loop drawing on a terminal that is no longer set up. Its own test binary, because
-//! a panic hook is process-wide.
+//! The panic hook restores the terminal before the panic message is printed, and stops the client loop with an error,
+//! so a panic on another thread doesn't leave the loop drawing on a terminal that is no longer set up, and `shepherd`
+//! exits non-zero. Its own test binary, because a panic hook is process-wide.
 
 mod support {
     pub mod fake_terminal;
@@ -8,8 +8,8 @@ mod support {
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use shepherd::client::{ClientRuntime, Connector};
-use shepherd::terminal::{TerminalSetup, install_panic_hook, with_terminal};
+use shepherd::client::{ClientError, ClientRuntime, Connector, install_client_panic_hook};
+use shepherd::terminal::{TerminalSetup, with_terminal};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::ids::MachineId;
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
@@ -17,7 +17,7 @@ use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use support::fake_terminal::FakeTerminal;
 
 #[test]
-fn a_panic_on_another_thread_restores_the_terminal_first_and_stops_the_client() {
+fn a_panic_on_another_thread_restores_the_terminal_first_and_fails_the_client() {
     let order: Arc<Mutex<Vec<String>>> = Arc::default();
     let terminal = FakeTerminal::enhanced();
     {
@@ -45,18 +45,18 @@ fn a_panic_on_another_thread_restores_the_terminal_first_and_stops_the_client() 
     let setup: Arc<dyn TerminalSetup> = terminal.clone();
 
     let result = with_terminal(setup, |restorer| {
-        let events = runtime.events();
-        install_panic_hook(restorer.clone(), move || {
-            events.shutdown();
-        });
+        install_client_panic_hook(restorer.clone(), runtime.events());
         let worker = std::thread::spawn(|| panic!("boom"));
         assert!(worker.join().is_err());
-        runtime.pump();
-        runtime.done()
+        runtime.run()
     });
     let _ = std::panic::take_hook();
 
-    assert_eq!(result.ok(), Some(true), "the client stopped");
+    assert_eq!(
+        result.ok(),
+        Some(Err(ClientError::Panicked)),
+        "the client stopped with an error"
+    );
     assert_eq!(
         *order.lock().unwrap_or_else(PoisonError::into_inner),
         ["previous hook saw [enter,push keyboard,pop keyboard,leave]"]

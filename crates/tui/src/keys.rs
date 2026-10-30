@@ -135,7 +135,8 @@ pub fn from_legacy_terminal(key: KeyEvent) -> KeyEvent {
     let KeyCode::Char(c @ '4'..='7') = key.code else {
         return key;
     };
-    if key.modifiers != KeyModifiers::CONTROL {
+    // Other modifiers stay: a legacy terminal sends alt as an ESC prefix, which crossterm reports as ctrl+alt+digit.
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return key;
     }
     let pressed = match c {

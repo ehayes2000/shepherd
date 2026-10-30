@@ -35,7 +35,7 @@ use shepherd_core::wire::{
 };
 use shepherd_term::Screen;
 
-use crate::terminal::{CrosstermSetup, TerminalSetup, install_panic_hook, with_terminal};
+use crate::terminal::{CrosstermSetup, Restorer, TerminalSetup, install_panic_hook, with_terminal};
 
 /// How often [`ClientRuntime::run`] ticks the client.
 pub const TICK: Duration = Duration::from_millis(50);
@@ -54,6 +54,8 @@ pub enum ClientError {
     Fatal(String),
     /// The terminal couldn't be set up, read or drawn on.
     Terminal(String),
+    /// A thread panicked. Its message was printed when it happened.
+    Panicked,
 }
 
 impl fmt::Display for ClientError {
@@ -61,6 +63,7 @@ impl fmt::Display for ClientError {
         match self {
             Self::Fatal(why) => f.write_str(why),
             Self::Terminal(why) => write!(f, "terminal: {why}"),
+            Self::Panicked => f.write_str("a thread panicked"),
         }
     }
 }
@@ -79,6 +82,8 @@ enum Input {
     Terminal(Event),
     /// The terminal can't be read any more.
     TerminalFailed(String),
+    /// A thread panicked.
+    Panicked,
     /// Quit, as if the user detached (a signal).
     Shutdown,
 }
@@ -125,6 +130,11 @@ impl EventSender {
     /// Asks the client to quit. Sessions keep running on the host.
     pub fn shutdown(&self) -> bool {
         self.0.send(Input::Shutdown).is_ok()
+    }
+
+    /// A thread panicked: the client quits with [`ClientError::Panicked`]. Sessions keep running on the host.
+    pub fn panicked(&self) -> bool {
+        self.0.send(Input::Panicked).is_ok()
     }
 }
 
@@ -201,6 +211,8 @@ pub struct ClientRuntime<L, C, H> {
     window: (u16, u16),
     /// Why the terminal stopped working, if it did.
     terminal_failed: Option<String>,
+    /// A thread panicked.
+    panicked: bool,
     /// The outer terminal reports keys unambiguously (kitty keyboard protocol).
     keyboard_enhanced: bool,
     done: bool,
@@ -232,6 +244,7 @@ where
             screens: Screens::new(),
             window: DEFAULT_SIZE,
             terminal_failed: None,
+            panicked: false,
             keyboard_enhanced: false,
             done: false,
         }
@@ -388,6 +401,9 @@ where
                     .map_err(terminal_error)?;
             }
         }
+        if self.panicked {
+            return Err(ClientError::Panicked);
+        }
         if let Some(why) = &self.terminal_failed {
             return Err(ClientError::Terminal(why.clone()));
         }
@@ -403,6 +419,10 @@ where
             Input::Terminal(event) => self.terminal_event(event),
             Input::TerminalFailed(why) => {
                 self.terminal_failed = Some(why);
+                self.user(Intent::Quit);
+            }
+            Input::Panicked => {
+                self.panicked = true;
                 self.user(Intent::Quit);
             }
             Input::Shutdown => self.user(Intent::Quit),
@@ -532,15 +552,20 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
         ratatui::Terminal::new(CrosstermBackend::new(io::stdout())).map_err(terminal_error)?;
     let setup: Arc<dyn TerminalSetup> = Arc::new(CrosstermSetup);
     with_terminal(setup.clone(), |restorer| {
-        let on_panic = events.clone();
-        install_panic_hook(restorer.clone(), move || {
-            on_panic.shutdown();
-        });
+        install_client_panic_hook(restorer.clone(), events.clone());
         runtime.set_keyboard_enhanced(restorer.keyboard_enhanced());
         read_terminal_events(events)?;
         runtime.run_with(&mut TerminalView::new(backend, setup))
     })
     .map_err(terminal_error)?
+}
+
+/// On a panic on any thread: restores the terminal, prints the message, and stops the client with
+/// [`ClientError::Panicked`], so `shepherd` exits non-zero.
+pub fn install_client_panic_hook(restorer: Restorer, events: EventSender) {
+    install_panic_hook(restorer, move || {
+        events.panicked();
+    });
 }
 
 /// Turns SIGTERM, SIGHUP and SIGINT into [`EventSender::shutdown`], so the client quits through its normal path and

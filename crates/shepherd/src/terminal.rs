@@ -5,8 +5,9 @@
 //! wants the mouse), and tests record calls instead. [`TerminalGuard`] restores the terminal when dropped, so a normal
 //! return, an error and a panic that unwinds all restore it, keyboard flags included. [`install_panic_hook`] restores
 //! it before the panic message is printed, so the message lands on the normal screen where the user can read it, and
-//! stops the client loop, so a panic on another thread doesn't leave it drawing. Signals (SIGTERM, SIGHUP, SIGINT) quit
-//! the client loop, which then returns through the guard (see [`crate::client::forward_signals`]).
+//! stops the client loop with an error, so a panic on another thread doesn't leave it drawing and `shepherd` exits
+//! non-zero. Signals (SIGTERM, SIGHUP, SIGINT) quit the client loop, which then returns through the guard (see
+//! [`crate::client::forward_signals`]).
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -74,21 +75,22 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    /// Takes the terminal over. If that fails partway, what was done is undone before returning the error. A terminal
-    /// that can't be asked for unambiguous keys is still used, with legacy keys.
+    /// Takes the terminal over. If that fails or panics partway, what was done is undone before returning the error
+    /// or unwinding: the guard exists first, so its drop restores. A terminal that can't be asked for unambiguous keys
+    /// is still used, with legacy keys.
     pub fn enter(setup: Arc<dyn TerminalSetup>) -> io::Result<Self> {
-        let restorer = Restorer {
-            setup,
-            active: Arc::new(AtomicBool::new(true)),
-            keyboard: Arc::new(AtomicBool::new(false)),
+        let guard = Self {
+            restorer: Restorer {
+                setup,
+                active: Arc::new(AtomicBool::new(true)),
+                keyboard: Arc::new(AtomicBool::new(false)),
+            },
         };
-        if let Err(e) = restorer.setup.enter() {
-            restorer.restore();
-            return Err(e);
-        }
+        let restorer = &guard.restorer;
+        restorer.setup.enter()?;
         let pushed = restorer.setup.push_keyboard().unwrap_or(false);
         restorer.keyboard.store(pushed, Ordering::SeqCst);
-        Ok(Self { restorer })
+        Ok(guard)
     }
 
     pub fn restorer(&self) -> &Restorer {
@@ -113,7 +115,8 @@ pub fn with_terminal<R>(
 }
 
 /// At the start of any panic, on any thread: restores the terminal, runs the hook that was installed before (which
-/// prints the message), then calls `on_panic` (the client passes its shutdown, so its loop stops drawing).
+/// prints the message), then calls `on_panic` (the client stops its loop with an error, see
+/// [`crate::client::install_client_panic_hook`]).
 pub fn install_panic_hook(restorer: Restorer, on_panic: impl Fn() + Send + Sync + 'static) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

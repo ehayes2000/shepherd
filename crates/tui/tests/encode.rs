@@ -396,11 +396,26 @@ fn control_bytes_1c_to_1f_from_a_legacy_terminal_reach_the_session_as_those_cont
 }
 
 #[test]
+fn control_bytes_1c_to_1f_with_alt_from_a_legacy_terminal_keep_alt() {
+    // A legacy terminal sends alt as an ESC prefix; crossterm reports ESC 0x1C as ctrl+alt+4.
+    let key = from_legacy_terminal(KeyEvent::new(KeyCode::Char('4'), CTRL | ALT));
+    assert_eq!(key, KeyEvent::new(KeyCode::Char('\\'), CTRL | ALT));
+    assert_eq!(
+        show(encode::key(&key, &legacy())),
+        Some("\x1b\x1c".escape_debug().to_string())
+    );
+    assert_eq!(
+        show(encode::key(&key, &kitty(1))),
+        Some("\x1b[92;7u".escape_debug().to_string())
+    );
+}
+
+#[test]
 fn other_keys_from_a_legacy_terminal_are_left_alone() {
     for key in [
         KeyEvent::new(KeyCode::Char('4'), NONE),
         KeyEvent::new(KeyCode::Char('a'), CTRL),
-        KeyEvent::new(KeyCode::Char('4'), CTRL | ALT),
+        KeyEvent::new(KeyCode::Char('4'), ALT),
         KeyEvent::new(KeyCode::Enter, SHIFT),
     ] {
         assert_eq!(from_legacy_terminal(key), key, "{key:?}");
