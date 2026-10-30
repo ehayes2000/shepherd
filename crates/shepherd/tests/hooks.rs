@@ -247,8 +247,9 @@ fn a_host_that_never_answers_times_the_hook_out() {
 fn a_host_that_drops_the_connection_before_answering_is_a_disconnect() {
     let net = FakeNetwork::new();
     let (host, events) = silent_host(&net);
-    // The fake network drops a conn's sinks with it; a socket link keeps its sink until the link is dropped. Hold
-    // a copy, as that link would, so the hook learns of the drop from the `Disconnected` event alone.
+    // Every link drops a conn's sink once its `Disconnected` is sent, which closes the hook's channel. Hold a copy so
+    // the channel stays open and the test can only end via the `Disconnected` event: otherwise the channel closing
+    // would mask a `deliver` that ignores it.
     let kept: Arc<Mutex<Option<Arc<dyn LinkEventSink>>>> = Arc::default();
     let hook = {
         let (net, kept) = (net.clone(), kept.clone());
