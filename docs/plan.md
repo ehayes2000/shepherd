@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T26 search and open | building | task/t26-search @ 8558383 | 0 | – |
-| T36b host hot-swap by re-exec | in review | task/t36b-hotswap @ a52f5e0 (on 99e47e6) | 1 | PM-accepted: listener handed over before closing conns; 1-column resize nudge; adopt on fresh instance. Linux unverified until CI |
+| T36b host hot-swap by re-exec | fixing (CHANGES) | task/t36b-hotswap @ a52f5e0 | 1 | Blocking: bad config after adoption kills sessions; refuse() can killpg/close what isn't ours; vacuous refusal tests; CLOEXEC re-set, hooks-busy, 0600, drain untested |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
@@ -734,6 +734,17 @@ acceptance:
 - From the T37 review: host shutdown cancels creates but doesn't wait for their cleanup; delay `finish` until no create is
   running (bounded) so a cancelled-at-shutdown create never leaves an unrecorded worktree/branch.
 scope: crates/adapters
+
+### F38: PTY backpressure contract case fails under load
+status: todo
+depends: F14
+touches: testkit contracts::pty, adapters::pty (tests)
+goal: `pty::tests::unacked_output_stops_reading_until_acked` failed 12/12 under a 12-copy load round on main (99e47e6) with
+"seq didn't exit: Timeout after ~1.1MB" — a 10 s total deadline that's a measurement under load, not a liveness bound.
+acceptance:
+- Make the bound a generous liveness bound (or count progress instead of total time) so the case still fails if backpressure
+  breaks; 0 failures in two 24-copy rounds of the whole adapters binary.
+scope: crates/testkit, crates/adapters
 
 ## Out of scope for the initial feature set
 
