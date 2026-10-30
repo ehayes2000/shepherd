@@ -5,7 +5,7 @@ mod support;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use ratatui::backend::TestBackend;
+use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -17,7 +17,7 @@ use shepherd::client::{
 use shepherd::terminal::{TerminalSetup, with_terminal};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::client::{
-    Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, RETRY_INTERVAL,
+    Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, NOTICE_TIMEOUT, RETRY_INTERVAL,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::LaunchError;
@@ -978,4 +978,118 @@ fn clicking_the_workspace_and_opening_a_typed_path_switches_to_it() {
         h.runtime.client().workspace(),
         Some(std::path::Path::new("/src/app"))
     );
+}
+
+// ---------- display polish ----------
+
+/// A ready harness with session `s1`, which has begun a synchronized update that it never ends and printed `held`
+/// inside it. Returns the hold's timeout.
+fn open_hold() -> (Harness, jiff::SignedDuration) {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n')]);
+    // The fake host echoes input.
+    h.user(Intent::Input(b"\x1b[?2026hheld".to_vec()));
+    let hold = h
+        .runtime
+        .screen(&SessionId::new("s1"))
+        .and_then(Screen::sync_hold);
+    let hold = hold.unwrap_or_else(|| panic!("no hold"));
+    assert_eq!(h.screen("s1"), "");
+    let timeout = jiff::SignedDuration::try_from(hold.timeout).unwrap_or_else(|e| panic!("{e}"));
+    (h, timeout)
+}
+
+#[test]
+fn output_inside_an_open_hold_doesnt_put_off_its_deadline() {
+    let (mut h, timeout) = open_hold();
+    h.advance(timeout / 2);
+    h.user(Intent::Input(b"more".to_vec()));
+    assert_eq!(h.screen("s1"), "");
+    h.advance(timeout - timeout / 2);
+    assert!(h.runtime.tick(), "a released hold redraws");
+    assert_eq!(h.screen("s1"), "heldmore");
+}
+
+#[test]
+fn a_closed_sessions_hold_is_forgotten() {
+    let (mut h, timeout) = open_hold();
+    h.user(Intent::BeginClose);
+    h.user(Intent::Confirm);
+    assert!(h.runtime.screen(&SessionId::new("s1")).is_none());
+    h.advance(timeout);
+    assert!(!h.runtime.tick());
+}
+
+#[test]
+fn a_session_stuck_in_a_synchronized_update_is_drawn_once_its_hold_times_out() {
+    let (mut h, timeout) = open_hold();
+    h.advance(timeout - jiff::SignedDuration::from_millis(1));
+    assert!(!h.runtime.tick());
+    assert_eq!(h.screen("s1"), "");
+    h.advance(jiff::SignedDuration::from_millis(1));
+    assert!(h.runtime.tick(), "a released hold redraws");
+    assert_eq!(h.screen("s1"), "held");
+}
+
+#[test]
+fn a_tick_that_clears_the_notice_redraws() {
+    // Never started, so no tick changes the connection.
+    let mut h = Harness::new();
+    h.user(Intent::NewSession);
+    assert!(h.runtime.client().notice().is_some());
+    // The first tick starts the notice's time.
+    assert!(!h.runtime.tick());
+    h.advance(NOTICE_TIMEOUT);
+    assert!(h.runtime.tick());
+    assert_eq!(h.runtime.client().notice(), None);
+}
+
+#[test]
+fn the_selected_sessions_cursor_shape_reaches_the_real_terminal() {
+    const BAR: &[u8] = b"\x1b[5 q";
+    const USERS_OWN: &[u8] = b"\x1b[0 q";
+    let mut h = Harness::ready();
+    let options = ratatui::TerminalOptions {
+        viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, WINDOW.0, WINDOW.1)),
+    };
+    /// What the real terminal is sent.
+    #[derive(Clone, Default)]
+    struct Written(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Written {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            lock(&self.0).extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let out = Written::default();
+    let terminal = ratatui::Terminal::with_options(CrosstermBackend::new(out.clone()), options)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let mut view = TerminalView::new(terminal);
+    let written = |seq: &[u8]| {
+        lock(&out.0)
+            .windows(seq.len())
+            .filter(|w| *w == seq)
+            .count()
+    };
+    let draw = |h: &Harness, view: &mut TerminalView<CrosstermBackend<Written>>| {
+        view.draw(h.runtime.client(), h.runtime.screens())
+            .unwrap_or_else(|e| panic!("{e}"));
+    };
+
+    h.keys(&[ctrl('b'), ch('n')]);
+    // The fake host echoes it: the session asks for a blinking bar.
+    h.user(Intent::Input(BAR.to_vec()));
+    draw(&h, &mut view);
+    assert_eq!(written(BAR), 1);
+    // Unchanged: not written again.
+    draw(&h, &mut view);
+    assert_eq!(written(BAR), 1);
+
+    // Under a popup the cursor is the user's own again.
+    h.user(Intent::ShowHelp);
+    draw(&h, &mut view);
+    assert_eq!(written(USERS_OWN), 1);
 }

@@ -15,7 +15,7 @@ use shepherd_core::wire::WireError;
 use shepherd_term::Modes;
 use shepherd_term::Screen;
 use shepherd_testkit::builders::ClientDriver;
-use shepherd_tui::{Pointer, Screens, layout, map_event, pane_size, render};
+use shepherd_tui::{Pointer, Screens, cursor_style, layout, map_event, pane_size, render};
 
 fn draw(client: &Client, screens: &Screens, cols: u16, rows: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap_or_else(|e| match e {});
@@ -191,9 +191,8 @@ fn profile_picker() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
-/// The footer with a notice, which leaves room for the buttons.
-#[test]
-fn footer_with_a_notice() {
+/// `three_sessions` showing a notice: a refused rename.
+fn with_notice() -> (ClientDriver, Screens) {
     let (mut c, screens) = three_sessions();
     c.user(Intent::BeginRename);
     let sent = c.user(Intent::Confirm);
@@ -203,7 +202,55 @@ fn footer_with_a_notice() {
             session: SessionId::new("s3"),
         }),
     );
+    (c, screens)
+}
+
+/// The footer with a notice: it takes the whole width and the `Detach` and `?` buttons hide.
+#[test]
+fn footer_with_a_notice() {
+    let (c, screens) = with_notice();
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
+/// The footer once the notice is cleared by the next user action: the buttons are back.
+#[test]
+fn footer_after_the_notice_clears() {
+    let (mut c, screens) = with_notice();
+    c.user(Intent::Dismiss);
+    assert_eq!(c.client().notice(), None);
+    insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
+#[test]
+fn the_hidden_footer_buttons_cant_be_clicked_while_a_notice_shows() {
+    let (mut c, _) = with_notice();
+    let window = Rect::new(0, 0, 80, 24);
+    let detach = {
+        let (mut c, screens) = with_notice();
+        c.user(Intent::Dismiss);
+        position_of(&buffer(c.client(), &screens, 80, 24), "Detach")
+    };
+    // `Detach ?`: the help button is a blank column after it.
+    let help = Position::new(detach.x + 7, detach.y);
+    let hits = |c: &ClientDriver| {
+        [detach, help].map(|at| shepherd_tui::hit(&layout(window), c.client(), at.x, at.y))
+    };
+    assert!(
+        !hits(&c).iter().any(|hit| matches!(
+            hit,
+            Some(shepherd_tui::Target::Detach | shepherd_tui::Target::Help)
+        )),
+        "{:?}",
+        hits(&c)
+    );
+    c.user(Intent::Dismiss);
+    assert_eq!(
+        hits(&c),
+        [
+            Some(shepherd_tui::Target::Detach),
+            Some(shepherd_tui::Target::Help)
+        ]
+    );
 }
 
 /// Four sessions: `api` asked permission and `docs` went idle while unselected (both marked), `tests` went idle and
@@ -496,6 +543,86 @@ fn the_cursor_is_hidden_after_the_prefix_and_under_a_popup() {
 }
 
 #[test]
+fn the_collapsed_sidebar_keeps_its_buttons_while_a_notice_shows() {
+    let (c, screens) = with_notice();
+    let window = Rect::new(0, 0, 40, 12);
+    let buf = buffer(c.client(), &screens, 40, 12);
+    let detach = position_of(&buf, "⏏");
+    // `?` in the glyph column, on the last line.
+    let help = Position::new(detach.x, detach.y + 1);
+    assert_eq!(buf[help].symbol(), "?");
+    assert_eq!(
+        [detach, help].map(|at| shepherd_tui::hit(&layout(window), c.client(), at.x, at.y)),
+        [
+            Some(shepherd_tui::Target::Detach),
+            Some(shepherd_tui::Target::Help)
+        ]
+    );
+}
+
+/// `three_sessions` after the selected session sent `decscusr` (`CSI Ps SP q`).
+fn with_cursor_style(decscusr: &[u8]) -> (ClientDriver, Screens) {
+    let (c, mut screens) = three_sessions();
+    if let Some(s) = screens.get_mut(&SessionId::new("s3")) {
+        s.feed(decscusr);
+    }
+    (c, screens)
+}
+
+#[test]
+fn the_cursor_takes_the_selected_sessions_shape_and_blink() {
+    use ratatui::crossterm::cursor::SetCursorStyle;
+    let table = [
+        (&b"\x1b[1 q"[..], SetCursorStyle::BlinkingBlock),
+        (b"\x1b[3 q", SetCursorStyle::BlinkingUnderScore),
+        (b"\x1b[4 q", SetCursorStyle::SteadyUnderScore),
+        (b"\x1b[5 q", SetCursorStyle::BlinkingBar),
+        (b"\x1b[6 q", SetCursorStyle::SteadyBar),
+    ];
+    for (decscusr, want) in table {
+        let (c, screens) = with_cursor_style(decscusr);
+        assert_eq!(
+            cursor_style(c.client(), &screens),
+            want,
+            "{}",
+            String::from_utf8_lossy(decscusr)
+        );
+    }
+}
+
+#[test]
+fn a_session_that_never_set_its_cursor_leaves_the_users_own() {
+    let (c, screens) = three_sessions();
+    assert_eq!(
+        cursor_style(c.client(), &screens),
+        ratatui::crossterm::cursor::SetCursorStyle::DefaultUserShape
+    );
+    // Back to the default (`0`), the same.
+    let (c, screens) = with_cursor_style(b"\x1b[5 q\x1b[0 q");
+    assert_eq!(
+        cursor_style(c.client(), &screens),
+        ratatui::crossterm::cursor::SetCursorStyle::DefaultUserShape
+    );
+}
+
+#[test]
+fn a_cursor_that_isnt_the_sessions_has_the_users_own_shape() {
+    use ratatui::crossterm::cursor::SetCursorStyle;
+    let (mut c, screens) = with_cursor_style(b"\x1b[5 q");
+    c.user(Intent::BeginRename);
+    assert_eq!(
+        cursor_style(c.client(), &screens),
+        SetCursorStyle::DefaultUserShape
+    );
+    c.user(Intent::Dismiss);
+    c.user(Intent::SetFocus(Focus::Command));
+    assert_eq!(
+        cursor_style(c.client(), &screens),
+        SetCursorStyle::DefaultUserShape
+    );
+}
+
+#[test]
 fn the_rename_popup_puts_the_cursor_after_the_name() {
     let (mut c, screens) = three_sessions();
     c.user(Intent::BeginRename);
@@ -542,7 +669,8 @@ fn status_glyphs_follow_the_documented_table() {
         (Activity::Exited { code: Some(0) }, false, ("✕", Color::Red)),
         // A PTY that ended is exited whatever the log last said.
         (Activity::Working { tool: None }, true, ("✕", Color::Red)),
-        (Activity::Unknown, false, ("?", Color::DarkGray)),
+        // Not `?`: that is the help button, in the same column of the collapsed sidebar.
+        (Activity::Unknown, false, ("·", Color::DarkGray)),
     ];
     for (activity, exited, want) in table {
         assert_eq!(

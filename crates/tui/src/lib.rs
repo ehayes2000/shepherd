@@ -1,7 +1,7 @@
 //! Pure rendering of client state and key mapping. See `docs/architecture.md`.
 //!
 //! - [`render`] draws the sidebar ([`sidebar`]), the selected session's terminal in the pane ([`layout`]), and any
-//!   popup or menu.
+//!   popup or menu. [`cursor_style`] is the cursor shape to go with it, which a ratatui frame can't carry.
 //! - [`map_event`] / [`map_key`] turn terminal events into client [`Intent`](shepherd_core::client::Intent)s, with input
 //!   for the session encoded by [`encode`] for its [`Screen::modes`].
 //!
@@ -14,7 +14,7 @@
 //! | needs permission / needs input   | `▲`   | yellow     |
 //! | idle                             | `○`   | default    |
 //! | exited                           | `✕`   | red        |
-//! | unknown                          | `?`   | dark gray  |
+//! | unknown                          | `·`   | dark gray  |
 //!
 //! A session that wants the user (blocked on them, or idle since they last looked) also gets a yellow `▌` on the
 //! left edge of its row, in both the full and the collapsed sidebar.
@@ -29,13 +29,14 @@ pub mod sidebar;
 use std::collections::BTreeMap;
 
 use ratatui::Frame;
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
-use shepherd_term::Screen;
+use shepherd_term::{CursorShape, Screen};
 
 pub use keys::{PREFIX, Pointer, from_legacy_terminal, map_event, map_key};
 pub use layout::{Layout, Target, hit, layout, pane_size};
@@ -57,15 +58,40 @@ pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
         None => {}
     }
     let popup_cursor = popup::render(client, frame.area(), frame.buffer_mut());
-    let cursor = match (client.popup(), selected) {
+    let cursor = match (client.popup(), cursor_session(client, screens)) {
         (Some(_), _) => popup_cursor,
-        (None, Some(screen)) if client.focus() == Focus::Terminal => {
-            session_cursor(screen, layout.pane)
-        }
-        (None, _) => None,
+        (None, Some(screen)) => session_cursor(screen, layout.pane),
+        (None, None) => None,
     };
     if let Some(at) = cursor {
         frame.set_cursor_position(at);
+    }
+}
+
+/// The session whose cursor [`render`] shows: the selected one, while keys go to it and no popup is open.
+fn cursor_session<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
+    if client.popup().is_some() || client.focus() != Focus::Terminal {
+        return None;
+    }
+    screens.get(client.selected()?)
+}
+
+/// The shape and blink of the real terminal's cursor, for the runtime to set after each draw: the selected session's
+/// while [`render`] shows its cursor, else the user's own.
+///
+/// A [`Screen`] reports a steady block both for a program that never chose a cursor and for one that asked for a
+/// steady block, so that is the user's own shape too: a session that never chose leaves the user's cursor alone.
+pub fn cursor_style(client: &Client, screens: &Screens) -> SetCursorStyle {
+    let Some(cursor) = cursor_session(client, screens).map(Screen::cursor) else {
+        return SetCursorStyle::DefaultUserShape;
+    };
+    match (cursor.shape, cursor.blinking) {
+        (CursorShape::Block, false) => SetCursorStyle::DefaultUserShape,
+        (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
+        (CursorShape::Underline, false) => SetCursorStyle::SteadyUnderScore,
+        (CursorShape::Underline, true) => SetCursorStyle::BlinkingUnderScore,
+        (CursorShape::Beam, false) => SetCursorStyle::SteadyBar,
+        (CursorShape::Beam, true) => SetCursorStyle::BlinkingBar,
     }
 }
 

@@ -7,8 +7,8 @@
 //! highlighted background, and a session that wants the user has a yellow bar on its left edge.
 //! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
-//! the prefix and its bindings while it's pending; otherwise the latest notice, else a reconnecting note, else a hint
-//! for help, then the `Detach` and `?` buttons on the right.
+//! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width, else a
+//! reconnecting note or a hint for help with the `Detach` and `?` buttons on the right.
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
@@ -48,7 +48,8 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
         Activity::NeedsPermission { .. } | Activity::NeedsInput => ("▲", Color::Yellow),
         Activity::Idle => ("○", Color::Reset),
         Activity::Exited { .. } => ("✕", Color::Red),
-        Activity::Unknown => ("?", Color::DarkGray),
+        // Not `?`, which is the help button in the collapsed sidebar's glyph column.
+        Activity::Unknown => ("·", Color::DarkGray),
     }
 }
 
@@ -132,13 +133,16 @@ pub(crate) fn close_button(layout: &Layout, row: Rect) -> Rect {
 
 /// The footer's buttons, left to right: `Detach`, then `?` in the last column. Collapsed, they are glyphs in the
 /// glyph column: `⏏` just above `?` on the last line. Not shown while the prefix is pending, when the footer shows
-/// it instead.
+/// it instead, nor in the full sidebar while a notice shows, which then has the whole footer.
 pub(crate) fn footer_buttons(
     client: &Client,
     layout: &Layout,
 ) -> Vec<(Rect, Target, &'static str)> {
     let inner = inner(layout);
     if client.focus() == Focus::Command {
+        return Vec::new();
+    }
+    if !layout.collapsed && client.notice().is_some() {
         return Vec::new();
     }
     if layout.collapsed {

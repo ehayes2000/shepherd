@@ -194,6 +194,7 @@ impl TerminalSetup for CrosstermSetup {
             execute!(out, DisableBracketedPaste),
             execute!(out, LeaveAlternateScreen),
             execute!(out, cursor::Show),
+            execute!(out, cursor::SetCursorStyle::DefaultUserShape),
             disable_raw_mode(),
             out.flush(),
         ];

@@ -8,18 +8,24 @@
 //! the client every [`TICK`] with the clock's time so connect retries fire, and redraws a [`View`] once per batch of
 //! inputs, so a flood of output isn't drawn message by message.
 //!
+//! Each tick also ends any session's synchronized update (`CSI ? 2026 h`) whose deadline has passed: a screen reads no
+//! clock ([`Screen::sync_hold`]), so without this a session that never ends its update would keep showing the frame
+//! from before it. [`TerminalView`] passes the selected session's cursor shape and blink to the real terminal.
+//!
 //! [`run`] is `shepherd` itself: the real terminal (see [`crate::terminal`]) and the local host's socket.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::Event;
+use ratatui::crossterm::queue;
 use ratatui::layout::Rect;
 use shepherd_tui::{Pointer, Screens, from_legacy_terminal, map_event};
 
@@ -145,14 +151,39 @@ pub trait View {
     fn draw(&mut self, client: &Client, screens: &Screens) -> io::Result<()>;
 }
 
-/// Draws with ratatui on `B`. The mouse is captured for the client's whole life by the terminal guard.
-pub struct TerminalView<B: Backend> {
-    terminal: ratatui::Terminal<B>,
+/// A ratatui backend that can also set the real terminal's cursor shape, which ratatui itself doesn't.
+pub trait CursorStyleBackend: Backend {
+    fn set_cursor_style(&mut self, style: SetCursorStyle) -> io::Result<()>;
 }
 
-impl<B: Backend> TerminalView<B> {
+impl<W: Write> CursorStyleBackend for CrosstermBackend<W> {
+    fn set_cursor_style(&mut self, style: SetCursorStyle) -> io::Result<()> {
+        queue!(self, style)?;
+        Write::flush(self)
+    }
+}
+
+/// A test backend has a cell grid and no cursor shape.
+impl CursorStyleBackend for TestBackend {
+    fn set_cursor_style(&mut self, _: SetCursorStyle) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Draws with ratatui on `B`, and sets the cursor's shape ([`shepherd_tui::cursor_style`]) after each draw where it
+/// changed. The mouse is captured for the client's whole life by the terminal guard.
+pub struct TerminalView<B: CursorStyleBackend> {
+    terminal: ratatui::Terminal<B>,
+    /// The cursor shape last set. The real terminal starts with the user's own.
+    cursor_style: SetCursorStyle,
+}
+
+impl<B: CursorStyleBackend> TerminalView<B> {
     pub fn new(terminal: ratatui::Terminal<B>) -> Self {
-        Self { terminal }
+        Self {
+            terminal,
+            cursor_style: SetCursorStyle::DefaultUserShape,
+        }
     }
 
     pub fn terminal(&self) -> &ratatui::Terminal<B> {
@@ -160,7 +191,7 @@ impl<B: Backend> TerminalView<B> {
     }
 }
 
-impl<B: Backend> View for TerminalView<B> {
+impl<B: CursorStyleBackend> View for TerminalView<B> {
     fn size(&mut self) -> io::Result<(u16, u16)> {
         let size = self
             .terminal
@@ -173,8 +204,20 @@ impl<B: Backend> View for TerminalView<B> {
         self.terminal
             .draw(|frame| shepherd_tui::render(client, screens, frame))
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let style = shepherd_tui::cursor_style(client, screens);
+        if style != self.cursor_style {
+            self.terminal.backend_mut().set_cursor_style(style)?;
+            self.cursor_style = style;
+        }
         Ok(())
     }
+}
+
+/// When to end a session's open synchronized update.
+struct SyncDeadline {
+    /// The [`shepherd_term::SyncHold::id`] it is for.
+    hold: u64,
+    due: jiff::Timestamp,
 }
 
 fn selected_screen<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
@@ -195,6 +238,8 @@ pub struct ClientRuntime<L, C, H> {
     tx: Sender<Input>,
     rx: Receiver<Input>,
     screens: Screens,
+    /// When each session's open synchronized update ([`Screen::sync_hold`]) is to be ended, by the clock.
+    sync_deadlines: HashMap<SessionId, SyncDeadline>,
     /// The window's `(cols, rows)`, from the last resize.
     window: (u16, u16),
     /// Why the terminal stopped working, if it did.
@@ -234,6 +279,7 @@ where
             tx,
             rx,
             screens: Screens::new(),
+            sync_deadlines: HashMap::new(),
             window: DEFAULT_SIZE,
             terminal_failed: None,
             panicked: false,
@@ -280,9 +326,58 @@ where
         self.handle(ClientEvent::Start);
     }
 
-    pub fn tick(&mut self) {
+    /// Time passes: ends synchronized updates that are due and ticks the client. Returns whether that changed what
+    /// is drawn.
+    pub fn tick(&mut self) -> bool {
         let at = (self.clock)();
+        let released = self.expire_syncs(at.instant());
+        let connection = self.client.connection().clone();
+        let notice = self.client.notice().map(str::to_owned);
         self.handle(ClientEvent::Tick { at });
+        released
+            || *self.client.connection() != connection
+            || self.client.notice() != notice.as_deref()
+    }
+
+    /// Ends every synchronized update whose deadline is at or before `now`. Returns whether there was one.
+    fn expire_syncs(&mut self, now: jiff::Timestamp) -> bool {
+        let due: Vec<(SessionId, u64)> = self
+            .sync_deadlines
+            .iter()
+            .filter(|(_, d)| d.due <= now)
+            .map(|(session, d)| (session.clone(), d.hold))
+            .collect();
+        for (session, hold) in &due {
+            self.sync_deadlines.remove(session);
+            if let Some(screen) = self.screens.get_mut(session) {
+                if let Err(panic) = screen_guard::update(screen, |s| s.expire_sync(*hold)) {
+                    tracing::error!(%session, %panic, "screen panicked; replaced it with a blank one");
+                }
+                screen.take_replies();
+            }
+            self.track_sync(session);
+        }
+        !due.is_empty()
+    }
+
+    /// Keeps `session`'s sync deadline in step with its screen: a new hold gets a deadline its timeout from now, a
+    /// hold already tracked keeps its own, and no hold, none.
+    fn track_sync(&mut self, session: &SessionId) {
+        let hold = self.screens.get(session).and_then(Screen::sync_hold);
+        let Some(hold) = hold else {
+            self.sync_deadlines.remove(session);
+            return;
+        };
+        if self.sync_deadlines.get(session).map(|d| d.hold) == Some(hold.id) {
+            return;
+        }
+        let now = (self.clock)().instant();
+        let timeout =
+            jiff::SignedDuration::try_from(hold.timeout).unwrap_or(jiff::SignedDuration::MAX);
+        // A deadline past jiff's range can't be waited for: end the update at the next tick.
+        let due = now.checked_add(timeout).unwrap_or(now);
+        self.sync_deadlines
+            .insert(session.clone(), SyncDeadline { hold: hold.id, due });
     }
 
     pub fn user(&mut self, intent: Intent) {
@@ -394,9 +489,7 @@ where
             }
             if !self.done && last_tick.elapsed() >= TICK {
                 last_tick = Instant::now();
-                let before = self.client.connection().clone();
-                self.tick();
-                changed |= *self.client.connection() != before;
+                changed |= self.tick();
             }
             if let Some(view) = view.as_deref_mut()
                 && changed
@@ -464,6 +557,7 @@ where
             }
             // The host's own screen answers the program's queries (decision 0007).
             screen.take_replies();
+            self.track_sync(&out.session);
         }
         let log_entry = matches!(
             message,
@@ -474,6 +568,8 @@ where
             let sessions = self.client.sessions();
             self.screens
                 .retain(|id, _| sessions.iter().any(|s| &s.id == id));
+            let screens = &self.screens;
+            self.sync_deadlines.retain(|id, _| screens.contains_key(id));
         }
     }
 
