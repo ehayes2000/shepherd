@@ -10,7 +10,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F32 atomic branch create | building | task/f32-atomic-branch @ eec8843 | 0 | – |
-| T25 close removes worktree | in review | task/t25-close-cleanup @ 808391d | 1 | PM-accepted: worktree/removing frame; worktree_kept; SessionClose.worktree mode; worktree/status request; Restarted event; force=false default |
+| T25 close removes worktree | fixing (CHANGES) | task/t25-close-cleanup @ 808391d | 1 | Blocking: Remove-anyway can force-delete unconfirmed new changes; escape test passes via error. Minors: stale status answer, Failed→Keep, is_gone, wording (PM decisions) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
