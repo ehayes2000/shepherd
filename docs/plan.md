@@ -10,6 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | T37 worktree no cap + concurrent + cancel | building | task/t37-worktree-nocap @ 82d82be | 0 | user priority; modelled on herdr |
+| F35 display-safe text | building | task/f35-display-safe @ HEAD | 0 | – |
+| T36 spike host hot-swap | building (spike) | task/t36-hotswap-spike @ HEAD | 0 | docs only; read herdr's live handoff |
 | F32 atomic branch create | fixing (CHANGES) | task/f32-atomic-branch @ 740967d | 1 | Blocking: core.filesRefLockTimeout lets cleanup delete another process's lock → pin =0 |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -571,7 +573,7 @@ acceptance:
 scope: crates/core, crates/tui
 
 ### F35: One display-safe text rule for everything agents and hooks can name
-status: todo
+status: in-progress
 depends: T24
 touches: tui (render), core (display text)
 goal: Several strings shown in the UI come from untrusted sources: auto names (T24), manual renames from any client, hook
@@ -588,7 +590,7 @@ acceptance:
 scope: crates/core, crates/tui, crates/shepherd
 
 ### T36: Spike: hot-swap the host on a version mismatch
-status: todo (user priority: soon)
+status: in-progress
 depends: –
 touches: docs only (spike)
 goal: Installing or rebuilding `shepherd` leaves the old host daemon running; new clients then hit "method not found" on new
