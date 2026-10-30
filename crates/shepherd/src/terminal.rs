@@ -242,4 +242,10 @@ mod tests {
             b"\x07\x1b]9;a\\bcd\x1b\\"
         );
     }
+
+    #[test]
+    fn c1_control_characters_cannot_end_the_alert_early() {
+        // U+009C is ST and U+009B is CSI where a terminal reads C1 controls.
+        assert_eq!(alert_sequence("a\u{9c}b\u{9b}c"), b"\x07\x1b]9;abc\x1b\\");
+    }
 }

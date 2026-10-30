@@ -876,12 +876,15 @@ impl Client {
     }
 }
 
-/// What an alert about `session` says.
+/// What an alert about `session` says. It starts with fixed text, so a session's name can never lead it: OSC 9 text
+/// beginning `<digit>;` is a subcommand (progress, cwd) in ConEmu-style terminals.
 fn alert_message(session: &ClientSession) -> String {
     let name = &session.name;
     match &session.activity {
-        Activity::NeedsPermission { title } => format!("{name} needs permission: {title}"),
-        Activity::NeedsInput => format!("{name} needs input"),
-        _ => format!("{name} is idle"),
+        Activity::NeedsPermission { title } => {
+            format!("shepherd: {name} needs permission: {title}")
+        }
+        Activity::NeedsInput => format!("shepherd: {name} needs input"),
+        _ => format!("shepherd: {name} is idle"),
     }
 }

@@ -295,7 +295,24 @@ fn with_the_bell_on_a_session_newly_wanting_attention_alerts() {
     let sent = c.sync();
     assert_eq!(
         alerts(&sent),
-        [("s1".into(), "shell-1 needs permission: rm -rf build".into())]
+        [(
+            "s1".into(),
+            "shepherd: shell-1 needs permission: rm -rf build".into()
+        )]
+    );
+}
+
+#[test]
+fn an_alert_starts_with_fixed_text_whatever_the_session_is_called() {
+    // A name like an OSC 9 subcommand (`4;` progress, `9;` cwd in ConEmu-style terminals) must not lead the message.
+    let mut c = live(true);
+    c.host().rename("s1", "4;3;50");
+    c.sync();
+    go_idle(&mut c, "s1");
+    let sent = c.sync();
+    assert_eq!(
+        alerts(&sent),
+        [("s1".into(), "shepherd: 4;3;50 is idle".into())]
     );
 }
 
@@ -304,7 +321,10 @@ fn an_idle_session_alerts_that_it_is_done() {
     let mut c = live(true);
     go_idle(&mut c, "s1");
     let sent = c.sync();
-    assert_eq!(alerts(&sent), [("s1".into(), "shell-1 is idle".into())]);
+    assert_eq!(
+        alerts(&sent),
+        [("s1".into(), "shepherd: shell-1 is idle".into())]
+    );
 }
 
 #[test]
@@ -359,7 +379,10 @@ fn the_catch_up_after_connecting_does_not_alert() {
     // Live from here.
     start_turn(&mut c, "s1", 1);
     go_idle(&mut c, "s1");
-    assert_eq!(alerts(&c.sync()), [("s1".into(), "shell-1 is idle".into())]);
+    assert_eq!(
+        alerts(&c.sync()),
+        [("s1".into(), "shepherd: shell-1 is idle".into())]
+    );
 }
 
 // ---------- selection ----------

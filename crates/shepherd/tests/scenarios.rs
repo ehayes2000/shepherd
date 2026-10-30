@@ -932,7 +932,7 @@ fn a_session_that_goes_idle_while_unselected_rings_the_terminal_and_is_marked_un
         h.settle();
     })
     .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(terminal.alerts(), ["shell-1 is idle"]);
+    assert_eq!(terminal.alerts(), ["shepherd: shell-1 is idle"]);
     let s1 = |h: &Harness| h.runtime.client().sessions()[1].attention;
     assert!(s1(&h), "marked while unselected");
     h.user(Intent::SelectSession(SessionId::new("s1")));
