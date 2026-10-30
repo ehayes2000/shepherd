@@ -282,6 +282,36 @@ fn an_orphans_hooks_get_the_branch_the_port_listed() {
 }
 
 #[test]
+fn a_detached_orphans_hooks_get_an_empty_branch() {
+    let mut host = in_workspace();
+    let (reply, _) = remove_orphan(&mut host, &["make clean"]);
+    let found = inspected(
+        &mut host,
+        reply,
+        &["make clean"],
+        Ok(Inspection::Listed {
+            status: Ok(clean_merged()),
+            exists: true,
+            branch: None,
+        }),
+    );
+    let [HostCommand::RunPreRemove { command, .. }] = &found[..] else {
+        panic!("{found:?}")
+    };
+    let branches: Vec<&(String, String)> = command
+        .env
+        .iter()
+        .filter(|(key, _)| key == "SHEPHERD_BRANCH")
+        .collect();
+    assert_eq!(
+        branches,
+        [&("SHEPHERD_BRANCH".to_owned(), String::new())],
+        "{:?}",
+        command.env
+    );
+}
+
+#[test]
 fn an_orphan_that_would_lose_work_is_kept_and_never_forced() {
     let cases = [
         (status(true, 0, false, true), "it has uncommitted changes"),
