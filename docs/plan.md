@@ -9,7 +9,6 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T25b cleanup view | re-review | task/t25b-cleanup @ ac20344 (on 82bce5e) | 2 | hook branch from list_managed; Unknown on disconnect; path on worktree/hook; guard/workspace/footer tests. Conflicts with F37 in check_shutdown_done (keep both) |
 | F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -47,6 +46,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | F19 | PM spot check | – |
 | F07 | 2 | kitty_top refresh in expire_sync untested |
 | T17b | 1 | Esc untested; fixed column widths; height overflow (→ F24) |
+| T25b | 2 | orphan hook branch taken from the client; disconnect shown as kept |
 | T27 | 2 | conflicted with F33; fixture leaked env to disk; CLICOLOR_FORCE broke JSON; real_worktrees could reach real gh |
 | F33 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | T26 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
@@ -780,17 +780,19 @@ acceptance:
   its child does (no orphaned `wait`), and a load round leaves no stand-in processes (checked by recorded pids).
 scope: crates/adapters
 
-### F41: T27 leftovers
+### F41: T27 and T25b leftovers
 status: todo
 depends: T27
-touches: adapters::forge (tests)
-goal: Two test gaps from the T27 final review.
+touches: adapters::forge (tests), shepherd tests, core tests
+goal: Test gaps from the T27 and T25b final reviews.
 acceptance:
 - `gh_reads_nothing_from_stdin` passes regardless of the test run's own stdin: run the port from a helper whose stdin is a
   pipe with data, so `.stdin(Stdio::inherit())` fails it under the gate's `/dev/null` stdin too.
+- From T25b: `inspect_worktree`'s membership `find(|w| w.path == *path)` → `next()` survives; add a case with a real managed
+  worktree beside the crafted outside path/symlink. Pin a detached orphan's hooks getting `SHEPHERD_BRANCH=""`.
 - `variables_that_point_gh_or_git_elsewhere_are_not_passed_on` also asserts an always-present variable (e.g. HOME) doesn't
   reach the stand-in, so deleting `env_clear()` fails it.
-scope: crates/adapters
+scope: crates/adapters, crates/core (tests), crates/shepherd (tests)
 
 ## Out of scope for the initial feature set
 
@@ -1534,7 +1536,7 @@ notes: The session closes immediately (PTY killed) and shows "removing worktree�
 the close is recorded once the outcome is known. A session whose worktree is already gone closes normally.
 
 ### T25b: Cleanup view
-status: in-progress
+status: done (877d23b)
 depends: T25
 touches: core::client, tui::popup, core::host
 goal: Find and remove abandoned worktrees in bulk.
