@@ -129,16 +129,17 @@ impl<P: Pty> PtyHarness<P> {
         );
     }
 
-    /// Collects `session`'s output, acknowledging none of it, until it holds at least `bytes`. Panics on its exit.
+    /// Collects `session`'s output, acknowledging none of it, until it holds at least `bytes`. Panics on its exit, or
+    /// if [`TIMEOUT`] passes with no event arriving: a bound on progress, not on the total time, which grows with
+    /// `bytes` and with load.
     pub fn output_unacked(&self, session: &SessionId, bytes: usize) -> Vec<u8> {
         let mut output = Vec::new();
-        self.wait_for(
-            |e| {
-                output.extend(output_of(e, session));
-                output.len() >= bytes
-            },
-            TIMEOUT,
-        );
+        while output.len() < bytes {
+            match self.events.recv_timeout(TIMEOUT) {
+                Ok(event) => output.extend(output_of(&event, session)),
+                Err(e) => panic!("{session} stalled: {e:?} after {} bytes", output.len()),
+            }
+        }
         output
     }
 
@@ -157,15 +158,22 @@ impl<P: Pty> PtyHarness<P> {
     }
 
     /// Like [`run_to_exit`](Self::run_to_exit), but acknowledges each output as it arrives, and checks that no
-    /// output is bigger than [`MAX_OUTPUT_CHUNK`].
-    pub fn run_to_exit_acking(&mut self, session: &SessionId) -> (Vec<u8>, Option<i32>) {
-        let deadline = Instant::now() + TIMEOUT;
+    /// output is bigger than [`MAX_OUTPUT_CHUNK`]. Bounded by progress, not by total time (which grows with the output
+    /// and with load): panics if [`TIMEOUT`] passes with no event, or if more than `limit` bytes arrive.
+    pub fn run_to_exit_acking(
+        &mut self,
+        session: &SessionId,
+        limit: usize,
+    ) -> (Vec<u8>, Option<i32>) {
         let mut output = Vec::new();
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.events.recv_timeout(left) {
+            match self.events.recv_timeout(TIMEOUT) {
                 Ok(PtyEvent::Output { session: s, bytes }) if &s == session => {
                     assert!(bytes.len() <= MAX_OUTPUT_CHUNK, "{} bytes", bytes.len());
+                    assert!(
+                        output.len() + bytes.len() <= limit,
+                        "{session} delivered more than {limit} bytes"
+                    );
                     // Racing the exit: the port may have forgotten the session already.
                     let _ = self.pty.ack(session, bytes.len());
                     output.extend(bytes);
@@ -435,7 +443,7 @@ pub fn unacked_output_stops_reading_until_acked<P: Pty>(mut h: PtyHarness<P>) {
     );
 
     h.pty.ack(&s, output.len()).unwrap();
-    let (rest, code) = h.run_to_exit_acking(&s);
+    let (rest, code) = h.run_to_exit_acking(&s, expected.len() - output.len());
     output.extend(rest);
     if output != expected.as_bytes() {
         let at = output

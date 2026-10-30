@@ -391,17 +391,27 @@ echo "hygiene $f $t" > "$1"
     /// Generous: under parallel load a shell and `ps` can take seconds to start.
     const TIMEOUT: Duration = Duration::from_secs(60);
 
-    /// Reports `started <pid> <tty|none>` to the fifo in `$1`, writes to stdout and, once it has handed its stderr
-    /// off as a host that started does, to stderr (neither may reach a terminal), then runs until killed (at most 2
-    /// minutes, in case a failed test leaks it). On `SIGUSR1` it reports `alive <pid> <ppid>` and exits.
+    /// How every stand-in host starts, `$1` being its report fifo and `$2` its lifetime in seconds. It records its pid
+    /// in `$1.pids` first, a plain file that never blocks, so [`StandInFixture`] kills it whether or not anyone read its
+    /// reports. Then it starts a watchdog that kills its whole process group (it leads one: the launcher calls
+    /// `setsid`) once the lifetime ends: no stand-in outlives that, even when its test died without dropping the
+    /// fixture, or it is stuck opening a fifo nobody reads. A stand-in that keeps running does so by `wait`ing on the
+    /// watchdog, so it ends with it.
+    const PRELUDE: &str = r#"
+echo $$ >> "$1.pids"
+(sleep "$2"; kill -KILL -- -$$) </dev/null >/dev/null 2>&1 &
+"#;
+
+    /// After [`PRELUDE`], reports `started <pid> <tty|none>` to the fifo in `$1`, writes to stdout and, once it has
+    /// handed its stderr off as a host that started does, to stderr (neither may reach a terminal), then runs until
+    /// killed or its lifetime ends. On `SIGUSR1` it reports `alive <pid> <ppid>` and exits, its watchdog with it.
     const STAND_IN: &str = r#"
-trap 'echo "alive $$ $(ps -o ppid= -p $$)" > "$1"; kill $! 2>/dev/null; exit 0' USR1
+trap 'echo "alive $$ $(ps -o ppid= -p $$)" > "$1"; kill -KILL -- -$$; exit 0' USR1
 if (exec 3</dev/tty) 2>/dev/null; then t=tty; else t=none; fi
 echo LEAKED-STDOUT
 exec 2>/dev/null
 echo LEAKED-STDERR >&2
 echo "started $$ $t" > "$1"
-sleep 120 &
 wait
 "#;
 
@@ -432,14 +442,13 @@ wait
         }
     }
 
-    /// A tempdir holding the stand-in's report fifo, read line by line on a thread. Kills every stand-in that
-    /// reported when dropped.
+    /// A tempdir holding the stand-ins' report fifo, read line by line on a thread. When dropped, kills the process
+    /// group of every stand-in that recorded its pid (see [`PRELUDE`]), whether or not it reported.
     struct StandInFixture {
         dir: TempDir,
         reports: Receiver<Report>,
         /// A write end of the fifo, so the reader never sees EOF between writers, and can be told to stop.
         stop: File,
-        pids: Vec<i32>,
         /// The stand-in listener [`LauncherFixture::running`] started, until it exits.
         listener: Option<ChildGuard>,
     }
@@ -465,7 +474,6 @@ wait
                 dir,
                 reports,
                 stop,
-                pids: Vec::new(),
                 listener: None,
             }
         }
@@ -476,6 +484,16 @@ wait
 
         fn stand_in(&self) -> ProcessHostLauncher {
             stand_in(&self.fifo())
+        }
+
+        /// The pids the stand-ins launched so far recorded.
+        fn recorded_pids(&self) -> Vec<i32> {
+            let pids = self.fifo().with_extension("pids");
+            std::fs::read_to_string(pids)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
         }
 
         /// Signals the stand-in `pid` until it reports that it is alive, or `None` if it never does. Repeated,
@@ -507,30 +525,26 @@ wait
         }
 
         fn next_within(&mut self, timeout: Duration) -> Report {
-            let report = self
-                .reports
+            self.reports
                 .recv_timeout(timeout)
-                .unwrap_or_else(|_| panic!("the stand-in didn't report"));
-            if let Report::Started { pid, .. } = report {
-                self.pids.push(pid);
-            }
-            report
+                .unwrap_or_else(|_| panic!("the stand-in didn't report"))
         }
     }
 
     impl Drop for StandInFixture {
         fn drop(&mut self) {
-            // Stand-ins that reported after a failed test stopped reading.
-            while let Ok(report) = self.reports.recv_timeout(Duration::from_millis(100)) {
-                if let Report::Started { pid, .. } = report {
-                    self.pids.push(pid);
-                }
-            }
-            for &pid in &self.pids {
-                // SAFETY: plain syscall. Each stand-in leads its own process group (`setsid`), its `sleep` included.
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                    libc::kill(pid, libc::SIGKILL);
+            for pid in self.recorded_pids() {
+                // SAFETY: plain syscall.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                // Each stand-in leads its own process group (`setsid`), its watchdog included. Killed until it is
+                // empty, because a child forked while the group is signalled can miss the signal and outlive its
+                // parent. Bounded, as a liveness check: the watchdog ends anything left.
+                let deadline = std::time::Instant::now() + TIMEOUT;
+                // SAFETY: plain syscall.
+                while unsafe { libc::kill(-pid, libc::SIGKILL) } == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
             let _ = self.stop.write_all(b"stop\n");
@@ -549,7 +563,10 @@ wait
         }
 
         fn failing_host(&mut self, message: &str) -> ProcessHostLauncher {
-            script(r#"printf '%s\n' "$1" >&2; exit 1"#, &[message])
+            ProcessHostLauncher::new(
+                "/bin/sh",
+                ["-c", r#"printf '%s\n' "$1" >&2; exit 1"#, "script", message],
+            )
         }
 
         fn wait_started(&mut self, n: usize, timeout: Duration) {
@@ -584,11 +601,24 @@ wait
         assert!(matches!(launched, Ok(Ok(()))), "{launched:?}");
     }
 
-    /// Launches `sh -c body` with `args` as `$1`...
-    fn script(body: &str, args: &[&str]) -> ProcessHostLauncher {
-        let mut argv = vec!["-c", body, "script"];
-        argv.extend_from_slice(args);
-        ProcessHostLauncher::new("/bin/sh", argv)
+    /// Launches `sh -c body`, with no arguments: a host that must exit by itself.
+    fn script(body: &str) -> ProcessHostLauncher {
+        ProcessHostLauncher::new("/bin/sh", ["-c", body, "script"])
+    }
+
+    /// Launches `body` as a stand-in host: after [`PRELUDE`], with `fifo` as `$1` and `lifetime` as `$2`.
+    fn stand_in_script(body: &str, fifo: &Path, lifetime: Duration) -> ProcessHostLauncher {
+        let body = format!("{PRELUDE}{body}");
+        ProcessHostLauncher::new(
+            "/bin/sh",
+            [
+                "-c",
+                &body,
+                "stand-in",
+                fifo.to_str().unwrap(),
+                &lifetime.as_secs().to_string(),
+            ],
+        )
     }
 
     /// Launches on another thread and returns what `launch` did. Fails the test if it blocks.
@@ -608,10 +638,7 @@ wait
     }
 
     fn stand_in(fifo: &Path) -> ProcessHostLauncher {
-        ProcessHostLauncher::new(
-            "/bin/sh",
-            ["-c", STAND_IN, "stand-in", fifo.to_str().unwrap()],
-        )
+        stand_in_script(STAND_IN, fifo, STAND_IN_LIFETIME)
     }
 
     mod contract {
@@ -637,6 +664,63 @@ wait
         );
     }
 
+    /// Whether no process is left in group `pgid`, within a generous liveness bound.
+    fn group_gone(pgid: i32) -> bool {
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            // SAFETY: plain syscall; signal 0 only checks that the group has a member.
+            if unsafe { libc::kill(-pgid, 0) } == -1 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A test that fails before it reads a stand-in's report still leaves nothing running: the fixture kills every
+    /// stand-in launched through it, its children included.
+    #[test]
+    fn a_dropped_fixture_kills_its_unread_stand_ins_and_their_children() {
+        let f = StandInFixture::new();
+        launch(f.stand_in());
+        let pids = f.recorded_pids();
+        assert_eq!(pids.len(), 1, "{pids:?}");
+        drop(f);
+        assert!(group_gone(pids[0]), "stand-in {} left running", pids[0]);
+    }
+
+    /// A stand-in nobody stops, as when its test process dies without dropping the fixture, ends with its lifetime,
+    /// children and all.
+    #[test]
+    fn a_stand_in_nobody_stops_ends_with_its_lifetime() {
+        let mut f = StandInFixture::new();
+        launch(stand_in_script(STAND_IN, &f.fifo(), Duration::from_secs(1)));
+        let Report::Started { pid, .. } = f.next() else {
+            panic!("expected started");
+        };
+        assert!(group_gone(pid), "stand-in {pid} outlived its lifetime");
+    }
+
+    /// Even one with a child stuck writing a report nobody reads, as a stand-in reporting after its test died would
+    /// be. (In a child: `sh` itself would give up the write when its watchdog exits and interrupts it.)
+    #[test]
+    fn a_stand_in_stuck_on_a_fifo_nobody_reads_ends_with_its_lifetime() {
+        let f = StandInFixture::new();
+        mkfifo(&f.fifo().with_extension("unread"));
+        launch(stand_in_script(
+            r#"exec 2>&-; (echo stuck > "$1.unread") & wait"#,
+            &f.fifo(),
+            Duration::from_secs(1),
+        ));
+        let pids = f.recorded_pids();
+        assert_eq!(pids.len(), 1, "{pids:?}");
+        assert!(
+            group_gone(pids[0]),
+            "stand-in {} outlived its lifetime",
+            pids[0]
+        );
+    }
+
     /// Re-runs itself with `SIGTERM` ignored and a file open without close-on-exec, as a careless parent of the
     /// client might leave them, and launches from there. Neither may reach the host.
     #[test]
@@ -658,23 +742,28 @@ wait
             return;
         }
         let mut f = StandInFixture::new();
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "launcher::tests::launched_host_inherits_no_leaked_fd_or_ignored_signal",
-                "--test-threads=1",
-                "--nocapture",
-            ])
-            .env(HYGIENE_VAR, "1")
-            .env(FIFO_VAR, f.fifo())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success(),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
+        let mut rerun = ChildGuard(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "launcher::tests::launched_host_inherits_no_leaked_fd_or_ignored_signal",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(HYGIENE_VAR, "1")
+                .env(FIFO_VAR, f.fifo())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
+        // Read while it runs, so a full pipe can't stall it.
+        let stdout = read_on_thread(rerun.0.stdout.take().unwrap());
+        let stderr = read_on_thread(rerun.0.stderr.take().unwrap());
+        let status = rerun.wait(TIMEOUT);
+        let stdout = stdout.join().unwrap();
+        assert!(status.success(), "{stdout}{}", stderr.join().unwrap());
         assert!(stdout.contains("1 passed"), "{stdout}");
         assert_eq!(
             f.next(),
@@ -737,7 +826,7 @@ wait
         cmd.env(CHILD_VAR, "1");
         cmd.env(FIFO_VAR, f.fifo());
         cmd.env(GO_VAR, &go);
-        let mut child = pty.slave.spawn_command(cmd).unwrap();
+        let mut child = PtyChildGuard(pty.slave.spawn_command(cmd).unwrap());
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().unwrap();
         let output = std::thread::spawn(move || {
@@ -757,7 +846,7 @@ wait
             matches!(rx.recv_timeout(TIMEOUT), Ok(Ok(()))),
             "the re-run never waited"
         );
-        let status = child.wait().unwrap();
+        let status = child.0.wait().unwrap();
         drop(pty.master);
         let output = String::from_utf8_lossy(&output.join().unwrap()).into_owned();
         assert!(status.success(), "{output}");
@@ -775,10 +864,7 @@ wait
 
     #[test]
     fn a_host_that_prints_an_error_and_exits_is_host_failed_with_its_text() {
-        let launcher = script(
-            r#"printf '\nshepherd host: line one\nline two\n\n' >&2; exit 1"#,
-            &[],
-        );
+        let launcher = script(r#"printf '\nshepherd host: line one\nline two\n\n' >&2; exit 1"#);
         assert_eq!(
             launch_result(launcher),
             Err(LaunchError::HostFailed(
@@ -791,7 +877,6 @@ wait
     fn a_host_failure_message_is_capped() {
         let launcher = script(
             r#"i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxx\n' >&2; i=$((i+1)); done; exit 1"#,
-            &[],
         );
         let Err(LaunchError::HostFailed(why)) = launch_result(launcher) else {
             panic!("expected HostFailed");
@@ -804,9 +889,10 @@ wait
     fn a_host_that_closes_stderr_and_keeps_running_started() {
         let mut f = StandInFixture::new();
         let fifo = f.fifo();
-        let launcher = script(
-            r#"exec 2>&-; echo "started $$ none" > "$1"; exec sleep 120"#,
-            &[fifo.to_str().unwrap()],
+        let launcher = stand_in_script(
+            r#"exec 2>&-; echo "started $$ none" > "$1"; wait"#,
+            &fifo,
+            STAND_IN_LIFETIME,
         );
         assert_eq!(launch_result(launcher), Ok(()));
         assert!(matches!(f.next(), Report::Started { .. }));
@@ -817,13 +903,13 @@ wait
     fn a_host_that_never_writes_or_closes_stderr_is_started_after_the_bound() {
         let mut f = StandInFixture::new();
         let fifo = f.fifo();
-        let launcher = script(
-            r#"echo "started $$ none" > "$1"; exec sleep 120"#,
-            &[fifo.to_str().unwrap()],
+        let launcher = stand_in_script(
+            r#"echo "started $$ none" > "$1"; wait"#,
+            &fifo,
+            STAND_IN_LIFETIME,
         )
         .startup_timeout(Duration::from_millis(500));
         assert_eq!(launch_result(launcher), Ok(()));
-        // Recorded, so the fixture kills it.
         assert!(matches!(f.next(), Report::Started { .. }));
     }
 
@@ -831,7 +917,7 @@ wait
     const LISTEN_VAR: &str = "SHEPHERD_LAUNCHER_TEST_LISTEN";
     /// What the stand-in listener prints once it listens.
     const LISTENING: &str = "stand-in listening";
-    /// How long a stand-in listener lives at most, in case a failed test leaks it.
+    /// How long a stand-in host or listener lives at most, in case a failed test leaks it.
     const STAND_IN_LIFETIME: Duration = Duration::from_secs(120);
 
     /// A stand-in for a running host, of any build: re-run with [`LISTEN_VAR`] set, it listens on that socket and
@@ -883,12 +969,39 @@ wait
         /// doesn't.
         fn exit_signal(&mut self, timeout: Duration) -> Option<i32> {
             use std::os::unix::process::ExitStatusExt;
+            self.wait(timeout).signal()
+        }
+
+        /// How it ended, waiting at most `timeout` for it to. Panics (and the drop kills it) if it doesn't.
+        fn wait(&mut self, timeout: Duration) -> std::process::ExitStatus {
             use wait_timeout::ChildExt;
             match self.0.wait_timeout(timeout).unwrap() {
-                Some(status) => status.signal(),
-                None => panic!("the stand-in listener is still running"),
+                Some(status) => status,
+                None => panic!("child {} is still running", self.0.id()),
             }
         }
+    }
+
+    /// A child of this test in a pty, killed and reaped when dropped, however the test ends.
+    struct PtyChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
+
+    impl Drop for PtyChildGuard {
+        fn drop(&mut self) {
+            // Our own child, by its handle. Once reaped, killing it signals nothing.
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    /// Reads `from` to its end on a thread, lossily decoded.
+    fn read_on_thread(mut from: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = from.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
     }
 
     /// Starts [`stand_in_listener`] on `socket` and waits until it listens.
