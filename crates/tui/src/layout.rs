@@ -76,6 +76,10 @@ pub enum Target {
     Confirm,
     /// The open dialog's button that cancels it: `[Cancel]`, or help's `[Close]`.
     Dismiss,
+    /// The close confirmation's `[Remove anyway]`, for a worktree that would lose work.
+    RemoveWorktree,
+    /// The close confirmation's `[Keep worktree]`, for a worktree that would lose work.
+    KeepWorktree,
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

@@ -154,7 +154,7 @@ pub struct Worktree {
 }
 
 /// What would be lost by removing a worktree. Computed from local refs only: nothing is fetched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeStatus {
     /// Uncommitted changes: staged, unstaged, or untracked files that aren't ignored.
     pub dirty: bool,
@@ -165,6 +165,43 @@ pub struct WorktreeStatus {
     /// HEAD is reachable from the origin default. Squash and rebase merges are not detected. A branch with no commits
     /// of its own counts as merged.
     pub merged_into_default: bool,
+}
+
+impl WorktreeStatus {
+    /// What removing the worktree would lose: its uncommitted changes, and its commits if they are neither merged into
+    /// the origin default nor pushed. Empty when removing it loses nothing.
+    pub fn losses(&self) -> Vec<Loss> {
+        let mut losses = Vec::new();
+        if self.dirty {
+            losses.push(Loss::UncommittedChanges);
+        }
+        if !self.merged_into_default && !self.pushed {
+            losses.push(Loss::Unpushed {
+                commits: self.ahead,
+            });
+        }
+        losses
+    }
+}
+
+/// Something removing a worktree would lose, see [`WorktreeStatus::losses`]. Its text is for the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Loss {
+    UncommittedChanges,
+    /// Commits that are neither merged into the origin default nor pushed.
+    Unpushed {
+        commits: u32,
+    },
+}
+
+impl fmt::Display for Loss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UncommittedChanges => f.write_str("uncommitted changes"),
+            Self::Unpushed { commits: 1 } => f.write_str("1 commit not pushed or merged"),
+            Self::Unpushed { commits } => write!(f, "{commits} commits not pushed or merged"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

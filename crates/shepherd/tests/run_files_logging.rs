@@ -27,6 +27,7 @@ fn new_session(h: &mut HostHarness, client: &mut FakeClient, profile: &str) -> S
 fn close(h: &mut HostHarness, client: &mut FakeClient, session: &SessionId) {
     let sent = client.request(ClientRequest::SessionClose(SessionClose {
         session: session.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     h.step();
     response(&client.take(), &sent).unwrap();

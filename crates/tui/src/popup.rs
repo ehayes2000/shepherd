@@ -11,7 +11,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
-use shepherd_core::client::{Cell, Client, MenuEntry, MenuItem, Popup};
+use shepherd_core::client::{Cell, Client, CloseCheck, MenuEntry, MenuItem, Popup};
 use shepherd_core::wire::ProfileInfo;
 
 use crate::layout::Target;
@@ -45,6 +45,12 @@ const MENU_WIDTH: u16 = 10;
 const DIALOG_WIDTH: u16 = 40;
 /// The rename and close dialogs' height: two lines and the buttons, in a border.
 const DIALOG_HEIGHT: u16 = 5;
+/// The close dialog's width for a session with a worktree, wide enough for its three buttons.
+const WORKTREE_DIALOG_WIDTH: u16 = 48;
+/// The close confirmation's hint while confirming closes the session (and removes its worktree if that's safe).
+const CLOSE_HINT: &str = "y / enter to close · n / esc to keep";
+/// Its hint when removing the worktree would lose work: confirming keeps it.
+const AT_RISK_HINT: &str = "enter keeps the worktree · esc cancels";
 const HELP_WIDTH: u16 = 56;
 
 /// The profile picker's line above its rows.
@@ -92,10 +98,24 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
             centered(window, DIALOG_WIDTH, DIALOG_HEIGHT),
             &[("[Save]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
         ),
-        Popup::ConfirmClose { .. } => dialog(
-            centered(window, DIALOG_WIDTH, DIALOG_HEIGHT),
-            &[("[Close]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
-        ),
+        Popup::ConfirmClose { .. } => match client.close_check() {
+            None => dialog(
+                centered(window, DIALOG_WIDTH, DIALOG_HEIGHT),
+                &[("[Close]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
+            ),
+            Some(check @ CloseCheck::AtRisk(_)) => dialog(
+                centered(window, WORKTREE_DIALOG_WIDTH, close_height(check)),
+                &[
+                    ("[Remove anyway]", Target::RemoveWorktree),
+                    ("[Keep worktree]", Target::KeepWorktree),
+                    ("[Cancel]", Target::Dismiss),
+                ],
+            ),
+            Some(check) => dialog(
+                centered(window, WORKTREE_DIALOG_WIDTH, close_height(check)),
+                &[("[Close]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
+            ),
+        },
         Popup::Menu { at, .. } => menu(&client.menu(), *at, window),
         Popup::PickProfile => pick_profile(client, window),
         Popup::Workspace { .. } => switcher(client, window),
@@ -348,7 +368,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
                 .iter()
                 .find(|s| &s.id == session)
                 .map_or(session.as_str(), |s| s.name.as_str());
-            confirm_close(name, body, buf);
+            confirm_close(name, client.close_check(), body, buf);
             None
         }
         Popup::PickProfile => {
@@ -433,19 +453,52 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
     cursor
 }
 
-fn confirm_close(name: &str, body: Rect, buf: &mut Buffer) {
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Close "),
-            Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw("? Its agent is stopped."),
-        ]),
-        Line::styled(
-            "y / enter to close · n / esc to keep",
-            Style::new().fg(Color::Gray),
-        ),
-    ];
-    Paragraph::new(lines).render(body, buf);
+/// The close confirmation's lines above its buttons: what closing does, what happens to the session's worktree (`check`,
+/// if it has one), and a hint.
+fn close_lines<'a>(name: &'a str, check: Option<&CloseCheck>) -> Vec<Line<'a>> {
+    let gray = Style::new().fg(Color::Gray);
+    let mut lines = vec![Line::from(vec![
+        Span::raw("Close "),
+        Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw("? Its agent is stopped."),
+    ])];
+    let worktree = |text: String| Line::styled(text, gray);
+    match check {
+        None => {}
+        Some(CloseCheck::Checking) => lines.push(worktree("Checking its worktree…".into())),
+        Some(CloseCheck::Safe) => {
+            lines.push(worktree("Its worktree is removed: nothing is lost.".into()));
+        }
+        Some(CloseCheck::Gone) => lines.push(worktree("Its worktree is already gone.".into())),
+        Some(CloseCheck::Failed(why)) => {
+            let red = Style::new().fg(Color::Red);
+            lines.push(Line::styled("Its worktree is kept:", red));
+            lines.push(Line::styled(why.clone(), red));
+        }
+        Some(CloseCheck::AtRisk(losses)) => {
+            lines.push(Line::raw("Removing its worktree would lose:"));
+            let loss = Style::new().fg(Color::Yellow);
+            lines.extend(
+                losses
+                    .iter()
+                    .map(|l| Line::styled(format!("  · {l}"), loss)),
+            );
+            lines.push(Line::styled(AT_RISK_HINT, gray));
+            return lines;
+        }
+    }
+    lines.push(Line::styled(CLOSE_HINT, gray));
+    lines
+}
+
+/// The close dialog's height for a session whose worktree is as `check` says: its lines and the buttons, in a border.
+fn close_height(check: &CloseCheck) -> u16 {
+    let lines = u16::try_from(close_lines("", Some(check)).len()).unwrap_or(u16::MAX);
+    lines.saturating_add(3)
+}
+
+fn confirm_close(name: &str, check: Option<&CloseCheck>, body: Rect, buf: &mut Buffer) {
+    Paragraph::new(close_lines(name, check)).render(body, buf);
 }
 
 /// Clears `area` and draws a bordered box titled `title` on it.

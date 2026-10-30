@@ -795,6 +795,8 @@ fn status_glyphs_follow_the_documented_table() {
         creating_worktree: false,
         failed: None,
         warning: None,
+        worktree: None,
+        removing_worktree: false,
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),

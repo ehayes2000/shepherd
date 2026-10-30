@@ -76,4 +76,5 @@ pub use frame::{Correlated, Frame, FrameError, Message, PendingRequests, Request
 pub use shepherd::{
     AgentExited, AgentIdle, AgentStarted, IdleInference, SessionClosed, SessionCreated,
     SessionFailed, SessionRenamed, ShepherdFrame, WorkspaceSelected, WorktreeCreated, WorktreeHook,
+    WorktreeRemoving,
 };

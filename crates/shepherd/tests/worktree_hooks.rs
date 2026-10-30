@@ -264,6 +264,7 @@ fn a_session_closed_while_a_hook_runs_runs_no_more_hooks_and_never_spawns() {
     let (id, hold) = s.start_with_first_hook_held();
     s.client.request(ClientRequest::SessionClose(SessionClose {
         session: id.clone(),
+        worktree: shepherd_core::wire::CloseWorktree::IfSafe,
     }));
     s.h.poll();
 

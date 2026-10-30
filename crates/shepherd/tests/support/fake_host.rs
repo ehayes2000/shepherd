@@ -195,12 +195,20 @@ impl FakeHost {
             ClientRequest::SessionRename(r) => {
                 reply_of(self.driver.rename(r.session.as_str(), &r.name))
             }
-            ClientRequest::SessionClose(c) => reply_of(self.driver.close(c.session.as_str())),
+            ClientRequest::SessionClose(c) => reply_of(self.driver.close_with(
+                c.session.as_str(),
+                c.worktree,
+                shepherd_core::config::WorkspaceHooks::default(),
+            )),
             ClientRequest::HookFrame(_) => Ok(HostResult::Ack),
             ClientRequest::SessionResume(r) => {
                 reply_of(self.driver.resume(r.session.as_str(), claude_resume_spec()))
             }
             ClientRequest::WorkspaceSelect(w) => reply_of(self.driver.select_workspace(&w.path)),
+            // The scripted host makes no worktrees: any it is asked about is gone.
+            ClientRequest::WorktreeStatus(_) => Ok(HostResult::WorktreeStatus(
+                shepherd_core::wire::WorktreeStatusOk::default(),
+            )),
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

@@ -238,6 +238,7 @@ fn a_session_closed_while_its_worktree_is_made_never_spawns() {
     s.client.request(ClientRequest::SessionClose(
         shepherd_core::wire::SessionClose {
             session: id.clone(),
+            worktree: shepherd_core::wire::CloseWorktree::IfSafe,
         },
     ));
     s.h.poll();

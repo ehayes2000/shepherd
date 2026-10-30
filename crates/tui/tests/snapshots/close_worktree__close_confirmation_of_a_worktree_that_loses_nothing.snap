@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/close_worktree.rs
+assertion_line: 146
+expression: "text(&buffer(&confirming(status(false, 0, true)), WIDE))"
+---
+ ⌂ shepherd            │
+ + New session         │
+ ◌ refactor           ×│
+   local · —           │
+                       │
+                       │
+                       │
+                       │
+                       │
+                ┌ close session ───────────────────────────────┐
+                │Close refactor? Its agent is stopped.         │
+                │Its worktree is removed: nothing is lost.     │
+                │y / enter to close · n / esc to keep          │
+                │                            [Close]  [Cancel] │
+                └──────────────────────────────────────────────┘
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ ctrl-b ? help Detach ?│
