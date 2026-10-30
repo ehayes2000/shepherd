@@ -13,6 +13,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | F36 display-safe gaps (minus ZWJ) | building | task/f36-display-gaps @ 72ebea3 | 0 | ZWJ item still awaits user |
 | F38+F40 adapter test hygiene | building | task/f38-f40-test-hygiene @ 72ebea3 | 0 | – |
 | F41 T27/T25b test gaps | building | task/f41-test-gaps @ 72ebea3 | 0 | – |
+| F42 new session wrong size | building | task/f42-spawn-size @ HEAD | 0 | user bug; diagnosis in spec |
 | F37 worktree lock/shutdown leftovers | fixing (CHANGES) | task/f37-worktree-leftovers @ 15e96c9 | 1 | Blocking: extra refspec locks a 2nd ref (use --refmap=); foreign-lock gap not accepted → fetch into private refs/shepherd/fetch/<name>, then local update-ref of origin/<default>. Minors: grace test, one group-wait failure under load |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -797,6 +798,26 @@ acceptance:
 - `variables_that_point_gh_or_git_elsewhere_are_not_passed_on` also asserts an always-present variable (e.g. HOME) doesn't
   reach the stand-in, so deleting `env_clear()` fails it.
 scope: crates/adapters, crates/core (tests), crates/shepherd (tests)
+
+### F42: A new session starts at the wrong size until the window is resized
+status: in-progress
+depends: T22
+touches: core::host, core::client, wire (SessionNew), shepherd::host::runtime (spawn size)
+goal: User report: a new session's terminal is sized wrong until the window is resized. PM diagnosis: every spawn uses
+`runtime::INITIAL_SIZE` (80×24), and `Host::handle` drops `Resize` for a session that isn't running yet — so the client's
+resize on selecting the new session (sent before the PTY exists, always so for worktree sessions) is lost.
+acceptance:
+- Regression test first (fix-bug), at core level: a client resize for a created-but-not-yet-spawned session is not lost;
+  the PTY spawns at that size (worktree and plain sessions), and a later resize still resizes.
+- `SessionNew` gains an optional size (additive both ways); the client sends its current view size with it; the host uses
+  the latest known size for the session (request size, then any resize before spawn), falling back to INITIAL_SIZE.
+- Restarts/resumes and adopted sessions spawn at the last size the host knows for them if any.
+- Scenario test through the real runtime with a fake PTY: the spawned size equals the client's view size; the TUI's first
+  frame for the new session matches (no resize needed).
+scope: crates/core, crates/shepherd, crates/testkit
+notes: (binding) Pending size is pure core state per session (no clock); `SpawnSpec` carries the size; `INITIAL_SIZE` is
+only the fallback. Also check the client sends a resize when a new session becomes selected via `session/created` (not only
+on user selection) and add a test either way.
 
 ## Out of scope for the initial feature set
 
