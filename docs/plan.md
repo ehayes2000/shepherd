@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F34 client marks answer keys | building | task/f34-answer-keys @ bce95a9 | 0 | – |
 | T24 auto-naming | fixing (round 3) | task/t24-auto-naming @ a9e2375 | 2 | Blocking: format chars (bidi/ZWJ/BOM) survive UAX#29 words; stacked marks unbound. PM: NFC + keep alnum + ≤2 marks/base (decision 0017 amended, unicode-normalization allowed) + byte cap |
-| T25 close removes worktree | building | task/t25-close-cleanup @ 83746d2 | 0 | split: cleanup view → T25b |
+| T25 close removes worktree | in review | task/t25-close-cleanup @ 808391d | 1 | PM-accepted: worktree/removing frame; worktree_kept; SessionClose.worktree mode; worktree/status request; Restarted event; force=false default |
 | F28 workspace repo root + ~ | fixing (CHANGES) | task/f28-repo-root @ 15094a9 | 1 | Blocking: bare repo named .git (and --separate-git-dir) gives a root the port rejects → decide by bareness. Minors: fake missing-path, symlink case |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
