@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| T11 host runtime | builder fixing round-2 findings | `task/T11-host-runtime` @ 9286f73 | 2 | Rebase onto main (T12 merged). Fix: disconnect a client that stalls mid-catch-up (stall window plus tick backoff); flaky `a_startup_error_is_also_logged` (tracing interest cache, so its own binary); scenarios for subscribe replacement and disconnect mid-catch-up. PM-accepted: F14 handles the `yes` backlog |
+| T11 host runtime | builder fixing round-3 findings | `task/T11-host-runtime` @ 15ad661 | 3 | Fix: add `EventLog::read_batch(log, from, max)` (port, adapter, fake, contract) and batch the catch-up cursor (no quadratic re-reads); forget the conn when `queued_bytes` is None. PM-accepted: F14 for the `yes` backlog; the stall metric is per-line coarse (noted on T31) |
 | T13 TUI layout, sidebar, keys (finishes M1) | review (round 1) | `task/T13-tui` @ 98fe2a3 | 0 | PM-accepted: `map_key`/`map_event` return `Vec<Intent>`; take `&Modes` and window `Rect`; ratatui + signal-hook deps in shepherd; sidebar 24 cols (3 under 60); mouse capture only when the session has mouse mode. Follow-ups in F15 |
 
 Next up: T16 (needs T11), then T17 (M2), F14, T18b, F11. After T13 merges, the PM does a manual smoke run of the real binary.
@@ -941,6 +941,8 @@ acceptance:
 - An unreachable peer shows as a dimmed machine group with its last-known sessions. Reconnects resume
   subscriptions from the last seen `seq` with no gaps or duplicates.
 - Scenario with two fake hosts over the fake link.
+- Catch-up stall detection (T11) counts "queue shrank", so a single huge line over a slow link (over 30 s to deliver) looks stalled.
+  Add a drained-bytes counter to `Link` and use it for progress.
 scope: adapters, core, shepherd
 
 ### T32: Create sessions on any machine
