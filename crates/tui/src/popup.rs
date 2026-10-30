@@ -520,7 +520,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Style::new().fg(Color::Gray),
     ));
     lines.extend(BINDINGS.iter().map(|(keys, what)| {
-        Line::from(vec![
+        draw::spans(vec![
             draw::span(shown(&format!("{keys:<14}")), key),
             draw::span(shown(what), Style::new()),
         ])
@@ -567,7 +567,7 @@ fn rename(name: &str, body: Rect, buf: &mut Buffer) -> Option<Position> {
 /// if it has one), and a hint.
 fn close_lines(name: &str, check: Option<&CloseCheck>) -> Vec<Line<'static>> {
     let gray = Style::new().fg(Color::Gray);
-    let mut lines = vec![Line::from(vec![
+    let mut lines = vec![draw::spans(vec![
         draw::span(shown("Close "), Style::new()),
         draw::span(shown(name), Style::new().add_modifier(Modifier::BOLD)),
         draw::span(shown("? Its agent is stopped."), Style::new()),

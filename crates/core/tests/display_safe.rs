@@ -4,7 +4,9 @@
 use std::cell::Cell;
 
 use proptest::prelude::*;
-use shepherd_core::display::{CHARS_READ_PER_GRAPHEME, display_safe, display_safe_iter};
+use shepherd_core::display::{
+    CHARS_KEPT_PER_GRAPHEME, CHARS_READ_PER_GRAPHEME, display_safe, display_safe_iter,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Room for every case below: none is cut by length unless it says so.
@@ -14,12 +16,15 @@ fn shown(text: &str) -> String {
     display_safe(text, ROOMY).as_str().to_owned()
 }
 
-/// Cc and Cf, the categories that must never be shown.
+/// Cc, Cf, Zl and Zp, the categories that must never be shown.
 fn invisible(c: char) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
     matches!(
         c.general_category(),
-        GeneralCategory::Control | GeneralCategory::Format
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
     )
 }
 
@@ -97,6 +102,12 @@ fn control_characters_are_dropped() {
 }
 
 #[test]
+fn line_and_paragraph_separators_are_dropped() {
+    assert_eq!(shown("one\u{2028}line\u{2029}para"), "onelinepara");
+    assert_eq!(shown("\u{2028}\u{2029}"), "");
+}
+
+#[test]
 fn text_is_shown_in_nfc() {
     assert_eq!(shown("cre\u{300}me bru\u{302}le\u{301}e"), "crème brûlée");
     // `x́` has no precomposed form: it stays a base and its mark.
@@ -149,6 +160,62 @@ fn text_is_capped_by_graphemes_never_inside_one() {
     }
 }
 
+/// Each grapheme cluster of `text`, as made safe at `max`, holds at most [`CHARS_KEPT_PER_GRAPHEME`] chars, and making
+/// it safe again leaves it as it is.
+fn assert_clusters_capped_and_idempotent(text: &str, max: usize) -> String {
+    let once = display_safe(text, max);
+    for cluster in once.as_str().graphemes(true) {
+        assert!(
+            cluster.chars().count() <= CHARS_KEPT_PER_GRAPHEME,
+            "{cluster:?} in {once:?}"
+        );
+    }
+    assert_eq!(display_safe(once.as_str(), max), once, "{text:?} at {max}");
+    once.into_string()
+}
+
+#[test]
+fn one_grapheme_cluster_cannot_grow_without_bound() {
+    // Extenders that aren't combining marks, so the per-base mark cap doesn't hold them.
+    let voiced = format!("ｶ{}", "\u{FF9E}".repeat(200));
+    let shown = assert_clusters_capped_and_idempotent(&voiced, 3);
+    assert_eq!(shown.graphemes(true).count(), 1);
+    assert!(shown.starts_with("ｶ\u{FF9E}"), "{shown:?}");
+    let tones = format!("👍{}", "🏽".repeat(200));
+    let shown = assert_clusters_capped_and_idempotent(&tones, 3);
+    assert!(shown.starts_with("👍🏽"), "{shown:?}");
+    // Hangul leading jamo all join one cluster.
+    assert_clusters_capped_and_idempotent(&"\u{1100}".repeat(500), 2);
+    // Indic conjuncts: consonant, virama, consonant, ... is one cluster with one mark per base.
+    assert_clusters_capped_and_idempotent(&"क्".repeat(200), 2);
+}
+
+#[test]
+fn a_long_run_of_flags_keeps_its_pairs() {
+    let flags = "🇯🇵🇺🇸".repeat(60);
+    assert_eq!(shown(&flags), flags);
+    // One more indicator in front shifts every pair.
+    assert_eq!(
+        display_safe(&format!("🇯{flags}"), 3).as_str(),
+        "🇯🇯\u{1F1F5}\u{1F1FA}\u{1F1F8}🇯"
+    );
+}
+
+#[test]
+fn the_review_counterexample_is_idempotent() {
+    // 31 leading jamo and a mark that NFC splits in two: one cluster of 33 chars, more than a second pass reads.
+    let text = format!("{}\u{344}", "\u{1100}".repeat(31));
+    assert_clusters_capped_and_idempotent(&text, 1);
+}
+
+#[test]
+fn a_full_cluster_is_followed_by_the_next_one() {
+    let text = format!("ｶ{}b", "\u{FF9E}".repeat(200));
+    let shown = assert_clusters_capped_and_idempotent(&text, 50);
+    assert!(shown.ends_with("\u{FF9E}b"), "{shown:?}");
+    assert_eq!(shown.graphemes(true).count(), 2);
+}
+
 /// How many chars `display_safe_iter` reads of an endless `chars`, kept to `max` graphemes.
 fn chars_read(chars: impl Iterator<Item = char>, max: usize) -> (usize, String) {
     let read = Cell::new(0);
@@ -192,6 +259,20 @@ proptest! {
         prop_assert!(!once.as_str().chars().any(invisible), "{:?}", once);
         prop_assert!(once.as_str().graphemes(true).count() <= max);
         // Safe text is left as it is, so cut or joined safe text can be made safe again for free.
+        prop_assert_eq!(display_safe(once.as_str(), max), once);
+    }
+
+    #[test]
+    fn text_heavy_in_extenders_is_shown_capped_and_stays_put(
+        text in "[\u{1100}\u{1161}\u{11A8}\u{344}\u{301}\u{FF9E}ｶ👍🏽क्a\u{200D}\u{2028}\u{1F1EF}\u{1F1F5}]{0,300}",
+        max in 0usize..12,
+    ) {
+        let once = display_safe(&text, max);
+        prop_assert!(!once.as_str().chars().any(invisible), "{:?}", once);
+        prop_assert!(once.as_str().graphemes(true).count() <= max);
+        for cluster in once.as_str().graphemes(true) {
+            prop_assert!(cluster.chars().count() <= CHARS_KEPT_PER_GRAPHEME, "{:?}", cluster);
+        }
         prop_assert_eq!(display_safe(once.as_str(), max), once);
     }
 }

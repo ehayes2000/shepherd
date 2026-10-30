@@ -17,7 +17,11 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            let _ = writeln!(std::io::stderr(), "shepherd: {why}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "shepherd: {}",
+                shepherd::stderr_safe(&why)
+            );
             ExitCode::FAILURE
         }
     }

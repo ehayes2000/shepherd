@@ -188,3 +188,76 @@ fn a_host_that_starts_closes_its_stderr_and_keeps_running() {
     // What `Home` stops on drop finds exactly this host.
     assert_eq!(host_pids(home.path()), [host.0.id()]);
 }
+
+/// Escape, bell, a Trojan Source override and isolate, and a line separator: hostile text a path or an argument could
+/// carry to a terminal.
+const EVIL: &str = "x\x1b]0;pwned\x07\u{202E}\u{2066}y\u{2028}z";
+
+/// What `EVIL` shows as once made display-safe.
+const EVIL_SHOWN: &str = "x]0;pwnedyz";
+
+/// Runs `shepherd` with `args` and `HOME` set to `home` until it exits (bounded), and returns its stderr and whether it
+/// succeeded.
+fn stderr_of(args: &[&str], home: &Path) -> (String, bool) {
+    let mut child = Reaped(
+        Command::new(SHEPHERD)
+            .args(args)
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stderr = child.0.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = tx.send(stderr.read_to_string(&mut out).map(|_| out));
+    });
+    let stderr = rx
+        .recv_timeout(TIMEOUT)
+        .expect("shepherd never closed its stderr")
+        .unwrap();
+    let status = child.0.wait().unwrap();
+    (stderr, status.success())
+}
+
+/// Whether every line of `stderr` is display-safe: nothing a terminal would act on besides the line breaks.
+fn display_safe_lines(stderr: &str) -> bool {
+    stderr
+        .split('\n')
+        .all(|line| shepherd_core::display::display_safe(line, usize::MAX).as_str() == line)
+}
+
+#[test]
+fn a_fatal_error_is_printed_display_safe() {
+    let home = Home::new();
+    let (stderr, ok) = stderr_of(&[EVIL], home.path());
+    assert!(!ok, "{stderr:?}");
+    assert!(stderr.contains("unknown command"), "{stderr:?}");
+    assert!(stderr.contains(EVIL_SHOWN), "{stderr:?}");
+    assert!(display_safe_lines(&stderr), "{stderr:?}");
+}
+
+#[test]
+fn a_host_startup_error_is_printed_display_safe() {
+    let home = Home::new();
+    let evil_home = home.path().join(EVIL);
+    let root = evil_home.join(".shepherd");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    let (stderr, ok) = stderr_of(&["host"], &evil_home);
+    assert!(!ok, "{stderr:?}");
+    assert!(stderr.contains("chmod 700"), "{stderr:?}");
+    assert!(stderr.contains(EVIL_SHOWN), "{stderr:?}");
+    assert!(display_safe_lines(&stderr), "{stderr:?}");
+}
+
+#[test]
+fn stderr_text_keeps_its_own_line_breaks() {
+    assert_eq!(
+        shepherd::stderr_safe("bad config:\n  1 | x\u{202E} =\n    | ^\x1b[2J"),
+        "bad config:\n  1 | x =\n    | ^[2J"
+    );
+}

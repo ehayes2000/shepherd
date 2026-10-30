@@ -21,4 +21,14 @@ disallowed-methods = [
   { path = "ratatui::text::Text::styled", reason = "make lines with crate::draw::line, which takes a DisplayText" },
   { path = "ratatui::widgets::Paragraph::new", reason = "use crate::draw::paragraph, whose lines are DisplayText" },
   { path = "ratatui::widgets::Block::title", reason = "use crate::draw::titled, which takes a DisplayText" },
+  { path = "ratatui::widgets::Block::title_top", reason = "use crate::draw::titled, which takes a DisplayText" },
+  { path = "ratatui::widgets::Block::title_bottom", reason = "use crate::draw::titled, which takes a DisplayText" },
+  { path = "ratatui::widgets::List::new", reason = "add a DisplayText-only constructor to crate::draw" },
+  { path = "ratatui::widgets::ListItem::new", reason = "add a DisplayText-only constructor to crate::draw" },
+  { path = "ratatui::widgets::Table::new", reason = "add a DisplayText-only constructor to crate::draw" },
+  { path = "ratatui::widgets::Row::new", reason = "add a DisplayText-only constructor to crate::draw" },
+  { path = "ratatui::widgets::Cell::new", reason = "add a DisplayText-only constructor to crate::draw" },
+  { path = "ratatui::widgets::Tabs::new", reason = "add a DisplayText-only constructor to crate::draw" },
 ]
+# `Line::from`, `Text::from`, `Span::from` and `.render` on a string are trait methods clippy can't single out here:
+# scripts/check-arch.sh greps for them instead.

@@ -1,7 +1,8 @@
 //! The only code that hands text to ratatui. Every function here takes a [`DisplayText`], which only
 //! [`display_safe`] makes, so text from agents, hooks, git and other clients can't reach the screen unsafe (F35).
 //! `crates/tui/clippy.toml` forbids ratatui's own text sinks (`Buffer::set_string`, `Line::raw`, `Paragraph::new`,
-//! ...) everywhere else.
+//! ...) everywhere else, and `scripts/check-arch.sh` forbids `Line::from`, `Text::from`, `Span::from` and `.render` on a
+//! string.
 #![allow(clippy::disallowed_methods)]
 
 use ratatui::buffer::Buffer;
@@ -61,6 +62,11 @@ pub(crate) fn span(text: DisplayText, style: Style) -> Span<'static> {
 
 pub(crate) fn line(text: DisplayText, style: Style) -> Line<'static> {
     Line::styled(text.into_string(), style)
+}
+
+/// One line of spans, each made by [`span`].
+pub(crate) fn spans(spans: Vec<Span<'static>>) -> Line<'static> {
+    Line::from(spans)
 }
 
 pub(crate) fn paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
