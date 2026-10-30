@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T25b cleanup view | building | task/t25b-cleanup @ 7b15652 | 0 | – |
 | F37 worktree lock/shutdown leftovers | building | task/f37-worktree-leftovers @ 7b15652 | 0 | – |
-| T27 PR status | fixing (CHANGES) | task/t27-pr-status @ dc0b09d | 1 | Blocking: conflicts with F33; fixture leaks env to disk; CLICOLOR_FORCE breaks JSON. Minors incl. real_worktrees PATH may reach real gh |
+| T27 PR status | re-review | task/t27-pr-status @ b04f815 (on d831077) | 2 | rebased over F33; env isolated; colour vars stripped; real_worktrees forge without gh |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
 F14, T16 (F18/T33 both touch `core::client` and `shepherd/src/client.rs`; F18/F14/T16 all touch `crates/shepherd/src/host/`).
