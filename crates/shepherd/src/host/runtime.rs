@@ -48,7 +48,7 @@ use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk,
+    Host, HostCommand, HostEvent, NewSessionSpec, ReplyTo, ResumeSpec, WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
@@ -1061,7 +1061,7 @@ impl<
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::SelectWorkspace {
                     ask: WorkspaceAsk::Select(reply),
-                    path: PathBuf::from(select.path),
+                    path: expand_home(Path::new(&select.path), &self.settings.home),
                 });
             }
             ClientRequest::SessionResume(resume) => {
@@ -1459,8 +1459,9 @@ impl<
     }
 }
 
-/// `path` resolved (no `..`, symlinks followed), if it is a directory in a git repo (its default branch can be
-/// found), or why it can't be a workspace, for the user. Runs on the worker thread: it touches the filesystem and git.
+/// The root of the repo `path` is in ([`Worktrees::repo_root`]: a subdirectory or a linked worktree names its main
+/// checkout), resolved, if `path` is a directory and the repo's default branch can be found; or why it can't be a
+/// workspace, for the user. Runs on the worker thread: it touches the filesystem and git.
 fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, String> {
     let shown = path.display();
     if !path.is_absolute() {
@@ -1470,10 +1471,13 @@ fn probe_workspace(worktrees: &impl Worktrees, path: &Path) -> Result<PathBuf, S
     if !resolved.is_dir() {
         return Err(format!("{shown} is not a directory"));
     }
-    worktrees
-        .default_branch(&RepoRef::new(resolved.clone()))
+    let root = worktrees
+        .repo_root(&resolved)
         .map_err(|e| format!("{shown}: {e}"))?;
-    Ok(resolved)
+    worktrees
+        .default_branch(&RepoRef::new(root.clone()))
+        .map_err(|e| format!("{shown}: {e}"))?;
+    Ok(root)
 }
 
 /// A session's screen panicked and was replaced with a blank one ([`screen_guard`]).

@@ -368,6 +368,13 @@ impl Repo {
 }
 
 impl Worktrees for FakeWorktrees {
+    /// Every fake repo has a main checkout, which names it.
+    fn repo_root(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        let s = self.take_failure()?;
+        let r = s.repo_of(path).ok_or_else(|| State::not_a_repo(path))?;
+        Ok(s.repos[r].main.clone())
+    }
+
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError> {
         let mut s = self.take_failure()?;
         let r = s
@@ -628,6 +635,10 @@ mod tests {
         fn same_named_repo(&self) -> RepoRef {
             self.fake
                 .add_repo(Path::new("/fake/other").join(REPO_NAME), DEFAULT)
+        }
+
+        fn resolved(&self, path: &Path) -> PathBuf {
+            path.to_owned()
         }
     }
 

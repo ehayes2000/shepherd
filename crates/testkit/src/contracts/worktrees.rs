@@ -33,6 +33,10 @@ macro_rules! worktrees_contract {
     };
     ($fixture:expr) => {
         $crate::worktrees_contract!(@cases $fixture;
+            repo_root_of_the_main_checkout_is_itself,
+            repo_root_of_a_subdirectory_is_the_checkout,
+            repo_root_of_a_linked_worktree_is_the_main_checkout,
+            repo_root_of_a_non_repo_is_not_a_repo,
             default_branch_is_what_origin_head_points_at,
             default_branch_of_a_non_repo_is_not_a_repo,
             default_branch_repairs_a_missing_origin_head,
@@ -138,6 +142,8 @@ pub trait WorktreesFixture {
     fn forget_origin_head(&self);
     /// Another clone whose directory is also named [`REPO_NAME`], somewhere else.
     fn same_named_repo(&self) -> RepoRef;
+    /// `path` with symlinks resolved, as the port reports paths it found on its own (e.g. a tempdir behind `/var`).
+    fn resolved(&self, path: &Path) -> PathBuf;
 }
 
 /// A fixture backed by a real filesystem.
@@ -181,6 +187,41 @@ fn assert_outside<F: WorktreesFixture>(f: &F, path: &Path) {
         matches!(result, Err(WorktreeError::OutsideManagedRoot(_))),
         "remove({}) gave {result:?}",
         path.display()
+    );
+}
+
+// ---------- repo_root ----------
+
+fn main_checkout<F: WorktreesFixture>(f: &F) -> Result<PathBuf, WorktreeError> {
+    Ok(f.resolved(f.repo().as_path()))
+}
+
+pub fn repo_root_of_the_main_checkout_is_itself<F: WorktreesFixture>(f: &F) {
+    assert_eq!(f.port().repo_root(f.repo().as_path()), main_checkout(f));
+}
+
+pub fn repo_root_of_a_subdirectory_is_the_checkout<F: WorktreesFixture>(f: &F) {
+    let sub = f.repo().as_path().join(SUBDIR);
+    assert_eq!(f.port().repo_root(&sub), main_checkout(f));
+}
+
+/// A worktree is another checkout of the same repo, which is named by its main checkout.
+pub fn repo_root_of_a_linked_worktree_is_the_main_checkout<F: WorktreesFixture>(f: &F) {
+    let path = create(f, "linked");
+    assert_eq!(f.port().repo_root(path.as_path()), main_checkout(f));
+}
+
+pub fn repo_root_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let result = f.port().repo_root(f.not_a_repo().as_path());
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
+    let missing = f.not_a_repo().as_path().join("missing");
+    let result = f.port().repo_root(&missing);
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
     );
 }
 

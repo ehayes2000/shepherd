@@ -9,7 +9,7 @@ use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, 
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::{
     Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo, ResumeSpec, ResumeTarget,
-    ResumeUnavailable, WorkspaceAsk,
+    ResumeUnavailable, WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -1138,6 +1138,27 @@ fn selecting_the_current_workspace_again_acks_without_appending() {
             result: Ok(HostResult::Ack),
         }]
     );
+}
+
+#[test]
+fn a_typed_path_starting_with_a_tilde_expands_to_the_home() {
+    let home = path("/home/me");
+    for (typed, expanded) in [
+        ("~", "/home/me"),
+        ("~/", "/home/me"),
+        ("~/Code/x", "/home/me/Code/x"),
+        ("~/../other", "/home/me/../other"),
+    ] {
+        assert_eq!(expand_home(&path(typed), &home), path(expanded), "{typed}");
+    }
+}
+
+#[test]
+fn a_typed_path_without_a_leading_tilde_is_left_alone() {
+    let home = path("/home/me");
+    for typed in ["/src/app", "app", "./app", "~other/app", "~x", "a/~/b", ""] {
+        assert_eq!(expand_home(&path(typed), &home), path(typed), "{typed}");
+    }
 }
 
 #[test]

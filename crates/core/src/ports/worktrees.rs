@@ -203,6 +203,12 @@ pub enum WorktreeError {
 }
 
 pub trait Worktrees {
+    /// The repo `path` is in, named by its main checkout's top-level directory with symlinks resolved. It is the same
+    /// for the main checkout, any directory inside it, and any linked worktree of it (found through the common git
+    /// dir). A repo with no main checkout to name (a worktree of a bare repo, a submodule) is named by the top level of
+    /// the checkout `path` is in. A path outside any checkout, or one that doesn't exist, is [`WorktreeError::NotARepo`].
+    fn repo_root(&self, path: &Path) -> Result<PathBuf, WorktreeError>;
+
     /// The repo's default branch (see the module docs). May write `origin/HEAD` if it is missing.
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError>;
 

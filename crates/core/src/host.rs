@@ -11,7 +11,9 @@
 //! [`Host::workspaces`]. Whether a path is a repo is asked of the world: a select is first a
 //! [`HostCommand::ProbeWorkspace`], whose answer comes back as [`HostEvent::WorkspaceProbed`]. A client's own cwd (from
 //! its hello) is probed only while no workspace is selected, and selected only if there still is none. Workspaces are
-//! paths as the probe resolved them, compared as paths. Each `session/created` records the workspace it was created in.
+//! repo roots as the probe resolved them, compared as paths, so selecting a subdirectory or a worktree of the current
+//! workspace is the same workspace. A typed path may start with `~` ([`expand_home`]). Each `session/created` records
+//! the workspace it was created in.
 //!
 //! Worktrees: a new session in a workspace, unless the request named its own cwd, gets a worktree of the workspace's
 //! repo, on a branch named after the session ([`naming`]) and started from the origin default. Its `session/created`
@@ -271,9 +273,9 @@ pub enum HostCommand {
         to: ReplyTo,
         result: Result<HostResult, WireError>,
     },
-    /// Find out whether `path` is in a git repo, resolving `..` and symlinks, and feed the answer back as
-    /// [`HostEvent::WorkspaceProbed`] with the same `ask`. The probe runs off the runtime thread, so other events may
-    /// be handled before its answer arrives, and the answer may no longer matter by then.
+    /// Find out which git repo `path` is in, as the root of its main checkout (resolving `..` and symlinks), and feed
+    /// the answer back as [`HostEvent::WorkspaceProbed`] with the same `ask`. The probe runs off the runtime thread, so
+    /// other events may be handled before its answer arrives, and the answer may no longer matter by then.
     ProbeWorkspace {
         ask: WorkspaceAsk,
         path: PathBuf,
@@ -997,6 +999,16 @@ fn display_tail(tail: &[u8]) -> String {
         .chars()
         .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
         .collect()
+}
+
+/// A workspace path as the user typed it, with a leading `~` (alone, or followed by `/`) replaced by `home`, the
+/// host's home directory. `~name` (another user's home) and every other path are returned as typed.
+pub fn expand_home(typed: &Path, home: &Path) -> PathBuf {
+    // Compares whole components, so `~name` doesn't match.
+    match typed.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => typed.to_path_buf(),
+    }
 }
 
 /// An `Append` of a frame the host produces about session `id`.

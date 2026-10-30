@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use shepherd_core::acpp::{Frame, Seq, ShepherdFrame};
+use shepherd_core::acpp::{Envelope, Frame, Seq, ShepherdFrame};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{EventLog, LogId};
 use shepherd_core::wire::{
@@ -277,4 +277,115 @@ fn while_a_workspace_probe_is_stuck_in_git_other_sessions_and_clients_are_still_
     h.step();
     assert!(response(&selector.take(), &selecting).is_ok());
     assert_eq!(h.host().workspace(), Some(d.app.as_path()));
+}
+
+/// The `workspace/selected` entries among `envelopes`, as the repos they selected.
+fn selections(envelopes: &[Envelope]) -> Vec<String> {
+    envelopes
+        .iter()
+        .filter_map(|env| match env.frame() {
+            Frame::Shepherd(m) => match m.body() {
+                ShepherdFrame::WorkspaceSelected(s) => Some(s.repo.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn host_selections(h: &HostHarness) -> Vec<String> {
+    selections(&h.log().read(LogId::Host, Seq::ZERO).expect("host log"))
+}
+
+/// `app/crates`, a real directory inside the fake repo `app`.
+fn subdir(d: &Dirs) -> PathBuf {
+    let sub = d.app.join("crates");
+    std::fs::create_dir(&sub).unwrap();
+    sub
+}
+
+#[test]
+fn a_client_started_in_a_subdirectory_of_a_repo_selects_the_repo() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    let d = dirs(&worktrees);
+    let sub = subdir(&d);
+    let mut h = harness(&worktrees);
+    let mut client = h.connect();
+    hello(&mut client, Some(&sub));
+    h.step();
+    assert_eq!(h.host().workspace(), Some(d.app.as_path()));
+}
+
+#[test]
+fn selecting_a_subdirectory_of_the_workspace_is_the_same_workspace() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    let d = dirs(&worktrees);
+    let sub = subdir(&d);
+    let mut h = harness(&worktrees);
+    let mut client = h.connect();
+    select(&mut client, &d.app);
+    h.step();
+    let req = select(&mut client, &sub);
+    h.step();
+    assert!(response(&client.take(), &req).is_ok());
+    assert_eq!(h.host().workspaces(), std::slice::from_ref(&d.app));
+    let app = d.app.to_str().unwrap().to_owned();
+    assert_eq!(host_selections(&h), vec![app], "selected again");
+}
+
+#[test]
+fn a_typed_path_starting_with_a_tilde_is_in_the_hosts_home() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    // The harness's home is a real directory; a fake repo in its `src` (which exists) stands in for `~/Code/x`.
+    let home = std::fs::canonicalize(HOME).unwrap();
+    let repo = home.join("src");
+    worktrees.add_repo(&repo, "main");
+    let mut h = harness(&worktrees);
+    let mut client = h.connect();
+    let req = select(&mut client, Path::new("~/src"));
+    h.step();
+    assert!(response(&client.take(), &req).is_ok());
+    assert_eq!(h.host().workspace(), Some(repo.as_path()));
+
+    // `~` alone is the home itself, which the fake doesn't know as a repo. `~name` and other relative paths are refused.
+    for (typed, why) in [
+        ("~", "not a git repository"),
+        ("~root/src", "not an absolute path"),
+        ("src", "not an absolute path"),
+    ] {
+        let req = select(&mut client, Path::new(typed));
+        h.step();
+        let result = response(&client.take(), &req);
+        assert!(
+            matches!(&result, Err(WireError::InvalidParams(msg)) if msg.contains(why)),
+            "{typed}: {result:?}"
+        );
+    }
+    assert_eq!(h.host().workspaces(), std::slice::from_ref(&repo));
+}
+
+/// The probe of a hello's cwd outlasts the client's subscribe, so the selection reaches it live, after its catch-up.
+#[test]
+fn a_selection_from_a_hellos_cwd_that_ends_after_the_subscribe_arrives_live() {
+    let worktrees = FakeWorktrees::new("/fake/worktrees");
+    let d = dirs(&worktrees);
+    let mut h = harness(&worktrees);
+    let hold = worktrees.hold_next();
+    let mut client = h.connect();
+    hello(&mut client, Some(&d.app));
+    h.poll();
+    assert!(
+        hold.wait_entered(Duration::from_secs(10)),
+        "the probe never reached the port"
+    );
+    let sub = client.subscribe_all();
+    h.poll();
+    let msgs = client.take();
+    assert!(response(&msgs, &sub).is_ok(), "the catch-up should be over");
+    assert!(selections(&entries(&msgs)).is_empty(), "{msgs:?}");
+
+    hold.release();
+    h.step();
+    let app = d.app.to_str().unwrap().to_owned();
+    assert_eq!(selections(&entries(&client.take())), vec![app]);
 }

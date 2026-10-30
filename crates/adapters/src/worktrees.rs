@@ -456,6 +456,32 @@ impl GitWorktrees {
 }
 
 impl Worktrees for GitWorktrees {
+    /// The common git dir of a main checkout is its `.git` directory, so its parent is the main checkout. Any other
+    /// common dir (a bare repo, a submodule's `.git/modules/<name>`) has no main checkout beside it.
+    fn repo_root(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        let args = [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ];
+        let out = self
+            .git(path, &args)
+            .map_err(|f| f.or_not_a_repo(path, "rev-parse"))?;
+        let mut lines = out.lines().map(Path::new);
+        let (Some(top), Some(common)) = (lines.next(), lines.next()) else {
+            return Err(WorktreeError::Other(format!(
+                "unexpected rev-parse output {out:?}"
+            )));
+        };
+        let root = match common.parent() {
+            Some(main) if common.file_name() == Some(OsStr::new(".git")) => main,
+            _ => top,
+        };
+        std::fs::canonicalize(root)
+            .map_err(|e| WorktreeError::Other(format!("{}: {e}", root.display())))
+    }
+
     fn default_branch(&self, repo: &RepoRef) -> Result<BranchName, WorktreeError> {
         self.common_dir(repo.as_path())?;
         self.default_of(repo.as_path()).map(BranchName::new)
@@ -1034,6 +1060,10 @@ mod tests {
             );
             RepoRef::new(tmp.join("other").join(REPO_NAME))
         }
+
+        fn resolved(&self, path: &Path) -> PathBuf {
+            std::fs::canonicalize(path).unwrap()
+        }
     }
 
     impl FsWorktreesFixture for GitFixture {
@@ -1107,6 +1137,24 @@ mod tests {
         vars.extend(env(tmp));
         vars.push((CHILD_VAR.into(), "1".into()));
         vars
+    }
+
+    /// A bare repo has no main checkout, so each of its worktrees names itself; the bare repo is not a checkout.
+    #[test]
+    fn repo_root_of_a_bare_repos_worktree_is_that_worktree() {
+        let f = GitFixture::new();
+        let origin = f.tmp().join("origin.git");
+        let wt = f.tmp().join("bare-wt");
+        f.git(
+            &origin,
+            &["worktree", "add", "--quiet", wt.to_str().unwrap(), DEFAULT],
+        );
+        let canonical = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(f.port.repo_root(&wt.join(SUBDIR)), Ok(canonical));
+        assert_eq!(
+            f.port.repo_root(&origin),
+            Err(WorktreeError::NotARepo(origin.clone()))
+        );
     }
 
     /// `status.showUntrackedFiles=no` would make untracked files invisible, and `git worktree remove` would then
