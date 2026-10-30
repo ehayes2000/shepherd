@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | F21 collapsed sidebar targets | in review | task/f21-collapsed-sidebar @ 3644212 | 1 | PM-accepted: Rename popup also closes with its session. Reviewer asked about ⏏ emoji width |
 | F07 palette in snapshots | in review | task/f07-palette-snapshots @ 694310a | 1 | Builder found host-crash bug → F23 |
-| F23 kitty push panic | building | task/f23-kitty-push-panic @ BASE | 0 | high priority; merges after F07 (both crates/term) |
+| F23 kitty push panic | building | task/f23-kitty-push-panic @ ff867eb | 0 | high priority; merges after F07 (both crates/term) |
 | T17 launch Claude sessions | in review | task/t17-launch-claude @ dc247bf (on 069e3b6) | 1 | PM-accepted: run files written by runtime (no port); default agent claude; exec-form hooks; names/agent field/startup sweep → F22 |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
