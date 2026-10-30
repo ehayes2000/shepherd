@@ -10,6 +10,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
 | F25 failed worktree create cleanup | building | task/f25-worktree-fail-cleanup @ 7d2a1cf | 0 | – |
+| F27 worktrees off runtime thread | building | task/f27-worktrees-worker @ HEAD | 0 | – |
+| F15 client display polish | building | task/f15-display-polish @ HEAD | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -269,7 +271,7 @@ acceptance:
 scope: crates/core (port), crates/adapters, crates/testkit, crates/shepherd
 
 ### F15: Client display polish from T13
-status: todo
+status: in-progress
 depends: T13
 touches: shepherd::client, core::client, tui
 goal: Small display gaps found while building the TUI.
@@ -438,7 +440,7 @@ acceptance:
 scope: crates/core (client), crates/tui
 
 ### F27: Worktrees calls run off the host runtime thread
-status: ready (must land before T22)
+status: in-progress
 depends: T21
 touches: ports::worktrees (or a runtime worker), shepherd::host
 goal: `Worktrees` calls (`default_branch` may run `git remote set-head --auto` over the network; T22's `create` fetches) run
