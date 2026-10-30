@@ -25,6 +25,9 @@
 //! build is this client's) gets the restart dialog ([`Popup::RestartHost`]), which says how many sessions restarting
 //! stops; only a click restarts it ([`ClientCommand::TerminateHost`]), and the reconnect then launches this build. A
 //! client that is the odd one out only gets a notice. A request the host doesn't know (`-32601`) says the host is older.
+//! While the host should be restarted ([`Client::restart_offer`]), the dialog can be reopened ([`Intent::OfferRestart`]);
+//! the dialog and the offer go when the link drops, and a hello that finds no reason closes the dialog, so a click
+//! can only ever stop the host it was about.
 //!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
@@ -151,6 +154,8 @@ pub enum Intent {
     CloseKeepingWorktree,
     /// Close the open popup or menu without doing anything.
     Dismiss,
+    /// Reopen the restart dialog, when the host should be restarted ([`Client::restart_offer`]); ignored otherwise.
+    OfferRestart,
     /// Restart the host, from the open restart dialog (a click on its `[Restart host]`). Ignored when that isn't open.
     RestartHost,
     /// Detach. Sessions keep running on the host.
@@ -339,6 +344,8 @@ pub struct Client {
     cwd: Option<String>,
     /// The build this client runs, sent in its hello and compared with the host's.
     build: Option<BuildId>,
+    /// Why the connected host should be restarted, if it should: the restart dialog can be reopened for it.
+    restart_offer: Option<HostOutdated>,
     connection: Connection,
     /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
@@ -400,6 +407,7 @@ impl Client {
             machine,
             cwd: None,
             build: None,
+            restart_offer: None,
             connection: Connection::Idle,
             launched: false,
             next_request: 0,
@@ -554,6 +562,12 @@ impl Client {
             .then(|| self.sessions.iter().filter(|s| !s.exited).count())
     }
 
+    /// Why the connected host should be restarted, while it should: an older host, one speaking another protocol
+    /// version, a stale one, or one that didn't know a request. [`Intent::OfferRestart`] reopens the dialog for it.
+    pub fn restart_offer(&self) -> Option<HostOutdated> {
+        self.restart_offer
+    }
+
     /// Why the client gave up, once it has.
     pub fn fatal(&self) -> Option<&str> {
         match &self.connection {
@@ -676,6 +690,9 @@ impl Client {
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
                 self.pending.clear();
+                // It was about the host that just went: the next hello decides afresh.
+                self.close_restart_dialog();
+                self.restart_offer = None;
                 self.connect(1)
             }
             _ => Vec::new(),
@@ -718,6 +735,10 @@ impl Client {
             Ok(typed) => typed.result,
             Err(e) => Err(WireError::Internal(e.to_string())),
         };
+        // A host that doesn't know a request is older than this client: restarting it is offered.
+        if let Err(WireError::MethodNotFound(_)) = &result {
+            self.restart_offer.get_or_insert(HostOutdated::Older);
+        }
         match (method, result) {
             (Method::Hello, Ok(HostResult::Hello(ok))) => {
                 self.check_build(&ok);
@@ -736,9 +757,7 @@ impl Client {
             (Method::Hello, Err(WireError::VersionMismatch { .. })) => {
                 self.connection = Connection::Incompatible;
                 self.launched = false;
-                self.popup = Some(Popup::RestartHost {
-                    why: HostOutdated::Older,
-                });
+                self.offer_restart(HostOutdated::Older);
                 Vec::new()
             }
             (Method::Hello, Err(e)) => self.fail(format!("the shepherd host refused us: {e}")),
@@ -795,20 +814,33 @@ impl Client {
     /// that is older than build identities or stale, and tells a client that is the odd one out. A client that doesn't
     /// know its own build compares nothing.
     fn check_build(&mut self, ok: &HelloOk) {
+        self.close_restart_dialog();
+        self.restart_offer = None;
         let Some(mine) = &self.build else {
             return;
         };
         let installed = ok.installed.as_ref();
-        let restart = |why| Some(Popup::RestartHost { why });
         match &ok.build {
-            None => self.popup = restart(HostOutdated::Older),
+            None => self.offer_restart(HostOutdated::Older),
             Some(host) if host.digest == mine.digest => {}
-            Some(_) if installed == Some(&mine.digest) => self.popup = restart(HostOutdated::Stale),
+            Some(_) if installed == Some(&mine.digest) => self.offer_restart(HostOutdated::Stale),
             Some(host) if installed == Some(&host.digest) => {
                 self.set_notice(ODD_ONE_OUT.to_owned())
             }
             Some(_) => self.set_notice(ALL_DIFFER.to_owned()),
         }
+    }
+
+    /// Opens the restart dialog for `why`, and keeps it reopenable ([`Intent::OfferRestart`]) while this host lasts.
+    fn offer_restart(&mut self, why: HostOutdated) {
+        self.restart_offer = Some(why);
+        self.popup = Some(Popup::RestartHost { why });
+    }
+
+    /// Closes the restart dialog, if it is open: a click on it must only ever stop the host it was about.
+    fn close_restart_dialog(&mut self) {
+        self.popup
+            .take_if(|p| matches!(p, Popup::RestartHost { .. }));
     }
 
     /// Keeps the host's profiles, `default` moved to the front.
@@ -1301,6 +1333,12 @@ impl Client {
                 self.popup = None;
                 Vec::new()
             }
+            Intent::OfferRestart => {
+                if let Some(why) = self.restart_offer {
+                    self.popup = Some(Popup::RestartHost { why });
+                }
+                Vec::new()
+            }
             Intent::RestartHost => {
                 if !matches!(self.popup, Some(Popup::RestartHost { .. })) {
                     return Vec::new();
@@ -1420,9 +1458,11 @@ fn refusal(e: WireError) -> String {
 const OLDER_HOST: &str = "the shepherd host is older than this client: restart it to use this";
 /// The notice for a client whose build is neither the host's nor the one installed at the host's path, while the host
 /// runs the installed one.
-const ODD_ONE_OUT: &str = "this window runs a different shepherd build than the host; restart it to use the installed one";
+const ODD_ONE_OUT: &str =
+    "this window runs another build than the host: restart it to use the installed one";
 /// The notice when this client, the host and the binary installed at the host's path are three different builds.
-const ALL_DIFFER: &str = "this window and the shepherd host run different shepherd builds, and neither is the installed one";
+const ALL_DIFFER: &str =
+    "this window and the host run different builds, and neither is the installed one";
 
 /// What an alert about `session` says. It starts with fixed text, so a session's name can never lead it: OSC 9 text
 /// beginning `<digit>;` is a subcommand (progress, cwd) in ConEmu-style terminals.

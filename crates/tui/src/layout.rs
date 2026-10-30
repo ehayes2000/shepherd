@@ -82,6 +82,8 @@ pub enum Target {
     KeepWorktree,
     /// The restart dialog's `[Restart host]`.
     RestartHost,
+    /// The sidebar footer's `Restart host`, while the host should be restarted: reopens the restart dialog.
+    OfferRestart,
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

@@ -94,6 +94,15 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PrivateFsError> {
     create_final_dir(dir)
 }
 
+/// Checks that `dir` exists and is a real directory, not a symlink, that group and others can't access, without
+/// creating anything. A missing `dir` is [`PrivateFsError::Io`] with `NotFound`'s message; use
+/// `fs::symlink_metadata` first to tell that case apart.
+pub fn check_private_dir(dir: &Path) -> Result<(), PrivateFsError> {
+    let dir = &normalize(dir);
+    let meta = fs::symlink_metadata(dir).map_err(|e| io_err(dir, e))?;
+    check_existing_dir(dir, &meta)
+}
+
 /// Creates the final part of `dir` exactly `0700`, or, if something is already there, checks it like any
 /// existing dir and never chmods it.
 fn create_final_dir(dir: &Path) -> Result<(), PrivateFsError> {

@@ -1186,6 +1186,31 @@ fn a_stale_host_is_restarted_when_the_user_clicks_restart_and_the_reconnect_rela
     );
 }
 
+/// The host was gone by the time the user clicked: nothing to stop is not a failure, so no "could not restart".
+#[test]
+fn restarting_a_host_that_is_already_gone_says_nothing_failed() {
+    let (a, b) = (build(0xa), build(0xb));
+    // A host started by someone else; the launcher knows of none running, so its terminate answers NotRunning.
+    let mut h = Harness::with_launcher(|net, host| {
+        *lock(&host) = Some(FakeHost::start(&net).with_build(a, b.digest));
+        FakeHostLauncher::new()
+    });
+    h.runtime.set_build(b);
+    h.runtime.start();
+    h.settle();
+    h.term(Event::Resize(WINDOW.0, WINDOW.1));
+    assert!(matches!(
+        h.runtime.client().popup(),
+        Some(Popup::RestartHost { .. })
+    ));
+    let mut view = test_view();
+    h.draw(&mut view);
+    h.click(find(&view, "[Restart host]"));
+    assert_eq!(h.launcher.terminations(), 0);
+    let notice = h.runtime.client().notice().unwrap_or_default().to_owned();
+    assert!(!notice.contains("could not restart"), "{notice}");
+}
+
 #[test]
 fn not_now_leaves_the_stale_host_running() {
     let (a, b) = (build(0xa), build(0xb));

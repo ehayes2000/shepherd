@@ -25,4 +25,4 @@ expression: "text(&buffer(&answered(hello_ok(None, None)), WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Restart host  Detach ?│

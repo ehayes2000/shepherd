@@ -24,5 +24,5 @@ expression: "text(&buffer(&answered(hello_ok(Some(2), Some(2))), WIDE))"
                        │
                        │
                        │
- this window runs a different shepherd build than the host; restart it to use
- the installed one
+ this window runs another build than the host: restart it to use the installed
+ one

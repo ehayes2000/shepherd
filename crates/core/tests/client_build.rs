@@ -10,9 +10,11 @@ use shepherd_core::wire::{BuildId, ClientRequest, ExeDigest, PROTOCOL_VERSION, W
 use shepherd_testkit::builders::{ClientDriver, requests, ts};
 
 /// The notice for an odd-one-out client.
-const ODD_ONE_OUT: &str = "this window runs a different shepherd build than the host; restart it to use the installed one";
+const ODD_ONE_OUT: &str =
+    "this window runs another build than the host: restart it to use the installed one";
 /// The notice when client, host and installed binary all differ.
-const ALL_DIFFER: &str = "this window and the shepherd host run different shepherd builds, and neither is the installed one";
+const ALL_DIFFER: &str =
+    "this window and the host run different builds, and neither is the installed one";
 /// What a `-32601` answer says.
 const OLDER_HOST: &str = "the shepherd host is older than this client: restart it to use this";
 
@@ -185,6 +187,84 @@ fn after_a_restart_the_dropped_link_reconnects_and_relaunches_the_host() {
         error: "connection refused".into(),
     });
     assert_eq!(failed, [ClientCommand::LaunchHost]);
+}
+
+#[test]
+fn the_restart_dialog_goes_when_the_link_drops_and_a_matching_host_answers() {
+    let mut c = answered(Ok(hello_ok(Some(2), Some(1))));
+    assert!(matches!(
+        c.client().popup(),
+        Some(Popup::RestartHost { .. })
+    ));
+    assert_eq!(
+        c.handle(ClientEvent::Disconnected),
+        [ClientCommand::Connect]
+    );
+    let sent = c.handle(ClientEvent::Connected {
+        at: ts("2026-10-29T12:00:01.000Z"),
+    });
+    c.answer(&sent, Ok(hello_ok(Some(1), Some(1))));
+    assert_eq!(c.client().popup(), None);
+    assert_eq!(c.user(Intent::RestartHost), []);
+}
+
+#[test]
+fn the_restart_dialog_goes_as_soon_as_the_link_drops() {
+    let mut c = answered(Ok(hello_ok(None, None)));
+    c.handle(ClientEvent::Disconnected);
+    assert_eq!(c.client().popup(), None);
+    assert_eq!(c.user(Intent::RestartHost), []);
+}
+
+#[test]
+fn after_not_now_on_an_incompatible_host_the_restart_dialog_can_be_reopened() {
+    let mut c = answered(Err(WireError::VersionMismatch { host: 2, client: 1 }));
+    c.user(Intent::Dismiss);
+    assert_eq!(c.client().restart_offer(), Some(HostOutdated::Older));
+    assert_eq!(c.user(Intent::OfferRestart), []);
+    assert_eq!(
+        c.client().popup().cloned(),
+        restart_dialog(HostOutdated::Older)
+    );
+}
+
+#[test]
+fn a_method_the_host_does_not_know_offers_a_restart() {
+    let mut c = answered(Ok(hello_ok(Some(1), Some(1))));
+    assert_eq!(c.client().restart_offer(), None);
+    c.user(Intent::BeginWorkspace);
+    c.user(Intent::EditWorkspacePath("/src/app".into()));
+    let sent = c.user(Intent::Confirm);
+    c.answer(
+        &sent,
+        Err(WireError::MethodNotFound(
+            "_shepherd/workspace/select".into(),
+        )),
+    );
+    assert_eq!(c.client().restart_offer(), Some(HostOutdated::Older));
+    c.user(Intent::Dismiss);
+    c.user(Intent::OfferRestart);
+    assert_eq!(
+        c.client().popup().cloned(),
+        restart_dialog(HostOutdated::Older)
+    );
+}
+
+#[test]
+fn a_host_of_the_same_build_offers_no_restart() {
+    let mut c = answered(Ok(hello_ok(Some(1), Some(1))));
+    c.user(Intent::OfferRestart);
+    assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn the_restart_offer_goes_with_the_host() {
+    let mut c = answered(Ok(hello_ok(None, None)));
+    c.user(Intent::Dismiss);
+    c.handle(ClientEvent::Disconnected);
+    assert_eq!(c.client().restart_offer(), None);
+    c.user(Intent::OfferRestart);
+    assert_eq!(c.client().popup(), None);
 }
 
 #[test]

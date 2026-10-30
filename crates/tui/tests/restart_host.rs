@@ -211,3 +211,60 @@ fn enter_does_not_restart_and_esc_closes_the_dialog() {
     assert_eq!(key(&c, KeyCode::Char('y')), []);
     assert_eq!(key(&c, KeyCode::Esc), [Intent::Dismiss]);
 }
+
+#[test]
+fn an_incompatible_host_after_not_now() {
+    let mut c = answered(Err(WireError::VersionMismatch { host: 2, client: 1 }));
+    c.user(Intent::Dismiss);
+    insta::assert_snapshot!(text(&buffer(&c, WIDE)));
+}
+
+#[test]
+fn after_not_now_the_footers_restart_host_reopens_the_dialog() {
+    let mut c = answered(Err(WireError::VersionMismatch { host: 2, client: 1 }));
+    c.user(Intent::Dismiss);
+    let buf = buffer(&c, WIDE);
+    // The footer's, not the pane's text that names it.
+    let footer = at(&buf, " Restart host  Detach");
+    let button = Position::new(footer.x + 1, footer.y);
+    assert_eq!(
+        hit(&layout(WIDE), c.client(), button.x, button.y),
+        Some(Target::OfferRestart)
+    );
+    assert_eq!(click(&mut c, button), []);
+    assert!(matches!(
+        c.client().popup(),
+        Some(shepherd_core::client::Popup::RestartHost { .. })
+    ));
+    // Restarting still takes the dialog's own button.
+    let restart = at(&buffer(&c, WIDE), "[Restart host]");
+    assert_eq!(click(&mut c, restart), [ClientCommand::TerminateHost]);
+}
+
+#[test]
+fn a_host_of_the_same_build_has_no_restart_host_in_the_footer() {
+    let c = answered(hello_ok(Some(1), Some(1)));
+    let buf = buffer(&c, WIDE);
+    assert!(!text(&buf).contains("Restart host"), "{}", text(&buf));
+}
+
+#[test]
+fn a_long_notice_takes_as_many_lines_as_its_words_wrap_to() {
+    let mut c = answered(hello_ok(Some(1), Some(1)));
+    c.user(Intent::BeginRename);
+    let sent = c.user(Intent::Confirm);
+    // 92 columns: 2 lines of 59 by count, but no two of the words fit on one line.
+    let words = ["a".repeat(30), "b".repeat(30), "c".repeat(30)];
+    c.answer(&sent, Err(WireError::InvalidParams(words.join(" "))));
+    let window = Rect::new(0, 0, 60, 12);
+    let shown = text(&buffer(&c, window));
+    let last: Vec<&str> = shown.lines().rev().take(3).collect();
+    assert_eq!(
+        last,
+        [
+            format!(" {}", words[2]),
+            format!(" {}", words[1]),
+            format!(" {}", words[0])
+        ]
+    );
+}

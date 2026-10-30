@@ -27,14 +27,17 @@
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use shepherd_core::ports::{HostLauncher, LaunchError, TerminateError};
+
+use crate::private_fs;
 
 pub struct ProcessHostLauncher {
     program: PathBuf,
@@ -143,6 +146,9 @@ impl HostLauncher for ProcessHostLauncher {
         let socket = self.socket.as_ref().ok_or_else(|| {
             TerminateError::Failed("no host socket to find the host by".to_owned())
         })?;
+        if !check_socket(socket)? {
+            return Err(TerminateError::NotRunning);
+        }
         let conn = match UnixStream::connect(socket) {
             Ok(conn) => conn,
             Err(e)
@@ -161,9 +167,15 @@ impl HostLauncher for ProcessHostLauncher {
             }
         };
         let failed = |e: io::Error| TerminateError::Failed(format!("cannot find the host: {e}"));
-        let pid = peer_pid(&conn).map_err(failed)?;
-        // SAFETY: plain libc call.
-        let own = unsafe { libc::getpid() };
+        let (pid, uid) = peer_cred(&conn).map_err(failed)?;
+        // SAFETY: plain libc calls.
+        let (own, me) = unsafe { (libc::getpid(), libc::getuid()) };
+        if uid != me {
+            return Err(TerminateError::Failed(format!(
+                "{} is served by another user (uid {uid})",
+                socket.display()
+            )));
+        }
         // Never 0 or negative (a process group, or every process), and never this process.
         if pid <= 0 || pid == own {
             return Err(TerminateError::Failed(format!(
@@ -238,10 +250,44 @@ pub fn release_stderr() -> io::Result<()> {
     Ok(())
 }
 
-/// The pid of the process that listens on the socket `conn` is connected to, from the connection's peer credentials
-/// (recorded when that process called `listen`).
+/// Whether `socket` is one this user's host serves on, before anything connects to it: its directory exists and is
+/// private (decision 0010, as the host checks it), and `socket` itself is a socket this user owns, not a symlink.
+/// `Ok(false)` when nothing is there; an error says what is wrong with what is.
+fn check_socket(socket: &Path) -> Result<bool, TerminateError> {
+    let refused = |why: String| TerminateError::Failed(format!("not stopping the host: {why}"));
+    let dir = socket
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        _ => private_fs::check_private_dir(dir).map_err(|e| refused(e.to_string()))?,
+    }
+    let meta = match std::fs::symlink_metadata(socket) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(refused(format!("{}: {e}", socket.display()))),
+    };
+    private_fs::refuse_symlink(socket, meta.file_type()).map_err(|e| refused(e.to_string()))?;
+    if !meta.file_type().is_socket() {
+        return Err(refused(format!("{} is not a socket", socket.display())));
+    }
+    // SAFETY: plain libc call.
+    let me = unsafe { libc::getuid() };
+    if meta.uid() != me {
+        return Err(refused(format!(
+            "{} belongs to another user (uid {})",
+            socket.display(),
+            meta.uid()
+        )));
+    }
+    Ok(true)
+}
+
+/// The pid and user of the process that listens on the socket `conn` is connected to, from the connection's peer
+/// credentials (recorded when that process called `listen`).
 #[cfg(target_vendor = "apple")]
-fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
+fn peer_cred(conn: &UnixStream) -> io::Result<(libc::pid_t, libc::uid_t)> {
     let mut pid: libc::pid_t = 0;
     let mut len =
         libc::socklen_t::try_from(std::mem::size_of::<libc::pid_t>()).map_err(io::Error::other)?;
@@ -258,13 +304,18 @@ fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
     if got == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(pid)
+    let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
+    // SAFETY: `uid` and `gid` are valid for writes, and the fd is open for the call.
+    if unsafe { libc::getpeereid(conn.as_raw_fd(), &raw mut uid, &raw mut gid) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((pid, uid))
 }
 
-/// The pid of the process that listens on the socket `conn` is connected to, from the connection's peer credentials
-/// (recorded when that process called `listen`).
+/// The pid and user of the process that listens on the socket `conn` is connected to, from the connection's peer
+/// credentials (recorded when that process called `listen`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
+fn peer_cred(conn: &UnixStream) -> io::Result<(libc::pid_t, libc::uid_t)> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -285,7 +336,7 @@ fn peer_pid(conn: &UnixStream) -> io::Result<libc::pid_t> {
     if got == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(cred.pid)
+    Ok((cred.pid, cred.uid))
 }
 
 /// Signals the host starts with at their default action, whatever the client had.
@@ -390,12 +441,12 @@ wait
         stop: File,
         pids: Vec<i32>,
         /// The stand-in listener [`LauncherFixture::running`] started, until it exits.
-        listener: Option<std::process::Child>,
+        listener: Option<ChildGuard>,
     }
 
     impl StandInFixture {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let fifo = dir.path().join("report");
             mkfifo(&fifo);
             // Opening a fifo read-write doesn't wait for a writer.
@@ -469,11 +520,6 @@ wait
 
     impl Drop for StandInFixture {
         fn drop(&mut self) {
-            if let Some(mut listener) = self.listener.take() {
-                // Our own child: kill it by its handle, never by name.
-                let _ = listener.kill();
-                let _ = listener.wait();
-            }
             // Stand-ins that reported after a failed test stopped reading.
             while let Ok(report) = self.reports.recv_timeout(Duration::from_millis(100)) {
                 if let Report::Started { pid, .. } = report {
@@ -524,7 +570,7 @@ wait
 
         fn wait_terminated(&mut self, timeout: Duration) {
             let mut listener = self.listener.take().expect("a running stand-in listener");
-            assert_eq!(exit_signal(&mut listener, timeout), Some(libc::SIGTERM));
+            assert_eq!(listener.exit_signal(timeout), Some(libc::SIGTERM));
         }
     }
 
@@ -785,47 +831,84 @@ wait
     const LISTEN_VAR: &str = "SHEPHERD_LAUNCHER_TEST_LISTEN";
     /// What the stand-in listener prints once it listens.
     const LISTENING: &str = "stand-in listening";
+    /// How long a stand-in listener lives at most, in case a failed test leaks it.
+    const STAND_IN_LIFETIME: Duration = Duration::from_secs(120);
 
     /// A stand-in for a running host, of any build: re-run with [`LISTEN_VAR`] set, it listens on that socket and
-    /// accepts connections until a signal stops it. It knows nothing of shepherd's protocol, like a host older than
-    /// `terminate`. Run normally, it does nothing.
+    /// accepts connections until a signal stops it, or [`STAND_IN_LIFETIME`] passes. It knows nothing of shepherd's
+    /// protocol, like a host older than `terminate`. Run normally, it does nothing.
     #[test]
     fn stand_in_listener() {
         let Some(socket) = std::env::var_os(LISTEN_VAR) else {
             return;
         };
         let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        // Polled, so the lifetime is honoured even when nothing connects.
+        listener.set_nonblocking(true).unwrap();
         let mut out = std::io::stdout();
         writeln!(out, "{LISTENING}").unwrap();
         out.flush().unwrap();
-        // At most 2 minutes, in case a failed test leaks it.
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + STAND_IN_LIFETIME;
         // Kept open, as a host keeps its clients': a connection closed at once can't be asked for its peer.
         let mut conns = Vec::new();
-        for conn in listener.incoming() {
-            conns.push(conn);
-            if std::time::Instant::now() > deadline {
-                return;
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((conn, _)) => conns.push(conn),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    /// A child process of this test, killed and reaped when dropped, however the test ends.
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            // Our own child, by its handle: never by name.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    impl ChildGuard {
+        /// Whether it is still running.
+        fn alive(&mut self) -> bool {
+            matches!(self.0.try_wait(), Ok(None))
+        }
+
+        /// The signal that ended it, waiting at most `timeout` for it to end. Panics (and the drop kills it) if it
+        /// doesn't.
+        fn exit_signal(&mut self, timeout: Duration) -> Option<i32> {
+            use std::os::unix::process::ExitStatusExt;
+            use wait_timeout::ChildExt;
+            match self.0.wait_timeout(timeout).unwrap() {
+                Some(status) => status.signal(),
+                None => panic!("the stand-in listener is still running"),
             }
         }
     }
 
     /// Starts [`stand_in_listener`] on `socket` and waits until it listens.
-    fn spawn_listener(socket: &Path) -> std::process::Child {
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "launcher::tests::stand_in_listener",
-                "--test-threads=1",
-                "--nocapture",
-            ])
-            .env(LISTEN_VAR, socket)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let stdout = child.stdout.take().unwrap();
+    fn spawn_listener(socket: &Path) -> ChildGuard {
+        let mut child = ChildGuard(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "launcher::tests::stand_in_listener",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(LISTEN_VAR, socket)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let stdout = child.0.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -835,36 +918,32 @@ wait
                 }
             }
         });
-        if rx.recv_timeout(TIMEOUT).is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the stand-in listener never listened");
-        }
+        assert!(
+            rx.recv_timeout(TIMEOUT).is_ok(),
+            "the stand-in listener never listened"
+        );
         child
     }
 
-    /// The signal that ended `child`, waiting at most `timeout` for it to end. Kills it if it doesn't.
-    fn exit_signal(child: &mut std::process::Child, timeout: Duration) -> Option<i32> {
-        use std::os::unix::process::ExitStatusExt;
-        use wait_timeout::ChildExt;
-        match child.wait_timeout(timeout).unwrap() {
-            Some(status) => status.signal(),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("the stand-in listener is still running");
-            }
-        }
+    /// A tempdir only this user can access, as `~/.shepherd` is (decision 0010), whatever the umask.
+    fn private_tempdir() -> TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    fn launcher_for(socket: &Path) -> ProcessHostLauncher {
+        ProcessHostLauncher::new("/nonexistent", ["host"]).socket(socket)
     }
 
     #[test]
     fn terminate_signals_the_process_listening_on_the_socket() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let socket = dir.path().join("host.sock");
         let mut listener = spawn_listener(&socket);
-        let launcher = ProcessHostLauncher::new("/nonexistent", ["host"]).socket(&socket);
-        assert_eq!(launcher.terminate(), Ok(()));
-        assert_eq!(exit_signal(&mut listener, TIMEOUT), Some(libc::SIGTERM));
+        assert_eq!(launcher_for(&socket).terminate(), Ok(()));
+        assert_eq!(listener.exit_signal(TIMEOUT), Some(libc::SIGTERM));
     }
 
     #[test]
@@ -878,15 +957,83 @@ wait
 
     #[test]
     fn terminate_on_a_socket_nothing_listens_on_is_not_running() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let socket = dir.path().join("host.sock");
         // Left by a listener that was killed, as after a host that crashed: the file stays. Bound in another process,
         // because a child another test forks from this one could still hold a listener bound here.
-        let mut listener = spawn_listener(&socket);
-        listener.kill().unwrap();
-        listener.wait().unwrap();
+        drop(spawn_listener(&socket));
         assert!(socket.exists());
-        let launcher = ProcessHostLauncher::new("/nonexistent", ["host"]).socket(&socket);
-        assert_eq!(launcher.terminate(), Err(TerminateError::NotRunning));
+        assert_eq!(
+            launcher_for(&socket).terminate(),
+            Err(TerminateError::NotRunning)
+        );
+    }
+
+    #[test]
+    fn terminate_in_a_directory_that_does_not_exist_is_not_running() {
+        let dir = private_tempdir();
+        let socket = dir.path().join("gone").join("host.sock");
+        assert_eq!(
+            launcher_for(&socket).terminate(),
+            Err(TerminateError::NotRunning)
+        );
+    }
+
+    #[test]
+    fn terminate_refuses_a_symlink_at_the_socket_path_and_signals_nothing() {
+        let dir = private_tempdir();
+        let real = dir.path().join("elsewhere.sock");
+        let mut listener = spawn_listener(&real);
+        let socket = dir.path().join("host.sock");
+        std::os::unix::fs::symlink(&real, &socket).unwrap();
+        let result = launcher_for(&socket).terminate();
+        assert!(
+            matches!(result, Err(TerminateError::Failed(_))),
+            "{result:?}"
+        );
+        assert!(listener.alive(), "the stand-in was signalled");
+    }
+
+    #[test]
+    fn terminate_refuses_a_socket_in_a_directory_others_can_write_and_signals_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_tempdir();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let socket = shared.join("host.sock");
+        let mut listener = spawn_listener(&socket);
+        let result = launcher_for(&socket).terminate();
+        assert!(
+            matches!(result, Err(TerminateError::Failed(_))),
+            "{result:?}"
+        );
+        assert!(listener.alive(), "the stand-in was signalled");
+    }
+
+    #[test]
+    fn terminate_refuses_a_path_that_is_not_a_socket() {
+        let dir = private_tempdir();
+        let socket = dir.path().join("host.sock");
+        std::fs::write(&socket, b"").unwrap();
+        let result = launcher_for(&socket).terminate();
+        assert!(
+            matches!(result, Err(TerminateError::Failed(_))),
+            "{result:?}"
+        );
+    }
+
+    /// A socket this very process listens on: `terminate` must never signal itself.
+    #[test]
+    fn terminate_never_signals_its_own_process() {
+        let dir = private_tempdir();
+        let socket = dir.path().join("host.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let result = launcher_for(&socket).terminate();
+        assert!(
+            matches!(result, Err(TerminateError::Failed(_))),
+            "{result:?}"
+        );
+        // Still here to assert it.
     }
 }

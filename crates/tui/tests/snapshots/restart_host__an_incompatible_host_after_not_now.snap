@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/restart_host.rs
+expression: "text(&buffer(&c, WIDE))"
+---
+ ⌂ choose a workspace  │
+ + New session         │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │   The shepherd host speaks another protocol version.
+                       │            Click Restart host to restart it.
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+                       │
+ Restart host  Detach ?│

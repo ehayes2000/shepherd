@@ -14,7 +14,7 @@ expression: "text(&buffer(&c, WIDE))"
                 ┌ restart the host ────────────────────────────┐
                 │The shepherd host is older than this window   │
                 │and can't update itself. Restart it?          │ocol version.
-                │Its running sessions will stop.               │
+                │Its running sessions will stop.               │t it.
                 │                    [Restart host]  [Not now] │
                 └──────────────────────────────────────────────┘
                        │
@@ -25,4 +25,4 @@ expression: "text(&buffer(&c, WIDE))"
                        │
                        │
                        │
- ctrl-b ? help Detach ?│
+ Restart host  Detach ?│

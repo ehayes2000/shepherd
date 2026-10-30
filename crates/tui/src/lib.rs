@@ -124,10 +124,13 @@ fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
             ),
         ],
         Connection::Failed(why) => vec![draw::line(shown(why), Style::new().fg(Color::Red))],
-        Connection::Incompatible => vec![draw::line(
-            shown("The shepherd host speaks another protocol version. Restart it to connect."),
-            Style::new().fg(Color::Yellow),
-        )],
+        Connection::Incompatible => vec![
+            draw::line(
+                shown("The shepherd host speaks another protocol version."),
+                Style::new().fg(Color::Yellow),
+            ),
+            draw::line(shown("Click Restart host to restart it."), gray),
+        ],
         _ => vec![draw::line(shown("Connecting to the shepherd host…"), gray)],
     };
     let height = (lines.len() as u16).min(pane.height);
