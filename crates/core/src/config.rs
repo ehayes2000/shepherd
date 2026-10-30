@@ -242,6 +242,14 @@ impl Config {
         self.profiles.get(name)
     }
 
+    /// The profile called `name`, or the default one when `name` is `None`. `None` when no profile has that name.
+    pub fn profile_or_default(&self, name: Option<&str>) -> Option<&AgentProfile> {
+        match name {
+            Some(name) => self.profile(name),
+            None => Some(&self.default_agent),
+        }
+    }
+
     /// All profiles, by name.
     pub fn profiles(&self) -> impl Iterator<Item = &AgentProfile> {
         self.profiles.values()

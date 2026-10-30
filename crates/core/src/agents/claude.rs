@@ -48,6 +48,23 @@ use crate::ids::SessionId;
 /// The agent name in `source.agent` and `_shepherd/agent/started`.
 pub const AGENT: &str = "claude-code";
 
+/// The hooks a Claude Code session is launched with: every hook the table above maps to more than a vendor frame.
+pub const HOOK_EVENTS: [&str; 13] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PermissionDenied",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Notification",
+    "Stop",
+    "StopFailure",
+    "PreCompact",
+    "PostCompact",
+    "SessionEnd",
+];
+
 /// What the translator remembers between hooks of one shepherd session. The host keeps one per session and passes
 /// it to every [`translate`] call, so a prompt and its `Stop` pair up by id. It serializes, so the host can persist
 /// it across restarts.

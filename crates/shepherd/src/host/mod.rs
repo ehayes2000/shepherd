@@ -10,6 +10,7 @@
 //!    a client that launched it that it started. A startup error before that is printed there, for that client.
 
 mod env;
+mod run_files;
 mod runtime;
 
 use std::fs::{File, OpenOptions};
@@ -38,6 +39,8 @@ pub type RealHost = HostRuntime<PortablePty, UnixListenLink, JsonlEventLog, Real
 pub const SOCKET_FILE: &str = "host.sock";
 pub const LOG_FILE: &str = "host.log";
 pub const CONFIG_FILE: &str = "config.toml";
+/// Each session's run files (e.g. Claude Code's generated settings) go in `<root>/run/<session>/`.
+pub const RUN_DIR: &str = "run";
 
 /// Why the host couldn't start. Each message says what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -68,6 +71,8 @@ pub enum HostStartError {
     Config { path: PathBuf, error: ConfigError },
     #[error("cannot open {path}: {reason}")]
     LogFile { path: PathBuf, reason: String },
+    #[error("cannot find the running shepherd executable: {0}")]
+    Executable(String),
 }
 
 fn root_error(root: &Path, e: PrivateFsError) -> HostStartError {
@@ -136,8 +141,16 @@ fn open_inner(
         .load()
         .map_err(config_error)?;
     let config = Config::resolve(raw, login_shell).map_err(config_error)?;
+    let shepherd =
+        std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
     let pty = PortablePty::new(tx.pty_sink());
-    let settings = RuntimeSettings { config, home };
+    let settings = RuntimeSettings {
+        config,
+        home,
+        run_root: root.join(RUN_DIR),
+        shepherd,
+        socket: root.join(SOCKET_FILE),
+    };
     HostRuntime::start(pty, link, log, RealEnv, settings, tx, rx).map_err(|e| log_error(root, e))
 }
 

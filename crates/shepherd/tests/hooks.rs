@@ -374,12 +374,16 @@ mod real {
         }
     }
 
-    /// Asks the host on `socket` for a new session and returns its id.
+    /// Asks the host on `socket` for a new `shell` session and returns its id. Never the default profile, which
+    /// would run the real `claude`.
     fn new_session(socket: &Path) -> SessionId {
         let mut stream = UnixStream::connect(socket).unwrap();
         let request = encode_request(&Request {
             id: 1.into(),
-            body: ClientRequest::SessionNew(SessionNew::default()),
+            body: ClientRequest::SessionNew(SessionNew {
+                profile: Some("shell".to_owned()),
+                cwd: None,
+            }),
         });
         stream.write_all(&request).unwrap();
         let mut line = Vec::new();
