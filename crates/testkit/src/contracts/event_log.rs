@@ -31,6 +31,10 @@ macro_rules! event_log_contract {
             awkward_frame_content_survives_reopen,
             append_to_the_wrong_log_is_wrong_log,
             unsafe_session_ids_are_invalid,
+            read_batch_returns_at_most_max_entries_after_from,
+            consecutive_batches_cover_the_log_exactly_once,
+            read_batch_at_the_end_or_of_an_empty_log_is_empty,
+            read_batch_sees_entries_appended_after_a_reopen,
         );
     };
     (@cases $make:expr; $($case:ident),* $(,)?) => {
@@ -170,6 +174,73 @@ pub fn read_past_the_end_is_empty<L: EventLog>(mut h: EventLogHarness<L>) {
     h.push(&s, 2);
     assert_eq!(h.read(s.clone(), Seq::new(2)).unwrap(), vec![]);
     assert_eq!(h.read(s.clone(), Seq::new(100)).unwrap(), vec![]);
+}
+
+pub fn read_batch_returns_at_most_max_entries_after_from<L: EventLog>(mut h: EventLogHarness<L>) {
+    let s = session("s1");
+    let appended: Vec<Envelope> = (1..=10).map(|n| h.push(&s, n)).collect();
+    assert_eq!(
+        h.read_batch(s.clone(), Seq::ZERO, 3).unwrap(),
+        appended[..3]
+    );
+    assert_eq!(
+        h.read_batch(s.clone(), Seq::new(4), 3).unwrap(),
+        appended[4..7]
+    );
+    // Fewer than `max` left: just those.
+    assert_eq!(
+        h.read_batch(s.clone(), Seq::new(8), 5).unwrap(),
+        appended[8..]
+    );
+    assert_eq!(h.read_batch(s.clone(), Seq::ZERO, 0).unwrap(), vec![]);
+}
+
+pub fn consecutive_batches_cover_the_log_exactly_once<L: EventLog>(mut h: EventLogHarness<L>) {
+    let s = session("s1");
+    for n in 1..=23 {
+        h.push(&s, n);
+        h.push(&LogId::Host, n);
+    }
+    let mut got = Vec::new();
+    let mut from = Seq::ZERO;
+    loop {
+        let batch = h.read_batch(s.clone(), from, 5).unwrap();
+        let Some(last) = batch.last() else {
+            break;
+        };
+        assert!(batch.len() <= 5);
+        from = last.seq();
+        got.extend(batch);
+    }
+    assert_eq!(got, h.all(&s));
+}
+
+pub fn read_batch_at_the_end_or_of_an_empty_log_is_empty<L: EventLog>(mut h: EventLogHarness<L>) {
+    let s = session("s1");
+    h.push(&s, 1);
+    h.push(&s, 2);
+    assert_eq!(h.read_batch(s.clone(), Seq::new(2), 10).unwrap(), vec![]);
+    assert_eq!(h.read_batch(s.clone(), Seq::new(100), 10).unwrap(), vec![]);
+    assert_eq!(h.read_batch(LogId::Host, Seq::ZERO, 10).unwrap(), vec![]);
+    assert_eq!(
+        h.read_batch(session("nobody"), Seq::ZERO, 10).unwrap(),
+        vec![]
+    );
+}
+
+pub fn read_batch_sees_entries_appended_after_a_reopen<L: EventLog>(mut h: EventLogHarness<L>) {
+    let s = session("s1");
+    let mut appended: Vec<Envelope> = (1..=4).map(|n| h.push(&s, n)).collect();
+    h.reopen();
+    appended.extend((5..=6).map(|n| h.push(&s, n)));
+    assert_eq!(
+        h.read_batch(s.clone(), Seq::new(2), 3).unwrap(),
+        appended[2..5]
+    );
+    assert_eq!(
+        h.read_batch(s.clone(), Seq::new(5), 3).unwrap(),
+        appended[5..]
+    );
 }
 
 pub fn reading_a_log_with_no_entries_is_empty<L: EventLog>(h: EventLogHarness<L>) {

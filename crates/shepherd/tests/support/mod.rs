@@ -178,13 +178,28 @@ fn build_runtime(
     log: FakeEventLog,
     env: TestEnv,
 ) -> Runtime {
+    runtime_with(net, programs, log, env, |sink| sink)
+}
+
+/// A host runtime on fakes with any `EventLog` (e.g. a wrapper that counts reads), listening on `net`, its link's
+/// events passing through `link_sink` (e.g. to hold some back). For tests the [`HostHarness`] doesn't cover; step
+/// it with `run_until_idle`.
+pub fn runtime_with<E: EventLog>(
+    net: &FakeNetwork,
+    programs: &[(String, Program)],
+    log: E,
+    env: TestEnv,
+    link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
+) -> HostRuntime<FakePty, FakeLink, E, TestEnv> {
     let (tx, rx) = runtime_channel();
     let mut pty = FakePty::new(tx.pty_sink());
     for (command, program) in programs {
         let program = program.clone();
         pty = pty.with_program(command.clone(), move |input, p| program(input, p));
     }
-    let link = net.listen(tx.link_sink()).expect("fake host listens");
+    let link = net
+        .listen(link_sink(tx.link_sink()))
+        .expect("fake host listens");
     let settings = RuntimeSettings {
         config: Config::resolve(None, Some(SHELL.to_owned())).expect("default config"),
         home: HOME.into(),
@@ -313,7 +328,7 @@ impl FakeClient {
         Self::connect_with(net, false)
     }
 
-    fn connect_with(net: &FakeNetwork, paced: bool) -> Self {
+    pub fn connect_with(net: &FakeNetwork, paced: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let sink = Arc::new(ChannelSink(Mutex::new(tx)));
         let (link, conn) = if paced {

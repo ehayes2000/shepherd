@@ -9,7 +9,8 @@
 //! - **Subscriptions.** Per connection, paced by the link's backpressure (decision 0013). A subscribe starts a
 //!   cursor per log; entries are read from the log and sent while the conn's queue is below [`LOW_WATER`]. A
 //!   blocked catch-up retries after [`CATCH_UP_TICK`], doubling up to [`MAX_CATCH_UP_TICK`] while its queue doesn't
-//!   shrink, and holds no entries in memory meanwhile. A conn whose queue hasn't shrunk for [`STALL_TIMEOUT`] is
+//!   shrink. Entries are read [`CATCH_UP_BATCH`] at a time (`EventLog::read_batch`), so each is read once and a
+//!   conn holds at most one batch. A conn whose queue hasn't shrunk for [`STALL_TIMEOUT`] is
 //!   closed: a client that stopped reading. A log whose cursor hasn't reached its end gets no live
 //!   entries (the cursor reads them); once it reaches the end, in that same iteration, the log goes live. When
 //!   every cursor is done the conn gets a `snapshot_ansi()` of every live screen, then the ack, and from then on
@@ -55,6 +56,8 @@ pub const CATCH_UP_TICK: Duration = Duration::from_millis(5);
 pub const MAX_CATCH_UP_TICK: Duration = Duration::from_millis(500);
 /// A catching-up conn whose queue hasn't shrunk for this long is closed.
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many entries a catch-up reads from the log at a time, and the most it holds per conn.
+pub const CATCH_UP_BATCH: usize = 256;
 
 /// Everything the loop reacts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,8 +166,8 @@ struct Blocked {
 struct Cursor {
     /// The last seq sent.
     after: Seq,
-    /// Entries read from the log and not sent yet. Refilled from `after` when empty; empty after a refill means
-    /// the cursor has reached the end.
+    /// Entries read from the log and not sent yet, at most [`CATCH_UP_BATCH`]. Refilled from `after` when empty;
+    /// empty after a refill means the cursor has reached the end.
     batch: VecDeque<Envelope>,
 }
 
@@ -725,8 +728,11 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
                 return;
             };
             match self.link.queued_bytes(conn) {
-                // Gone: its `Disconnected` is on the way.
-                None => return,
+                // Gone, its `Disconnected` still on the way: forget it now, so no retry deadline is left behind.
+                None => {
+                    self.forget(conn);
+                    return;
+                }
                 Some(queued) if queued >= LOW_WATER => {
                     self.block(conn, queued);
                     return;
@@ -737,7 +743,7 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
             let log = entry.key().clone();
             let cursor = entry.get_mut();
             if cursor.batch.is_empty() {
-                match self.log.read(log, cursor.after) {
+                match self.log.read_batch(log, cursor.after, CATCH_UP_BATCH) {
                     // The end of this log: it goes live now, before anything else can be appended to it.
                     Ok(read) if read.is_empty() => {
                         entry.remove();
@@ -770,16 +776,12 @@ impl<P: Pty, L: Link, E: EventLog, V: Env> HostRuntime<P, L, E, V> {
     }
 
     /// `conn`'s catch-up found `queued` bytes waiting. Schedules the next check, backing off while the queue
-    /// doesn't shrink, and closes the conn once it hasn't shrunk for [`STALL_TIMEOUT`]. Drops the entries read
-    /// ahead, so a stalled conn holds no copy of the log; they are read again from the cursor.
+    /// doesn't shrink, and closes the conn once it hasn't shrunk for [`STALL_TIMEOUT`].
     fn block(&mut self, conn: ConnId, queued: usize) {
         let now = self.env.instant();
         let Some(sub) = self.conns.get_mut(&conn).and_then(|c| c.sub.as_mut()) else {
             return;
         };
-        for cursor in sub.cursors.values_mut() {
-            cursor.batch = VecDeque::new();
-        }
         let blocked = match sub.blocked {
             Some(b) if queued >= b.queued => {
                 if now.saturating_duration_since(b.since) >= STALL_TIMEOUT {

@@ -24,9 +24,9 @@ use shepherd_core::ports::{ConfigSource, LogError, LogId};
 
 pub use env::{Env, RealEnv};
 pub use runtime::{
-    CATCH_UP_TICK, HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER, MAX_CATCH_UP_TICK,
-    RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT,
-    runtime_channel,
+    CATCH_UP_BATCH, CATCH_UP_TICK, HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER,
+    MAX_CATCH_UP_TICK, RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE,
+    STALL_TIMEOUT, runtime_channel,
 };
 
 /// The host runtime on the real adapters.

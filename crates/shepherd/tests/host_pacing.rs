@@ -3,13 +3,14 @@
 
 mod support;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use shepherd::host::{
-    CATCH_UP_TICK, MAX_CATCH_UP_TICK, RuntimeEvent, SHUTDOWN_GRACE, STALL_TIMEOUT,
+    CATCH_UP_BATCH, CATCH_UP_TICK, MAX_CATCH_UP_TICK, RuntimeEvent, SHUTDOWN_GRACE, STALL_TIMEOUT,
 };
-use shepherd_core::acpp::Envelope;
+use shepherd_core::acpp::{Envelope, Seq};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::{EventLog, LogId, MAX_QUEUED, PtyError, PtyEvent};
 use shepherd_core::wire::{ClientRequest, HostMessage, SessionRename};
@@ -274,6 +275,135 @@ fn a_blocked_client_whose_queue_keeps_shrinking_is_never_closed() {
         h.step();
         assert!(!slow.is_disconnected());
     }
+}
+
+/// A [`FakeEventLog`] that counts the entries its reads return (what a real log would parse), and the most any one
+/// read returned (what a reader has to hold at once).
+struct CountingLog {
+    inner: FakeEventLog,
+    parsed: Arc<AtomicUsize>,
+    largest: Arc<AtomicUsize>,
+}
+
+impl CountingLog {
+    fn count(&self, read: &[Envelope]) {
+        self.parsed.fetch_add(read.len(), Ordering::SeqCst);
+        self.largest.fetch_max(read.len(), Ordering::SeqCst);
+    }
+}
+
+impl EventLog for CountingLog {
+    fn append(
+        &mut self,
+        log: LogId,
+        draft: shepherd_core::acpp::FrameDraft,
+        stamp: shepherd_core::acpp::Stamp,
+    ) -> Result<Envelope, shepherd_core::ports::LogError> {
+        self.inner.append(log, draft, stamp)
+    }
+
+    fn read(&self, log: LogId, from: Seq) -> Result<Vec<Envelope>, shepherd_core::ports::LogError> {
+        let read = self.inner.read(log, from)?;
+        self.count(&read);
+        Ok(read)
+    }
+
+    fn read_batch(
+        &self,
+        log: LogId,
+        from: Seq,
+        max: usize,
+    ) -> Result<Vec<Envelope>, shepherd_core::ports::LogError> {
+        let read = self.inner.read_batch(log, from, max)?;
+        self.count(&read);
+        Ok(read)
+    }
+
+    fn logs(&self) -> Result<Vec<LogId>, shepherd_core::ports::LogError> {
+        self.inner.logs()
+    }
+}
+
+#[test]
+fn a_paced_catch_up_reads_each_entry_about_once() {
+    let parsed = Arc::new(AtomicUsize::new(0));
+    let largest = Arc::new(AtomicUsize::new(0));
+    let log = CountingLog {
+        inner: big_history(MAX_QUEUED * 3 / 2),
+        parsed: parsed.clone(),
+        largest: largest.clone(),
+    };
+    let net = shepherd_testkit::fakes::link::FakeNetwork::new();
+    let env = TestEnv::new();
+    let clock = env.clock();
+    let mut rt = runtime_with(&net, &[(SHELL.to_owned(), echo_shell())], log, env, |s| s);
+    rt.run_until_idle();
+    let total = rt
+        .log()
+        .inner
+        .read(LogId::Session(SessionId::new("s_a")), Seq::ZERO)
+        .unwrap()
+        .len();
+    parsed.store(0, Ordering::SeqCst);
+    largest.store(0, Ordering::SeqCst);
+
+    let mut slow = FakeClient::connect_with(&net, true);
+    let req = slow.subscribe_all();
+    rt.run_until_idle();
+    let mut msgs = Vec::new();
+    let mut rounds = 0;
+    while !msgs.iter().any(|m| is_response(m, &req)) {
+        rounds += 1;
+        assert!(rounds < 10_000);
+        slow.read(64 * 1024);
+        msgs.extend(slow.take());
+        if let Some(due) = rt.next_deadline() {
+            clock.advance(due.saturating_duration_since(clock.now()));
+        }
+        rt.run_until_idle();
+    }
+    assert!(rounds > 100, "not paced: {rounds} rounds");
+    assert_eq!(entries(&msgs).len(), total);
+    let parsed = parsed.load(Ordering::SeqCst);
+    assert!(
+        parsed <= total + CATCH_UP_BATCH,
+        "parsed {parsed} entries for {total}"
+    );
+    assert!(largest.load(Ordering::SeqCst) <= CATCH_UP_BATCH);
+}
+
+/// Passes link events through, except `Disconnected`, which is held back as if still in flight.
+struct HoldDisconnects(Arc<dyn shepherd_core::ports::LinkEventSink>);
+
+impl shepherd_core::ports::LinkEventSink for HoldDisconnects {
+    fn send(&self, event: shepherd_core::ports::LinkEvent) {
+        if !matches!(event, shepherd_core::ports::LinkEvent::Disconnected { .. }) {
+            self.0.send(event);
+        }
+    }
+}
+
+#[test]
+fn a_catching_up_conn_found_gone_leaves_no_deadline_before_its_disconnect_arrives() {
+    let net = shepherd_testkit::fakes::link::FakeNetwork::new();
+    let env = TestEnv::new();
+    let clock = env.clock();
+    let mut rt = runtime_with(
+        &net,
+        &[(SHELL.to_owned(), echo_shell())],
+        big_history(MAX_QUEUED * 3 / 2),
+        env,
+        |sink| Arc::new(HoldDisconnects(sink)),
+    );
+    let mut slow = FakeClient::connect_with(&net, true);
+    slow.subscribe_all();
+    rt.run_until_idle();
+    let due = rt.next_deadline().expect("a blocked catch-up");
+
+    drop(slow);
+    clock.advance(due.saturating_duration_since(clock.now()));
+    rt.run_until_idle();
+    assert_eq!(rt.next_deadline(), None);
 }
 
 #[test]
