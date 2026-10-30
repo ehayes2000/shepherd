@@ -9,9 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F18 host startup errors | in review | task/f18-host-startup-errors @ fda5554 | 1 | PM-accepted: message on stderr after restore (no lingering error screen); hand-started host releases stderr too |
-| T33 clickable sidebar | building | task/t33-clickable-sidebar @ 9e868ad | 0 | – |
-| T16 hook subcommand | in review | task/t16-hook-subcommand @ 22256a6 | 1 | PM-accepted: wire carries raw payload; per-run ULID seed; 1 s ack wait; translator leak → F19. PM to fix acpp.md rule 6 + plan text after merge |
+| T33 clickable sidebar | in review | task/t33-clickable-sidebar @ 3479069 | 1 | PM-accepted: extra intent SidebarRows(usize); Pointer in tui state; header title → button |
+| T16 hook subcommand | fixing (CHANGES) | task/t16-hook-subcommand @ 22256a6 | 1 | Blocking: reply-timeout bound untested. Minors: Refused/Disconnected via deliver; docs narrowed to what's bounded (PM). Earlier accepts stand |
 | F14 pty backpressure | building | task/f14-pty-backpressure @ 9e868ad | 0 | – |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -40,6 +39,7 @@ Next: T34 after T33; T17 after T16; T18b after F14 and T16.
 | T11 | 4 | 8 MB attach limit, stalled clients never dropped, quadratic re-reads, deadline starvation |
 | T12 | 3 | weak tests (mutation), handshake crash loop, daemon inherits fds and signals, flaky test helper |
 | F11 | 2 | doc claimed WrongType for every special file; sockets and dirs got Io |
+| F18 | 2 | e2e test could leak a detached host on failure; unwritten no-stderr-before-release rule |
 
 ## Milestones
 
@@ -291,7 +291,7 @@ acceptance:
 scope: crates/adapters, crates/testkit
 
 ### F18: Host startup errors reach the user
-status: in-progress
+status: done (03c6d2f)
 depends: T12
 touches: adapters::launcher, core::ports::launcher, core::client, shepherd::client, shepherd::host
 goal: When the auto-launched host can't start (e.g. `~/.shepherd` is 0755), the user sees the host's own error message instead
