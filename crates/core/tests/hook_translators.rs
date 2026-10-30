@@ -134,3 +134,40 @@ fn codex_hooks_pair_a_prompt_with_its_stop_across_calls() {
     let answered = t.translate(&sid("s1"), AgentKind::Codex, &stop, String::new);
     assert_eq!(response_id(&answered), Some(opened));
 }
+
+#[test]
+fn a_hook_from_another_agent_kind_replaces_the_sessions_translator() {
+    let mut t = Translators::new();
+    translate(&mut t, "s1", &prompt());
+    // A Codex hook for the same session: a fresh Codex translator, which has no open prompt for this Stop.
+    let drafts = t.translate(&sid("s1"), AgentKind::Codex, &stop(), || "seed".to_owned());
+    assert!(
+        drafts
+            .iter()
+            .all(|d| d.source.agent.as_deref() == Some("codex")),
+        "{drafts:?}"
+    );
+    assert_eq!(response_id(&drafts), None);
+    assert_eq!(drafts[0].frame.method(), Some("_shepherd/agent/idle"));
+    assert_eq!(t.len(), 1);
+}
+
+#[test]
+fn translators_that_follow_each_other_in_one_session_never_share_an_id() {
+    // The caller's seed is the same for the whole host run; switching agent kinds back and forth creates three
+    // translators that write to one log.
+    let mut t = Translators::new();
+    let mut ids = Vec::new();
+    for agent in [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::ClaudeCode,
+    ] {
+        let drafts = t.translate(&sid("s1"), agent, &prompt(), || "run1".to_owned());
+        ids.push(request_id(&drafts).expect("a prompt request").to_string());
+    }
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 3, "{ids:?}");
+}

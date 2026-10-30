@@ -70,6 +70,9 @@ pub enum LaunchError {
     /// hooks with: `'`, or `\`, which fish reads as an escape inside single quotes.
     #[error("{} can't be quoted for the shell", .0.display())]
     NotShellSafe(PathBuf),
+    /// Codex's hook override couldn't be built.
+    #[error("cannot build the Codex hooks override")]
+    CodexHooks,
 }
 
 /// What `profile` runs in the session `ctx` describes.
@@ -94,7 +97,8 @@ pub fn plan(profile: &AgentProfile, ctx: &LaunchContext) -> Result<Launch, Launc
                 shell_quote(&ctx.shepherd)?,
                 AgentKind::Codex.as_str()
             );
-            let hooks = toml::Value::Table(codex::hooks_config(&command));
+            let hooks = codex::hooks_config(&command).ok_or(LaunchError::CodexHooks)?;
+            let hooks = toml::Value::Table(hooks);
             (vec!["-c".to_owned(), format!("hooks={hooks}")], Vec::new())
         }
         AgentKind::Shell => (Vec::new(), Vec::new()),

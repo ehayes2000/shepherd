@@ -100,27 +100,24 @@ pub fn hook_trust_hash(event: &str, command: &str) -> Option<String> {
 
 /// The `hooks` table to pass with `-c hooks=<value>`: one matcher-less group per [`HOOK_EVENTS`] entry running
 /// `command`, plus `state` trusting exactly those handlers.
-pub fn hooks_config(command: &str) -> toml::Table {
+/// `None` only if the config can't be built, which every event in [`HOOK_EVENTS`] having a label and a plain
+/// command config always serializing rule out.
+pub fn hooks_config(command: &str) -> Option<toml::Table> {
     let group = MatcherGroup {
         hooks: vec![CommandHook::new(command)],
     };
     let mut hooks = toml::Table::new();
     let mut state = toml::Table::new();
     for event in HOOK_EVENTS {
-        let (Some(key), Some(hash), Ok(groups)) = (
-            hook_trust_key(event),
-            hook_trust_hash(event, command),
-            toml::Value::try_from([&group]),
-        ) else {
-            unreachable!("every hooked event has a label, and a hook config always serializes");
-        };
-        hooks.insert(event.to_owned(), groups);
+        let key = hook_trust_key(event)?;
+        let hash = hook_trust_hash(event, command)?;
+        hooks.insert(event.to_owned(), toml::Value::try_from([&group]).ok()?);
         let mut trusted = toml::Table::new();
         trusted.insert("trusted_hash".to_owned(), toml::Value::String(hash));
         state.insert(key, toml::Value::Table(trusted));
     }
     hooks.insert("state".to_owned(), toml::Value::Table(state));
-    hooks
+    Some(hooks)
 }
 
 /// `hook_event_key_label` in `codex-rs/hooks/src/lib.rs`, for the events shepherd hooks.

@@ -44,12 +44,15 @@ impl Translation {
 /// requests so a prompt and its `Stop` pair up.
 ///
 /// It is not host state: it is not a fold over the logs, and a restarted host starts with none. A translator is
-/// created on a session's first hook with a seed from the caller, which must be unique among the translators that
-/// ever write to that session's log (see [`ClaudeTranslation::new`]), so a new translator never reuses an id an old
-/// one left in the log.
+/// created on a session's first hook, and again whenever a hook from another agent kind replaces it. Its id seed
+/// must be unique among the translators that ever write to that session's log (see [`ClaudeTranslation::new`]), so
+/// a new translator never reuses an id an old one left in the log: it is the caller's seed, unique per host run,
+/// plus a count of the translators this value has created.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Translators {
     sessions: BTreeMap<SessionId, Translation>,
+    /// How many translators have been created, which makes each one's seed unique within a host run.
+    created: u64,
 }
 
 impl Translators {
@@ -66,8 +69,9 @@ impl Translators {
     }
 
     /// Translates one hook payload from `agent` in `session` into the frames to append. `seed` is called only when
-    /// the session has no translator for `agent` yet (a translator for another agent kind is replaced). An agent
-    /// kind without a translator gives no frames.
+    /// the session has no translator for `agent` yet (a translator for another agent kind is replaced), and must be
+    /// unique per host run among the runs that write to the session's log. An agent kind without a translator gives
+    /// no frames.
     pub fn translate(
         &mut self,
         session: &SessionId,
@@ -76,7 +80,12 @@ impl Translators {
         seed: impl FnOnce() -> String,
     ) -> Vec<FrameDraft> {
         if self.sessions.get(session).map(Translation::agent) != Some(agent) {
-            let Some(fresh) = Translation::new(agent, session, seed()) else {
+            if !Self::supports(agent) {
+                return Vec::new();
+            }
+            self.created = self.created.saturating_add(1);
+            let seed = format!("{}-{}", seed(), self.created);
+            let Some(fresh) = Translation::new(agent, session, seed) else {
                 return Vec::new();
             };
             self.sessions.insert(session.clone(), fresh);

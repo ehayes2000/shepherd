@@ -514,3 +514,151 @@ fn subagent_tool_calls_never_open_a_turn_of_their_own() {
     ]);
     assert_eq!(methods(&drafts), vec![Some("session/update")]);
 }
+
+// ---------- which tool a permission names ----------
+
+/// The `toolCallId` of the permission request the last payload produced.
+fn permission_tool(payloads: &[Value]) -> String {
+    let drafts = last(payloads);
+    let Some(AcpFrame::RequestPermission(r)) = drafts
+        .iter()
+        .find(|d| d.frame.method() == Some("session/request_permission"))
+        .map(acp)
+    else {
+        panic!("no request_permission in {drafts:?}");
+    };
+    r.tool_call.tool_call_id.clone()
+}
+
+fn with(mut payload: Value, key: &str, value: Value) -> Value {
+    payload[key] = value;
+    payload
+}
+
+#[test]
+fn a_permission_for_the_same_input_under_another_tool_name_names_no_open_tool() {
+    let other = with(fx!("PermissionRequest.Bash"), "tool_name", json!("Shell"));
+    let id = permission_tool(&[fx!("UserPromptSubmit"), fx!("PreToolUse.Bash"), other]);
+    assert_ne!(id, "call_bash_1");
+}
+
+#[test]
+fn a_permission_for_the_same_tool_with_other_input_names_no_open_tool() {
+    let other = with(
+        fx!("PermissionRequest.Bash"),
+        "tool_input",
+        json!({ "command": "rm -rf target", "description": null }),
+    );
+    let id = permission_tool(&[fx!("UserPromptSubmit"), fx!("PreToolUse.Bash"), other]);
+    assert_ne!(id, "call_bash_1");
+}
+
+#[test]
+fn a_permission_matching_two_open_tools_names_the_latest() {
+    let again = with(fx!("PreToolUse.Bash"), "tool_use_id", json!("call_bash_2"));
+    let id = permission_tool(&[
+        fx!("UserPromptSubmit"),
+        fx!("PreToolUse.Bash"),
+        again,
+        fx!("PermissionRequest.Bash"),
+    ]);
+    assert_eq!(id, "call_bash_2");
+}
+
+#[test]
+fn a_new_prompt_forgets_the_tools_of_the_turn_before() {
+    let id = permission_tool(&[
+        fx!("UserPromptSubmit"),
+        fx!("PreToolUse.Bash"),
+        fx!("UserPromptSubmit"),
+        fx!("PermissionRequest.Bash"),
+    ]);
+    assert_ne!(id, "call_bash_1");
+}
+
+#[test]
+fn a_finished_tool_is_no_longer_named_by_a_permission() {
+    let id = permission_tool(&[
+        fx!("UserPromptSubmit"),
+        fx!("PreToolUse.Bash"),
+        fx!("PostToolUse.Bash"),
+        fx!("PermissionRequest.Bash"),
+    ]);
+    assert_ne!(id, "call_bash_1");
+}
+
+// ---------- what lifecycle hooks reset ----------
+
+#[test]
+fn a_new_pre_compact_cancels_a_compaction_that_never_completed() {
+    let drafts = one(&[fx!("PreCompact"), fx!("PreCompact")]);
+    let updates: Vec<(String, String)> = drafts
+        .iter()
+        .map(|d| match update(d) {
+            SessionUpdate::CompactionUpdate(c) => {
+                (c.compaction_id.clone(), c.status.as_str().to_owned())
+            }
+            other => panic!("expected compaction_update, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(updates.len(), 3, "{updates:?}");
+    let first = &updates[0].0;
+    assert_eq!(updates[1], (first.clone(), "cancelled".to_owned()));
+    assert_ne!(&updates[2].0, first);
+    assert_eq!(updates[2].1, "in_progress");
+}
+
+/// After `reset`, the turn, its tools and the compaction that were open before it are gone.
+fn assert_resets(reset: Value) {
+    let mut st = state();
+    run(
+        &mut st,
+        &[
+            fx!("UserPromptSubmit"),
+            fx!("PreToolUse.Bash"),
+            fx!("PreCompact"),
+            reset,
+        ],
+    );
+    // No open prompt: Stop only goes idle.
+    assert_eq!(
+        methods(&translate(&mut st.clone(), &fx!("Stop"))),
+        vec![Some("_shepherd/agent/idle")]
+    );
+    // No open compaction: PostCompact has nothing to complete.
+    assert_eq!(
+        methods(&translate(&mut st.clone(), &fx!("PostCompact"))),
+        vec![Some("_codex/PostCompact")]
+    );
+    // No open tool: a permission for it gets its own id.
+    let drafts = translate(&mut st, &fx!("PermissionRequest.Bash"));
+    let Some(AcpFrame::RequestPermission(r)) = drafts
+        .iter()
+        .find(|d| d.frame.method() == Some("session/request_permission"))
+        .map(acp)
+    else {
+        panic!("no request_permission in {drafts:?}");
+    };
+    assert_ne!(r.tool_call.tool_call_id, "call_bash_1");
+}
+
+#[test]
+fn session_start_forgets_the_turn_tools_and_compaction_in_progress() {
+    assert_resets(fx!("SessionStart.startup"));
+}
+
+#[test]
+fn session_end_forgets_the_turn_tools_and_compaction_in_progress() {
+    assert_resets(fx!("SessionEnd"));
+}
+
+#[test]
+fn a_hook_without_a_session_id_uses_the_one_from_session_start() {
+    let mut prompt = fx!("UserPromptSubmit");
+    prompt.as_object_mut().unwrap().remove("session_id");
+    let drafts = last(&[fx!("SessionStart.startup"), prompt]);
+    let AcpFrame::Prompt(p) = acp(&drafts[0]) else {
+        panic!("expected a prompt request");
+    };
+    assert_eq!(p.session_id, CODEX_SESSION);
+}
