@@ -9,7 +9,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
-| F08 worktree create timeout cleanup | re-review | task/f08-worktree-timeout @ 5698676 (on b17c1b4) | 2 | All 6 addressed + process-group wait after kill; builder load 0/24 ×2 |
+| F08 worktree create timeout cleanup | fixing (round 3) | task/f08-worktree-timeout @ 5698676 | 2 | Blocking: T20 typed-timeout test flakes 1/24 (packed-refs.lock) → rewrite with blocking hook. Accepted untested: cleanup timeout, group wait |
 | T19b resume | building | task/t19b-resume @ 4b1dd28 | 0 | – |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
