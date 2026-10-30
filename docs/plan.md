@@ -11,7 +11,7 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 |---|---|---|---|---|
 | T18 attention | in review | task/t18-attention @ 9147ef6 (on 9206504) | 1 | PM-accepted: focused = selected (window focus → follow-up); permission seq tracked like idle; no ring on catch-up |
 | T19 Codex | building | task/t19-codex @ 0fa5b1e | 0 | PM: hook trust via session-flags hooks.state + sha2 in core (decision 0016); never bypass-hook-trust |
-| F08 worktree create timeout cleanup | building | task/f08-worktree-timeout @ 55c4694 | 0 | – |
+| F08 worktree create timeout cleanup | in review | task/f08-worktree-timeout @ 065762e | 1 | Reviewer to judge 5 s injected timeout under load |
 | F14 pty backpressure | in review | task/f14-pty-backpressure @ 1abe0c8 (rebased on 03c6d2f) | 1 | PM-accepted: drain-and-discard after kill; ack skips fail_next; stty -opost in ordering case; run_events(max) |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -409,6 +409,30 @@ acceptance:
 - A client scenario: the fake host sends profiles, a click on `+ New session` then a profile row sends `SessionNew` with
   that profile.
 scope: crates/tui, crates/shepherd (tests/support fake host)
+
+### F25: Clean up after a failed worktree create
+status: todo
+depends: F08
+touches: adapters::worktrees
+goal: A `post-checkout` hook that exits non-zero (or any non-timeout failure of `worktree add`) can leave the worktree and
+branch behind, like the timeout case F08 fixed.
+acceptance:
+- Any `worktree add` failure after git registered the worktree runs the same cleanup as F08; a retry with the same name
+  succeeds. Adapter test with a failing hook. Errors that happen before anything is created clean up nothing.
+scope: crates/adapters
+
+### F26: Attention follows window focus
+status: todo
+depends: T18
+touches: core::client (attention), tui::keys (focus events)
+goal: T18 treats "selected" as "seen". If the shepherd window is in the background, the selected session going idle
+should still alert and be marked until the window regains focus.
+acceptance:
+- The client tracks terminal window focus from focus-in/out events (crossterm `FocusGained/Lost`, already enabled) as an
+  intent; while unfocused, the selected session is treated like an unselected one for attention and alerts; on focus-in the
+  selected session's mark clears. Core table tests; the existing focus-forwarding keys test keeps passing (the event is both
+  forwarded to a session that asked for focus events and reported to core).
+scope: crates/core (client), crates/tui
 
 ## Out of scope for the initial feature set
 
