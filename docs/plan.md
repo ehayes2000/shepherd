@@ -586,6 +586,30 @@ acceptance:
   apostrophe strip.
 scope: crates/core, crates/tui, crates/shepherd
 
+### T36: Spike: hot-swap the host on a version mismatch
+status: todo (user priority: soon)
+depends: –
+touches: docs only (spike)
+goal: Installing or rebuilding `shepherd` leaves the old host daemon running; new clients then hit "method not found" on new
+requests (seen 2026-10-30: a host from before T21 refused `_shepherd/workspace/select`). The user wants the host to update
+itself in place on macOS/Linux when it detects a mismatch, ideally without killing running sessions.
+acceptance (spike: findings + a recommended design in docs/architecture.md, no production code):
+- Mismatch detection: what the hello carries (build id: crate version + git hash baked at build time, or the exe's path +
+  mtime/inode), and who decides (client sees an older host; host sees a newer client).
+- Swap mechanism, options compared with a small throwaway prototype each:
+  (a) re-exec in place: the host `execve`s the new binary at its path, passing PTY master fds and the listening socket across
+  exec (cleared CLOEXEC) plus a handoff file (session → fd, screen snapshots via `Screen::snapshot_ansi`, run/translator
+  state); the log is already the source of truth. Agents keep running.
+  (b) the new binary starts as a second host, takes over the listening socket and receives the PTY fds from the old one over a
+  unix socket (SCM_RIGHTS), then the old exits.
+  (c) simple restart (old host exits, sessions die, client relaunches) as the fallback when handoff isn't possible.
+- What breaks: the exe replaced on disk while running (cargo install / rebuild — macOS code signing, Linux "text file busy"),
+  log lock handoff, half-written frames, a handoff that fails midway (must fall back to (c) with nothing lost from the log),
+  a downgrade, two clients of different versions.
+- UX: the client shows "host updated" / "host is older — updating…"; never silently kills sessions unless (c) is the only
+  option, and then asks first.
+notes: Follow-ups after the spike: T36a mismatch detection + clear UX (can ship first, small), T36b the chosen swap.
+
 ## Out of scope for the initial feature set
 
 None of these are planned yet, but the log was designed so each one is additive:
