@@ -9,6 +9,8 @@ Updated by the PM on every transition (see `docs/pm.md`). On takeover, check it 
 
 | Task | Stage | Branch @ commit | Round | Open items / PM decisions |
 |---|---|---|---|---|
+| F28 workspace repo root + ~ | building | task/f28-repo-root @ HEAD | 0 | – |
+| F31 real answers only | building | task/f31-answer-input @ HEAD | 0 | – |
 | T23 worktree hooks | in review | task/t23-worktree-hooks @ 95c8d7f (on 0070ed1) | 1 | PM-accepted: per-workspace hook_timeout_s; frame fields post_create + error; restart mid-hooks fails; process_group.rs copy (dedupe later); keys not canonicalized |
 
 Wave of 5 (user asked for more parallelism). Known small overlaps, merge in this order to keep rebases cheap: F11, F18, T33,
@@ -467,7 +469,7 @@ notes: Decide in the report whether this is an async port shape (`start_*` + eve
 sync port; prefer the wrapper if it keeps the port trait and its contract suite unchanged.
 
 ### F28: Workspace from a subdirectory, and `~` in typed paths
-status: ready
+status: in-progress
 depends: T21
 touches: ports::worktrees, adapters::worktrees, core::host (workspace)
 goal: Running `shepherd` in `<repo>/crates` should pick `<repo>`, and typing `~/Code/x` in the switcher should work.
@@ -507,7 +509,7 @@ acceptance:
 scope: crates/tui
 
 ### F31: Only real answers count as answering a permission dialog
-status: todo
+status: in-progress
 depends: T18b
 touches: core::wire (input), core::host::quiet, tui::keys
 goal: T18b counts any client input after a permission request as an answer. Focus reports (`CSI I`/`CSI O`, forwarded when the
