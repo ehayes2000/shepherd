@@ -8,13 +8,14 @@ use std::sync::mpsc::Receiver;
 
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind};
+use shepherd_core::config::AgentKind;
 use shepherd_core::host::HostCommand;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, Link, LinkEvent};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, HelloOk, HostNotification, HostResponse,
-    HostResult, LogEntry, Notify, PtyOutput, Request, SessionResize, decode_client_message,
-    encode_host_notification, encode_response, negotiate,
+    HostResult, LogEntry, Notify, ProfileInfo, PtyOutput, Request, SessionNew, SessionResize,
+    decode_client_message, encode_host_notification, encode_response, negotiate,
 };
 use shepherd_testkit::builders::{HostDriver, claude_resume_spec};
 use shepherd_testkit::contracts::link::ChannelSink;
@@ -34,6 +35,11 @@ pub struct FakeHost {
     bell: bool,
     /// The `cwd` of every hello it was sent, in order.
     hello_cwds: Vec<Option<String>>,
+    /// The profiles and default its hello answer offers. None by default, like a host older than profiles.
+    profiles: Vec<ProfileInfo>,
+    default_profile: Option<String>,
+    /// Every session/new it was sent, in order.
+    session_news: Vec<SessionNew>,
 }
 
 impl FakeHost {
@@ -53,7 +59,30 @@ impl FakeHost {
             resizes: Vec::new(),
             bell: false,
             hello_cwds: Vec::new(),
+            profiles: Vec::new(),
+            default_profile: None,
+            session_news: Vec::new(),
         }
+    }
+
+    /// One whose hello answer offers `profiles`, the first the default.
+    pub fn with_profiles(self, profiles: &[(&str, AgentKind)]) -> Self {
+        Self {
+            default_profile: profiles.first().map(|(name, _)| (*name).to_owned()),
+            profiles: profiles
+                .iter()
+                .map(|(name, agent)| ProfileInfo {
+                    name: (*name).to_owned(),
+                    agent: *agent,
+                })
+                .collect(),
+            ..self
+        }
+    }
+
+    /// Every session/new it was sent, in order.
+    pub fn session_news(&self) -> &[SessionNew] {
+        &self.session_news
     }
 
     /// One whose config has `[notify] bell = true`.
@@ -136,6 +165,8 @@ impl FakeHost {
                 negotiate(&hello, &MachineId::new("m_test")).map(|ok| {
                     HostResult::Hello(HelloOk {
                         notify: Notify { bell: self.bell },
+                        profiles: self.profiles.clone(),
+                        default_profile: self.default_profile.clone(),
                         ..ok
                     })
                 })
@@ -155,7 +186,8 @@ impl FakeHost {
                 self.subscribers.push(conn);
                 Ok(HostResult::Ack)
             }
-            ClientRequest::SessionNew(_) => {
+            ClientRequest::SessionNew(new) => {
+                self.session_news.push(new);
                 self.sessions += 1;
                 let id = format!("s{}", self.sessions);
                 reply_of(self.driver.new_session(&id))

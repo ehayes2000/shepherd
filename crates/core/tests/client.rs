@@ -1200,6 +1200,7 @@ fn a_notice_is_cleared_by_the_next_user_action() {
         Intent::SetFocus(Focus::Terminal),
         Intent::SelectSession(sid("s1")),
         Intent::ScrollSidebar(1),
+        Intent::ScrollPicker { by: 1, shown: 2 },
         Intent::NewSession,
         Intent::BeginNewSession,
         Intent::ShowHelp,
@@ -1739,6 +1740,59 @@ fn the_new_session_key_creates_the_default_profile_without_the_picker() {
     let sent = c.user(Intent::NewSession);
     assert_eq!(bodies(&sent), [new_session(None)]);
     assert_eq!(c.client().popup(), None);
+}
+
+/// A connected client whose host has `n` profiles, `p01` (the default) to `p<n>`, with the picker open.
+fn picker_of(n: usize) -> ClientDriver {
+    let names: Vec<String> = (1..=n).map(|i| format!("p{i:02}")).collect();
+    let profiles: Vec<(&str, AgentKind)> = names
+        .iter()
+        .map(|n| (n.as_str(), AgentKind::Shell))
+        .collect();
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(&profiles, "p01");
+    c.user(Intent::BeginNewSession);
+    c
+}
+
+#[test]
+fn the_picker_scrolls_within_its_list() {
+    let mut c = picker_of(10);
+    assert_eq!(c.client().picker_scroll(), 0);
+    assert_eq!(c.user(Intent::ScrollPicker { by: 3, shown: 4 }), []);
+    assert_eq!(c.client().picker_scroll(), 3);
+    // The last rows fill the picker: 10 profiles, 4 shown.
+    c.user(Intent::ScrollPicker { by: 100, shown: 4 });
+    assert_eq!(c.client().picker_scroll(), 6);
+    c.user(Intent::ScrollPicker { by: -2, shown: 4 });
+    assert_eq!(c.client().picker_scroll(), 4);
+    c.user(Intent::ScrollPicker { by: -100, shown: 4 });
+    assert_eq!(c.client().picker_scroll(), 0);
+}
+
+#[test]
+fn a_picker_that_shows_every_profile_does_not_scroll() {
+    let mut c = picker_of(3);
+    c.user(Intent::ScrollPicker { by: 1, shown: 3 });
+    assert_eq!(c.client().picker_scroll(), 0);
+}
+
+#[test]
+fn the_picker_opens_scrolled_to_the_top() {
+    let mut c = picker_of(10);
+    c.user(Intent::ScrollPicker { by: 5, shown: 4 });
+    c.user(Intent::Dismiss);
+    c.user(Intent::BeginNewSession);
+    assert_eq!(c.client().picker_scroll(), 0);
+}
+
+#[test]
+fn scrolling_the_picker_while_it_is_closed_does_nothing() {
+    let mut c = picker_of(10);
+    c.user(Intent::Dismiss);
+    assert_eq!(c.user(Intent::ScrollPicker { by: 5, shown: 4 }), []);
+    c.user(Intent::BeginNewSession);
+    assert_eq!(c.client().picker_scroll(), 0);
 }
 
 // ---------- workspaces ----------

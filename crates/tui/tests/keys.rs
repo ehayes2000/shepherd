@@ -4,7 +4,8 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use shepherd_core::client::{Cell, Focus, Intent};
+use shepherd_core::client::{Cell, Focus, Intent, Popup};
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{Modes, MouseEncoding, MouseMode, MouseTracking};
@@ -251,6 +252,29 @@ fn esc_dismisses_the_context_menu_and_other_keys_are_dropped() {
     });
     assert_eq!(keys(&c, press(KeyCode::Esc)), [Intent::Dismiss]);
     for key in [ch('r'), ch('x'), press(KeyCode::Enter), ctrl('b')] {
+        assert_eq!(keys(&c, key), [], "{key:?}");
+    }
+}
+
+#[test]
+fn esc_dismisses_the_profile_picker_and_other_keys_are_dropped() {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            ("claude", AgentKind::ClaudeCode),
+            ("shell", AgentKind::Shell),
+        ],
+        "claude",
+    );
+    c.user(Intent::BeginNewSession);
+    assert_eq!(c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(keys(&c, press(KeyCode::Esc)), [Intent::Dismiss]);
+    for key in [
+        ch('s'),
+        press(KeyCode::Enter),
+        press(KeyCode::Down),
+        ctrl('b'),
+    ] {
         assert_eq!(keys(&c, key), [], "{key:?}");
     }
 }

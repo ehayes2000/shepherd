@@ -12,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use shepherd_core::client::{Cell, Client, MenuEntry, MenuItem, Popup};
+use shepherd_core::wire::ProfileInfo;
 
 use crate::layout::Target;
 
@@ -173,30 +174,39 @@ fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
 }
 
 /// The profile picker: a prompt, then one row per profile (the default first and marked), each a whole line of the
-/// dialog, then `[Cancel]`.
+/// dialog, then `[Cancel]`. It is as tall as its profiles and fits the window; the rows shown start at the client's
+/// scroll, moved up as far as the last rows fill it. Its columns are as wide as their longest entries, but a long
+/// name is cut short with `…` so the agent and the mark stay visible.
 fn pick_profile(client: &Client, window: Rect) -> Placed {
     let profiles = client.profiles();
-    let height = profiles.len() as u16 + 4;
+    let count = u16::try_from(profiles.len()).unwrap_or(u16::MAX);
     let mut placed = dialog(
-        centered(window, DIALOG_WIDTH, height),
+        centered(window, DIALOG_WIDTH, count.saturating_add(4)),
         &[("[Cancel]", Target::Dismiss)],
     );
     let inside = inner(placed.area);
-    let name_width = profiles
-        .iter()
-        .map(|p| p.name.chars().count())
-        .max()
-        .unwrap_or(0);
+    let widest = |width: fn(&ProfileInfo) -> usize| profiles.iter().map(width).max().unwrap_or(0);
+    let agent_width = widest(|p| p.agent.as_str().chars().count());
+    let mark_width = match client.default_profile() {
+        Some(_) => DEFAULT_MARK.chars().count() + 2,
+        None => 0,
+    };
+    // The leading blank, and two blanks after the name.
+    let room = usize::from(inside.width).saturating_sub(3 + agent_width + mark_width);
+    let name_width = widest(|p| p.name.chars().count()).min(room.max(1));
     let rows = (inside.y + 1)..inside.bottom().saturating_sub(1);
-    for (profile, y) in profiles.iter().zip(rows) {
+    let first = client
+        .picker_scroll()
+        .min(profiles.len().saturating_sub(rows.len()));
+    for (profile, y) in profiles[first..].iter().zip(rows) {
         let mark = if client.default_profile() == Some(profile.name.as_str()) {
             DEFAULT_MARK
         } else {
             ""
         };
         let label = format!(
-            " {:<name_width$}  {:<11}  {mark}",
-            profile.name,
+            " {:<name_width$}  {:<agent_width$}  {mark}",
+            cut(&profile.name, name_width),
             profile.agent.as_str()
         );
         placed.controls.push(Control {
@@ -206,6 +216,23 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
         });
     }
     placed
+}
+
+/// How many profiles the open picker shows at once in `window`.
+pub(crate) fn picker_rows(client: &Client, window: Rect) -> usize {
+    let placed = pick_profile(client, window);
+    // Its border, the prompt and the buttons.
+    usize::from(placed.area.height.saturating_sub(4))
+}
+
+/// `text` cut to `width` characters, its last one `…` if any were cut.
+fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 /// The workspace switcher: the workspaces used before under a line saying so, each a whole line of the dialog with

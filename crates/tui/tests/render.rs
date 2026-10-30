@@ -191,6 +191,39 @@ fn profile_picker() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
+/// The picker over twenty shell profiles in a short window, scrolled down three rows.
+#[test]
+fn profile_picker_scrolled() {
+    let names: Vec<String> = (1..=20).map(|i| format!("profile-{i:02}")).collect();
+    let profiles: Vec<(&str, AgentKind)> = names
+        .iter()
+        .map(|n| (n.as_str(), AgentKind::Shell))
+        .collect();
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(&profiles, "profile-01");
+    c.user(Intent::BeginNewSession);
+    c.user(Intent::ScrollPicker { by: 3, shown: 6 });
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 10));
+}
+
+/// The picker with a default profile whose name is longer than the dialog has room for.
+#[test]
+fn profile_picker_with_a_long_name() {
+    let mut c = ClientDriver::new();
+    c.connect_with_profiles(
+        &[
+            (
+                "claude-with-a-very-long-profile-name",
+                AgentKind::ClaudeCode,
+            ),
+            ("shell", AgentKind::Shell),
+        ],
+        "claude-with-a-very-long-profile-name",
+    );
+    c.user(Intent::BeginNewSession);
+    insta::assert_debug_snapshot!(buffer(c.client(), &Screens::new(), 60, 10));
+}
+
 /// `three_sessions` showing a notice: a refused rename.
 fn with_notice() -> (ClientDriver, Screens) {
     let (mut c, screens) = three_sessions();
