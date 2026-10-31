@@ -1,9 +1,11 @@
 # Claude Code hook fixtures
 
-Hand-written hook payloads (stdin JSON) for `tests/claude_hooks.rs`. They were not recorded from a real `claude` run.
+Hand-written hook payloads (stdin JSON) for `tests/claude_hooks.rs` and `tests/subagents.rs`. They were not recorded
+from a real `claude` run.
 Each follows the schema in the Claude Code hooks reference:
 
-- Source: <https://code.claude.com/docs/en/hooks> (also `hooks.md`), read 2026-10-29.
+- Source: <https://code.claude.com/docs/en/hooks> (also `hooks.md`), read 2026-10-29; the subagent hooks
+  (`SubagentStart`, `SubagentStop`), the `Agent` and `AskUserQuestion` tool inputs, re-read 2026-10-31.
 
 ## Documented vs inferred
 
@@ -30,6 +32,14 @@ value or one the reference lists. Inferred means a value we picked that fits the
 | `Stop.continued` | `stop_hook_active: true` (Claude is continuing because a Stop hook blocked the previous `Stop`) | |
 | `PreToolUse.Grep.subagent`, `PermissionRequest.Grep.subagent` | `agent_id`, `agent_type` (present when the hook fires inside a subagent), Grep `pattern` | `agent-7f3a`, `Explore`, `path`, `toolu_03GHI789` |
 | `CwdChanged` | `old_cwd`, `new_cwd` (stands in for any hook without a mapping) | |
+| `PreToolUse.Agent`, `PostToolUse.Agent` | tool `Agent` ("Spawns a subagent"), `tool_input` `prompt`, `description`, `subagent_type` | the texts, `toolu_04JKL012`, the `tool_response` text |
+| `SubagentStart` | `agent_id`, `agent_type` (the matcher's value: `general-purpose`, `Explore`, `Plan`, custom names); no task field | `agent-7f3a` (the id the subagent fixtures already use; the reference's own examples use both `agent-abc123` and `def456`) |
+| `SubagentStop` | `stop_hook_active`, `agent_id`, `agent_type`, `agent_transcript_path` (in a nested `subagents/` folder), `last_assistant_message`, `background_tasks`, `session_crons` | the transcript file name `agent-7f3a.jsonl` |
+| `SubagentStop.internal` | internal agents (prompt suggestions, `/btw`) fire `SubagentStop` with `agent_type` `""` when the session runs without `--agent` | `agent-9c1d` |
+| `SubagentStart.internal` | | that an internal agent's `SubagentStart`, if it fires, also has an empty `agent_type` (the reference only says so of `SubagentStop`) |
+| `PostToolUse.Grep.subagent` | as `PreToolUse.Grep.subagent`; `tool_response` | the response shape |
+| `PreToolUse.AskUserQuestion.subagent` | tool `AskUserQuestion`, `tool_input.questions[]` with `question`, `header`, `options`, `multiSelect` (the reference's example) | that a subagent can ask one, and its `PreToolUse` fires as the question appears |
+| `PreToolUse.Agent.hostile`, `SubagentStart.hostile` | | escape sequences, NUL, CR/LF, bidi override and zero-width text in `subagent_type`/`agent_type` and `description` |
 
 ## Facts from the reference the translator relies on
 
@@ -45,3 +55,8 @@ value or one the reference lists. Inferred means a value we picked that fits the
 - A Stop hook can block `Stop` (or `/goal` can), and Claude then keeps working and fires `Stop` again with
   `stop_hook_active: true`, up to 8 consecutive continuations.
 - A hook can block `PreCompact`, and then no `PostCompact` follows.
+- Subagents: `SubagentStart` fires "when a subagent is spawned", `SubagentStop` "when a subagent finishes". Hooks
+  inside a subagent carry its `agent_id` and `agent_type`. `SubagentStart` has no task, so the translator pairs it
+  with the `Agent` tool's `PreToolUse` by type (inferred: that the call's `PreToolUse` comes before the subagent's
+  `SubagentStart`). A `SubagentStop` hook can keep a subagent from stopping (exit code 2).
+- `idle_prompt` doesn't fire while a background subagent is still running.

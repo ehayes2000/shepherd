@@ -110,6 +110,8 @@ fn the_generated_settings_run_this_shepherd_by_absolute_path_for_every_hook_the_
             "PreCompact",
             "PostCompact",
             "SessionEnd",
+            "SubagentStart",
+            "SubagentStop",
         ]
     );
     for (event, entry) in hooks {
@@ -192,6 +194,8 @@ fn the_codex_override_runs_this_shepherd_on_every_hook_the_translator_reads() {
             "PreCompact",
             "PostCompact",
             "SessionEnd",
+            "SubagentStart",
+            "SubagentStop",
         ]
     );
 }

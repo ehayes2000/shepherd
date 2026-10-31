@@ -22,6 +22,10 @@ pub enum ShepherdFrame {
     AgentStarted(AgentStarted),
     AgentIdle(AgentIdle),
     AgentExited(AgentExited),
+    SubagentStarted(SubagentStarted),
+    SubagentBlocked(SubagentBlocked),
+    SubagentWorking(SubagentWorking),
+    SubagentFinished(SubagentFinished),
     WorktreeCreated(WorktreeCreated),
     WorktreeHook(WorktreeHook),
     WorktreeRemoving(WorktreeRemoving),
@@ -44,6 +48,10 @@ impl ShepherdFrame {
             Self::AgentStarted(_) => "_shepherd/agent/started",
             Self::AgentIdle(_) => "_shepherd/agent/idle",
             Self::AgentExited(_) => "_shepherd/agent/exited",
+            Self::SubagentStarted(_) => "_shepherd/subagent/started",
+            Self::SubagentBlocked(_) => "_shepherd/subagent/blocked",
+            Self::SubagentWorking(_) => "_shepherd/subagent/working",
+            Self::SubagentFinished(_) => "_shepherd/subagent/finished",
             Self::WorktreeCreated(_) => "_shepherd/worktree/created",
             Self::WorktreeHook(_) => "_shepherd/worktree/hook",
             Self::WorktreeRemoving(_) => "_shepherd/worktree/removing",
@@ -68,6 +76,10 @@ impl ShepherdFrame {
             Self::AgentStarted(p) => to_params(p),
             Self::AgentIdle(p) => to_params(p),
             Self::AgentExited(p) => to_params(p),
+            Self::SubagentStarted(p) => to_params(p),
+            Self::SubagentBlocked(p) => to_params(p),
+            Self::SubagentWorking(p) => to_params(p),
+            Self::SubagentFinished(p) => to_params(p),
             Self::WorktreeCreated(p) => to_params(p),
             Self::WorktreeHook(p) => to_params(p),
             Self::WorktreeRemoving(p) => to_params(p),
@@ -96,6 +108,10 @@ impl ShepherdFrame {
             "_shepherd/agent/started" => Self::AgentStarted(p(params)?),
             "_shepherd/agent/idle" => Self::AgentIdle(p(params)?),
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
+            "_shepherd/subagent/started" => Self::SubagentStarted(p(params)?),
+            "_shepherd/subagent/blocked" => Self::SubagentBlocked(p(params)?),
+            "_shepherd/subagent/working" => Self::SubagentWorking(p(params)?),
+            "_shepherd/subagent/finished" => Self::SubagentFinished(p(params)?),
             "_shepherd/worktree/created" => Self::WorktreeCreated(p(params)?),
             "_shepherd/worktree/hook" => Self::WorktreeHook(p(params)?),
             "_shepherd/worktree/removing" => Self::WorktreeRemoving(p(params)?),
@@ -255,6 +271,61 @@ pub struct AgentExited {
     pub code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+}
+
+// Subagents: helpers the session's agent spawned (Claude Code's `Agent` tool, Codex's `spawn_agent`), as its hooks
+// report them. `id` is the agent's own subagent id (`agent_id` in its hooks). Their text is the agent's, kept raw:
+// display it only through `display_safe`.
+
+/// A subagent started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentStarted {
+    pub id: String,
+    /// What kind of subagent it is, as the agent names it (e.g. `Explore`, or a custom agent's name).
+    pub agent_type: String,
+    /// What it was asked to do: the spawning tool call's short description, or its prompt. Absent when no spawning
+    /// call could be paired with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+}
+
+/// A subagent is waiting on the user: it asked permission for a tool, or asked a question. It is answered in the
+/// parent session's own TUI. A later `subagent/working`, `subagent/finished`, or the parent's turn ending ends it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentBlocked {
+    pub id: String,
+    pub kind: BlockKind,
+    /// What it is waiting on, for the user: the tool and its main argument, or the question.
+    pub text: String,
+    /// The subagent's type, as the hook said: it lets a block from a subagent the session no longer lists (e.g. a
+    /// background one still running after the parent's turn ended) list it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+}
+
+/// What a blocked subagent waits on. Open: a value this build doesn't know is kept as [`BlockKind::Other`], and is
+/// still a block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockKind {
+    /// Permission to use a tool.
+    Permission,
+    /// An answer to a question.
+    Question,
+    #[serde(untagged)]
+    Other(String),
+}
+
+/// A blocked subagent got going again: its tool activity followed the block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentWorking {
+    pub id: String,
+}
+
+/// A subagent finished. It stays listed until the parent's turn ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentFinished {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

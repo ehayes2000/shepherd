@@ -508,6 +508,12 @@ fn shepherd_extension_table_parses_into_typed_frames() {
         json!({ "method": "_shepherd/worktree/hook",
                 "params": { "hook": "post-create", "exit_code": 1, "output_tail": "err" } }),
         json!({ "method": "_shepherd/workspace/selected", "params": { "repo": "~/code/shepherd" } }),
+        json!({ "method": "_shepherd/subagent/started",
+                "params": { "id": "agent-7f3a", "agent_type": "Explore", "task": "Find callers" } }),
+        json!({ "method": "_shepherd/subagent/blocked",
+                "params": { "id": "agent-7f3a", "kind": "permission", "text": "Bash: ls" } }),
+        json!({ "method": "_shepherd/subagent/working", "params": { "id": "agent-7f3a" } }),
+        json!({ "method": "_shepherd/subagent/finished", "params": { "id": "agent-7f3a" } }),
     ];
     for mut raw in cases {
         raw["jsonrpc"] = json!("2.0");

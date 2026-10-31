@@ -570,3 +570,73 @@ fn a_focus_report_and_its_redraw_leave_a_permission_dialog_put() {
         Activity::NeedsPermission { .. }
     ));
 }
+
+// ---------- a blocked subagent ----------
+
+fn subagent_started(id: &str) -> (Dir, Value) {
+    shepherd(
+        "_shepherd/subagent/started",
+        json!({ "id": id, "agent_type": "Explore" }),
+    )
+}
+
+fn subagent_blocked(id: &str, text: &str) -> (Dir, Value) {
+    shepherd(
+        "_shepherd/subagent/blocked",
+        json!({ "id": id, "kind": "permission", "text": text }),
+    )
+}
+
+fn subagent_working(id: &str) -> (Dir, Value) {
+    shepherd("_shepherd/subagent/working", json!({ "id": id }))
+}
+
+#[test]
+fn a_blocked_subagent_keeps_a_working_session_from_going_quiet_idle() {
+    // The parent waits on the subagent, and the subagent's dialog is legitimately quiet.
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, subagent_started("a"));
+    d.append(500, subagent_blocked("a", "Bash: ls"));
+    d.output(600);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+    assert!(matches!(d.state().activity(), Activity::Working { .. }));
+}
+
+#[test]
+fn a_subagent_block_answered_and_redrawn_then_quiet_goes_idle_inferred_quiet_after_permission() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, subagent_started("a"));
+    d.append(500, subagent_blocked("a", "Bash: ls"));
+    d.output(600);
+    d.input(900);
+    d.output(1000);
+    assert_eq!(d.tick(3999), vec![]);
+    assert_eq!(d.tick(4000), vec![IdleInference::QuietAfterPermission]);
+}
+
+#[test]
+fn a_second_subagent_block_needs_its_own_answer() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, subagent_started("a"));
+    d.append(500, subagent_blocked("a", "Bash: ls"));
+    d.input(900);
+    d.output(1000);
+    d.append(1500, subagent_blocked("a", "Bash: rm"));
+    d.output(1600);
+    assert_eq!(d.tick(600_000), vec![]);
+}
+
+#[test]
+fn a_subagent_working_again_lets_the_session_go_quiet_again() {
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, subagent_started("a"));
+    d.append(500, subagent_blocked("a", "Bash: ls"));
+    d.append(1000, subagent_working("a"));
+    assert_eq!(d.tick(3999), vec![]);
+    assert_eq!(d.tick(4000), vec![IdleInference::Quiet]);
+}

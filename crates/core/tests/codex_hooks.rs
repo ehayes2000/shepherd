@@ -33,6 +33,12 @@ fn all_fixtures() -> Vec<Value> {
         fx!("PreToolUse.mcp"),
         fx!("PreToolUse.Bash.subagent"),
         fx!("SubagentStart"),
+        fx!("SubagentStop"),
+        fx!("PreToolUse.spawn_agent"),
+        fx!("PostToolUse.spawn_agent"),
+        fx!("PermissionRequest.Bash.subagent"),
+        fx!("PostToolUse.Bash.subagent"),
+        fx!("PreModelRequest"),
         fx!("Stop"),
         fx!("Stop.continued"),
         fx!("Interrupt"),
@@ -439,9 +445,9 @@ fn post_compact_without_a_pre_compact_is_a_vendor_frame() {
 
 #[test]
 fn hooks_without_an_acp_equivalent_become_codex_vendor_frames_with_the_raw_payload() {
-    let drafts = one(&[fx!("SubagentStart")]);
-    assert_eq!(methods(&drafts), vec![Some("_codex/SubagentStart")]);
-    assert_eq!(drafts[0].frame.raw()["params"], fx!("SubagentStart"));
+    let drafts = one(&[fx!("PreModelRequest")]);
+    assert_eq!(methods(&drafts), vec![Some("_codex/PreModelRequest")]);
+    assert_eq!(drafts[0].frame.raw()["params"], fx!("PreModelRequest"));
 }
 
 #[test]

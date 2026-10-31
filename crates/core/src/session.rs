@@ -7,7 +7,8 @@ use crate::acpp::acp::{
     ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use crate::acpp::{
-    Correlated, Dir, Envelope, Frame, PendingRequests, RequestId, Response, Seq, ShepherdFrame,
+    BlockKind, Correlated, Dir, Envelope, Frame, PendingRequests, RequestId, Response, Seq,
+    ShepherdFrame, SubagentBlocked, SubagentStarted,
 };
 
 /// What the agent in a session is doing, as far as its log tells.
@@ -54,6 +55,58 @@ impl ToolSummary {
     }
 }
 
+/// A subagent of the session's agent, from the `_shepherd/subagent/*` frames. Its text is the agent's, raw: display
+/// it only through `display_safe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subagent {
+    id: String,
+    agent_type: String,
+    task: Option<String>,
+    status: SubagentStatus,
+    /// The seq of the block behind [`SubagentStatus::Blocked`].
+    blocked_since: Option<Seq>,
+}
+
+impl Subagent {
+    /// The agent's own id for it.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn agent_type(&self) -> &str {
+        &self.agent_type
+    }
+
+    /// What it was asked to do, if the hooks said.
+    pub fn task(&self) -> Option<&str> {
+        self.task.as_deref()
+    }
+
+    pub fn status(&self) -> &SubagentStatus {
+        &self.status
+    }
+
+    fn waits_since(&self) -> Option<Seq> {
+        match self.status {
+            SubagentStatus::Blocked { .. } => self.blocked_since,
+            _ => None,
+        }
+    }
+}
+
+/// Where a subagent is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubagentStatus {
+    Working,
+    /// Waiting on the user, who answers in the parent session's TUI.
+    Blocked {
+        kind: BlockKind,
+        text: String,
+    },
+    /// Done; listed until the parent's turn ends.
+    Finished,
+}
+
 /// A request still waiting for its response: its direction and id, to forget it in `pending` once its outcome
 /// is inferred.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +140,8 @@ pub struct SessionState {
     pending: PendingRequests,
     turns: u32,
     last_prompt: Option<String>,
+    /// The agent's subagents since its turn began, in the order they started.
+    subagents: Vec<Subagent>,
 }
 
 impl Default for SessionState {
@@ -100,6 +155,7 @@ impl Default for SessionState {
             pending: PendingRequests::default(),
             turns: 0,
             last_prompt: None,
+            subagents: Vec::new(),
         }
     }
 }
@@ -147,15 +203,34 @@ impl SessionState {
         &self.tools
     }
 
-    /// Whether the session wants the user: it started waiting on them (blocked, or idle) after `last_seen`, the last
-    /// seq the user has seen. A wait the user has already seen doesn't want them again.
+    /// Whether the session wants the user: it, or one of its subagents, started waiting on them (blocked, or idle)
+    /// after `last_seen`, the last seq the user has seen. A wait the user has already seen doesn't want them again.
+    /// A blocked subagent wants the user whatever the agent itself is doing.
     pub fn attention(&self, last_seen: Seq) -> bool {
-        match self.activity {
+        let own = match self.activity {
             Activity::NeedsPermission { .. } | Activity::NeedsInput | Activity::Idle => {
                 self.waiting_since.is_some_and(|seq| seq > last_seen)
             }
             _ => false,
-        }
+        };
+        own || self
+            .subagents
+            .iter()
+            .any(|s| s.waits_since().is_some_and(|seq| seq > last_seen))
+    }
+
+    /// The agent's subagents in its current turn (and any that report in after it), in the order they started.
+    /// Finished ones stay until the turn ends; the turn ending drops them all, including any that never reported
+    /// finishing.
+    pub fn subagents(&self) -> &[Subagent] {
+        &self.subagents
+    }
+
+    /// Whether a subagent is waiting on the user.
+    pub fn subagent_blocked(&self) -> bool {
+        self.subagents
+            .iter()
+            .any(|s| matches!(s.status, SubagentStatus::Blocked { .. }))
     }
 
     /// How many prompts the user has sent. Continuation prompts (`_meta.shepherd.continuation: true`, e.g. a turn
@@ -191,8 +266,68 @@ impl SessionState {
                     ..Self::default()
                 };
             }
+            _ if matches!(self.activity, Activity::Exited { .. }) => {}
+            ShepherdFrame::SubagentStarted(s) => self.subagent_started(s),
+            ShepherdFrame::SubagentBlocked(b) => self.subagent_blocked_at(seq, b),
+            ShepherdFrame::SubagentWorking(w) => {
+                if let Some(sub) = self.subagent_mut(&w.id)
+                    && matches!(sub.status, SubagentStatus::Blocked { .. })
+                {
+                    sub.status = SubagentStatus::Working;
+                }
+            }
+            ShepherdFrame::SubagentFinished(f) => {
+                if let Some(sub) = self.subagent_mut(&f.id) {
+                    sub.status = SubagentStatus::Finished;
+                }
+            }
             _ => {}
         }
+    }
+
+    fn subagent_mut(&mut self, id: &str) -> Option<&mut Subagent> {
+        self.subagents.iter_mut().find(|s| s.id == id)
+    }
+
+    /// A start for a subagent already listed (a restarted host's translator announcing it again) updates its type,
+    /// and its task if it has one, and leaves where it is alone.
+    fn subagent_started(&mut self, started: &SubagentStarted) {
+        if let Some(sub) = self.subagent_mut(&started.id) {
+            sub.agent_type = started.agent_type.clone();
+            if started.task.is_some() {
+                sub.task = started.task.clone();
+            }
+            return;
+        }
+        self.subagents.push(Subagent {
+            id: started.id.clone(),
+            agent_type: started.agent_type.clone(),
+            task: started.task.clone(),
+            status: SubagentStatus::Working,
+            blocked_since: None,
+        });
+    }
+
+    /// A block lists a subagent the session doesn't have. The same block again keeps the wait it began.
+    fn subagent_blocked_at(&mut self, seq: Seq, block: &SubagentBlocked) {
+        let status = SubagentStatus::Blocked {
+            kind: block.kind.clone(),
+            text: block.text.clone(),
+        };
+        if let Some(sub) = self.subagent_mut(&block.id) {
+            if sub.status != status {
+                sub.status = status;
+                sub.blocked_since = Some(seq);
+            }
+            return;
+        }
+        self.subagents.push(Subagent {
+            id: block.id.clone(),
+            agent_type: block.agent_type.clone().unwrap_or_default(),
+            task: None,
+            status,
+            blocked_since: Some(seq),
+        });
     }
 
     /// Opens a turn. A `continuation` isn't a user prompt, so it leaves `turns` and `last_prompt` alone.
@@ -313,6 +448,7 @@ impl SessionState {
     /// Drops the in-flight state of the current turn, forgetting requests whose responses no longer matter.
     fn end_turn(&mut self) {
         self.tools.clear();
+        self.subagents.clear();
         self.forget_permission();
         if let Some(r) = self.prompt.take() {
             self.pending.forget(&r.dir, &r.id);

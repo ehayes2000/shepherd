@@ -1,12 +1,14 @@
 # Codex hook fixtures
 
-Hand-written hook payloads (stdin JSON) for `tests/codex_hooks.rs` and the `codex` scenario. They were not recorded
-from a real `codex` run: builders never run `codex`. Each follows the documented schema:
+Hand-written hook payloads (stdin JSON) for `tests/codex_hooks.rs`, `tests/subagents.rs` and the `codex` scenario.
+They were not recorded from a real `codex` run: builders never run `codex`. Each follows the documented schema:
 
 - The Codex hooks reference: <https://developers.openai.com/codex/hooks> (redirects to
-  <https://learn.chatgpt.com/docs/hooks>), read 2026-10-30.
-- The command-input structs in `codex-rs/hooks/src/schema.rs` (`PreToolUseCommandInput`, `StopCommandInput`, ...),
-  openai/codex at rust-v0.166.0.
+  <https://learn.chatgpt.com/docs/hooks>), read 2026-10-30; its `SubagentStart`/`SubagentStop` sections re-read
+  2026-10-31.
+- The command-input structs in `codex-rs/hooks/src/schema.rs` (`PreToolUseCommandInput`, `StopCommandInput`,
+  `SubagentStartCommandInput`, `SubagentStopCommandInput`, ...), openai/codex at rust-v0.166.0, and for subagents the
+  files named below, at the same tag.
 
 ## Documented vs inferred
 
@@ -27,7 +29,11 @@ they list. Inferred means a value we picked that fits the documented type.
 | `Interrupt` | runs when the user interrupts an active main-thread turn; not for idle threads or subagents | |
 | `PreCompact`, `PostCompact` | `trigger` (`manual`, `auto`); no summary field | |
 | `SessionEnd` | `reason` (currently always `other`); no `model` or `permission_mode` | |
-| `SubagentStart` | `agent_id`, `agent_type` (stands in for any hook without a mapping) | |
+| `SubagentStart` | `turn_id` (the subagent's), `agent_id`, `agent_type` (`SubagentStartCommandInput`); the parent's `session_id` ("Subagent hooks use the parent session id") | `explorer` |
+| `SubagentStop` | `turn_id`, `agent_transcript_path` (string or null), `stop_hook_active`, `agent_id`, `agent_type`, `last_assistant_message` (`SubagentStopCommandInput`) | the message |
+| `PreToolUse.spawn_agent`, `PostToolUse.spawn_agent` | `spawn_agent` is a local function tool, named `spawn_agent` in hook stdin (`HookToolName::spawn_agent` in `codex-rs/core/src/tools/hook_names.rs`, matcher alias `Agent`); its input is its arguments, `message` and optional `agent_type` (`SpawnAgentArgs` in `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`) | that its `PreToolUse` fires (the reference's "other local function tools" rows; "some specialized tool paths can opt out"); the `tool_response` text |
+| `PermissionRequest.Bash.subagent`, `PostToolUse.Bash.subagent` | `agent_id`, `agent_type` optional on `PermissionRequestCommandInput` and `PostToolUseCommandInput` | that a subagent's approval fires `PermissionRequest` (the reference doesn't say) |
+| `PreModelRequest` | an event in `HookEventName` (stands in for any hook without a mapping) | its fields beyond the common ones |
 
 ## Facts from the reference the translator relies on
 
@@ -38,3 +44,10 @@ they list. Inferred means a value we picked that fits the documented type.
 - `Stop` can be blocked by a hook, and Codex then keeps working (`stop_hook_active: true` on the next `Stop`).
 - `SessionEnd` runs when an open conversation is archived or deleted, or after 30 minutes idle with no client open.
 - Codex has no `Notification`, `PostToolUseFailure`, `PermissionDenied` or `StopFailure` hook.
+- A thread-spawned subagent fires `SubagentStart` and `SubagentStop` in place of `SessionStart` and `Stop`
+  (`StartHookTarget::SubagentStart` in `codex-rs/hooks/src/events/session_start.rs`, `StopHookTarget::SubagentStop`
+  in `stop.rs`). `SessionEnd` and `Interrupt` don't run for subagents. Plain stdout from a `SubagentStart` hook
+  becomes model context, so `shepherd hook` must print nothing (it never does).
+- `spawn_agent` without an `agent_type` spawns the `default` role (`DEFAULT_ROLE_NAME` in
+  `codex-rs/core/src/agent/role.rs`). That `SubagentStart`'s `agent_type` is then `default` is inferred.
+- Codex has no hook for a subagent asking the user a question, so Codex subagents only block on permission.

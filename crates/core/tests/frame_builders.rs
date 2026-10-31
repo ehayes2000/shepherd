@@ -9,8 +9,9 @@ use shepherd_core::acpp::acp::{
     SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use shepherd_core::acpp::{
-    AgentExited, AgentIdle, AgentStarted, Correlated, Dir, Frame, IdleInference, PendingRequests,
-    RequestId, SessionClosed, SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame,
+    AgentExited, AgentIdle, AgentStarted, BlockKind, Correlated, Dir, Frame, IdleInference,
+    PendingRequests, RequestId, SessionClosed, SessionCreated, SessionFailed, SessionRenamed,
+    ShepherdFrame, SubagentBlocked, SubagentFinished, SubagentStarted, SubagentWorking,
     WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoving,
 };
 use shepherd_core::ids::MachineId;
@@ -549,6 +550,36 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
                 })
             }),
         arb_string().prop_map(|repo| ShepherdFrame::WorkspaceSelected(WorkspaceSelected { repo })),
+        arb_subagent(),
+    ]
+}
+
+fn arb_subagent() -> impl Strategy<Value = ShepherdFrame> {
+    let kind = prop_oneof![
+        Just(BlockKind::Permission),
+        Just(BlockKind::Question),
+        "x[a-z_]{0,8}".prop_map(BlockKind::Other),
+    ];
+    prop_oneof![
+        (arb_string(), arb_string(), arb_opt_string()).prop_map(|(id, agent_type, task)| {
+            ShepherdFrame::SubagentStarted(SubagentStarted {
+                id,
+                agent_type,
+                task,
+            })
+        }),
+        (arb_string(), kind, arb_string(), arb_opt_string()).prop_map(
+            |(id, kind, text, agent_type)| {
+                ShepherdFrame::SubagentBlocked(SubagentBlocked {
+                    id,
+                    kind,
+                    text,
+                    agent_type,
+                })
+            }
+        ),
+        arb_string().prop_map(|id| ShepherdFrame::SubagentWorking(SubagentWorking { id })),
+        arb_string().prop_map(|id| ShepherdFrame::SubagentFinished(SubagentFinished { id })),
     ]
 }
 
