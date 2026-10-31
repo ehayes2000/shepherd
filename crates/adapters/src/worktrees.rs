@@ -245,14 +245,31 @@ impl GitWorktrees {
         self.run(dir, args, Some(timeout), None)
     }
 
-    /// Runs git in `dir`, killing it (its whole process group) once `timeout` passes, if there is one, or once `call`
-    /// is cancelled, if it belongs to a create. Either way the group is gone when this returns.
+    /// Runs a git call that finds `dir`'s repo, for [`Failure::or_not_a_repo`], which reads git's messages: so they
+    /// are untranslated (`LC_ALL=C`). Only these calls get the C locale: the hooks other calls run keep the user's.
+    fn probe<S: AsRef<OsStr>>(&self, dir: &Path, args: &[S]) -> Result<String, Failure> {
+        self.run_with(dir, args, Some(self.git_timeout), None, &[("LC_ALL", "C")])
+    }
+
     fn run<S: AsRef<OsStr>>(
         &self,
         dir: &Path,
         args: &[S],
         timeout: Option<Duration>,
         call: Option<&CreateCall>,
+    ) -> Result<String, Failure> {
+        self.run_with(dir, args, timeout, call, &[])
+    }
+
+    /// Runs git in `dir`, with `vars` set last, killing it (its whole process group) once `timeout` passes, if there
+    /// is one, or once `call` is cancelled, if it belongs to a create. Either way the group is gone when this returns.
+    fn run_with<S: AsRef<OsStr>>(
+        &self,
+        dir: &Path,
+        args: &[S],
+        timeout: Option<Duration>,
+        call: Option<&CreateCall>,
+        vars: &[(&str, &str)],
     ) -> Result<String, Failure> {
         let io = |e: io::Error| Failure::Io(e.to_string());
         let mut stdout = tempfile::tempfile().map_err(io)?;
@@ -291,7 +308,8 @@ impl GitWorktrees {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GCM_INTERACTIVE", "never")
             .env("SSH_ASKPASS_REQUIRE", "never")
-            .env("GIT_OPTIONAL_LOCKS", "0");
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .envs(vars.iter().copied());
         // SAFETY: `setsid` is async-signal-safe, and the closure touches nothing else.
         unsafe {
             command.pre_exec(|| {
@@ -577,7 +595,7 @@ impl GitWorktrees {
     /// The absolute common git dir of the checkout containing `dir`.
     fn common_dir(&self, dir: &Path) -> Result<PathBuf, WorktreeError> {
         let out = self
-            .git(
+            .probe(
                 dir,
                 &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             )
@@ -656,7 +674,7 @@ impl GitWorktrees {
             "--git-common-dir",
         ];
         let out = self
-            .git(path, &args)
+            .probe(path, &args)
             .map_err(|f| f.or_not_a_repo(path, "rev-parse"))?;
         // Git prints resolved paths already; resolving again keeps the comparisons in `repo_root` from relying on it.
         let canonical = |line: &str| {
@@ -1091,7 +1109,7 @@ impl Worktrees for GitWorktrees {
             .ok_or_else(|| WorktreeError::NotARepo(path.as_path().to_owned()))?;
         let common = self.common_dir(&target)?;
         let toplevel = self
-            .git(&target, &["rev-parse", "--show-toplevel"])
+            .probe(&target, &["rev-parse", "--show-toplevel"])
             .map_err(|f| f.or_not_a_repo(&target, "rev-parse"))?;
         let toplevel = std::fs::canonicalize(toplevel.trim_end_matches('\n'))
             .map_err(|e| WorktreeError::Other(e.to_string()))?;
@@ -1183,14 +1201,35 @@ impl Failure {
         }
     }
 
-    /// For calls where git exiting with an error means `dir` is not in a repo (or doesn't exist). A git killed by a
-    /// signal didn't exit with one: that says nothing about `dir`.
+    /// For the calls that find `dir`'s repo ([`GitWorktrees::probe`]): git's answer that there is none there is
+    /// [`WorktreeError::NotARepo`]. That answer is git's fatal exit (128) because `dir` doesn't exist (git can't change
+    /// to it), isn't in a repo, or is in one without a work tree (a bare repo is no checkout). Any other failure,
+    /// such as a git killed by a signal or one that refuses a repo it doesn't trust, says nothing about `dir` (F48, F51).
     fn or_not_a_repo(self, dir: &Path, op: &str) -> WorktreeError {
         match self {
-            Self::Exit { code: Some(_), .. } => WorktreeError::NotARepo(dir.to_owned()),
+            Self::Exit {
+                code: Some(FATAL_EXIT),
+                stderr,
+            } if !dir.is_dir() || says_there_is_no_repo(&stderr) => {
+                WorktreeError::NotARepo(dir.to_owned())
+            }
             other => other.into_error(op),
         }
     }
+}
+
+/// The exit code of git's `die`.
+const FATAL_EXIT: i32 = 128;
+
+/// Whether git's `stderr`, untranslated, says there is no repo, or no work tree, where it ran.
+fn says_there_is_no_repo(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("fatal: "))
+        .any(|why| {
+            why.starts_with("not a git repository")
+                || why == "this operation must be run in a work tree"
+        })
 }
 
 /// What a failed `worktree add` may have left behind that is ours to remove, besides the new branch.
@@ -1939,7 +1978,11 @@ mod tests {
     fn a_cancelled_create_leaves_no_hook_running() {
         let f = GitFixture::new();
         let pid_file = f.tmp().join("hook.pids");
-        let setup = format!("sleep 900 &\necho \"$$ $!\" > '{}'", pid_file.display());
+        let setup = format!(
+            "{} &\necho \"$$ $!\" > '{}'",
+            marked_sleep(900, &pid_file),
+            pid_file.display()
+        );
         let result = cancelled_create(&f, "orphans", &setup);
         assert_eq!(result, Err(WorktreeError::Cancelled));
         let pids: Vec<libc::pid_t> = std::fs::read_to_string(&pid_file)
@@ -1948,9 +1991,10 @@ mod tests {
             .map(|pid| pid.parse().unwrap())
             .collect();
         let alive: Vec<_> = pids.iter().copied().filter(|&pid| running(pid)).collect();
+        // Only the sleep is killed, while it is ours. The hook's shell needs no kill: its gate is released by now, so
+        // it ends by itself.
         for &pid in &alive {
-            // SAFETY: plain syscall on a pid the hook reported.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            kill_if_ours(pid, &pid_file);
         }
         assert_eq!(pids.len(), 2, "{pids:?}");
         assert!(alive.is_empty(), "still running: {alive:?}");
@@ -1960,7 +2004,8 @@ mod tests {
     /// Run from a hook (in git's process group and session) with a file to write to: leaves a `sleep` in git's group
     /// whose parent is outside it, in a group of its own. Once that `sleep` is killed, the parent starts another one in
     /// git's group (a member the kills missed, like one forked while they were delivered), then two seconds later reaps
-    /// both and exits. Writes "<git's group> <parent>" once the first `sleep` is in the group.
+    /// both and exits. Writes "<git's group> <parent>" once the first `sleep` is in the group. Each `sleep` is a perl
+    /// with the file in its arguments, as the parent has, so [`kill_if_ours`] can tell them ours.
     const LINGERING_ZOMBIE: &str = r#"
 use strict;
 use POSIX ();
@@ -1978,7 +2023,7 @@ if ($parent == 0) {
         close $r;
         print $w "ready\n";
         close $w;
-        exec "sleep", "900";
+        exec "perl", "-e", "sleep 900", $pids;
         die "exec: $!";
     }
     close $r;
@@ -1987,7 +2032,7 @@ if ($parent == 0) {
     my $late = fork() // die "fork: $!";
     if ($late == 0) {
         POSIX::setpgid(0, $group) or exit 1;
-        exec "sleep", "900";
+        exec "perl", "-e", "sleep 900", $pids;
         exit 1;
     }
     select(undef, undef, undef, 2);
@@ -2035,15 +2080,14 @@ close $out;
         } else {
             group_members(pgid)
         };
-        // SAFETY: plain syscalls. The parent is the script's own process, alive until it has reaped its child (its
-        // pid can't be reused before we are done with it, short of minutes passing); the group, while it has members,
-        // is still the one git led.
-        unsafe {
-            if running(parent) {
-                libc::kill(parent, libc::SIGKILL);
-            }
-            if rc == 0 {
-                libc::killpg(pgid, libc::SIGKILL);
+        // Every process the script starts names its pid file in its arguments: the parent, and the sleeps it leaves
+        // in git's group. Each is killed only while it is ours.
+        kill_if_ours(parent, &pids);
+        if rc == 0 {
+            for member in group_members(pgid).lines() {
+                if let Some(Ok(pid)) = member.split_whitespace().next().map(str::parse) {
+                    kill_if_ours(pid, &pids);
+                }
             }
         }
         assert_eq!(result, Err(WorktreeError::Cancelled));
@@ -2372,15 +2416,80 @@ close $out;
     /// A port whose `git` is a script that kills itself with SIGKILL, as a stray signal (say, one sent to a reused
     /// pid) would.
     fn port_whose_git_is_killed(f: &GitFixture) -> GitWorktrees {
-        let bin = f.tmp().join("killed-bin");
-        std::fs::create_dir(&bin).unwrap();
         // The body is sourced by the stand-in's own `sh`, so `$$` is the process the port spawned.
-        crate::stand_in::install(&bin.join("git"), "kill -KILL $$\n");
+        port_whose_git_runs(f, "kill -KILL $$\n", &[])
+    }
+
+    /// A port whose `git` is a stand-in running `body`, with `vars` added to its environment (before the port's own).
+    fn port_whose_git_runs(f: &GitFixture, body: &str, vars: &[(&str, &str)]) -> GitWorktrees {
+        let bin = f.tmp().join("stand-in-bin");
+        std::fs::create_dir(&bin).unwrap();
+        crate::stand_in::install(&bin.join("git"), body);
         let mut env = env(&f.tmp());
         env.push(("PATH".into(), bin.into()));
+        env.extend(vars.iter().map(|(k, v)| ((*k).into(), (*v).into())));
         GitWorktrees::new(f.root())
             .with_isolated_env(env)
             .with_git_timeout(TEST_TIMEOUT)
+    }
+
+    /// A `git` that exits with `code` after printing `message` to stderr.
+    fn git_failing(code: u8, message: &str) -> String {
+        format!("printf '%s\\n' '{message}' >&2\nexit {code}\n")
+    }
+
+    /// git's answer when there is no repo, in the C locale.
+    const NOT_A_REPO: &str = "fatal: not a git repository (or any of the parent directories): .git";
+
+    /// Any other fatal error says nothing about whether `dir` is a repo: it is a failure (F51).
+    #[test]
+    fn repo_root_reports_another_fatal_git_error_as_a_failure_not_as_not_a_repo() {
+        let f = GitFixture::new();
+        let git = git_failing(128, "fatal: detected dubious ownership in repository");
+        let result = port_whose_git_runs(&f, &git, &[]).repo_root(&f.app());
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("dubious ownership")),
+            "{result:?}"
+        );
+    }
+
+    /// Likewise for the calls that only ask for the repo's git dir.
+    #[test]
+    fn default_branch_reports_another_fatal_git_error_as_a_failure_not_as_not_a_repo() {
+        let f = GitFixture::new();
+        let git = git_failing(128, "fatal: detected dubious ownership in repository");
+        let result = port_whose_git_runs(&f, &git, &[]).default_branch(&f.repo());
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("dubious ownership")),
+            "{result:?}"
+        );
+    }
+
+    /// Only git's own exit for it (128) carries that answer.
+    #[test]
+    fn a_not_a_repo_message_with_another_exit_code_is_a_failure() {
+        let f = GitFixture::new();
+        let result = port_whose_git_runs(&f, &git_failing(1, NOT_A_REPO), &[]).repo_root(&f.app());
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("not a git repository")),
+            "{result:?}"
+        );
+    }
+
+    /// git translates its messages: the port asks for them untranslated, whatever the user's locale.
+    #[test]
+    fn repo_root_is_not_a_repo_whatever_the_users_locale() {
+        let f = GitFixture::new();
+        let git = format!(
+            "if [ \"$LC_ALL\" = C ]; then m='{NOT_A_REPO}'; else m='fatal: Kein Git-Repository'; fi\n\
+             printf '%s\\n' \"$m\" >&2\nexit 128\n"
+        );
+        let locale = [("LANG", "de_DE.UTF-8"), ("LC_ALL", "de_DE.UTF-8")];
+        let port = port_whose_git_runs(&f, &git, &locale);
+        assert_eq!(
+            port.repo_root(&f.app()),
+            Err(WorktreeError::NotARepo(f.app()))
+        );
     }
 
     /// A git killed by a signal says nothing about the directory it ran in: it is no answer that it isn't a repo (F48).
@@ -2416,6 +2525,81 @@ close $out;
         !stat.is_empty() && !stat.starts_with('Z')
     }
 
+    /// A shell command that sleeps for `secs` with `marker` (a path in the test's tempdir) in its arguments, so
+    /// [`kill_if_ours`] can tell it is ours.
+    fn marked_sleep(secs: u32, marker: &Path) -> String {
+        format!("perl -e 'sleep {secs}' '{}'", marker.display())
+    }
+
+    /// Kills `pid` if it is a live process whose arguments name `marker`, a path in the test's tempdir (as a
+    /// [`marked_sleep`]'s do). Once our process is gone its pid may name someone else's, such as a git another test
+    /// started, which is left alone (F48, F51).
+    fn kill_if_ours(pid: libc::pid_t, marker: &Path) {
+        let marker = marker.to_str().unwrap();
+        let Ok(out) = Command::new("ps")
+            .args(["-ww", "-o", "stat=,args=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return;
+        };
+        let line = String::from_utf8_lossy(&out.stdout);
+        let Some((stat, args)) = line.trim().split_once(char::is_whitespace) else {
+            return;
+        };
+        if !stat.contains('Z') && args.contains(marker) {
+            // SAFETY: plain syscall, on a live process whose arguments name this test's tempdir: ours (short of it
+            // dying and its pid being handed out between the `ps` and here).
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+
+    /// A process that took the pid of one of ours is spared.
+    #[test]
+    fn kill_if_ours_spares_a_process_that_does_not_name_the_marker() {
+        use std::os::unix::process::ExitStatusExt;
+        let f = GitFixture::new();
+        let mut stranger = Command::new("sleep").arg("300").spawn().unwrap();
+        let id = libc::pid_t::try_from(stranger.id()).unwrap();
+        kill_if_ours(id, &f.tmp());
+        // A SIGKILL sent above would be acted on before this SIGTERM.
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = stranger.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+    }
+
+    /// One that names the marker is killed.
+    #[test]
+    fn kill_if_ours_kills_a_marked_sleep() {
+        use std::os::unix::process::ExitStatusExt;
+        let f = GitFixture::new();
+        let mut ours = Command::new("/bin/sh")
+            .args(["-c", &format!("exec {}", marked_sleep(300, &f.tmp()))])
+            .spawn()
+            .unwrap();
+        let id = libc::pid_t::try_from(ours.id()).unwrap();
+        // `ps` shows the new arguments once `sh` has exec'd perl.
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !ps_args(id).contains("perl") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        kill_if_ours(id, &f.tmp());
+        // So a missed kill fails the test rather than holding it: the SIGKILL, if sent, is acted on first.
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = ours.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    }
+
+    /// The arguments `ps` shows for `pid`.
+    fn ps_args(pid: libc::pid_t) -> String {
+        let out = Command::new("ps")
+            .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     /// The hook and its `sleep` are in git's process group; killing git leaves them running unless the group is
     /// killed too.
     #[test]
@@ -2426,7 +2610,8 @@ close $out;
             &f,
             "post-checkout",
             &format!(
-                "sleep 900 &\necho \"$$ $!\" > '{}'\nkill -KILL $PPID\nwait",
+                "{} &\necho \"$$ $!\" > '{}'\nkill -KILL $PPID\nwait",
+                marked_sleep(900, &pid_file),
                 pid_file.display()
             ),
         );
@@ -2440,9 +2625,9 @@ close $out;
             .map(|pid| pid.parse().unwrap())
             .collect();
         let alive: Vec<_> = pids.iter().copied().filter(|&pid| running(pid)).collect();
+        // Only the sleep is killed, while it is ours. The hook's shell needs no kill: it waits for the sleep.
         for &pid in &alive {
-            // SAFETY: plain syscall on a pid the hook reported.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            kill_if_ours(pid, &pid_file);
         }
         assert_eq!(pids.len(), 2, "{pids:?}");
         assert!(alive.is_empty(), "still running: {alive:?}");
@@ -2935,7 +3120,11 @@ close $out;
         hook(
             &f,
             "post-checkout",
-            &format!("sleep 3600 &\necho $! > '{}'", pid_file.display()),
+            &format!(
+                "{} &\necho $! > '{}'",
+                marked_sleep(3600, &pid_file),
+                pid_file.display()
+            ),
         );
         let started = Instant::now();
         let result = f
@@ -2945,8 +3134,7 @@ close $out;
         if let Ok(pid) = std::fs::read_to_string(&pid_file)
             && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
         {
-            // SAFETY: plain syscall on the pid the hook reported.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            kill_if_ours(pid, &pid_file);
         }
         assert!(result.is_ok(), "{result:?}");
         assert!(elapsed < CREATE_LIMIT, "took {elapsed:?}");

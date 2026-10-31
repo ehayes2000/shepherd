@@ -498,15 +498,19 @@ wait
 
         /// Whether process group `pgid` has a live member launched through this fixture: a stand-in, or a subshell of
         /// one such as its watchdog, whose arguments name this fixture's fifo. (`ps` prints each process on one line,
-        /// escaping the newlines in a stand-in's script.) `ps` is retried a few times if it can't be run or fails, as
-        /// it can under load; if it never answers, the group counts as not ours: it is never killed unverified, and its
-        /// watchdog ends it within [`STAND_IN_LIFETIME`].
+        /// escaping the newlines in a stand-in's script.) `ps` is retried a few times, with a pause between tries, if it
+        /// can't be run or fails, as it can under load; if it never answers, the group counts as not ours: it is never
+        /// signalled unverified, and its watchdog ends it within [`STAND_IN_LIFETIME`].
         fn group_is_ours(&self, pgid: i32) -> bool {
             let fifo = self.fifo();
             let Some(fifo) = fifo.to_str() else {
                 return false;
             };
-            let Some(out) = (0..5).find_map(|_| {
+            let Some(out) = (0..5).find_map(|attempt| {
+                if attempt > 0 {
+                    // Whatever made `ps` fail (a fork or exec refused under load) may pass in a moment.
+                    std::thread::sleep(Duration::from_millis(100));
+                }
                 std::process::Command::new("ps")
                     .args(["-A", "-o", "pgid=,stat=,args="])
                     .output()
@@ -527,15 +531,18 @@ wait
         }
 
         /// Signals the stand-in `pid` until it reports that it is alive, or `None` if it never does. Repeated,
-        /// because `sh` can lose a trapped signal that arrives while it forks (between `started` and `wait`).
+        /// because `sh` can lose a trapped signal that arrives while it forks (between `started` and `wait`). Each signal
+        /// goes out only while the stand-in's group (it leads one) is proven ours ([`StandInFixture::group_is_ours`]):
+        /// SIGUSR1 ends a process that doesn't trap it, and once our stand-in is gone its pid may name someone else's.
         fn ask_alive(&mut self, pid: i32) -> Option<Report> {
             let deadline = std::time::Instant::now() + TIMEOUT;
             let mut signalled = false;
             while std::time::Instant::now() < deadline {
-                // SAFETY: plain syscall.
-                if unsafe { libc::kill(pid, libc::SIGUSR1) } != 0 {
+                // SAFETY: plain syscall, on a group that has one of our stand-ins in it, so its id can't have been
+                // reused (short of all of it dying and the id being handed out in between).
+                if !self.group_is_ours(pid) || unsafe { libc::kill(pid, libc::SIGUSR1) } != 0 {
                     if !signalled {
-                        // Gone before it was ever asked: it can't have answered.
+                        // Gone (or never ours) before it was ever asked: it can't have answered.
                         return None;
                     }
                     // Gone after a signal got through: it may have answered and exited. Wait for that answer.
@@ -763,6 +770,28 @@ wait
         // SAFETY: plain syscall on our own unreaped child.
         unsafe { libc::kill(id, libc::SIGTERM) };
         let status = stranger.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+    }
+
+    /// A stand-in that died before it was asked whether it is alive may have its pid handed to another process (one
+    /// leading a group of its own, as a git another test runs does). Asking signals only a stand-in proven ours:
+    /// SIGUSR1 would end that process (F51).
+    #[test]
+    fn asking_if_alive_spares_a_process_that_took_a_dead_stand_ins_pid() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut f = StandInFixture::new();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let id = libc::pid_t::try_from(stranger.id()).unwrap();
+        let answer = f.ask_alive(id);
+        // A SIGUSR1 the ask sent would be acted on before this SIGTERM.
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = stranger.wait().unwrap();
+        assert_eq!(answer, None);
         assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
     }
 
