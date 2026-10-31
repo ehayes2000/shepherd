@@ -2435,7 +2435,8 @@ close $out;
 
     /// A `git` that exits with `code` after printing `message` to stderr.
     fn git_failing(code: u8, message: &str) -> String {
-        format!("printf '%s\\n' '{message}' >&2\nexit {code}\n")
+        let quoted = message.replace('\'', r"'\''");
+        format!("printf '%s\\n' '{quoted}' >&2\nexit {code}\n")
     }
 
     /// git's answer when there is no repo, in the C locale.
@@ -2480,15 +2481,68 @@ close $out;
     #[test]
     fn repo_root_is_not_a_repo_whatever_the_users_locale() {
         let f = GitFixture::new();
-        let git = format!(
-            "if [ \"$LC_ALL\" = C ]; then m='{NOT_A_REPO}'; else m='fatal: Kein Git-Repository'; fi\n\
-             printf '%s\\n' \"$m\" >&2\nexit 128\n"
-        );
-        let locale = [("LANG", "de_DE.UTF-8"), ("LC_ALL", "de_DE.UTF-8")];
-        let port = port_whose_git_runs(&f, &git, &locale);
+        let port = port_whose_git_runs(&f, &git_with_no_repo_translated(""), &GERMAN);
         assert_eq!(
             port.repo_root(&f.app()),
             Err(WorktreeError::NotARepo(f.app()))
+        );
+    }
+
+    /// Likewise for the calls that only ask for the repo's git dir.
+    #[test]
+    fn default_branch_is_not_a_repo_whatever_the_users_locale() {
+        let f = GitFixture::new();
+        let port = port_whose_git_runs(&f, &git_with_no_repo_translated(""), &GERMAN);
+        assert_eq!(
+            port.default_branch(&f.repo()),
+            Err(WorktreeError::NotARepo(f.repo().as_path().to_owned()))
+        );
+    }
+
+    /// And for `remove`'s check that the path is a checkout's top level, made once the path is known to be in a repo.
+    #[test]
+    fn remove_is_not_a_repo_whatever_the_users_locale() {
+        let f = GitFixture::new();
+        let dir = f.root().join(REPO_NAME).join("not-a-checkout");
+        std::fs::create_dir_all(&dir).unwrap();
+        let common = f.app().join(".git");
+        let answers = format!(
+            "case \"$*\" in *--git-common-dir*) printf '%s\\n' '{}'; exit 0 ;; esac\n",
+            common.display()
+        );
+        let port = port_whose_git_runs(&f, &git_with_no_repo_translated(&answers), &GERMAN);
+        assert_eq!(
+            port.remove(&WorktreePath::new(&dir), true),
+            Err(WorktreeError::NotARepo(
+                std::fs::canonicalize(&dir).unwrap()
+            ))
+        );
+    }
+
+    /// A user's locale in which git translates its messages.
+    const GERMAN: [(&str, &str); 2] = [("LANG", "de_DE.UTF-8"), ("LC_ALL", "de_DE.UTF-8")];
+
+    /// A `git` that runs `answers` (which may answer a call and exit), then says there is no repo: untranslated only if
+    /// asked for the C locale.
+    fn git_with_no_repo_translated(answers: &str) -> String {
+        format!(
+            "{answers}if [ \"$LC_ALL\" = C ]; then m='{NOT_A_REPO}'; else m='fatal: Kein Git-Repository'; fi\n\
+             printf '%s\\n' \"$m\" >&2\nexit 128\n"
+        )
+    }
+
+    /// Only git's own words carry that answer, not a path in another error that happens to contain them.
+    #[test]
+    fn a_fatal_error_naming_a_path_with_not_a_repo_in_it_is_a_failure() {
+        let f = GitFixture::new();
+        let git = git_failing(
+            128,
+            "fatal: detected dubious ownership in repository at '/x/not a git repository'",
+        );
+        let result = port_whose_git_runs(&f, &git, &[]).repo_root(&f.app());
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("dubious ownership")),
+            "{result:?}"
         );
     }
 
@@ -2535,22 +2589,7 @@ close $out;
     /// [`marked_sleep`]'s do). Once our process is gone its pid may name someone else's, such as a git another test
     /// started, which is left alone (F48, F51).
     fn kill_if_ours(pid: libc::pid_t, marker: &Path) {
-        let marker = marker.to_str().unwrap();
-        let Ok(out) = Command::new("ps")
-            .args(["-ww", "-o", "stat=,args=", "-p", &pid.to_string()])
-            .output()
-        else {
-            return;
-        };
-        let line = String::from_utf8_lossy(&out.stdout);
-        let Some((stat, args)) = line.trim().split_once(char::is_whitespace) else {
-            return;
-        };
-        if !stat.contains('Z') && args.contains(marker) {
-            // SAFETY: plain syscall, on a live process whose arguments name this test's tempdir: ours (short of it
-            // dying and its pid being handed out between the `ps` and here).
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
+        crate::test_pids::signal_if_ours(pid, marker, libc::SIGKILL);
     }
 
     /// A process that took the pid of one of ours is spared.

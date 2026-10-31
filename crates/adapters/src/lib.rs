@@ -17,6 +17,8 @@ mod process_group;
 pub mod pty;
 #[cfg(test)]
 mod stand_in;
+#[cfg(test)]
+mod test_pids;
 pub mod worktrees;
 
 pub use commands::ShellCommands;
