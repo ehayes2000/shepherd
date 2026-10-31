@@ -833,6 +833,16 @@ impl Client {
         entries
     }
 
+    /// Whether the host of `peer` (this machine's for `None`) is where `session` lives, so what it says of the session
+    /// (its terminal output) is to be believed. A session not listed is this machine's host's.
+    pub fn is_home(&self, peer: Option<&MachineId>, session: &SessionId) -> bool {
+        let at = match peer {
+            None => At::Local,
+            Some(machine) => At::Peer(machine.clone()),
+        };
+        self.home(session) == at
+    }
+
     /// Whether listed session `session` is on a peer the client can't reach now: what is shown of it is the last that
     /// was known.
     pub fn offline(&self, session: &SessionId) -> bool {
@@ -1291,6 +1301,11 @@ impl Client {
 
     /// Peer `machine`'s host answered the hello: subscribe from where its logs were left.
     fn peer_hello(&mut self, machine: &MachineId, ok: HelloOk) -> Vec<ClientCommand> {
+        // The tunnel reaches the machine asked for: a host answering as another one is not to be believed.
+        if &ok.machine != machine {
+            let why = format!("it answered as another machine ({})", ok.machine);
+            return self.peer_failed(machine, why, true);
+        }
         let Some(peer) = self.peers.get_mut(machine) else {
             return Vec::new();
         };
@@ -1732,9 +1747,7 @@ impl Client {
         if let Some(id) = env.session() {
             feed.states.entry(id.clone()).or_default().apply(env);
         }
-        if *at == At::Local {
-            self.notice_kept_worktree(env, live);
-        }
+        self.notice_kept_worktree(env, live);
         let wanted: Vec<SessionId> = self
             .sessions
             .iter()
@@ -1768,8 +1781,8 @@ impl Client {
         self.set_notice(format!("kept the worktree of {name}: {why}"));
     }
 
-    /// An alert for each of host `at`'s sessions that wants the user and wasn't in `wanted`, if that host's bell is on
-    /// and it is live.
+    /// An alert for each session that wants the user and wasn't in `wanted`, after an entry from host `at`, if that
+    /// host's bell is on and it is live. Only that host's sessions can have changed.
     fn alerts(&self, at: &At, wanted: &[SessionId]) -> Vec<ClientCommand> {
         let Some(feed) = self.feed(at) else {
             return Vec::new();
@@ -1779,7 +1792,7 @@ impl Client {
         }
         self.sessions
             .iter()
-            .filter(|s| s.attention && !wanted.contains(&s.id) && self.homes.get(&s.id) == Some(at))
+            .filter(|s| s.attention && !wanted.contains(&s.id))
             .map(|s| ClientCommand::Alert {
                 session: s.id.clone(),
                 message: alert_message(s),
@@ -2494,11 +2507,9 @@ impl Client {
     }
 
     /// Whether `s` might be stale: it has a worktree in the current workspace and isn't closing, and its PTY exited at
-    /// least `days` days before the latest tick. Whether its branch is merged is asked of the host.
+    /// least `days` days before the latest tick. Whether its branch is merged is asked of the host. Only this machine's
+    /// host's sessions can be: a peer's session isn't in its registry.
     fn stale(&self, s: &ClientSession, days: u32) -> bool {
-        if self.homes.get(&s.id) != Some(&At::Local) {
-            return false;
-        }
         let (Some(now), Some(exited)) = (self.now, self.local.registry.exited_at(&s.id)) else {
             return false;
         };

@@ -600,6 +600,10 @@ where
     /// A message from the local host, or from `peer`'s.
     fn host_message(&mut self, peer: Option<MachineId>, message: HostMessage) {
         if let HostMessage::Notification(HostNotification::PtyOutput(out)) = &message {
+            // Only the session's own host draws its terminal.
+            if !self.client.is_home(peer.as_ref(), &out.session) {
+                return;
+            }
             let (cols, rows) = self
                 .client
                 .size()

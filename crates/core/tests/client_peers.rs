@@ -3,20 +3,24 @@
 //! its own host.
 
 use serde_json::{Value, json};
-use shepherd_core::acpp::{Seq, Timestamp};
+use shepherd_core::acpp::{Envelope, Seq, Source, SourceKind, Timestamp};
 use shepherd_core::client::{
-    ClientCommand, ClientEvent, Intent, MachineStatus, NOTICE_TIMEOUT, PEER_RETRY, PEER_RETRY_MAX,
-    PeerEvent, SidebarEntry,
+    Cell, CleanupOutcome, Client, ClientCommand, ClientEvent, Intent, MachineStatus, MenuItem,
+    NOTICE_TIMEOUT, PEER_RETRY, PEER_RETRY_MAX, PeerEvent, SidebarEntry,
 };
+use shepherd_core::config::WorkspaceHooks;
+use shepherd_core::host::HostEvent;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::{
+    BuildId, CloseWorktree, ExeDigest, HostMessage, HostNotification, LogEntry, SessionResume,
+};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, InputKind, PROTOCOL_VERSION, RawResponse,
     Request, SessionClose, SessionInput, SessionRename, SessionResize, Subscribe, SubscribeFrom,
     Tunnel, WireError, WorktreeCheck,
 };
-use shepherd_core::wire::{HostMessage, HostNotification, LogEntry};
-use shepherd_testkit::builders::{ClientDriver, HostDriver, requests, ts};
+use shepherd_testkit::builders::{ClientDriver, HostDriver, claude_session_spec, requests, ts};
 
 fn m(id: &str) -> MachineId {
     MachineId::new(id)
@@ -84,8 +88,28 @@ impl Machines {
     /// A client connected to its local host, caught up, with the local host trusting `peers` (id, name), none of them
     /// reached yet. Returns it and what the peer list answer produced.
     fn new(peers: &[(&str, &str)]) -> (Self, Vec<ClientCommand>) {
-        let mut c = ClientDriver::new();
-        let subscribe = c.connect_named("studio");
+        Self::from_client(
+            ClientDriver::new(),
+            json!({ "notify": { "bell": false } }),
+            peers,
+        )
+    }
+
+    /// [`Machines::new`], driving `c`, whose local host's hello answer also says `extra`.
+    fn from_client(
+        mut c: ClientDriver,
+        extra: Value,
+        peers: &[(&str, &str)],
+    ) -> (Self, Vec<ClientCommand>) {
+        let started = c.handle(ClientEvent::Start);
+        assert_eq!(started, [ClientCommand::Connect]);
+        let hello = c.handle(ClientEvent::Connected { at: at(0) });
+        let mut answer =
+            json!({ "version": PROTOCOL_VERSION, "machine": "m_test", "name": "studio" });
+        if let (Some(answer), Some(extra)) = (answer.as_object_mut(), extra.as_object()) {
+            answer.extend(extra.clone());
+        }
+        let subscribe = c.answer(&hello, Ok(answer));
         let caught_up = c.answer(&subscribe, Ok(json!({})));
         let list: Vec<Value> = peers
             .iter()
@@ -144,10 +168,24 @@ impl Machines {
 
     /// Opens `machine`'s conn, its tunnel and hello. Returns the subscribe commands.
     fn handshake(&mut self, machine: &str) -> Vec<ClientCommand> {
+        let answer = json!({ "version": PROTOCOL_VERSION, "machine": machine });
+        self.handshake_answering(machine, answer)
+    }
+
+    /// Opens `machine`'s conn and tunnel, and answers its hello with `answer`. Returns what the answer produced.
+    fn handshake_answering(&mut self, machine: &str, answer: Value) -> Vec<ClientCommand> {
         let tunnel = self.handle(peer(machine, PeerEvent::Connected { at: at(0) }));
         let hello = self.answer(machine, &tunnel, Ok(json!({})));
-        let answer = json!({ "version": PROTOCOL_VERSION, "machine": machine });
         self.answer(machine, &hello, Ok(answer))
+    }
+
+    /// Hands the client `envelope` from `machine`'s host, whatever it was sent before.
+    fn resend(&mut self, machine: &str, envelope: Envelope) -> Vec<ClientCommand> {
+        let entry = HostNotification::LogEntry(Box::new(LogEntry { envelope }));
+        self.handle(peer(
+            machine,
+            PeerEvent::Host(HostMessage::Notification(entry)),
+        ))
     }
 
     /// Reaches `machine`: handshake, its whole log, and the subscribe answered.
@@ -614,22 +652,45 @@ fn a_reconnected_peer_is_subscribed_to_from_the_last_entry_of_each_of_its_logs()
 #[test]
 fn entries_a_reconnected_peer_sends_again_are_not_applied_twice_and_new_ones_are() {
     let mut net = with_peer_session_selected();
+    net.host("m_b").rename("b1", "first");
+    net.sync("m_b");
+    let first = net
+        .host("m_b")
+        .log()
+        .last()
+        .cloned()
+        .unwrap_or_else(|| panic!("a log"));
     net.handle(peer("m_b", PeerEvent::Disconnected));
-    net.host("m_b").rename("b1", "renamed-while-away");
+    net.host("m_b").rename("b1", "second");
     let subscribe = net.handshake("m_b");
-    // A careless host resends everything: only the new entry changes anything.
-    let everything = net.host("m_b").log().to_vec();
-    for envelope in everything {
-        net.handle(peer(
-            "m_b",
-            PeerEvent::Host(HostMessage::Notification(HostNotification::LogEntry(
-                Box::new(LogEntry { envelope }),
-            ))),
-        ));
-    }
+    net.sync("m_b");
     net.answer("m_b", &subscribe, Ok(json!({})));
-    assert!(net.names().contains(&"renamed-while-away".to_owned()));
-    assert_eq!(net.names().len(), 2);
+    // A careless host sends the older rename again, after the newer one: folding it again would undo the newer.
+    net.resend("m_b", first);
+    assert!(
+        net.names().contains(&"second".to_owned()),
+        "{:?}",
+        net.names()
+    );
+    // And the next reconnect still resumes after the newest entry.
+    let newest = net
+        .host("m_b")
+        .log()
+        .iter()
+        .filter(|e| e.session() == Some(&sid("b1")))
+        .map(|e| e.seq())
+        .max();
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    let again = net.handshake("m_b");
+    match &peer_requests(&again, "m_b")[..] {
+        [
+            Request {
+                body: ClientRequest::Subscribe(sub),
+                ..
+            },
+        ] => assert_eq!(sub.from.sessions.get(&sid("b1")).copied(), newest),
+        other => panic!("expected a subscribe, got {other:?}"),
+    }
 }
 
 #[test]
@@ -801,4 +862,304 @@ fn local_log_entries_still_arrive_as_before() {
     net.c.host().new_session("a9");
     net.c.sync();
     assert_eq!(net.c.client().sessions()[0].id, sid("a9"));
+}
+
+// ---------- what stays this machine's ----------
+
+fn alerts(commands: &[ClientCommand]) -> Vec<SessionId> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            ClientCommand::Alert { session, .. } => Some(session.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The agent in `session` on `host` goes idle.
+fn idle(host: &mut HostDriver, session: &str) {
+    let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    let frame = json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} });
+    host.append(Some(session), hook, frame);
+}
+
+fn build(byte: u8) -> BuildId {
+    BuildId {
+        version: "0.1.0".into(),
+        digest: ExeDigest::from_bytes([byte; 32]),
+    }
+}
+
+#[test]
+fn with_a_peers_session_selected_workspaces_the_finder_and_cleanup_still_ask_this_machines_host() {
+    let mut net = with_peer_session_selected();
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::EditWorkspacePath("/src/other".into()));
+    let select = net.user(Intent::Confirm);
+    net.user(Intent::Dismiss);
+    let find = net.user(Intent::BeginFind);
+    net.user(Intent::Dismiss);
+    let cleanup = net.user(Intent::BeginCleanup);
+    for (what, sent) in [
+        ("workspace", select),
+        ("finder", find),
+        ("cleanup", cleanup),
+    ] {
+        assert_eq!(requests(&sent).len(), 1, "{what}: {sent:?}");
+        assert_eq!(peer_requests(&sent, "m_b").len(), 0, "{what}: {sent:?}");
+    }
+}
+
+#[test]
+fn with_a_peers_session_selected_a_stale_host_is_asked_to_update_on_this_machine_only() {
+    let c = ClientDriver::from_client(Client::new(m("m_client")).with_build(build(1)));
+    let same = json!({ "build": build(1) });
+    let (mut net, _) = Machines::from_client(c, same, &[("m_b", "laptop")]);
+    net.host("m_b").new_session("b1");
+    net.reach("m_b");
+    net.user(Intent::SelectSession(sid("b1")));
+    net.handle(ClientEvent::Disconnected);
+    let hello = net.handle(ClientEvent::Connected { at: at(0) });
+    let stale = json!({
+        "version": PROTOCOL_VERSION,
+        "machine": "m_test",
+        "build": build(2),
+        "installed": ExeDigest::from_bytes([1; 32]),
+    });
+    let sent = net.c.answer(&hello, Ok(stale));
+    let upgrades: Vec<_> = requests(&sent)
+        .into_iter()
+        .filter(|r| matches!(r.body, ClientRequest::HostUpgrade(_)))
+        .collect();
+    assert_eq!(upgrades.len(), 1, "{sent:?}");
+    assert_eq!(peer_requests(&sent, "m_b").len(), 0);
+}
+
+#[test]
+fn restarting_this_machines_host_stops_only_its_own_sessions() {
+    let net = with_peer_session_selected();
+    assert_eq!(net.c.client().sessions().len(), 2);
+    assert_eq!(net.c.client().sessions_to_stop(), Some(1));
+}
+
+/// Session `id` on `host`, with a worktree in `/src/app`, its PTY exited long before the ticks of these tests.
+fn stale_on(host: &mut HostDriver, id: &str) {
+    host.new_session(id);
+    host.worktree_ready(id);
+    host.pin_ts("2026-10-01T00:00:00Z");
+    host.pty_exited(id, Some(0));
+    host.unpin_ts();
+}
+
+#[test]
+fn cleanup_never_offers_a_peers_stale_session() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.c.host().select_workspace("/src/app");
+    stale_on(net.c.host(), "a1");
+    net.c.sync();
+    net.host("m_b").select_workspace("/src/app");
+    stale_on(net.host("m_b"), "b1");
+    net.reach("m_b");
+    net.handle(ClientEvent::Tick {
+        at: ts("2026-10-29T12:00:00Z"),
+    });
+    let asked = net.user(Intent::BeginCleanup);
+    let checks = net.c.answer(
+        &asked,
+        Ok(json!({ "worktrees": [], "cleanup_after_days": 7 })),
+    );
+    let bodies: Vec<_> = requests(&checks).iter().map(|r| r.body.clone()).collect();
+    assert_eq!(
+        bodies,
+        [ClientRequest::WorktreeStatus(WorktreeCheck {
+            session: sid("a1")
+        })]
+    );
+}
+
+#[test]
+fn a_session_being_cleaned_up_here_is_not_finished_by_a_peer_closing_one_of_the_same_id() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.c.host().select_workspace("/src/app");
+    stale_on(net.c.host(), "dup");
+    net.c.sync();
+    net.host("m_b").select_workspace("/src/app");
+    net.host("m_b").new_session("dup");
+    net.host("m_b").worktree_ready("dup");
+    net.reach("m_b");
+    net.handle(ClientEvent::Tick {
+        at: ts("2026-10-29T12:00:00Z"),
+    });
+    let asked = net.user(Intent::BeginCleanup);
+    let check = net.c.answer(
+        &asked,
+        Ok(json!({ "worktrees": [], "cleanup_after_days": 7 })),
+    );
+    let status =
+        json!({ "dirty": false, "ahead": 0, "pushed": false, "merged_into_default": true });
+    net.c.answer(&check, Ok(json!({ "status": status })));
+    let close = net.user(Intent::CleanupRemoveSafe);
+    assert_eq!(requests(&close).len(), 1, "{close:?}");
+    net.host("m_b")
+        .close_with("dup", CloseWorktree::IfSafe, WorkspaceHooks::default());
+    net.host("m_b").handle(HostEvent::Restarted);
+    net.sync("m_b");
+    let outcomes: Vec<_> = net
+        .c
+        .client()
+        .cleanup_rows()
+        .iter()
+        .map(|r| r.outcome.clone())
+        .collect();
+    assert_eq!(outcomes, [Some(CleanupOutcome::Removing)]);
+}
+
+#[test]
+fn a_worktree_a_peer_kept_on_close_is_a_notice_once_live() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.host("m_b").select_workspace("/src/app");
+    net.host("m_b").new_session("b1");
+    net.host("m_b").worktree_ready("b1");
+    net.reach("m_b");
+    net.host("m_b")
+        .close_with("b1", CloseWorktree::IfSafe, WorkspaceHooks::default());
+    net.host("m_b").handle(HostEvent::Restarted);
+    net.sync("m_b");
+    assert_eq!(
+        net.c.client().notice(),
+        Some("kept the worktree of shell-1: the host stopped before the worktree was removed")
+    );
+}
+
+// ---------- each host's own ----------
+
+#[test]
+fn resuming_a_peers_session_asks_its_host() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.host("m_b")
+        .new_session_with("b1", claude_session_spec());
+    net.host("m_b")
+        .agent_started("b1", "claude-code", Some("abc123"));
+    net.host("m_b").pty_exited("b1", Some(0));
+    net.reach("m_b");
+    net.user(Intent::OpenMenu {
+        session: sid("b1"),
+        at: Cell { col: 1, row: 1 },
+    });
+    let sent = net.user(Intent::MenuChoose(MenuItem::Resume));
+    let bodies: Vec<_> = peer_requests(&sent, "m_b")
+        .iter()
+        .map(|r| r.body.clone())
+        .collect();
+    assert_eq!(
+        bodies,
+        [ClientRequest::SessionResume(SessionResume {
+            session: sid("b1")
+        })]
+    );
+    assert!(!sends_local(&sent));
+}
+
+/// A client whose own host (bell `local_bell`) runs `a1`, selected, and peer `m_b` (bell `peer_bell`) runs `b1`.
+fn with_bells(local_bell: bool, peer_bell: bool) -> Machines {
+    let extra = json!({ "notify": { "bell": local_bell } });
+    let (mut net, _) = Machines::from_client(ClientDriver::new(), extra, &[("m_b", "laptop")]);
+    net.c.host().new_session("a1");
+    net.c.sync();
+    net.host("m_b").new_session("b1");
+    let answer = json!({
+        "version": PROTOCOL_VERSION,
+        "machine": "m_b",
+        "notify": { "bell": peer_bell },
+    });
+    let subscribe = net.handshake_answering("m_b", answer);
+    net.sync("m_b");
+    net.answer("m_b", &subscribe, Ok(json!({})));
+    net.user(Intent::SelectSession(sid("a1")));
+    net
+}
+
+#[test]
+fn a_peers_session_wanting_the_user_alerts_by_the_peers_bell() {
+    let mut net = with_bells(false, true);
+    idle(net.host("m_b"), "b1");
+    assert_eq!(alerts(&net.sync("m_b")), [sid("b1")]);
+}
+
+#[test]
+fn this_machines_bell_does_not_ring_for_a_peers_session() {
+    let mut net = with_bells(true, false);
+    idle(net.host("m_b"), "b1");
+    assert_eq!(alerts(&net.sync("m_b")), Vec::<SessionId>::new());
+    // This machine's own still does.
+    net.user(Intent::WindowFocus(false));
+    idle(net.c.host(), "a1");
+    assert_eq!(alerts(&net.c.sync()), [sid("a1")]);
+}
+
+#[test]
+fn a_peer_dropped_while_catching_up_is_live_once_caught_up_again() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.c.host().new_session("a1");
+    net.c.sync();
+    net.host("m_b").new_session("b1");
+    let bell = json!({ "version": PROTOCOL_VERSION, "machine": "m_b", "notify": { "bell": true } });
+    // Its first subscribe is never answered.
+    net.handshake_answering("m_b", bell.clone());
+    net.sync("m_b");
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    let subscribe = net.handshake_answering("m_b", bell);
+    net.answer("m_b", &subscribe, Ok(json!({})));
+    net.user(Intent::SelectSession(sid("a1")));
+    idle(net.host("m_b"), "b1");
+    assert_eq!(alerts(&net.sync("m_b")), [sid("b1")]);
+}
+
+#[test]
+fn a_reconnected_peers_selected_session_is_resized_to_the_view() {
+    let mut net = with_peer_session_selected();
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    let subscribe = net.handshake("m_b");
+    assert_eq!(
+        peer_notifications(&subscribe, "m_b"),
+        [&ClientNotification::SessionResize(SessionResize {
+            session: sid("b1"),
+            cols: 80,
+            rows: 24,
+        })]
+    );
+}
+
+#[test]
+fn entries_on_a_peers_conn_before_its_hello_are_ignored() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.host("m_b").new_session("b1");
+    net.handle(peer("m_b", PeerEvent::Connected { at: at(0) }));
+    net.sync("m_b");
+    assert_eq!(net.names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_stray_connected_for_a_reached_peer_asks_for_no_tunnel() {
+    let mut net = Machines::connected(&[("m_b", "laptop")]);
+    assert_eq!(
+        net.handle(peer("m_b", PeerEvent::Connected { at: at(5) })),
+        []
+    );
+}
+
+#[test]
+fn a_peer_answering_hello_as_another_machine_is_a_failed_attempt() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.host("m_b").new_session("b1");
+    let impostor = json!({ "version": PROTOCOL_VERSION, "machine": "m_test" });
+    let after = net.handshake_answering("m_b", impostor);
+    assert_eq!(after, [ClientCommand::DisconnectPeer(m("m_b"))]);
+    let status = net.c.client().machines()[1].status.clone();
+    assert!(
+        matches!(&status, MachineStatus::Offline(Some(why)) if why.contains("another machine")),
+        "{status:?}"
+    );
+    net.sync("m_b");
+    assert_eq!(net.names(), Vec::<String>::new());
 }
