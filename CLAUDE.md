@@ -29,8 +29,8 @@ Skills:
 scripts/check.sh      # fmt --check, clippy -D warnings, all tests, architecture rules
 ```
 
-`scripts/check.sh` must pass before every commit. The pre-commit hook runs it (`git config core.hooksPath .githooks`)
-and so does CI. Never use `--no-verify`. If the gate is wrong, fix the gate in its own commit and say why.
+`scripts/check.sh` must pass before every commit. The pre-commit hook runs it (`git config core.hooksPath .githooks`).
+There is no CI; the local gate is the only check. Never use `--no-verify`. If the gate is wrong, fix the gate in its own commit and say why.
 
 ## Architecture: the non-negotiables
 
