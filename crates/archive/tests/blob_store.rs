@@ -346,6 +346,47 @@ fn put_over_a_symlink_at_the_blob_path_is_refused_and_writes_nothing_outside() {
 }
 
 #[test]
+fn put_heals_an_existing_blob_that_inflates_past_the_cap() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let store = BlobStore::open(&root).unwrap().with_max_len(1024);
+    let id = store.put(b"real").unwrap();
+    plant_blob_file(
+        &root,
+        b"real",
+        &zstd::encode_all(&[0u8; 64 * 1024][..], 3).unwrap(),
+    );
+    assert!(matches!(store.get(&id), Err(BlobError::TooLarge { .. })));
+
+    assert_eq!(store.put(b"real").unwrap(), id);
+
+    assert_eq!(store.writes(), 2, "the oversized blob was replaced");
+    assert_eq!(store.get(&id).unwrap(), b"real");
+}
+
+/// A 16-byte zstd frame whose header claims `size` bytes of content: magic, a descriptor for a single-segment frame
+/// with an 8-byte content size, the size, and one empty raw last block.
+fn frame_claiming(size: u64) -> Vec<u8> {
+    let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0xE0];
+    frame.extend_from_slice(&size.to_le_bytes());
+    frame.extend_from_slice(&[0x01, 0x00, 0x00]);
+    frame
+}
+
+#[test]
+fn a_frame_header_claiming_a_huge_size_reserves_no_more_than_the_cap() {
+    assert_eq!(
+        zstd::zstd_safe::get_frame_content_size(&frame_claiming(1 << 60)).ok(),
+        Some(Some(1 << 60)),
+        "the planted frame really claims 2^60 bytes"
+    );
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    // In a child, so a regression aborts the child (allocation failure) and fails this test, not the test binary.
+    assert_eq!(run_child("huge-header", &root), Some(0));
+}
+
+#[test]
 fn put_over_a_directory_at_the_blob_path_is_refused() {
     let dir = tempdir();
     let root = dir.path().join("archive");
@@ -465,6 +506,13 @@ fn child_process() {
             unsafe { libc::umask(0o277) };
             let store = BlobStore::open(root).unwrap();
             store.put(b"under a strict umask").unwrap();
+        }
+        Some("huge-header") => {
+            let store = BlobStore::open(root).unwrap().with_max_len(1024);
+            let id = store.put(b"claims a lot").unwrap();
+            plant_blob_file(root, b"claims a lot", &frame_claiming(1 << 60));
+            // Without the clamp this reserves 2^60 bytes and the allocator aborts the process.
+            assert!(store.get(&id).is_err());
         }
         other => panic!("unknown child job {other:?}"),
     }
