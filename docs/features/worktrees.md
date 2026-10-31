@@ -26,6 +26,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F33 | Hooks don't queue behind each other or outlive the host | done | 5cf8a10 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
+| F48 | repo_root returns an uncanonical /tmp path under load | todo |  |  |  |
 
 ## Specs
 
@@ -328,3 +329,14 @@ acceptance:
 - From the F17 review: `Entered::wait_entered` (adapters worktrees tests) returns at once forever after the reader thread
   reports `false`, so `wait_held` busy-loops up to CREATE_LIMIT on a fixture malfunction; remember the reported state and stop.
 scope: crates/shepherd, crates/core
+
+### F48: repo_root returns an uncanonical /tmp path under load
+depends: F28
+touches: adapters::worktrees
+goal: In the T30 review's gate, `worktrees::tests::repo_root_of_a_nested_subdirectory_and_its_parent_is_the_checkout` got
+`NotARepo("/tmp/...")` where it expected `/private/tmp/...`; it passed 3/3 alone. A path spelling that depends on timing
+(git's `rev-parse --show-toplevel` vs our canonicalization, or a fixture race) breaks "canonicalize at the boundary once".
+acceptance:
+- Reproduce (loaded rounds), find the cause, regression test first (fix-bug); 0 failures in a 24-copy round of the filter.
+scope: crates/adapters
+

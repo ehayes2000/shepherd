@@ -16,7 +16,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | building | task/t41-archive-restore @ 4380131 | 0 |  |
 | F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | review | task/f47-swap-flush @ 2534cdc (on 3ab1965) | 1 | Link::flush_closed; swap waits bounded by CLOSE_FLUSH; fake keeps slow peer's lines. Reviewer judges shutdown race |
-| T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | review | task/t30-pairing @ 060ab1e (on b290fe6) | 2 | ticket printed whole; strict decode; join validates first; Ctrl-C stops pairing; NotOpen vs Refused |
+| T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | merging | task/t30-pairing @ 060ab1e | 2 | approved r2; minors → T31 notes |
 
 ## Ready to start
 
@@ -30,6 +30,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
+| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | todo | F28 |
 
 ## Features
 
@@ -45,7 +46,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
-| [Workspaces and worktrees](features/worktrees.md) | M3 | 16 | 1 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
+| [Workspaces and worktrees](features/worktrees.md) | M3 | 16 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 
 <!-- tasks:end -->
 

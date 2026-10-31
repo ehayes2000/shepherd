@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
-| T30 | Pairing and trusted peers | review | task/t30-pairing @ 060ab1e (on b290fe6) | 2 | ticket printed whole; strict decode; join validates first; Ctrl-C stops pairing; NotOpen vs Refused |
+| T30 | Pairing and trusted peers | merging | task/t30-pairing @ 060ab1e | 2 | approved r2; minors → T31 notes |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 
@@ -106,6 +106,9 @@ acceptance:
 - Scenario with two fake hosts over the fake link.
 - Catch-up stall detection (T11) counts "queue shrank", so a single huge line over a slow link (over 30 s to deliver) looks stalled.
   Add a drained-bytes counter to `Link` and use it for progress.
+- From the T30 review: `peering.rs` `gone`'s `pending.start.is_some()` condition is untested (start, wait, the waiter's
+  client goes → no StopPairing); fix its comment for the two-client race (a waiter leaving can stop a pairing whose
+  start was answered but whose wait isn't sent yet).
 scope: adapters, core, shepherd
 accepted (decision 0019): the host owns the only iroh endpoint. The client reaches a remote host through a
 `_shepherd/tunnel { machine }` conn to its local host, which splices lines to the peer with read pausing for flow control. So
