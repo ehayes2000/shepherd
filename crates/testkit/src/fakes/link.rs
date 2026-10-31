@@ -6,12 +6,19 @@
 //! until [`MAX_QUEUED`] is passed, which disconnects it as a slow consumer, just like a socket peer that stops
 //! reading. A paced client ([`FakeNetwork::connect_paced`]) reads only when the test says so
 //! ([`FakeNetwork::deliver`]), so a test can play a slow reader and watch [`Link::queued_bytes`].
+//!
+//! Closing a conn whose peer has lines it hasn't read leaves the peer's end open, still delivering, until it has read
+//! them (then it gets `PeerGone`) or the closing link is dropped, which cuts the delivery off like an exec ending a
+//! process's threads. [`Link::flush_closed`] waits for those deliveries. Nothing here gives up on a peer by itself
+//! (the unix adapter gives up after `CLOSE_FLUSH`), so a stalled peer's closed conn stays undelivered until the
+//! deadline. [`FakeNetwork::wait_until_flushing`] lets a test read only once someone is waiting.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
-    ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
+    ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
 };
 use shepherd_core::wire::MAX_LINE;
 
@@ -31,6 +38,8 @@ struct End {
     pending: VecDeque<Vec<u8>>,
     /// Bytes sent to this end and not yet read. Only a stalled or paced peer leaves bytes unread.
     unread: usize,
+    /// The link that closed this end's conn while it still had bytes unread. The end stays until it has read them.
+    closed_by: Option<LinkId>,
 }
 
 impl End {
@@ -42,6 +51,7 @@ impl End {
             peer,
             pending: VecDeque::new(),
             unread: 0,
+            closed_by: None,
         }
     }
 }
@@ -52,6 +62,8 @@ struct Net {
     host: Option<(LinkId, Arc<dyn LinkEventSink>)>,
     ends: HashMap<ConnId, End>,
     next_id: u64,
+    /// How many callers are inside [`Link::flush_closed`] right now.
+    flushing: usize,
 }
 
 impl Net {
@@ -150,13 +162,34 @@ impl Net {
                 sink.send(LinkEvent::Line { conn, line });
             }
         }
+        if end.closed_by.is_some() && end.unread == 0 {
+            // Its conn was closed and it has now read everything: the close is done.
+            self.disconnect(conn, DisconnectReason::PeerGone, DisconnectReason::PeerGone);
+        }
         delivered
     }
 
+    /// A peer with bytes still unread keeps its end, delivering, until it has read them (see the module docs).
     fn close(&mut self, link: LinkId, conn: ConnId) -> Result<(), LinkError> {
-        self.end(link, conn)?;
-        self.disconnect(conn, DisconnectReason::Closed, DisconnectReason::PeerGone);
+        let peer = self.end(link, conn)?.peer;
+        match self.ends.get_mut(&peer) {
+            Some(to) if to.unread > 0 => {
+                to.closed_by = Some(link);
+                if let Some(sink) = self.ends.remove(&conn).and_then(|this| this.sink) {
+                    sink.send(LinkEvent::Disconnected {
+                        conn,
+                        reason: DisconnectReason::Closed,
+                    });
+                }
+            }
+            _ => self.disconnect(conn, DisconnectReason::Closed, DisconnectReason::PeerGone),
+        }
         Ok(())
+    }
+
+    /// Whether every conn `link` closed has finished delivering.
+    fn flushed(&self, link: LinkId) -> bool {
+        !self.ends.values().any(|end| end.closed_by == Some(link))
     }
 
     /// Removes the conn `end` belongs to. `end` gets `here`, its peer gets `there`.
@@ -179,7 +212,8 @@ impl Net {
         }
     }
 
-    /// Disconnects every conn of `link` without flushing, as when its process dies.
+    /// Disconnects every conn of `link` without flushing, as when its process dies, and cuts off what the conns it
+    /// closed were still delivering.
     fn drop_link(&mut self, link: LinkId) {
         if self.host.as_ref().is_some_and(|(host, _)| *host == link) {
             self.host = None;
@@ -194,12 +228,56 @@ impl Net {
         for conn in owned {
             self.disconnect(conn, DisconnectReason::Closed, DisconnectReason::PeerGone);
         }
+        // The peers of those closes: their side of the conn is gone.
+        let mut cut_off: Vec<ConnId> = self
+            .ends
+            .iter()
+            .filter(|(_, end)| end.closed_by == Some(link))
+            .map(|(&conn, _)| conn)
+            .collect();
+        cut_off.sort();
+        for conn in cut_off {
+            self.disconnect(conn, DisconnectReason::PeerGone, DisconnectReason::PeerGone);
+        }
     }
 }
 
 /// The transport the fake links share. Cheap to clone; clones are the same network.
 #[derive(Clone, Default)]
-pub struct FakeNetwork(Arc<Mutex<Net>>);
+pub struct FakeNetwork(Arc<Shared>);
+
+#[derive(Default)]
+struct Shared {
+    net: Mutex<Net>,
+    /// Notified whenever the network's lock is released, so waiters can look again.
+    changed: Condvar,
+}
+
+/// The network locked. Releasing it wakes whoever waits for a change.
+struct Locked<'a> {
+    net: MutexGuard<'a, Net>,
+    changed: &'a Condvar,
+}
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = Net;
+
+    fn deref(&self) -> &Net {
+        &self.net
+    }
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut Net {
+        &mut self.net
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        self.changed.notify_all();
+    }
+}
 
 impl FakeNetwork {
     pub fn new() -> Self {
@@ -233,6 +311,15 @@ impl FakeNetwork {
         Ok((FakeLink::new(self.clone(), id), conn))
     }
 
+    /// Whether the other side closed `conn`'s conn while `conn` still had lines to read: they are delivered as it
+    /// reads them, and its `Disconnected` comes after.
+    pub fn closed_by_peer(&self, conn: ConnId) -> bool {
+        self.lock()
+            .ends
+            .get(&conn)
+            .is_some_and(|end| end.closed_by.is_some())
+    }
+
     /// Lets the paced client end `conn` read up to `max_bytes` of what was sent to it (at least one line, if any
     /// is waiting). Returns the bytes read.
     pub fn deliver(&self, conn: ConnId, max_bytes: usize) -> usize {
@@ -248,8 +335,47 @@ impl FakeNetwork {
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Net> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Waits until some link is inside [`Link::flush_closed`], or `timeout` passes. Returns whether one is: a test
+    /// playing a slow reader reads only then, so a caller that never waits for the flush never gets it.
+    pub fn wait_until_flushing(&self, timeout: Duration) -> bool {
+        let net = self.0.net.lock().unwrap_or_else(PoisonError::into_inner);
+        let (net, _) = self
+            .0
+            .changed
+            .wait_timeout_while(net, timeout, |net| net.flushing == 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        net.flushing > 0
+    }
+
+    /// Waits until every conn `link` closed has finished delivering, or `deadline` passes.
+    fn flush_closed(&self, link: LinkId, deadline: Instant) -> FlushOutcome {
+        let mut net = self.0.net.lock().unwrap_or_else(PoisonError::into_inner);
+        net.flushing += 1;
+        self.0.changed.notify_all();
+        let outcome = loop {
+            if net.flushed(link) {
+                break FlushOutcome::Flushed;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break FlushOutcome::TimedOut;
+            }
+            net = self
+                .0
+                .changed
+                .wait_timeout(net, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        };
+        net.flushing -= 1;
+        outcome
+    }
+
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            net: self.0.net.lock().unwrap_or_else(PoisonError::into_inner),
+            changed: &self.0.changed,
+        }
     }
 }
 
@@ -292,6 +418,10 @@ impl Link for FakeLink {
 
     fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
         self.net.lock().queued_bytes(self.id, conn)
+    }
+
+    fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
+        self.net.flush_closed(self.id, Instant::now() + within)
     }
 }
 
@@ -407,6 +537,29 @@ mod tests {
             host.send(host_conn, &chunk).unwrap();
         }
         assert_eq!(host.queued_bytes(host_conn), None);
+    }
+
+    #[test]
+    fn a_paced_client_reads_what_was_queued_before_a_close_unless_the_host_goes_first() {
+        let (mut host, events, _client, conn, host_conn, net) = paced();
+        host.send(host_conn, b"bye").unwrap();
+        host.close(host_conn).unwrap();
+        assert_eq!(host.flush_closed(Duration::ZERO), FlushOutcome::TimedOut);
+        net.deliver(conn, usize::MAX);
+        assert_eq!(
+            events.disconnect_of(conn),
+            (vec![b"bye".to_vec()], DisconnectReason::PeerGone)
+        );
+        assert_eq!(host.flush_closed(Duration::ZERO), FlushOutcome::Flushed);
+
+        let (mut host, events, _client, conn, host_conn, _net) = paced();
+        host.send(host_conn, b"lost").unwrap();
+        host.close(host_conn).unwrap();
+        drop(host);
+        assert_eq!(
+            events.disconnect_of(conn),
+            (vec![], DisconnectReason::PeerGone)
+        );
     }
 
     #[test]

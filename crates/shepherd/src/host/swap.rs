@@ -4,7 +4,8 @@
 //! module does the rest ([`hand_off`], then [`exec`]), in this order:
 //! 1. hand the listener over, so every connect from now on waits in the backlog for the new image (before the conns
 //!    close: a client reconnecting at once must not be accepted by this image and cut off by the exec);
-//! 2. close every conn;
+//! 2. close every conn, and wait (at most `CLOSE_FLUSH`) until what was queued for each, the upgrade's `Accepted`
+//!    included, is delivered: the exec ends the link's writer threads;
 //! 3. write `<root>/run/handoff-<pid>.json` (`0600`);
 //! 4. clear `CLOEXEC` on exactly the carried descriptors (the log's lock, the listener, each session's master and
 //!    slave);

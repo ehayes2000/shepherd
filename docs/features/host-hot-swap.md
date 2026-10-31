@@ -13,8 +13,9 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T36a | Build identity in the hello, and a clear mismatch UX | done | 44dac96 | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | T36b | Hot-swap the host by re-exec, keeping sessions running | done | 2de1f2f | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
-| F47 | A swap can lose its Accepted answer before exec | review | task/f47-swap-flush @ 8684af0 | 1 | re-reviewing; check the hook-less commit |
+| F47 | A swap can lose its Accepted answer before exec | merging | task/f47-swap-flush @ 8684af0 | 2 | round 2 APPROVE; minors filed to F50; 12-copy round deferred (machine slow) |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
+| F50 | Tighten F47's flush tests | todo |  |  |  |
 
 ## Specs
 
@@ -139,4 +140,19 @@ acceptance:
 - After the loop is done, `finish` calls `flush_closed(CLOSE_FLUSH)` (the same bounded call as a swap); a test shows a slow
   client receives what was queued before shutdown, and a never-reading client can't hold shutdown past the bound.
 scope: crates/shepherd
+
+### F50: Tighten F47's flush tests
+depends: F47
+touches: shepherd tests (hotswap, support), testkit::contracts::link
+goal: From F47's round-2 review: two of its tests can stay green when the thing they guard breaks.
+acceptance:
+- `FakeClient::is_disconnected` (crates/shepherd/tests/support/mod.rs ~845) also returns true when the host closed with
+  lines unread, so the hotswap tests' `assert!(client.is_disconnected())` (hotswap.rs ~171, ~194) pass even if the fake
+  never cuts the client off. The two new hotswap tests assert the disconnect really happened (a stricter helper or a
+  delivered `Disconnected`); breaking the fake's cut-off on link drop makes a hotswap test fail.
+- The unix link contract's second `flush_closed(QUIET)` expecting `TimedOut` (contracts/link.rs ~756) depends on finishing
+  within `CLOSE_FLUSH` of the close; restructure so a scheduling stall can't flip it (check right after `close`, or accept
+  either outcome once `CLOSE_FLUSH` has passed).
+- Run the 12-copy hotswap_e2e round F47 deferred (when the machine allows): 0 failures.
+scope: crates/shepherd (tests), crates/testkit
 

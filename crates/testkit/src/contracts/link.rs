@@ -38,6 +38,10 @@ macro_rules! link_contract {
             queued_bytes_rise_while_the_peer_does_not_read,
             queued_bytes_fall_to_zero_once_the_peer_has_read_everything,
             queued_bytes_of_an_unknown_or_closed_conn_is_none,
+            flush_closed_with_nothing_closed_is_flushed,
+            closed_conn_is_flushed_once_its_peer_has_read_everything,
+            flush_closed_times_out_while_a_closed_peer_does_not_read,
+            closed_conn_whose_peer_goes_away_is_flushed,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -58,7 +62,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
-    ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
+    ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
 };
 use shepherd_core::wire::MAX_LINE;
 
@@ -188,6 +192,11 @@ impl Events {
             }
         }
         (lines, reason.unwrap())
+    }
+
+    /// The events that have already arrived, without waiting for more.
+    pub fn ready(&self) -> Vec<LinkEvent> {
+        self.0.try_iter().collect()
     }
 
     /// Panics if any event arrives within `window`.
@@ -669,4 +678,89 @@ pub fn queued_bytes_of_an_unknown_or_closed_conn_is_none<F: LinkFixture>(mut h: 
     assert_eq!(c.link.queued_bytes(c.conn), Some(0));
     h.host.close(c.host_conn).unwrap();
     assert_eq!(h.host.queued_bytes(c.host_conn), None);
+}
+
+pub fn flush_closed_with_nothing_closed_is_flushed<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let mut c = h.connect();
+    h.send(c.host_conn, "open, not closed");
+    assert_eq!(h.host.flush_closed(Duration::ZERO), FlushOutcome::Flushed);
+    assert_eq!(c.link.flush_closed(Duration::ZERO), FlushOutcome::Flushed);
+}
+
+/// A backlog bigger than a socket holds, so the close still has delivering to do when it returns.
+pub fn closed_conn_is_flushed_once_its_peer_has_read_everything<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let c = h.connect();
+    let chunk = vec![b'x'; CHUNK];
+    for _ in 0..BACKLOG / CHUNK {
+        h.send(c.host_conn, &chunk);
+    }
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(h.host.flush_closed(TIMEOUT), FlushOutcome::Flushed);
+    // Delivered already, not just on its way: all that can still be in flight is what one socket buffer and one
+    // read hold, a few chunks at most.
+    let arrived = c.events.ready();
+    let lines = |events: &[LinkEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, LinkEvent::Line { .. }))
+            .count()
+    };
+    assert!(
+        lines(&arrived) >= BACKLOG / CHUNK / 2,
+        "{} of {} lines had arrived when flush_closed returned",
+        lines(&arrived),
+        BACKLOG / CHUNK
+    );
+    let mut rest = Vec::new();
+    if !arrived
+        .iter()
+        .any(|e| matches!(e, LinkEvent::Disconnected { .. }))
+    {
+        rest = c
+            .events
+            .wait_for(|e| matches!(e, LinkEvent::Disconnected { .. }), TIMEOUT);
+    }
+    let all: Vec<LinkEvent> = arrived.into_iter().chain(rest).collect();
+    assert_eq!(lines(&all), BACKLOG / CHUNK);
+    assert_eq!(
+        all.last(),
+        Some(&LinkEvent::Disconnected {
+            conn: c.conn,
+            reason: DisconnectReason::PeerGone
+        })
+    );
+}
+
+/// Queues a backlog for a peer that never reads, until it is stuck: the peer's buffers full, most of it queued.
+fn stuck_backlog<F: LinkFixture>(h: &mut LinkHarness<F>, conn: ConnId) {
+    let chunk = vec![b'x'; CHUNK];
+    for _ in 0..BACKLOG / CHUNK {
+        h.send(conn, &chunk);
+    }
+    spin_until("most of the backlog is queued", || {
+        h.host.queued_bytes(conn).is_some_and(|q| q >= BACKLOG / 2)
+    });
+}
+
+/// The wait is bounded: a closed conn whose peer never reads can't hold `flush_closed` past its bound, and the
+/// outcome says the delivery isn't done.
+pub fn flush_closed_times_out_while_a_closed_peer_does_not_read<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let (_peer, conn) = h.stalled_peer();
+    stuck_backlog(&mut h, conn);
+    h.host.close(conn).unwrap();
+    assert_eq!(h.host.flush_closed(Duration::ZERO), FlushOutcome::TimedOut);
+    // A deadline still ahead is waited for, then given up on.
+    assert_eq!(h.host.flush_closed(QUIET), FlushOutcome::TimedOut);
+}
+
+pub fn closed_conn_whose_peer_goes_away_is_flushed<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let (peer, conn) = h.stalled_peer();
+    stuck_backlog(&mut h, conn);
+    h.host.close(conn).unwrap();
+    drop(peer);
+    assert_eq!(h.host.flush_closed(TIMEOUT), FlushOutcome::Flushed);
 }

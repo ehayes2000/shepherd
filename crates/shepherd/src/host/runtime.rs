@@ -45,7 +45,8 @@
 //!   [`RuntimeEvent::Preflighted`]. Once accepted, the runtime exports its PTYs (their pumps paused, everything read so
 //!   far queued), handles what is queued (screens fed, hook frames appended, other requests dropped), and hands a
 //!   [`SwapPlan`] (each session's token, size and `snapshot_ansi`, and the translators) out of [`HostRuntime::run`].
-//!   The caller stops accepting, closes every conn ([`HostRuntime::close_conns`]) and re-execs; if that fails, [`HostRuntime::swap_failed`] resumes the PTYs and
+//!   The caller stops accepting, closes every conn ([`HostRuntime::close_conns`], which waits, bounded, for what was
+//!   queued to be delivered) and re-execs; if that fails, [`HostRuntime::swap_failed`] resumes the PTYs and
 //!   later upgrades are answered with why. The new image starts with [`HostRuntime::adopt`]: adopted sessions get no
 //!   exit and keep their run directory, their screens are fed their snapshots, the translators are restored, and each
 //!   is nudged to redraw.
@@ -90,10 +91,10 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    CommandError, Commands, ConnId, EventLog, Forge, ForgeError, Link, LinkEvent, LinkEventSink,
-    LogError, LogId, MAX_QUEUED, PairTicket, Peers, PeersEvent, PeersEventSink, PtyError, PtyEvent,
-    PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId, WorktreeError, WorktreeName, WorktreePath,
-    Worktrees,
+    CLOSE_FLUSH, CommandError, Commands, ConnId, EventLog, FlushOutcome, Forge, ForgeError, Link,
+    LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, PairTicket, Peers, PeersEvent,
+    PeersEventSink, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId,
+    WorktreeError, WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -783,8 +784,9 @@ impl<
     }
 
     /// Closes every conn, for a swap: after the listener is handed over, so a client reconnecting at once waits in the
-    /// backlog for the new image instead of being accepted by this one and cut off by the exec. What was sent to each,
-    /// the upgrade's answer included, is flushed first.
+    /// backlog for the new image instead of being accepted by this one and cut off by the exec. Returns once what was
+    /// sent to each, the upgrade's answer included, is delivered, or after [`CLOSE_FLUSH`] for a client that isn't
+    /// reading: the exec would cut the deliveries off. The one wait in the loop, bounded, and only for a swap.
     pub fn close_conns(&mut self) {
         let conns: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in conns {
@@ -794,6 +796,10 @@ impl<
         }
         self.conns.clear();
         self.replies.clear();
+        // Timed by the link, on the clock it waits with: not `Env::instant`, which tests move by hand.
+        if self.link.flush_closed(CLOSE_FLUSH) == FlushOutcome::TimedOut {
+            tracing::warn!("a client didn't read what it was sent before the swap; it is cut off");
+        }
     }
 
     /// The exec of a swap failed with `why`: the PTYs are resumed and served as before, and the next upgrade

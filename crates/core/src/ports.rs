@@ -20,7 +20,10 @@ pub use event_log::{EventLog, LogError, LogId};
 pub use forge::{Check, Forge, ForgeError, Pr, PrChecks, PrState};
 pub use identity::{IdentityError, MachineIdentity, MachineKey};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};
-pub use link::{ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED};
+pub use link::{
+    CLOSE_FLUSH, ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink,
+    MAX_QUEUED,
+};
 pub use peers::{
     ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
     PeersEventSink, TOKEN_LEN,
