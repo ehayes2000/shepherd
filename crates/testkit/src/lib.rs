@@ -693,6 +693,8 @@ pub mod contracts {
     pub mod worktrees;
 }
 
+pub mod stand_in;
+
 /// One stateful in-memory fake per port. Each must pass its port's contract suite.
 pub mod fakes {
     pub mod commands;

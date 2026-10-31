@@ -628,12 +628,9 @@ fn an_upgrade_after_the_machine_key_was_moved_aside_makes_one_and_keeps_the_iden
     assert!(alive(shell), "the shell {shell} died");
 }
 
-/// The checked-in stand-in script (see `shepherd_adapters`' `stand_in`): run through a symlink, it sources the body at
+/// The checked-in stand-in script (see `shepherd_testkit::stand_in`): run through a symlink, it sources the body at
 /// the symlink's path plus `.sh`. Never a freshly written executable (F45).
-const STAND_IN: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../adapters/tests/fixtures/stand-in"
-);
+const STAND_IN: &str = shepherd_testkit::stand_in::SHARED;
 
 /// T29 review: the machine key breaks between the preflight and the exec. The host's startup path is a symlink, first
 /// to the real binary, then (before the upgrade) to a stand-in that runs the real `handoff-check` and then makes the
@@ -696,30 +693,45 @@ fn a_key_broken_after_the_preflight_keeps_the_carried_machine_id_and_warns() {
 
 /// The swap execs the path the host started from, even after a new build was renamed over it: `current_exe()` would
 /// then name a deleted file on Linux.
+///
+/// No new executable file is made on macOS, which assesses one on its first exec, one at a time machine-wide: under
+/// load that outlasted the preflight's bound (F44). A hard link is no way out, as making one has the binary assessed
+/// again. The new build is a stand-in (a symlink) that leaves a marker and execs the built binary.
 #[test]
 fn a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_file() {
     let (mut running, root) = start_host_with(|home| {
         let bin = home.join("bin");
         fs::create_dir(&bin).unwrap();
         let exe = bin.join("shepherd");
-        fs::copy(SHEPHERD, &exe).unwrap();
+        place_startup_binary(&exe);
         exe
     });
     let socket = root.join(shepherd::host::SOCKET_FILE);
     let host_pid = running.host.id();
     let home = root.parent().unwrap().to_path_buf();
     let exe = home.join("bin").join("shepherd");
+    let marker = home.join("new-build-ran");
     let (mut a, mut seen, session) = shell_session(&socket, &mut running);
     // `cargo install` and friends: a new file renamed over the old one.
     let fresh = home.join("bin").join("shepherd.new");
-    fs::copy(SHEPHERD, &fresh).unwrap();
+    fs::write(
+        home.join("bin").join("shepherd.sh"),
+        format!(
+            "if [ \"$1\" = host ]; then : > '{}'; fi\nexec '{SHEPHERD}' \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(STAND_IN, &fresh).unwrap();
     fs::rename(&fresh, &exe).unwrap();
 
     a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
-    a.read_until(&mut seen, |s| s.closed);
+    // Answered first, so a refused swap fails here with its reason, not as a connection that never closes.
+    a.read_until(&mut seen, |s| answered(s, Method::HostUpgrade).is_some());
     let answer: UpgradeAnswer =
         serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
     assert_eq!(answer, UpgradeAnswer::Accepted);
+    a.read_until(&mut seen, |s| s.closed);
 
     let mut b = Client::connect(&socket);
     b.request(ClientRequest::Subscribe(Subscribe::default()));
@@ -732,6 +744,21 @@ fn a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_file()
         logged.contains("took over from the previous host image"),
         "{logged}"
     );
+    assert!(
+        marker.exists(),
+        "the new build at {} never ran",
+        exe.display()
+    );
     b.input(&session, b"echo moved-$((40+2))\n");
     b.read_until(&mut after, |s| text(&s.output).contains("moved-42"));
+}
+
+/// Puts the built binary at `path`, the startup path a new build is then renamed over. On macOS a symlink:
+/// `current_exe()` keeps the path as it was run, and a copy would be assessed on its first exec (F44). Elsewhere
+/// `current_exe()` resolves symlinks, so a copy, whose replaced path is what this test is about (decision 0018).
+fn place_startup_binary(path: &Path) {
+    #[cfg(target_os = "macos")]
+    std::os::unix::fs::symlink(SHEPHERD, path).unwrap();
+    #[cfg(not(target_os = "macos"))]
+    fs::copy(SHEPHERD, path).unwrap();
 }

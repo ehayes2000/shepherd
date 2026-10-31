@@ -342,9 +342,9 @@ mod real {
     /// A liveness bound on each read from the host, never a measurement.
     const GENEROUS: Duration = Duration::from_secs(60);
 
-    /// Records its argv and environment into `$FAKE_OUT`, then exits.
-    const FAKE_CODEX: &str = r#"#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_OUT/args"
+    /// Records its argv and environment into `$FAKE_OUT`, then exits. The body of a stand-in
+    /// (`shepherd_testkit::stand_in`), never a freshly written executable (F46).
+    const FAKE_CODEX: &str = r#"printf '%s\n' "$@" > "$FAKE_OUT/args"
 env > "$FAKE_OUT/env"
 "#;
 
@@ -408,8 +408,7 @@ env > "$FAKE_OUT/env"
         let out = tmp.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let codex = tmp.path().join("codex");
-        std::fs::write(&codex, FAKE_CODEX).unwrap();
-        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        shepherd_testkit::stand_in::install(&codex, FAKE_CODEX);
         host::prepare_root(&root).unwrap();
         let config = root.join(host::CONFIG_FILE);
         std::fs::write(

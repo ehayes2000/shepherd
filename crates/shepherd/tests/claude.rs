@@ -1093,9 +1093,8 @@ mod real {
     const GENEROUS: Duration = Duration::from_secs(60);
 
     /// Records its argv, environment and `--settings` file into `$FAKE_OUT`, says `ready`, and exits once it reads a
-    /// line.
-    const FAKE_CLAUDE: &str = r#"#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_OUT/args"
+    /// line. The body of a stand-in (`shepherd_testkit::stand_in`), never a freshly written executable (F46).
+    const FAKE_CLAUDE: &str = r#"printf '%s\n' "$@" > "$FAKE_OUT/args"
 env > "$FAKE_OUT/env"
 cp "$2" "$FAKE_OUT/settings.json"
 echo ready
@@ -1190,8 +1189,7 @@ read line
         let out = tmp.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let claude = tmp.path().join("claude");
-        std::fs::write(&claude, FAKE_CLAUDE).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        shepherd_testkit::stand_in::install(&claude, FAKE_CLAUDE);
         host::prepare_root(&root).unwrap();
         let config = root.join(host::CONFIG_FILE);
         std::fs::write(
