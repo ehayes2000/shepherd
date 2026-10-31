@@ -16,9 +16,13 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
 | T32 | Create sessions on any machine | done | 482db06 | 2 | round 2 APPROVE; untarget test minors → T32b |
-| T32b | Show whether each machine's link is relayed or direct | todo |  |  |  |
+| T32b | Show whether each machine's link is relayed or direct | ready |  |  |  |
 | F52 | Peer conn hardening after the tunnel | done | cc35bba | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
+| T62 | Machine colors | ready |  |  |  |
+| T63 | Flat sidebar by default; group by machine on demand | todo |  |  |  |
+| T64 | Machines panel | todo |  |  |  |
+| T65 | New session: machine first, then agent | todo |  |  |  |
 
 ## Specs
 
@@ -182,6 +186,8 @@ acceptance:
 - The peers port reports each connected peer's path kind (iroh `Connection::paths()`: direct or relayed), the host's peer
   list carries it (additive field), and the sidebar's machine header shows it (snapshot).
 - A path that changes (relay → direct after hole punching) updates the header; fake peers port test.
+- From the TUI mocks: the peers port also reports each connected peer's round-trip latency (iroh's path RTT), carried in
+  the peer list (additive) for T63's footer and T64's panel.
 - From T32's review (core client.rs `untarget`): test that dropping some other peer leaves a popup on `m_b` alone with no
   notice; assert the scroll resets (or drop them); assert the notice in the switcher's untrust test.
 scope: crates/core, crates/testkit, crates/adapters, crates/shepherd, crates/tui
@@ -214,4 +220,59 @@ acceptance:
   (fix-bug). A liveness bound that is too tight for a loaded machine is a valid cause only with evidence of progress.
 - 0 failures in a 24-copy round of the adapters lib.
 scope: crates/adapters, crates/testkit
+
+### T62: Machine colors
+depends: T31b
+touches: core::config, tui (draw)
+goal: From the TUI mocks: each machine has a color, used everywhere its name appears.
+acceptance:
+- Each machine gets a stable color from a fixed palette, derived from its machine id (so every client agrees), overridable
+  per machine in config. This machine has its own.
+- Every place a machine's name is drawn uses it: sidebar line 2, machine headers, the new-session picker, the footer, and
+  later the status page, machines panel and PM panel (through one shared style helper).
+- Tests: the same id always gets the same color; config override; snapshots of the sidebar and picker with colors; colors
+  readable on the default theme (no foreground equal to the background).
+scope: crates/core, crates/tui
+
+### T63: Flat sidebar by default; group by machine on demand
+depends: T32b, T62
+touches: tui::sidebar, core::client
+goal: From the TUI mocks (as the manifesto says): one list, newest first, with the machine on line 2; grouping is on demand.
+acceptance:
+- Changes T31b: the sidebar is flat by default even with peers (machine name, in its color, on line 2 of each row). `g`
+  and a clickable toggle switch to grouping under machine headers showing each machine's state and link (direct, relay,
+  offline); the choice is remembered per client.
+- An offline machine's sessions stay listed, dimmed, in both modes.
+- When the selected session is on another machine, the footer names the link: e.g. `on studio · direct · 4ms` (T32b's
+  path kind and latency).
+- Tests through the T45 harness: flat and grouped snapshots, toggle by click and key, offline dimmed, footer text for
+  direct, relay and offline, tiny window.
+scope: crates/tui, crates/core
+
+### T64: Machines panel
+depends: T32b, T62, T49
+touches: tui (machines view), core::client, core::wire (peer info), shepherd (host)
+goal: From the TUI mocks: `ctrl-b m` lists every machine with its health, and manages them.
+acceptance:
+- A `View(Machines)` page listing this machine and each peer: name (colored), state, link and latency, OS, agent and
+  worktree counts, host build, with a stale host (older build than this one) flagged. The peer info comes from the peer
+  list (additive fields each host reports about itself).
+- Actions per machine, all clickable: rename (this machine, or a peer's local label), update host (a peer's: sends it the
+  upgrade request it accepts from local clients only, so it goes through the peer's own `shepherd` over the tunnel, or is
+  offered as instructions if that's refused), and pair a new machine (shows the pairing ticket, T30).
+- Tests through the harness: snapshot, stale flag, offline machine, each action's request, refusals shown.
+scope: crates/tui, crates/core, crates/shepherd
+notes: F52 made pairing, trust and upgrade requests local-only on a host; the panel must respect that (a peer's host is
+managed by a client local to it, e.g. a tunnelled CLI on that machine, never by forging a local request).
+
+### T65: New session: machine first, then agent
+depends: T32, T62
+touches: tui::popup, core::client
+goal: From the TUI mocks: "where, then what". Changes T32's single popup into two steps.
+acceptance:
+- New session first asks which machine (defaulting to the last one used, in each machine's color; offline machines
+  listed, dimmed, not choosable, with why), then which agent profile on that machine. With no peers it skips straight to
+  the profile step (today's behaviour).
+- Tests through the harness: both steps by click and key, the default, offline refusal, no-peers shortcut, tiny window.
+scope: crates/tui, crates/core
 

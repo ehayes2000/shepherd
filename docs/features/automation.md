@@ -20,6 +20,9 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T48 | Host-owned layout: pages and splits in core | ready |  |  |  |
 | T49 | Render pages and split panes | todo |  |  |  |
 | T50 | `shepherd ui` CLI and screenshots | todo |  |  |  |
+| T51 | Answer an agent's pending question | todo |  |  |  |
+| T52 | Read a session's screen as text | todo |  |  |  |
+| T53 | Shepherd MCP server for agents | todo |  |  |  |
 
 ## Specs
 
@@ -80,6 +83,9 @@ acceptance:
 - `shepherd reply <session> [--json]` prints the last reply without prompting; `shepherd wait <session> [--timeout]`
   waits for idle or wants-user.
 - Scenario test with a fake agent: new session, prompt, wait, reply comes back; busy refusal; wants-user return; timeout.
+- Each prompt is recorded in the session's log as `_shepherd/session/prompted { text, by }` (`by`: `cli`, `mcp:<session>`
+  for an agent such as the project manager, or `client`), so the UI can show the last thing an agent was told and by whom
+  (status page, PM panel). Long text is kept whole in the log and shortened only when drawn.
 scope: crates/core, crates/archive, crates/shepherd, crates/testkit
 notes: (binding) The host does the typing, so every client sees the prompt in the session's screen. Port shape for
 reading a reply (PM decision): `trait Transcripts { fn last_reply(&self, req: &ReplyRequest) -> Result<Option<Reply>,
@@ -141,3 +147,47 @@ acceptance:
   with the sessions' current screens) and prints it as text, so an agent can see what a user would.
 - `--json` shapes documented in `docs/cli.md`, each with a test; tests run the binary against a real host on fakes.
 scope: crates/shepherd
+
+### T51: Answer an agent's pending question
+depends: T47
+touches: core::host, core::agents, core::wire, shepherd (cli)
+goal: A permission prompt or question an agent is blocked on can be answered without attaching: from the status page
+(y/a/n), the CLI, or the project manager's `answer` tool.
+acceptance:
+- The host knows when a session's agent is blocked on a question and what it asked (Claude Code's `Notification` /
+  permission hooks, Codex's equivalent; cite each agent's docs or source), recorded in the log as
+  `_shepherd/agent/asked { kind: permission | question, text, choices? }` and cleared when it's answered or the turn moves on.
+- `_shepherd/session/answer { session, choice }` (`yes`, `always`, `no`, or a choice index for a question) types the
+  agent's own keys for that choice (cited per agent) only while that question is pending; otherwise it's refused with the
+  session's status. `shepherd answer <session> <choice> [--json]`.
+- Scenario tests with a fake agent: asked → answered → working; answer with nothing pending refused; a stale answer after
+  the user already answered in the pane is refused, never typed.
+scope: crates/core, crates/shepherd, crates/testkit
+notes: Builders never run the real agents; `scripts/e2e-agents.sh` gains an answer round trip for the user to run.
+
+### T52: Read a session's screen as text
+depends: T46
+touches: core::wire, shepherd (host, cli)
+goal: An agent can see what a session shows (`read_pane`), as a user would.
+acceptance:
+- `_shepherd/session/screen { session, lines? }` answers the session's current screen (and up to `lines` of scrollback)
+  as text from the host's emulator, with control sequences stripped and wide characters intact.
+- `shepherd screen <session> [--lines N] [--json]`. Tests against a real host on fakes with a scripted PTY.
+scope: crates/core, crates/shepherd
+
+### T53: Shepherd MCP server for agents
+depends: T46, T47, T51, T52
+touches: shepherd (mcp, new), docs
+goal: An agent (first the project manager) runs other agents through shepherd's own tools.
+acceptance:
+- `shepherd mcp` serves MCP over stdio (use a maintained MCP crate if one fits; record the dependency in the decision)
+  with tools `status` (every session on every machine, as T46), `read_pane` (T52), `send` (T47 prompt, with optional
+  wait), `answer` (T51), `new_session` (T46) and `stop` (close a session; refuses one with unsaved work unless told). Each
+  tool's input and output schema is documented in `docs/cli.md` next to the CLI it mirrors.
+- A tool call is recorded with its origin (`by: mcp:<calling session>`), so the UI shows what the agent did. The server
+  only talks to the local host over its socket; it gets no capabilities the CLI doesn't have.
+- Tests drive the server over stdio with scripted MCP requests against a real host on fakes: every tool, errors (unknown
+  session, busy, nothing to answer), and schema snapshots.
+scope: crates/shepherd, docs
+notes: Decision 0022. The tools mirror the CLI one to one; no tool does anything the CLI can't.
+

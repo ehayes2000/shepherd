@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shepherd TUI Mocks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* One visual world: a dark terminal on a slate desk. Each mock is a 120x36 cell buffer drawn the way ratatui would. */
+:root {
+  color-scheme: dark;
+  --desk: #0d0f12;
+  --ink: #c9ced6;
+  --muted: #7d8590;
+  --rule: #23272e;
+  --accent: #56b6c2;
+  --term-bg: #15181d;
+  --term-chrome: #1e2228;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* ratatui named colors, as a typical dark terminal theme maps them */
+  --c-reset: #d4d8df;
+  --c-gray: #9aa1ab;
+  --c-dgray: #5d6470;
+  --c-cyan: #56b6c2;
+  --c-green: #98c379;
+  --c-yellow: #e5c07b;
+  --c-red: #e06c75;
+  --c-blue: #61afef;
+  --c-magenta: #c678dd;
+  --c-orange: #d77757;
+  --c-white: #f2f4f7;
+  --bg-sel: #343a45;
+  --bg-bar: #1f242b;
+  --bg-input: #262b33;
+  --bg-warn: #3a3222;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--desk); color: var(--ink); font-family: var(--sans); }
+body { padding: 28px 20px 60px; }
+.wrap { max-width: 1120px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px 24px; border-bottom: 1px solid var(--rule); padding-bottom: 16px; }
+h1 { font-family: var(--mono); font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.sub { color: var(--muted); font-size: 14px; margin: 4px 0 0; max-width: 62ch; }
+nav.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+nav.tabs a, .variants button {
+  font-family: var(--mono); font-size: 13px; color: var(--muted); text-decoration: none;
+  border: 1px solid var(--rule); background: transparent; padding: 6px 12px; border-radius: 4px; cursor: pointer;
+}
+nav.tabs a:hover, .variants button:hover { color: var(--ink); border-color: #3a404a; }
+nav.tabs a[aria-current="page"], .variants button[aria-pressed="true"] { color: var(--desk); background: var(--accent); border-color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+section.screen { display: none; flex-direction: column; gap: 14px; }
+section.screen.on { display: flex; }
+.screen-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px 20px; }
+.screen-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.screen-head p { margin: 4px 0 0; color: var(--muted); font-size: 14px; max-width: 70ch; }
+.variants { display: flex; gap: 6px; flex-wrap: wrap; }
+.term-scroll { overflow-x: auto; }
+.term { display: inline-block; background: var(--term-bg); border: 1px solid #2a2f37; border-radius: 8px; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+.term .chrome { display: flex; align-items: center; gap: 7px; padding: 8px 12px; background: var(--term-chrome); border-bottom: 1px solid #2a2f37; border-radius: 8px 8px 0 0; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.term .chrome i { width: 10px; height: 10px; border-radius: 50%; background: #3a3f47; display: inline-block; }
+.term .chrome b { font-weight: 400; margin-left: 8px; }
+pre.buf { margin: 0; padding: 10px 12px 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.3; color: var(--c-reset); font-variant-ligatures: none; }
+pre.buf .w { display: inline-block; width: 1ch; text-align: center; overflow: hidden; vertical-align: top; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 28px; margin: 4px 0 0; padding: 0; list-style: none; }
+.notes li { font-size: 14px; line-height: 1.5; color: var(--ink); border-left: 2px solid var(--rule); padding-left: 12px; }
+.notes li b { font-family: var(--mono); font-size: 12.5px; color: var(--accent); font-weight: 400; display: block; margin-bottom: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.legend span b { font-weight: 400; margin-right: 6px; }
+
+.f-reset{color:var(--c-reset)} .f-gray{color:var(--c-gray)} .f-dgray{color:var(--c-dgray)} .f-cyan{color:var(--c-cyan)}
+.f-green{color:var(--c-green)} .f-yellow{color:var(--c-yellow)} .f-red{color:var(--c-red)} .f-blue{color:var(--c-blue)}
+.f-magenta{color:var(--c-magenta)} .f-orange{color:var(--c-orange)} .f-white{color:var(--c-white)} .f-bg{color:var(--term-bg)}
+.k-sel{background:var(--bg-sel)} .k-bar{background:var(--bg-bar)} .k-input{background:var(--bg-input)} .k-warn{background:var(--bg-warn)}
+.k-cyan{background:var(--c-cyan)} .k-yellow{background:var(--c-yellow)}
+.B{font-weight:700} .D{opacity:.55} .U{text-decoration:underline}
+@media (prefers-reduced-motion: no-preference) { section.screen.on { animation: fade .18s ease-out; } }
+@keyframes fade { from { opacity: .4 } to { opacity: 1 } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1><span>shepherd</span> · TUI mocks</h1>
+      <p class="sub">Four screens drawn as 120×36 ratatui buffers with the colors, glyphs and sidebar rows the client already uses. The data is made up.</p>
+    </div>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#pm" data-screen="pm">Project manager</a>
+      <a href="#status" data-screen="status">Status page</a>
+      <a href="#subagents" data-screen="subagents">Subagents</a>
+      <a href="#machines" data-screen="machines">Machines</a>
+    </nav>
+  </header>
+
+  <div class="legend" aria-label="Status glyphs">
+    <span><b class="f-green">●</b>working</span>
+    <span><b class="f-yellow">▲</b>needs you</span>
+    <span><b class="f-reset">○</b>idle</span>
+    <span><b class="f-dgray">◌</b>starting</span>
+    <span><b class="f-red">✕</b>exited / offline</span>
+    <span><b class="f-cyan">▸3</b>subagents (collapsed)</span>
+    <span><b class="f-gray">#415 ✓</b>PR + checks</span>
+  </div>
+
+  <section class="screen" id="s-pm">
+    <div class="screen-head">
+      <div>
+        <h2>Project manager</h2>
+        <p>A Claude Code session you talk to, with shepherd's MCP tools, that runs the other agents for you. Opens with <code>ctrl-b p</code>. On the right: what its agents are working on, and what's waiting on you.</p>
+      </div>
+      <div class="variants" role="group" aria-label="Project manager variant">
+        <button type="button" id="pm-v1" data-target="pm" data-v="talk" aria-pressed="true">Morning briefing</button>
+        <button type="button" id="pm-v2" data-target="pm" data-v="dispatch" aria-pressed="false">Dispatching</button>
+        <button type="button" id="pm-v3" data-target="pm" data-v="ask" aria-pressed="false">Asking you</button>
+      </div>
+    </div>
+    <div class="term-scroll"><div class="term"><div class="chrome"><i></i><i></i><i></i><b>shepherd — 120×36</b></div><pre class="buf" id="pm"></pre></div></div>
+    <ul class="notes">
+      <li><b>just a claude session</b>The PM is an ordinary Claude Code PTY, launched with a <code>shepherd</code> MCP server: <code>status</code>, <code>read_pane</code>, <code>send</code>, <code>answer</code>, <code>new_session</code>, <code>stop</code>. You talk to it like any agent. Shepherd only adds the panel.</li>
+      <li><b>same events as you</b>Its tool calls turn into the same host events as your keystrokes. The status page and the events feed show what the PM did, and the panel tags each working agent with the last thing the PM told it.</li>
+      <li><b>two lists</b>Working shows each busy agent with the last thing the PM told it. Waiting on you collects every decision, whether an agent asked it or the PM raised it, with the question on its own line.</li>
+      <li><b>asks with a picker</b>When it needs a call it asks one question with a recommended option, using Claude Code's own picker. Your answer goes back through the PM, which relays it to the agent.</li>
+    </ul>
+  </section>
+
+  <section class="screen" id="s-status">
+    <div class="screen-head">
+      <div>
+        <h2>Status page</h2>
+        <p>Every agent on every machine in one table. Opens with <code>ctrl-b s</code>. Whatever needs you sorts to the top and can be answered without attaching.</p>
+      </div>
+      <div class="variants" role="group" aria-label="Status page variant">
+        <button type="button" id="cc-v1" data-target="cc" data-v="state" aria-pressed="true">Group by state</button>
+        <button type="button" id="cc-v2" data-target="cc" data-v="machine" aria-pressed="false">Group by machine</button>
+      </div>
+    </div>
+    <div class="term-scroll"><div class="term"><div class="chrome"><i></i><i></i><i></i><b>shepherd — 120×36</b></div><pre class="buf" id="cc"></pre></div></div>
+    <ul class="notes">
+      <li><b>triage first</b>The table groups by what you owe the agent: needs you, working, idle, exited. The header counts each group so you can check the backlog from across the room.</li>
+      <li><b>answer in place</b>The preview shows the selected agent's live pane. <code>y</code>/<code>a</code>/<code>n</code> answer a permission prompt and <code>⏎</code> attaches. You only switch sessions when you want to talk to an agent.</li>
+      <li><b>events + loops</b>The feed is the same event stream loops subscribe to. The title shows how many loops are watching, which leaves room for "when PR checks fail, tell the agent".</li>
+      <li><b>broadcast</b>The input line messages the selected agent. <code>tab</code> widens the target to a group (all working, all on devbox) so the orchestrator flow is built in.</li>
+    </ul>
+  </section>
+
+  <section class="screen" id="s-subagents">
+    <div class="screen-head">
+      <div>
+        <h2>Subagents in the sidebar</h2>
+        <p>A session's badge counts its live subagents. <code>⇥</code> expands the tree under the session. Selecting a subagent shows its transcript read-only.</p>
+      </div>
+      <div class="variants" role="group" aria-label="Subagent variant">
+        <button type="button" id="sa-v1" data-target="sa" data-v="parent" aria-pressed="true">Parent selected</button>
+        <button type="button" id="sa-v2" data-target="sa" data-v="child" aria-pressed="false">Subagent selected</button>
+      </div>
+    </div>
+    <div class="term-scroll"><div class="term"><div class="chrome"><i></i><i></i><i></i><b>shepherd — 120×36</b></div><pre class="buf" id="sa"></pre></div></div>
+    <ul class="notes">
+      <li><b>badge = live count</b><code>▸4</code> when collapsed, <code>▾4</code> when expanded. Finished subagents stay in the tree, dimmed, until the parent's turn ends, then drop out of the count.</li>
+      <li><b>attention bubbles up</b>If a subagent is blocked on permission, its parent's glyph turns <span class="f-yellow">▲</span> even while the parent is working. Otherwise you'd miss it inside a collapsed tree.</li>
+      <li><b>one row per subagent</b>Children get a single line: branch, glyph, agent type, task. Two lines each would push the other sessions off screen.</li>
+      <li><b>read-only drill-in</b>A subagent has no PTY of its own. Its transcript comes from the agent's hook or log stream, so the pane says it's read-only and where to answer.</li>
+    </ul>
+  </section>
+
+  <section class="screen" id="s-machines">
+    <div class="screen-head">
+      <div>
+        <h2>Multiple machines</h2>
+        <p>Each machine gets a name and a color. The color follows its sessions everywhere: sidebar line two, the command center and the new-session picker.</p>
+      </div>
+      <div class="variants" role="group" aria-label="Machines variant">
+        <button type="button" id="mm-v1" data-target="mm" data-v="flat" aria-pressed="true">Flat sidebar</button>
+        <button type="button" id="mm-v2" data-target="mm" data-v="grouped" aria-pressed="false">Grouped + machines panel</button>
+        <button type="button" id="mm-v3" data-target="mm" data-v="new" aria-pressed="false">New session on…</button>
+      </div>
+    </div>
+    <div class="term-scroll"><div class="term"><div class="chrome"><i></i><i></i><i></i><b>shepherd — 120×36</b></div><pre class="buf" id="mm"></pre></div></div>
+    <ul class="notes">
+      <li><b>flat is the default</b>As the manifesto says: one list, newest first, with the machine on line two. Attaching to a remote session looks like a local one. Only the footer names the link and its latency.</li>
+      <li><b>grouped on demand</b><code>g</code> regroups the sidebar under machine headers, each with its state and link (direct, relay, offline). An offline machine keeps its sessions, dimmed, so you can still see what was running.</li>
+      <li><b>machines panel</b><code>ctrl-b m</code> lists the peers with link, agent and worktree counts and host build, so a stale host shows up here as well as at hello. Pairing a new machine is one ticket.</li>
+      <li><b>where, then what</b>New session asks for the machine first (it defaults to the last one used), then the agent profile. Offline machines are listed but can't be chosen.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+(() => {
+  const W = 120, H = 36;
+  const chars = s => Array.from(s);
+  const len = s => chars(s).length;
+  const pad = (s, n) => { const c = chars(s); return c.length >= n ? c.slice(0, n).join("") : s + " ".repeat(n - c.length); };
+  const rpad = (s, n) => { const c = chars(s); return c.length >= n ? c.slice(0, n).join("") : " ".repeat(n - c.length) + s; };
+
+  class Buf {
+    constructor(w, h) {
+      this.w = w; this.h = h;
+      this.c = Array.from({ length: h }, () => Array.from({ length: w }, () => ({ ch: " ", fg: "reset", bg: null, B: 0, D: 0 })));
+    }
+    set(x, y, str, st = {}) {
+      if (y < 0 || y >= this.h) return x + len(str);
+      for (const ch of chars(str)) {
+        if (x >= 0 && x < this.w) Object.assign(this.c[y][x], { fg: "reset", B: 0, D: 0 }, keep(this.c[y][x]), st, { ch });
+        x++;
+      }
+      return x;
+    }
+    // spans: [[text, style], ...]
+    line(x, y, spans, base = {}) { for (const [t, s] of spans) x = this.set(x, y, t, { ...base, ...(s || {}) }); return x; }
+    bg(x, y, w, bg) { for (let i = x; i < x + w && i < this.w; i++) if (i >= 0 && y >= 0 && y < this.h) this.c[y][i].bg = bg; }
+    clear(x, y, w, h) { for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) if (this.c[j] && this.c[j][i]) this.c[j][i] = { ch: " ", fg: "reset", bg: null, B: 0, D: 0 }; }
+    vline(x, y0, y1, st = { fg: "dgray" }) { for (let y = y0; y <= y1; y++) this.set(x, y, "│", st); }
+    hline(x0, x1, y, st = { fg: "dgray" }, ch = "─") { for (let x = x0; x <= x1; x++) this.set(x, y, ch, st); }
+    box(x, y, w, h, { title, titleSt, right, rightSt, st = { fg: "dgray" } } = {}) {
+      this.set(x, y, "┌", st); this.hline(x + 1, x + w - 2, y, st); this.set(x + w - 1, y, "┐", st);
+      this.set(x, y + h - 1, "└", st); this.hline(x + 1, x + w - 2, y + h - 1, st); this.set(x + w - 1, y + h - 1, "┘", st);
+      this.vline(x, y + 1, y + h - 2, st); this.vline(x + w - 1, y + 1, y + h - 2, st);
+      if (title) this.set(x + 2, y, ` ${title} `, titleSt || st);
+      if (right) this.set(x + w - 3 - len(right) - 1, y, ` ${right} `, rightSt || st);
+    }
+    html() {
+      let out = "";
+      for (const row of this.c) {
+        let i = 0;
+        while (i < row.length) {
+          const a = row[i]; const key = sk(a); let run = "";
+          while (i < row.length && sk(row[i]) === key) { const ch = row[i].ch; run += ch.charCodeAt(0) < 128 ? esc(ch) : `<span class="w">${esc(ch)}</span>`; i++; }
+          const cls = [`f-${a.fg}`, a.bg ? `k-${a.bg}` : "", a.B ? "B" : "", a.D ? "D" : ""].filter(Boolean).join(" ");
+          out += `<span class="${cls}">${run}</span>`;
+        }
+        out += "\n";
+      }
+      return out;
+    }
+  }
+  const keep = c => (c.bg ? { bg: c.bg } : {});
+  const sk = c => `${c.fg}|${c.bg}|${c.B}|${c.D}`;
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // ---------- shared vocabulary ----------
+  const ST = {
+    work: ["●", "green"], need: ["▲", "yellow"], idle: ["○", "reset"],
+    start: ["◌", "dgray"], exit: ["✕", "red"], done: ["✓", "dgray"], unk: ["·", "dgray"],
+  };
+  const MC = { air: "cyan", studio: "magenta", devbox: "blue", pi: "dgray" };
+  const key = k => [k, { fg: "cyan", B: 1 }];
+  const hint = t => [t, { fg: "gray", D: 1 }];
+  const pr = (n, s) => {
+    if (!n) return [["—", { fg: "gray", D: 1 }]];
+    const g = { ok: ["✓", "green"], run: ["…", "yellow"], fail: ["✕", "red"] }[s];
+    return [[`#${n} `, { fg: "gray", D: 1 }], [g[0], { fg: g[1] }]];
+  };
+
+  function sidebarTop(b, w, ws = "~/Code/shepherd") {
+    b.line(1, 0, [["⌕ Search…", { fg: "gray" }]]);
+    b.line(1, 1, [["⌂ ", { fg: "gray" }], [ws, { fg: "gray" }]]);
+    b.line(1, 2, [["+ New session", { fg: "cyan", B: 1 }]]);
+  }
+
+  // A two-line session row, as crates/tui/src/sidebar.rs draws it, plus a subagent badge.
+  function sessionRow(b, y, w, r) {
+    if (r.sel) { b.bg(0, y, w, "sel"); b.bg(0, y + 1, w, "sel"); }
+    const [g, gc] = ST[r.st];
+    b.set(1, y, g, { fg: gc });
+    b.set(3, y, pad(r.name, w - 9), { B: r.sel ? 1 : 0, D: r.dim ? 1 : 0 });
+    if (r.sub) b.set(w - 5, y, rpad(r.sub, 3), { fg: r.subNeed ? "yellow" : "cyan", B: 1 });
+    b.set(w - 1, y, "×", { fg: "gray" });
+    const where = r.machine ? [[r.machine, { fg: MC[r.machine] || "gray", D: r.dim ? 1 : 0 }], [" · ", { fg: "gray", D: 1 }]] : [];
+    const l2 = [...where, ...(r.l2 || pr(r.pr, r.prs))];
+    b.line(3, y + 1, l2);
+    return y + 2;
+  }
+  function childRow(b, y, w, c) {
+    if (c.sel) b.bg(0, y, w, "sel");
+    const [g, gc] = ST[c.st];
+    b.set(3, y, c.last ? "└" : "├", { fg: "dgray" });
+    b.set(5, y, g, { fg: gc });
+    b.set(7, y, pad(c.kind, 9), { fg: c.st === "done" ? "dgray" : "magenta", B: c.sel ? 1 : 0 });
+    b.set(16, y, pad(c.task, w - 17), { fg: c.st === "done" ? "dgray" : "gray", B: c.sel ? 1 : 0 });
+    return y + 1;
+  }
+  function machineHeader(b, y, w, m) {
+    const [g, gc] = m.st;
+    let x = b.line(1, y, [[m.name, { fg: MC[m.name], B: 1 }], [" ", {}], [g, { fg: gc }], [" " + m.meta + " ", { fg: "gray", D: 1 }]]);
+    b.hline(x, w - 1, y, { fg: "dgray" });
+    return y + 1;
+  }
+  function sidebarHint(b, w, extra) {
+    b.line(1, H - 1, [key("ctrl-b ?"), hint(" help"), ...(extra || [])]);
+  }
+  function splitter(b, x) { b.vline(x, 0, H - 1); }
+
+
+  // ---------- Project manager ----------
+  function drawPM(v) {
+    const b = new Buf(W, H), LX = 1, SEP = 73, RX = SEP + 2, RW = W - RX - 1;
+    // header bar
+    b.bg(0, 0, W, "bar");
+    b.line(1, 0, [["shepherd", { fg: "cyan", B: 1 }], [" ▸ ", { fg: "dgray" }], ["pm", { B: 1 }], ["  project manager · claude opus · ", { fg: "gray" }], ["air", { fg: "cyan" }], ["  ⌂ ~/Code/shepherd", { fg: "gray", D: 1 }]]);
+    b.line(W - 11, 0, [["ctrl-b p ", { fg: "gray", D: 1 }], ["✕", { fg: "gray" }]]);
+    b.vline(SEP, 1, H - 1);
+
+    let y = 2;
+    const P = (spans) => b.line(LX, y++, spans);
+    const user = (t) => { b.bg(0, y, SEP, "input"); P([["❯ ", { fg: "gray" }], [t, {}]]); y++; };
+    const mcp = (tool, args, res, resSt) => {
+      P([["⏺ ", { fg: "green" }], ["shepherd - " + tool + " ", { B: 1 }], ["(MCP)", { fg: "gray" }], [args ? "(" + args + ")" : "", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], [res, resSt || { fg: "gray" }]]);
+    };
+    const say = (lines, first = true) => lines.forEach((t, i) => P(i === 0 && first ? [["⏺ ", { fg: "white" }], [t, {}]] : [["  " + t, {}]]));
+
+    let working, waiting;
+    if (v === "talk") {
+      user("morning. what happened overnight and what do you need from me?");
+      mcp("status", "", "11 sessions on 4 machines · 3 need attention · pi offline");
+      mcp("read_pane", 'iroh-spike, last 40 lines', "Read 40 lines");
+      y++;
+      say(["Overnight: f41-sidebar-search went green (#415) and wants review.",
+           "f36 is mid-review. pty-resize failed clippy; the checks loop sent",
+           "it the log and it's fixing it. I approved t28's cargo test, which",
+           "is on its allowlist."]);
+      y++;
+      say(["Three things need you:"], false);
+      P([["  1. ", { fg: "gray" }], ["iroh-spike", { fg: "magenta" }], [" asks which ALPN to use. I'd say ", {}], ["shepherd/1", { fg: "cyan" }], [" so the", {}]]);
+      P([["     version lives in the name. Want me to tell it?", {}]]);
+      P([["  2. ", { fg: "gray" }], ["wire-v2", { fg: "magenta" }], [" has been idle for 1h with #411 failing. Stop it, or", {}]]);
+      P([["     hand the branch to a fresh builder?", {}]]);
+      P([["  3. ", { fg: "gray" }], ["T29 and T30", { B: 1 }], [" are ready in docs/plan.md. devbox has room.", {}]]);
+      working = [
+        ["work", "t28-hello-build", "devbox", "✓ approved test", "gray"],
+        ["work", "f36-cleanup-view", "studio", "in review", "gray"],
+        ["work", "pty-resize", "devbox", "sent clippy log", "gray"],
+        ["work", "snapshot-flake", "devbox", "running", "gray"],
+      ];
+      waiting = [
+        ["iroh-spike", "studio", "asks which ALPN name to use"],
+        ["wire-v2", "studio", "idle 1h, #411 failing: stop or reassign?"],
+        ["f41-sidebar-search", "studio", "#415 is green: ready to merge"],
+      ];
+    } else if (v === "dispatch") {
+      user("1 yes. stop wire-v2 but keep the branch. start T29 and T30 on devbox");
+      mcp("send", 'iroh-spike, "Use ALPN shepherd/1…"', "delivered · iroh-spike is working");
+      mcp("stop", 'wire-v2, worktree: remove, branch: keep', "stopped · worktree removed · branch wire-v2 kept (#411)");
+      mcp("new_session", 'devbox, claude, "t29-pair-ticket"', "started t29-pair-ticket on devbox · from origin/main", { fg: "gray" });
+      mcp("new_session", 'devbox, claude, "t30-machines-panel"', "started t30-machines-panel on devbox · from origin/main", { fg: "gray" });
+      mcp("send", 't29-pair-ticket, <T29 spec · 46 lines>', "delivered");
+      mcp("send", 't30-machines-panel, <T30 spec · 38 lines>', "delivered");
+      y++;
+      say(["Done. iroh-spike has its answer, wire-v2 is gone (branch kept),",
+           "and T29/T30 are building on devbox. I'll watch them and come back",
+           "when one needs a review or a call."]);
+      y++;
+      P([["✻ ", { fg: "orange" }], ["Watching 8 sessions… ", { fg: "orange" }], ["(esc to interrupt)", { fg: "gray" }]]);
+      working = [
+        ["work", "iroh-spike", "studio", "→ ALPN answer", "cyan"],
+        ["start", "t29-pair-ticket", "devbox", "→ T29 spec", "cyan"],
+        ["start", "t30-machines-panel", "devbox", "→ T30 spec", "cyan"],
+        ["work", "t28-hello-build", "devbox", "running tests", "gray"],
+        ["work", "f36-cleanup-view", "studio", "in review", "gray"],
+        ["work", "pty-resize", "devbox", "fixing clippy", "gray"],
+        ["work", "snapshot-flake", "devbox", "running", "gray"],
+      ];
+      waiting = [
+        ["f41-sidebar-search", "studio", "#415 is green: ready to merge"],
+      ];
+    } else {
+      user("devbox says its host is a build behind. sort it out");
+      mcp("status", 'devbox', "host 9c0e11 · client a41f2c · 6 sessions, 2 mid-turn");
+      y++;
+      say(["Updating the devbox host restarts all 6 of its sessions. t28 and",
+           "snapshot-flake are mid-turn and would lose the turn in progress."]);
+      y++;
+      b.hline(0, SEP - 1, y, { fg: "dgray" }); y++;
+      P([["☐ ", { fg: "cyan" }], ["devbox host", { fg: "cyan", B: 1 }]]);
+      y++;
+      P([["When should I update the devbox host?", { B: 1 }]]);
+      y++;
+      P([["❯ 1. ", { fg: "cyan" }], ["When t28 and snapshot-flake go idle ", { fg: "cyan" }], ["(Recommended)", { fg: "gray" }]]);
+      P([["     Queue it; I'll hold new work for devbox until then.", { fg: "gray" }]]);
+      P([["  2. ", {}], ["Now", {}]]);
+      P([["     6 sessions restart; 2 lose their current turn.", { fg: "gray" }]]);
+      P([["  3. ", {}], ["Not today", {}]]);
+      P([["     I'll ask again tomorrow morning.", { fg: "gray" }]]);
+      P([["  4. ", {}], ["Type something.", {}]]);
+      y++;
+      P([["Enter to select · ↑/↓ to navigate · Esc to cancel", { fg: "gray", D: 1 }]]);
+      working = [
+        ["work", "t28-hello-build", "devbox", "mid-turn", "yellow"],
+        ["work", "snapshot-flake", "devbox", "mid-turn", "yellow"],
+        ["start", "t29-pair-ticket", "devbox", "→ T29 spec", "gray"],
+        ["start", "t30-machines-panel", "devbox", "→ T30 spec", "gray"],
+        ["work", "pty-resize", "devbox", "fixing clippy", "gray"],
+        ["work", "iroh-spike", "studio", "→ ALPN answer", "gray"],
+        ["work", "f36-cleanup-view", "studio", "in review", "gray"],
+      ];
+      waiting = [
+        ["devbox host", "devbox", "update now or later? (asked here)", true],
+        ["f41-sidebar-search", "studio", "#415 is green: ready to merge"],
+      ];
+    }
+
+    // Claude Code input at the bottom of the PM pane
+    if (v !== "ask") {
+      b.hline(0, SEP - 1, H - 4, { fg: "dgray" });
+      b.line(LX, H - 3, [["❯ ", {}], ["▏", { fg: "gray" }]]);
+      b.hline(0, SEP - 1, H - 2, { fg: "dgray" });
+    }
+    b.line(LX, H - 1, [["  ⏵⏵ auto mode on", { fg: "yellow" }], ["  · shepherd mcp · 6 tools", { fg: "gray", D: 1 }]]);
+
+    // right panel: working, then waiting on you
+    b.clear(SEP, 1, W - SEP, H - 1);
+    b.vline(SEP, 1, H - 1);
+    let ry = 2;
+    b.line(RX, ry, [["WORKING", { fg: "green", B: 1 }], [`  ${working.length}`, { fg: "gray", D: 1 }]]);
+    b.set(W - 14, ry, "last from pm", { fg: "gray", D: 1 });
+    ry++;
+    for (const [st, name, m, note, nc] of working) {
+      const [g, gc] = ST[st];
+      if (v === "ask" && nc === "yellow") b.bg(SEP + 1, ry, W - SEP - 1, "warn");
+      b.line(RX, ry, [[g + " ", { fg: gc }], [pad(name, 19), {}], [pad(m, 7), { fg: MC[m] }], [pad(note, RW - 28), { fg: nc }]]);
+      ry++;
+    }
+    ry++;
+    b.hline(SEP + 1, W - 1, ry, { fg: "dgray" }); ry += 2;
+    b.line(RX, ry, [["WAITING ON YOU", { fg: "yellow", B: 1 }], [`  ${waiting.length}`, { fg: "gray", D: 1 }]]); ry += 2;
+    for (const [name, m, ask, hi] of waiting) {
+      if (hi) { b.bg(SEP + 1, ry, W - SEP - 1, "warn"); b.bg(SEP + 1, ry + 1, W - SEP - 1, "warn"); }
+      b.line(RX, ry, [["▲ ", { fg: "yellow" }], [pad(name, 19), { B: 1 }], [m, { fg: MC[m] }]]);
+      b.line(RX + 2, ry + 1, [[ask, { fg: "gray" }]]);
+      ry += 3;
+    }
+    b.line(RX, H - 1, [key("⏎"), hint(" attach  "), key("ctrl-b s"), hint(" status page")]);
+    return b.html();
+  }
+
+  // ---------- Command center ----------
+  const AGENTS = [
+    { g: "need", st: "need", name: "t28-hello-build", agent: "claude", m: "devbox", sub: "2", act: "Bash(cargo test)", actSt: "yellow", pr: null, age: "1m" },
+    { g: "need", st: "need", name: "iroh-spike", agent: "codex", m: "studio", sub: "", act: "asks: ALPN name?", actSt: "yellow", pr: null, age: "4m" },
+    { g: "need", st: "need", name: "pm", agent: "claude", m: "air", sub: "4", act: "subagent wants Bash", actSt: "yellow", pr: [418, "run"], age: "38m" },
+    { g: "work", st: "work", name: "f36-cleanup-view", agent: "claude", m: "studio", sub: "1", act: "Edit cleanup.rs", pr: [417, "run"], age: "22m" },
+    { g: "work", st: "work", name: "f41-sidebar-search", agent: "codex", m: "studio", sub: "", act: "Bash check.sh", pr: [415, "ok"], age: "51m" },
+    { g: "work", st: "work", name: "snapshot-flake", agent: "claude", m: "devbox", sub: "2", act: "Read render.rs", pr: null, age: "9m" },
+    { g: "work", st: "work", name: "docs-arch", agent: "claude", m: "air", sub: "", act: "Write arch doc", pr: null, age: "3m" },
+    { g: "work", st: "work", name: "pty-resize", agent: "codex", m: "devbox", sub: "", act: "cargo build", pr: [416, "fail"], age: "1h" },
+    { g: "idle", st: "idle", name: "fix-login", agent: "claude", m: "air", sub: "", act: "finished · 12m ago", pr: [409, "ok"], age: "2h" },
+    { g: "idle", st: "idle", name: "wire-v2", agent: "claude", m: "studio", sub: "", act: "waiting · 1h", pr: [411, "fail"], age: "3h" },
+    { g: "exit", st: "exit", name: "old-host-swap", agent: "codex", m: "pi", sub: "", act: "pi offline", actSt: "red", pr: null, age: "5h" },
+  ];
+  const GROUPS = { need: ["NEEDS YOU", "yellow"], work: ["WORKING", "green"], idle: ["IDLE", "reset"], exit: ["EXITED", "red"] };
+
+  function drawCommandCenter(mode) {
+    const b = new Buf(W, H);
+    // header bar
+    b.bg(0, 0, W, "bar");
+    let x = b.line(1, 0, [["shepherd", { fg: "cyan", B: 1 }], ["  ⌂ ~/Code/shepherd", { fg: "gray" }]]);
+    const mach = [["air", ST.work], ["studio", ST.work], ["devbox", ["●", "yellow"]], ["pi", ST.exit]];
+    let mx = 62;
+    for (const [n, [g, gc]] of mach) mx = b.line(mx, 0, [[n, { fg: MC[n], B: 1 }], [" ", {}], [g, { fg: gc }], ["   ", {}]]);
+    b.line(W - 11, 0, [["ctrl-b s ", { fg: "gray", D: 1 }], ["✕", { fg: "gray" }]]);
+
+    // summary line
+    const counts = { need: 3, work: 5, idle: 2, exit: 1 };
+    b.line(1, 1, [
+      ["▲ 3 need you", { fg: "yellow", B: 1 }], ["    ", {}],
+      ["● 5 working", { fg: "green" }], ["    ", {}],
+      ["○ 2 idle", {}], ["    ", {}],
+      ["✕ 1 exited", { fg: "red" }], ["    ", {}],
+      ["↳ 9 subagents running", { fg: "magenta" }], ["    ", {}],
+      ["4 machines · 3 online", { fg: "gray", D: 1 }],
+    ]);
+
+    // agent table
+    const TX = 0, TW = 74, TY = 2, TH = 23;
+    b.box(TX, TY, TW, TH, { title: "agents", titleSt: { fg: "cyan", B: 1 }, right: mode === "machine" ? "g: by state" : "g: by machine", rightSt: { fg: "gray", D: 1 } });
+    const cols = { st: 2, name: 4, agent: 25, m: 33, sub: 41, act: 45, pr: 66 };
+    let y = TY + 1;
+    b.line(TX + cols.name, y, [["NAME", { fg: "gray", D: 1 }]]);
+    b.set(TX + cols.agent, y, "AGENT", { fg: "gray", D: 1 });
+    b.set(TX + cols.m, y, "MACHINE", { fg: "gray", D: 1 });
+    b.set(TX + cols.sub, y, "SUB", { fg: "gray", D: 1 });
+    b.set(TX + cols.act, y, "DOING", { fg: "gray", D: 1 });
+    b.set(TX + cols.pr, y, "PR", { fg: "gray", D: 1 });
+    y++;
+
+    const row = (a) => {
+      const sel = a.name === "t28-hello-build";
+      if (sel) b.bg(TX + 1, y, TW - 2, "sel");
+      const [g, gc] = ST[a.st];
+      b.set(TX + cols.st, y, g, { fg: gc });
+      b.set(TX + cols.name, y, pad(a.name, 20), { B: sel ? 1 : 0 });
+      b.set(TX + cols.agent, y, a.agent, { fg: a.agent === "claude" ? "orange" : "gray" });
+      b.set(TX + cols.m, y, a.m, { fg: MC[a.m], D: a.m === "pi" ? 1 : 0 });
+      if (a.sub) b.set(TX + cols.sub, y, "↳" + a.sub, { fg: a.name === "pm" ? "yellow" : "magenta" });
+      else b.set(TX + cols.sub, y, "—", { fg: "gray", D: 1 });
+      b.set(TX + cols.act, y, pad(a.act, 20), a.actSt ? { fg: a.actSt } : { fg: "gray" });
+      b.line(TX + cols.pr, y, pr(a.pr && a.pr[0], a.pr && a.pr[1]));
+      y++;
+    };
+    if (mode === "machine") {
+      const ms = [["air", "● this machine", "green"], ["studio", "● direct 4ms", "green"], ["devbox", "● relay 86ms", "yellow"], ["pi", "✕ offline 3h", "red"]];
+      for (const [m, meta, mc] of ms) {
+        const list = AGENTS.filter(a => a.m === m);
+        let hx = b.line(TX + 2, y, [[m, { fg: MC[m], B: 1 }], ["  " + meta.slice(0, 1), { fg: mc }], [meta.slice(1), { fg: "gray", D: 1 }], [`  · ${list.length}`, { fg: "gray", D: 1 }]]);
+        y++;
+        const order = ["need", "work", "idle", "exit"];
+        list.sort((p, q) => order.indexOf(p.g) - order.indexOf(q.g)).forEach(row);
+      }
+    } else {
+      for (const gk of ["need", "work", "idle", "exit"]) {
+        const [label, color] = GROUPS[gk];
+        const list = AGENTS.filter(a => a.g === gk);
+        b.line(TX + 2, y, [[label, { fg: color, B: 1 }], [`  ${list.length}`, { fg: "gray", D: 1 }]]);
+        y++;
+        list.forEach(row);
+        if (gk !== "exit") y++;
+      }
+    }
+
+    // preview pane
+    const PX = 74, PW = 46;
+    b.box(PX, TY, PW, TH, { title: "t28-hello-build", titleSt: { B: 1 }, right: "devbox", rightSt: { fg: "blue" } });
+    let py = TY + 1;
+    const P = (spans) => { b.line(PX + 2, py++, spans); };
+    P([["⏺ ", { fg: "green" }], ["Update", { B: 1 }], ["(crates/core/src/wire.rs)", {}]]);
+    P([["  ⎿  ", { fg: "gray" }], ["Updated with 14 additions", { fg: "gray" }]]);
+    P([["⏺ ", { fg: "white" }], ["Hello now carries the build id. Running", {}]]);
+    P([["  ", {}], ["the wire tests.", {}]]);
+    py++;
+    P([["⏺ ", { fg: "green" }], ["Bash", { B: 1 }], ["(cargo test -p shepherd-core", {}]]);
+    P([["       wire)", {}]]);
+    py++;
+    b.hline(PX + 1, PX + PW - 2, py, { fg: "dgray" }); py++;
+    P([["Bash command", { fg: "yellow", B: 1 }]]);
+    py++;
+    P([["  cargo test -p shepherd-core wire", {}]]);
+    P([["  Run the wire tests after the hello change", { fg: "gray" }]]);
+    py++;
+    P([["Do you want to proceed?", {}]]);
+    P([["❯ 1. Yes", { fg: "cyan" }]]);
+    P([["  2. Yes, and don't ask again for cargo", {}]]);
+    P([["  3. No, and tell Claude what to do", {}]]);
+    py = TY + TH - 3;
+    b.hline(PX + 1, PX + PW - 2, py, { fg: "dgray" });
+    b.line(PX + 2, py + 1, [key("y"), hint(" allow  "), key("a"), hint(" always  "), key("n"), hint(" deny  "), key("⏎"), hint(" attach")]);
+
+    // events
+    const EY = 25, EH = 9;
+    b.box(0, EY, W, EH, { title: "events", titleSt: { fg: "cyan", B: 1 }, right: "2 loops watching", rightSt: { fg: "magenta" } });
+    const EV = [
+      ["14:02:11", "devbox", "t28-hello-build", ["▲", "yellow"], "permission", "Bash(cargo test -p shepherd-core wire)"],
+      ["14:01:58", "studio", "iroh-spike", ["▲", "yellow"], "question", "Which ALPN should the peer protocol use?"],
+      ["14:01:40", "air", "pm", ["↳", "magenta"], "spawned", "reviewer · F36 cleanup view"],
+      ["14:00:12", "studio", "f41-sidebar-search", ["✓", "green"], "checks", "PR #415 passing · loop \"on green, request review\" fired"],
+      ["13:58:03", "devbox", "pty-resize", ["✕", "red"], "checks", "PR #416 failing: clippy · loop sent the log to the agent"],
+      ["13:55:47", "pi", "—", ["✕", "red"], "offline", "lost peer pi (relay timeout after 30s)"],
+      ["13:54:20", "air", "fix-login", ["○", "reset"], "idle", "finished turn after 6m 12s"],
+    ];
+    EV.forEach((e, i) => {
+      const ey = EY + 1 + i;
+      b.line(2, ey, [[e[0], { fg: "gray", D: 1 }], ["  ", {}], [pad(e[1], 8), { fg: MC[e[1]], D: e[1] === "pi" ? 1 : 0 }], [pad(e[2], 20), {}], [e[3][0], { fg: e[3][1] }], [" " + pad(e[4], 12), { fg: e[3][1] === "reset" ? "gray" : e[3][1] }], [e[5], { fg: "gray" }]]);
+    });
+
+    // input + hints
+    b.bg(0, 34, W, "input");
+    b.line(1, 34, [["❯ ", { fg: "cyan", B: 1 }], ["to t28-hello-build", { fg: "blue" }], ["  message the selected agent · ", { fg: "gray", D: 1 }], key("tab"), [" target: all working, all on devbox…", { fg: "gray", D: 1 }]]);
+    b.line(1, 35, [key("j/k"), hint(" move  "), key("⏎"), hint(" attach  "), key("y/n"), hint(" answer  "), key("/"), hint(" filter  "), key("g"), hint(" group  "), key("s"), hint(" new session  "), key("x"), hint(" stop  "), key("esc"), hint(" back to sidebar")]);
+    return b.html();
+  }
+
+  // ---------- Subagents ----------
+  function drawSubagents(v) {
+    const b = new Buf(W, H), SW = 32;
+    sidebarTop(b, SW);
+    let y = 3;
+    const parentSel = v === "parent";
+    y = sessionRow(b, y, SW, { st: "need", name: "pm", sub: "▾4", subNeed: true, machine: "air", pr: 418, prs: "run", sel: parentSel });
+    y = childRow(b, y, SW, { st: "work", kind: "builder", task: "T28 hello build" });
+    y = childRow(b, y, SW, { st: "work", kind: "builder", task: "F38+F40 search" });
+    y = childRow(b, y, SW, { st: "need", kind: "reviewer", task: "F36 cleanup", sel: !parentSel });
+    y = childRow(b, y, SW, { st: "done", kind: "Explore", task: "callers · 41s", last: true });
+    y = sessionRow(b, y, SW, { st: "work", name: "f36-cleanup-view", sub: "▸1", machine: "studio", pr: 417, prs: "run" });
+    y = sessionRow(b, y, SW, { st: "need", name: "t28-hello-build", sub: "▸2", machine: "devbox", l2: [["—", { fg: "gray", D: 1 }]] });
+    y = sessionRow(b, y, SW, { st: "work", name: "snapshot-flake", sub: "▸2", machine: "devbox", l2: [["—", { fg: "gray", D: 1 }]] });
+    y = sessionRow(b, y, SW, { st: "work", name: "f41-sidebar-search", machine: "studio", pr: 415, prs: "ok" });
+    y = sessionRow(b, y, SW, { st: "work", name: "docs-arch", machine: "air", l2: [["—", { fg: "gray", D: 1 }]] });
+    y = sessionRow(b, y, SW, { st: "idle", name: "fix-login", machine: "air", pr: 409, prs: "ok" });
+    y = sessionRow(b, y, SW, { st: "idle", name: "wire-v2", machine: "studio", pr: 411, prs: "fail" });
+    y = sessionRow(b, y, SW, { st: "exit", name: "old-host-swap", machine: "pi", dim: true, l2: [["offline", { fg: "red", D: 1 }]] });
+    sidebarHint(b, SW, [hint("  "), key("⇥"), hint(" subagents")]);
+    splitter(b, SW);
+
+    const X = SW + 2;
+    if (parentSel) {
+      let py = 1;
+      const P = (spans, dx = 0) => b.line(X + dx, py++, spans);
+      P([["❯ ", { fg: "gray" }], ["dispatch T28, F36 and F38+F40, then review each one", {}]], 0);
+      b.bg(X - 1, 1, W - X + 1, "input");
+      py++;
+      P([["⏺ ", { fg: "white" }], ["Three ready tasks. Each builder gets its own worktree, then a reviewer that sees", {}]]);
+      P([["  only the diff and the spec.", {}]]);
+      py++;
+      const task = (st, kind, desc, line, meta) => {
+        P([["⏺ ", { fg: st === "need" ? "yellow" : st === "done" ? "green" : "green" }], [kind, { B: 1 }], [`(${desc})`, {}]]);
+        P([["  ⎿  ", { fg: "gray" }], line]);
+        if (meta) P([["     ", {}], [meta, { fg: "gray", D: 1 }]]);
+        py++;
+      };
+      task("work", "builder", "T28: hello carries the build id", ["Bash(cargo test -p shepherd-core wire)", { fg: "gray" }], "31 tool uses · 48.2k tokens · 6m 02s");
+      task("work", "builder", "F38+F40: sidebar search scoring", ["Edit(crates/tui/src/finder.rs)", { fg: "gray" }], "22 tool uses · 30.9k tokens · 4m 47s");
+      task("need", "reviewer", "F36 cleanup view", ["Waiting for permission: Bash(git diff main...t36)", { fg: "yellow" }], "8 tool uses · 11.4k tokens · 1m 10s");
+      task("done", "Explore", "find callers of Sidebar::rows", ["Done (9 tool uses · 12.1k tokens · 41s)", { fg: "gray" }]);
+      P([["✻ ", { fg: "orange" }], ["Orchestrating… ", { fg: "orange" }], ["(7m 31s · esc to interrupt)", { fg: "gray" }]]);
+
+      // permission prompt surfaced from the subagent
+      const BY = 23;
+      b.hline(X - 1, W - 1, BY, { fg: "dgray" });
+      b.line(X, BY + 1, [["Bash command", { fg: "yellow", B: 1 }], ["  from subagent ", { fg: "gray" }], ["reviewer", { fg: "magenta" }]]);
+      b.line(X + 2, BY + 3, [["git diff main...t36 -- crates/tui", {}]]);
+      b.line(X + 2, BY + 4, [["Show the T36 diff for review", { fg: "gray" }]]);
+      b.line(X, BY + 6, [["Do you want to proceed?", {}]]);
+      b.line(X, BY + 7, [["❯ 1. Yes", { fg: "cyan" }]]);
+      b.line(X, BY + 8, [["  2. Yes, and don't ask again for git diff", {}]]);
+      b.line(X, BY + 9, [["  3. No, and tell Claude what to do", {}]]);
+      b.hline(X - 1, W - 1, H - 2, { fg: "dgray" });
+      b.line(X, H - 1, [["  ⏵⏵ auto mode off (shift+tab to cycle)", { fg: "gray" }]]);
+    } else {
+      // transcript header bar
+      b.bg(X - 1, 0, W - X + 1, "bar");
+      b.line(X, 0, [["pm", { fg: "gray" }], [" ▸ ", { fg: "dgray" }], ["reviewer", { fg: "magenta", B: 1 }], [" · F36 cleanup view", { B: 1 }]]);
+      b.line(W - 34, 0, [["read-only transcript · ", { fg: "gray", D: 1 }], key("esc"), [" pm", { fg: "gray", D: 1 }]]);
+      let py = 2;
+      const P = (spans) => b.line(X, py++, spans);
+      P([["prompt", { fg: "gray", D: 1 }]]);
+      P([["│ ", { fg: "dgray" }], ["Review branch t36 against the F36 spec in docs/plan.md and", { fg: "gray" }]]);
+      P([["│ ", { fg: "dgray" }], ["docs/architecture.md. Return APPROVE or CHANGES with findings.", { fg: "gray" }]]);
+      py++;
+      P([["⏺ ", { fg: "green" }], ["Read", { B: 1 }], ["(docs/plan.md)", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], ["Read 412 lines", { fg: "gray" }]]);
+      P([["⏺ ", { fg: "green" }], ["Read", { B: 1 }], ["(docs/architecture.md)", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], ["Read 388 lines", { fg: "gray" }]]);
+      P([["⏺ ", { fg: "green" }], ["Grep", { B: 1 }], ["(\"removing_worktree\", crates/)", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], ["Found 6 matches in 3 files", { fg: "gray" }]]);
+      P([["⏺ ", { fg: "green" }], ["Read", { B: 1 }], ["(crates/tui/src/cleanup.rs)", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], ["Read 214 lines", { fg: "gray" }]]);
+      py++;
+      P([["⏺ ", { fg: "white" }], ["The spec wants the cleanup view to list merged worktrees first. I need the", {}]]);
+      P([["  full diff to check the sort and the snapshot it changed.", {}]]);
+      py++;
+      P([["⏺ ", { fg: "yellow" }], ["Bash", { B: 1 }], ["(git diff main...t36 -- crates/tui)", {}]]);
+      P([["  ⎿  ", { fg: "gray" }], ["Waiting for permission", { fg: "yellow" }]]);
+
+      // footer: where to answer
+      const FY = H - 5;
+      b.bg(X - 1, FY, W - X + 1, "warn"); b.bg(X - 1, FY + 1, W - X + 1, "warn");
+      b.line(X, FY, [["▲ ", { fg: "yellow" }], ["This subagent is blocked on a permission prompt in ", {}], ["pm", { B: 1 }], [".", {}]]);
+      b.line(X, FY + 1, [["  ", {}], key("y"), [" allow  ", { fg: "gray" }], key("n"), [" deny  ", { fg: "gray" }], key("⏎"), [" jump to the prompt in pm", { fg: "gray" }]]);
+      b.line(X, H - 2, [["8 tool uses · 11.4k tokens · 1m 10s · sonnet", { fg: "gray", D: 1 }]]);
+      b.line(X, H - 1, [key("j/k"), hint(" scroll  "), key("[ ]"), hint(" prev/next subagent  "), key("esc"), hint(" back to pm")]);
+    }
+    return b.html();
+  }
+
+  // ---------- Machines ----------
+  const SESS = [
+    { st: "need", name: "pm", sub: "▸4", subNeed: true, machine: "air", pr: 418, prs: "run" },
+    { st: "work", name: "f41-sidebar-search", machine: "studio", pr: 415, prs: "ok" },
+    { st: "need", name: "t28-hello-build", sub: "▸2", machine: "devbox", l2: [["—", { fg: "gray", D: 1 }]] },
+    { st: "need", name: "iroh-spike", machine: "studio", l2: [["—", { fg: "gray", D: 1 }]] },
+    { st: "work", name: "f36-cleanup-view", sub: "▸1", machine: "studio", pr: 417, prs: "run" },
+    { st: "work", name: "snapshot-flake", sub: "▸2", machine: "devbox", l2: [["—", { fg: "gray", D: 1 }]] },
+    { st: "work", name: "docs-arch", machine: "air", l2: [["—", { fg: "gray", D: 1 }]] },
+    { st: "work", name: "pty-resize", machine: "devbox", pr: 416, prs: "fail" },
+    { st: "idle", name: "fix-login", machine: "air", pr: 409, prs: "ok" },
+    { st: "idle", name: "wire-v2", machine: "studio", pr: 411, prs: "fail" },
+    { st: "exit", name: "old-host-swap", machine: "pi", dim: true, l2: [["offline 3h", { fg: "red", D: 1 }]] },
+  ];
+
+  function codexPane(b, X) {
+    let py = 0;
+    const P = (spans) => b.line(X, py++, spans);
+    b.box(X, 0, 50, 5, { st: { fg: "dgray" } });
+    b.line(X + 2, 1, [[">_ ", { fg: "gray" }], ["OpenAI Codex", { B: 1 }], [" (v0.61.0)", { fg: "gray" }]]);
+    b.line(X + 2, 2, [["model:     ", { fg: "gray" }], ["gpt-5.5 high", {}]]);
+    b.line(X + 2, 3, [["directory: ", { fg: "gray" }], ["~/.shepherd/wt/f41-sidebar-search", {}]]);
+    py = 6;
+    b.bg(X - 1, py, W - X + 1, "input");
+    P([["› ", { B: 1 }], ["make sidebar search fuzzy over the name, machine and PR number", {}]]);
+    py++;
+    P([["• ", { fg: "gray" }], ["Explored", { B: 1 }]]);
+    P([["  └ ", { fg: "dgray" }], ["Read ", { fg: "cyan" }], ["sidebar.rs, finder.rs, width.rs", {}]]);
+    P([["    ", {}], ["Search ", { fg: "cyan" }], ["fn score in crates/tui", {}]]);
+    py++;
+    P([["• ", { fg: "gray" }], ["Using nucleo-matcher for scoring instead of writing a matcher. It is already in", {}]]);
+    P([["  the allowed list for tui.", {}]]);
+    py++;
+    P([["• ", { fg: "green" }], ["Edited", { B: 1 }], [" crates/tui/src/finder.rs ", {}], ["(+58 -21)", { fg: "gray" }]]);
+    P([["• ", { fg: "green" }], ["Edited", { B: 1 }], [" crates/tui/tests/render.rs ", {}], ["(+40 -0)", { fg: "gray" }]]);
+    py++;
+    P([["• ", { fg: "gray" }], ["Ran", { B: 1 }], [" scripts/check.sh", {}]]);
+    P([["  └ ", { fg: "dgray" }], ["fmt ok · clippy ok · 431 passed; 0 failed · arch ok", { fg: "gray" }]]);
+    py++;
+    P([["─ Worked for 3m 10s ", { fg: "dgray" }], ["─".repeat(40), { fg: "dgray" }]]);
+    py++;
+    P([["• ", { fg: "gray" }], ["Search now ranks \"stu 415\" to f41-sidebar-search first. Snapshot", {}]]);
+    P([["  render__finder_fuzzy.snap is new; I read it before accepting.", {}]]);
+    b.bg(X - 1, H - 4, W - X + 1, "input");
+    b.line(X, H - 4, [["› ", { B: 1 }], ["Ask Codex to do anything", { fg: "gray", D: 1 }]]);
+    b.line(X, H - 3, [["  ⏎ send   ⌃J newline   ⌃T transcript   ⌃C quit", { fg: "gray", D: 1 }]]);
+  }
+
+  function drawMachines(v) {
+    const b = new Buf(W, H), SW = 28;
+    sidebarTop(b, SW);
+    let y = 3;
+    if (v === "grouped") {
+      const groups = [
+        { name: "air", st: ["●", "green"], meta: "this · 3" },
+        { name: "studio", st: ["●", "green"], meta: "direct 4ms" },
+        { name: "devbox", st: ["●", "yellow"], meta: "relay 86ms" },
+        { name: "pi", st: ["✕", "red"], meta: "offline 3h" },
+      ];
+      for (const g of groups) {
+        y = machineHeader(b, y, SW, g);
+        for (const s of SESS.filter(s => s.machine === g.name)) {
+          // inside a group the machine is implied, so line two keeps only PR / state
+          y = sessionRow(b, y, SW, { ...s, machine: "", l2: s.l2 || pr(s.pr, s.prs), sel: false });
+        }
+      }
+    } else {
+      SESS.forEach((s, i) => { y = sessionRow(b, y, SW, { ...s, sel: v === "flat" && s.name === "f41-sidebar-search" }); });
+    }
+    sidebarHint(b, SW, v === "grouped" ? [hint("  "), key("g"), hint(" flat")] : [hint("  "), key("g"), hint(" group")]);
+    splitter(b, SW);
+    const X = SW + 2;
+
+    if (v === "flat" || v === "new") {
+      codexPane(b, X);
+      // footer that names the remote link
+      b.line(W - 34, H - 1, [["on ", { fg: "gray", D: 1 }], ["studio", { fg: "magenta", B: 1 }], [" · ", { fg: "gray", D: 1 }], ["● ", { fg: "green" }], ["direct · 4ms · iroh", { fg: "gray", D: 1 }]]);
+    }
+
+    if (v === "new") {
+      // dim the pane under the popup
+      for (let j = 0; j < H; j++) for (let i = SW + 1; i < W; i++) b.c[j][i].D = 1;
+      const PX = 38, PY = 7, PW = 62, PH = 19;
+      b.clear(PX, PY, PW, PH);
+      b.box(PX, PY, PW, PH, { title: "new session", st: { fg: "cyan" } });
+      b.line(PX + 2, PY + 2, [["Where should it run?", { fg: "gray" }]]);
+      const ms = [
+        ["air", "this machine", "● ", "green", "3 agents", false],
+        ["studio", "direct · 4ms", "● ", "green", "4 agents", true],
+        ["devbox", "relay · 86ms", "● ", "yellow", "4 agents", false],
+        ["pi", "offline 3h", "✕ ", "red", "can't start", false],
+      ];
+      ms.forEach(([n, link, g, gc, count, sel], i) => {
+        const yy = PY + 3 + i;
+        if (sel) b.bg(PX + 1, yy, 28, "sel");
+        const off = n === "pi";
+        b.line(PX + 2, yy, [[g, { fg: gc }], [pad(n, 8), { fg: MC[n], B: sel ? 1 : 0, D: off ? 1 : 0 }], [pad(link, 14), { fg: "gray", D: 1 }]]);
+      });
+      b.line(PX + 2, PY + 8, [["studio was used last", { fg: "gray", D: 1 }]]);
+      b.vline(PX + 30, PY + 2, PY + 9, { fg: "dgray" });
+      b.line(PX + 32, PY + 2, [["Which agent?", { fg: "gray" }]]);
+      const prof = [["claude", "claude-code", true], ["codex", "codex", false], ["shell", "zsh", false]];
+      prof.forEach(([p, d, sel], i) => {
+        const yy = PY + 3 + i;
+        b.line(PX + 32, yy, [[pad(p, 8), sel ? { B: 1, fg: "cyan" } : {}], [d, { fg: "gray", D: 1 }]]);
+      });
+      b.line(PX + 32, PY + 7, [["(default on studio)", { fg: "gray", D: 1 }]]);
+      b.hline(PX + 1, PX + PW - 2, PY + 10, { fg: "dgray" });
+      b.line(PX + 2, PY + 11, [["worktree ", { fg: "gray" }], ["studio:~/.shepherd/wt/", {}], ["‹auto-named›", { fg: "gray", D: 1 }]]);
+      b.line(PX + 2, PY + 12, [["from     ", { fg: "gray" }], ["origin/main", {}], [" (fetched on studio)", { fg: "gray", D: 1 }]]);
+      b.line(PX + 2, PY + 13, [["hooks    ", { fg: "gray" }], [".shepherd/setup.sh", {}], [" runs on studio", { fg: "gray", D: 1 }]]);
+      b.line(PX + 2, PY + PH - 3, [key("←/→"), hint(" column  "), key("j/k"), hint(" choose  "), key("⏎"), hint(" start")]);
+      b.line(PX + PW - 12, PY + PH - 2, [["[Cancel]", { fg: "cyan", B: 1 }]]);
+    }
+
+    if (v === "grouped") {
+      // machines panel in the main area
+      const BX = X, BW = W - X - 1;
+      b.box(BX, 0, BW, 14, { title: "machines", titleSt: { fg: "cyan", B: 1 }, right: "ctrl-b m", rightSt: { fg: "gray", D: 1 } });
+      const cx = { n: 2, st: 11, link: 23, os: 40, ag: 49, wt: 57, build: 67 };
+      const hy = 1;
+      [["NAME", "n"], ["STATE", "st"], ["LINK", "link"], ["OS", "os"], ["AGENTS", "ag"], ["TREES", "wt"], ["HOST BUILD", "build"]].forEach(([t, k]) => b.set(BX + cx[k], hy, t, { fg: "gray", D: 1 }));
+      const rows = [
+        ["air", ["●", "green", "this"], "local socket", "macOS", "3", "7", ["a41f2c", "gray", ""]],
+        ["studio", ["●", "green", "online"], "direct · 4ms", "macOS", "4", "12", ["a41f2c", "gray", ""]],
+        ["devbox", ["●", "yellow", "online"], "relay · 86ms", "linux", "4", "9", ["9c0e11", "yellow", " ▲ older"]],
+        ["pi", ["✕", "red", "offline"], "seen 3h ago", "linux", "1", "2", ["—", "gray", ""]],
+      ];
+      rows.forEach((r, i) => {
+        const yy = hy + 1 + i, sel = r[0] === "devbox";
+        if (sel) b.bg(BX + 1, yy, BW - 2, "sel");
+        b.set(BX + cx.n, yy, r[0], { fg: MC[r[0]], B: 1, D: r[0] === "pi" ? 1 : 0 });
+        b.line(BX + cx.st, yy, [[r[1][0] + " ", { fg: r[1][1] }], [r[1][2], { fg: "gray" }]]);
+        b.set(BX + cx.link, yy, r[2], { fg: "gray" });
+        b.set(BX + cx.os, yy, r[3], { fg: "gray", D: 1 });
+        b.set(BX + cx.ag, yy, rpad(r[4], 3));
+        b.set(BX + cx.wt, yy, rpad(r[5], 3));
+        b.line(BX + cx.build, yy, [[r[6][0], { fg: r[6][1] }], [r[6][2], { fg: "yellow" }]]);
+      });
+      b.hline(BX + 1, BX + BW - 2, 7, { fg: "dgray" });
+      b.line(BX + 2, 8, [["devbox", { fg: "blue", B: 1 }], ["  node ", { fg: "gray", D: 1 }], ["k51…7fq2", {}], ["  via relay ", { fg: "gray", D: 1 }], ["use1-1.relay.iroh", {}]]);
+      b.line(BX + 2, 9, [["▲ ", { fg: "yellow" }], ["host runs an older build than this client; 4 sessions would stop on restart", { fg: "yellow" }]]);
+      b.line(BX + 2, 11, [key("r"), hint(" rename  "), key("u"), hint(" update host  "), key("p"), hint(" pair a machine  "), key("x"), hint(" forget  "), key("⏎"), hint(" filter sidebar")]);
+
+      // pairing box
+      const QY = 15;
+      b.box(BX, QY, BW, 9, { title: "pair a machine", titleSt: { B: 1 } });
+      b.line(BX + 2, QY + 2, [["On the new machine, run:", { fg: "gray" }]]);
+      b.bg(BX + 2, QY + 3, BW - 4, "input");
+      b.line(BX + 3, QY + 3, [["shepherd pair ", { fg: "cyan" }], ["dkr7e3q4m2x6…nodeticket…a9", {}]]);
+      b.line(BX + 2, QY + 5, [["Name it ", { fg: "gray" }], ["› ", { fg: "cyan" }], ["mini", { B: 1 }], ["▏", { fg: "cyan" }], ["   it will show up as a peer of every machine here", { fg: "gray", D: 1 }]]);
+      b.line(BX + 2, QY + 6, [["◌ waiting for mini to connect…", { fg: "dgray" }]]);
+
+      // hint for remote attach
+      b.line(BX + 1, H - 3, [["Sessions on an offline machine stay listed, dimmed. When pi reconnects,", { fg: "gray", D: 1 }]]);
+      b.line(BX + 1, H - 2, [["its host replays its log and the rows come back with their real state.", { fg: "gray", D: 1 }]]);
+    }
+    return b.html();
+  }
+
+  // ---------- wiring ----------
+  const draw = { pm: drawPM, cc: drawCommandCenter, sa: drawSubagents, mm: drawMachines };
+  const defaults = { pm: "talk", cc: "state", sa: "parent", mm: "flat" };
+  for (const [id, fn] of Object.entries(draw)) document.getElementById(id).innerHTML = fn(defaults[id]);
+  document.querySelectorAll(".variants button").forEach(btn => btn.addEventListener("click", () => {
+    const t = btn.dataset.target;
+    btn.parentElement.querySelectorAll("button").forEach(o => o.setAttribute("aria-pressed", String(o === btn)));
+    document.getElementById(t).innerHTML = draw[t](btn.dataset.v);
+  }));
+  const screens = ["pm", "status", "subagents", "machines"];
+  function route() {
+    const h = location.hash.slice(1);
+    const cur = screens.includes(h) ? h : screens[0];
+    screens.forEach(s => document.getElementById("s-" + s).classList.toggle("on", s === cur));
+    document.querySelectorAll("nav.tabs a").forEach(a => { if (a.dataset.screen === cur) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  }
+  window.addEventListener("hashchange", route);
+  route();
+})();
+</script>
+</body>
+</html>
