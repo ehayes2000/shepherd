@@ -134,8 +134,9 @@ pub trait Link {
     /// cut the deliveries off (decision 0018).
     fn flush_closed(&mut self, within: Duration) -> FlushOutcome;
     /// The machine `conn` is with, as the transport authenticated it, or `None` for a conn with this machine's own user
-    /// (a local socket, which only that user can reach) or a conn that is unknown.
-    fn peer(&self, conn: ConnId) -> Option<MachineId>;
+    /// (a local socket, which only that user can reach). A conn that is unknown (never was, or closed or gone) is
+    /// [`LinkError::UnknownConn`], never `None`: a caller allowing something only to local conns must refuse it.
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError>;
     /// How many bytes sent to `conn` the transport has delivered so far, counted as they are written, so one long line
     /// counts as it goes. It only rises, and it rises while the peer reads even when [`Link::queued_bytes`] doesn't
     /// fall (new lines keep coming, or one huge line is on its way): it tells a slow peer from one that stopped

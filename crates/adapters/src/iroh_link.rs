@@ -481,8 +481,10 @@ impl Link for IrohLink {
         self.conns.flush_closed(Instant::now() + within)
     }
 
-    fn peer(&self, conn: ConnId) -> Option<MachineId> {
-        self.conns.with(conn, |shared| shared.peer.clone())
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
+        self.conns
+            .with(conn, |shared| Some(shared.peer.clone()))
+            .ok_or(LinkError::UnknownConn)
     }
 
     fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
@@ -534,6 +536,11 @@ mod tests {
     use crate::peers::{Discovery, IrohPeers};
     use shepherd_core::ports::Peers;
 
+    /// A real node id, of a key nobody binds.
+    fn nobody() -> MachineId {
+        MachineId::new(iroh::SecretKey::from_bytes(&[7; 32]).public().to_string())
+    }
+
     /// A machine on localhost: its port, bound, with relays and address lookup off (no network).
     struct Node {
         peers: IrohPeers,
@@ -563,7 +570,7 @@ mod tests {
             self.link.flush_closed(within)
         }
 
-        fn peer(&self, conn: ConnId) -> Option<MachineId> {
+        fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
             self.link.peer(conn)
         }
 
@@ -594,12 +601,15 @@ mod tests {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-            let host = Self::node_in(dir.path().join("host"));
+            let mut host = Self::node_in(dir.path().join("host"));
+            // Trusted, so opening a conn to it dials (and finds nobody) rather than stopping at trust.
+            let trusted = BTreeSet::from([nobody()]);
+            host.peers.set_trusted(&trusted);
             Self {
                 dir,
                 next: 0,
                 host,
-                trusted: BTreeSet::new(),
+                trusted,
                 clients: Vec::new(),
             }
         }
@@ -677,6 +687,10 @@ mod tests {
         fn untrusted(&mut self, sink: Arc<dyn LinkEventSink>) -> Option<(Client, ConnId)> {
             Some(self.client(sink, false))
         }
+
+        fn nobody(&self) -> MachineId {
+            nobody()
+        }
     }
 
     mod contract {
@@ -686,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn a_conn_to_a_machine_nobody_hosts_ends_as_peer_gone() {
+    fn a_conn_to_what_is_not_a_machine_id_ends_as_peer_gone() {
         let machines = LocalMachines::new();
         let (sink, events) = Events::channel();
         let mut link = machines.host.peers.link(sink);

@@ -201,9 +201,13 @@ impl Net {
         )
     }
 
-    fn peer(&self, link: LinkId, conn: ConnId) -> Option<MachineId> {
-        let end = self.ends.get(&conn).filter(|end| end.owner == link)?;
-        end.with.clone()
+    fn peer(&self, link: LinkId, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
+        let end = self
+            .ends
+            .get(&conn)
+            .filter(|end| end.owner == link)
+            .ok_or(LinkError::UnknownConn)?;
+        Ok(end.with.clone())
     }
 
     fn pause_reading(&mut self, link: LinkId, conn: ConnId, paused: bool) -> Result<(), LinkError> {
@@ -631,7 +635,7 @@ impl FakeLink {
         self.machine.as_ref()
     }
 
-    /// Makes the next `send` or `close` on this link fail with `error`, doing nothing else.
+    /// Makes the next `send`, `close` or `open` on this link fail with `error`, doing nothing else.
     pub fn fail_next(&mut self, error: LinkError) {
         self.fail_next = Some(error);
     }
@@ -660,7 +664,7 @@ impl Link for FakeLink {
         self.net.flush_closed(self.id, Instant::now() + within)
     }
 
-    fn peer(&self, conn: ConnId) -> Option<MachineId> {
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
         self.net.lock().peer(self.id, conn)
     }
 
@@ -673,6 +677,9 @@ impl Link for FakeLink {
     }
 
     fn open(&mut self, peer: &MachineId) -> Result<ConnId, LinkError> {
+        if let Some(error) = self.fail_next.take() {
+            return Err(error);
+        }
         self.net.lock().open(self.id, peer)
     }
 }

@@ -133,7 +133,7 @@ impl<L: Link, P: Link> Link for HostLinks<L, P> {
         }
     }
 
-    fn peer(&self, conn: ConnId) -> Option<MachineId> {
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
         self.on(conn, |link, conn| link.peer(conn))
     }
 
@@ -242,6 +242,11 @@ mod tests {
         fn untrusted(&mut self, _: Arc<dyn LinkEventSink>) -> Option<(FakeLink, ConnId)> {
             None
         }
+
+        /// Conns are opened on the peers side beside it.
+        fn dials(&self) -> bool {
+            true
+        }
     }
 
     mod over_peers {
@@ -298,8 +303,8 @@ mod tests {
             panic!("{seen:?}")
         };
         assert_ne!(local_conn, opened);
-        assert_eq!(links.peer(opened), Some(other.clone()));
-        assert_eq!(links.peer(local_conn), None);
+        assert_eq!(links.peer(opened), Ok(Some(other.clone())));
+        assert_eq!(links.peer(local_conn), Ok(None));
         links.send(opened, b"hi").unwrap_or_else(|e| panic!("{e}"));
         let seen = other_events.wait_for(
             |e| matches!(e, LinkEvent::Line { .. }),

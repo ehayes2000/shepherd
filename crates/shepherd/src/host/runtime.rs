@@ -70,7 +70,8 @@
 //!   conn. Flow control: a line goes only while the other end's queue has room under [`TUNNEL_HIGH`] (a line into an
 //!   empty queue always goes), else it is held, and the end it came from stops being read
 //!   (`Link::pause_reading`) until what it holds is sent and the other end's queue is under [`TUNNEL_LOW`], checked
-//!   every [`TUNNEL_TICK`]. So a slow client backs up into the conn to the other machine's host, whose own catch-up
+//!   after [`TUNNEL_TICK`], doubling up to [`MAX_TUNNEL_TICK`] while no stopped end makes progress (a line sent, its
+//!   other end's queue shrinking, or reading resumed), so a client that stopped reading costs few wakeups. So a slow client backs up into the conn to the other machine's host, whose own catch-up
 //!   pacing (decision 0013) then waits, and the other way round. Either end going closes the other, after sending
 //!   what it held: a client sees `PeerGone` when the other machine goes, and can reconnect.
 //! - **Spawn sizes.** Every event goes to core through a [`Sizes`], which keeps the latest size each session's terminal
@@ -145,8 +146,10 @@ pub const CATCH_UP_BATCH: usize = 256;
 pub const TUNNEL_HIGH: usize = MAX_QUEUED / 4;
 /// A tunnel end stopped for its other end's sake is read again once that end's queue is under this.
 pub const TUNNEL_LOW: usize = TUNNEL_HIGH / 2;
-/// How often a tunnel that stopped reading an end looks again.
+/// How soon a tunnel that stopped reading an end first looks again.
 pub const TUNNEL_TICK: Duration = Duration::from_millis(5);
+/// The longest wait between looks at stopped tunnel ends that make no progress.
+pub const MAX_TUNNEL_TICK: Duration = MAX_CATCH_UP_TICK;
 
 /// Everything the loop reacts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +392,8 @@ struct TunnelEnd {
     held: VecDeque<Vec<u8>>,
     /// This end isn't being read, for the other end's sake.
     paused: bool,
+    /// The other end's queue when this end was last looked at.
+    last_queued: usize,
     /// The client's end of a tunnel not open yet: its request, and the machine it asked for.
     opening: Option<(RequestId, MachineId)>,
 }
@@ -399,6 +404,7 @@ impl TunnelEnd {
             other,
             held: VecDeque::new(),
             paused: false,
+            last_queued: 0,
             opening: None,
         }
     }
@@ -532,6 +538,8 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N> {
     tunnels: HashMap<ConnId, TunnelEnd>,
     /// When to look again at tunnel ends holding lines or stopped.
     tunnel_due: Option<Instant>,
+    /// How long the wait before that look was.
+    tunnel_wait: Duration,
 }
 
 impl<
@@ -661,6 +669,7 @@ impl<
             peer_due: None,
             tunnels: HashMap::new(),
             tunnel_due: None,
+            tunnel_wait: TUNNEL_TICK,
         };
         let adopted: BTreeSet<SessionId> = adoption.sessions.iter().map(|s| s.id.clone()).collect();
         let orphans: Vec<SessionId> = runtime
@@ -1685,8 +1694,16 @@ impl<
                 .filter(|(_, end)| end.paused || !end.held.is_empty())
                 .map(|(&conn, _)| conn)
                 .collect();
+            let mut progress = false;
             for conn in ends {
-                self.tunnel_flow(conn);
+                progress |= self.tunnel_flow(conn);
+            }
+            if self.tunnels.values().any(|end| end.paused) {
+                self.tunnel_wait = match progress {
+                    true => TUNNEL_TICK,
+                    false => (self.tunnel_wait * 2).min(MAX_TUNNEL_TICK),
+                };
+                self.tunnel_due = Some(now + self.tunnel_wait);
             }
         }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
@@ -2471,7 +2488,14 @@ impl<
     /// two, or answers why not. A refused tunnel from one of this machine's clients, as its first request, closes the
     /// conn; any other is only answered.
     fn tunnel(&mut self, conn: ConnId, id: RequestId, machine: MachineId, first: bool) {
-        let from = self.link.peer(conn);
+        // A conn the link no longer knows may have been anyone's: refused, never taken for a local one.
+        let from = match self.link.peer(conn) {
+            Ok(from) => from,
+            Err(error) => {
+                tracing::debug!(%conn, %error, "tunnel asked for on a conn that is gone");
+                return self.forget(conn);
+            }
+        };
         if let Err(error) = self.peering.tunnel(&machine, from.as_ref(), first) {
             let close = from.is_none() && first;
             return self.refuse_tunnel(conn, id, error, close);
@@ -2541,33 +2565,45 @@ impl<
         };
         end.held.push_back(line);
         self.tunnel_flow(conn);
+        if self.tunnel_due.is_none() && self.tunnels.get(&conn).is_some_and(|end| end.paused) {
+            self.tunnel_wait = TUNNEL_TICK;
+            self.tunnel_due = Some(self.env.instant() + TUNNEL_TICK);
+        }
     }
 
     /// Sends what tunnel end `conn` holds while the other end has room, then stops or resumes reading `conn`: stopped
     /// while it holds lines or the other end's queue is at [`TUNNEL_HIGH`], read again once neither is so and the queue
-    /// is under [`TUNNEL_LOW`]. A stopped end is looked at again after [`TUNNEL_TICK`].
-    fn tunnel_flow(&mut self, conn: ConnId) {
+    /// is under [`TUNNEL_LOW`]. Returns whether it made progress: sent a line, found the other end's queue shorter than
+    /// last time, or resumed reading.
+    fn tunnel_flow(&mut self, conn: ConnId) -> bool {
         let Some(other) = self.tunnels.get(&conn).map(|end| end.other) else {
-            return;
+            return false;
         };
+        let mut progress = false;
         loop {
             let queued = self.link.queued_bytes(other).unwrap_or(0);
             let Some(end) = self.tunnels.get_mut(&conn) else {
-                return;
+                return progress;
             };
+            if queued < end.last_queued {
+                progress = true;
+            }
+            end.last_queued = queued;
             let room = |len: usize| queued == 0 || queued + len <= TUNNEL_HIGH;
             match end.held.front() {
                 Some(line) if room(line.len()) => {
                     let line = end.held.pop_front().unwrap_or_default();
                     self.send(other, &line);
+                    progress = true;
                 }
                 _ => break,
             }
         }
         let queued = self.link.queued_bytes(other).unwrap_or(0);
         let Some(end) = self.tunnels.get_mut(&conn) else {
-            return;
+            return progress;
         };
+        end.last_queued = queued;
         let pause = !end.held.is_empty() || queued >= TUNNEL_HIGH;
         let resume = end.held.is_empty() && queued < TUNNEL_LOW;
         let change = match end.paused {
@@ -2577,13 +2613,12 @@ impl<
         };
         if let Some(paused) = change {
             end.paused = paused;
+            progress |= !paused;
             if let Err(error) = self.link.pause_reading(conn, paused) {
                 tracing::debug!(%conn, %error, "pause failed");
             }
         }
-        if self.tunnels.get(&conn).is_some_and(|end| end.paused) && self.tunnel_due.is_none() {
-            self.tunnel_due = Some(self.env.instant() + TUNNEL_TICK);
-        }
+        progress
     }
 
     /// Tunnel end `conn` is gone, for `reason`: the other end gets what `conn` held, then is closed. A client whose

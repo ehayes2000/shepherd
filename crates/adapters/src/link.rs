@@ -264,8 +264,8 @@ impl Link for UnixListenLink {
         self.conns.flush_closed(Instant::now() + within)
     }
 
-    fn peer(&self, _: ConnId) -> Option<MachineId> {
-        None
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
+        self.conns.peer(conn)
     }
 
     fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
@@ -336,8 +336,8 @@ impl Link for UnixConnectLink {
         self.conns.flush_closed(Instant::now() + within)
     }
 
-    fn peer(&self, _: ConnId) -> Option<MachineId> {
-        None
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
+        self.conns.peer(conn)
     }
 
     fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
@@ -670,6 +670,14 @@ impl Conns {
         let conns = self.lock();
         let handle = conns.get(&conn)?;
         Some(handle.shared.queued.load(Ordering::SeqCst))
+    }
+
+    /// Only this machine's user reaches the socket: a known conn is with no other machine.
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError> {
+        match self.lock().contains_key(&conn) {
+            true => Ok(None),
+            false => Err(LinkError::UnknownConn),
+        }
     }
 
     fn drained_bytes(&self, conn: ConnId) -> Option<u64> {

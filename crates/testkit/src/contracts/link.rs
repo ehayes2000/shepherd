@@ -43,6 +43,8 @@ macro_rules! link_contract {
             flush_closed_times_out_while_a_closed_peer_does_not_read,
             closed_conn_whose_peer_goes_away_is_flushed,
             each_end_names_the_machine_the_other_is,
+            the_peer_of_an_unknown_or_gone_conn_is_an_error_not_local,
+            opening_a_conn_to_a_machine_nobody_hosts,
             a_machine_the_host_does_not_trust_is_refused_and_never_announced,
             a_paused_conn_emits_no_lines_until_resumed_then_all_in_order,
             the_peer_of_a_paused_conn_queues_what_it_sends,
@@ -100,6 +102,14 @@ pub trait LinkFixture {
     /// A client end on a machine the host doesn't trust, and its conn, which the host refuses. `None` for a transport
     /// with nothing to refuse (a local socket only this machine's user can reach).
     fn untrusted(&mut self, sink: Arc<dyn LinkEventSink>) -> Option<(Self::Client, ConnId)>;
+    /// Whether the host's link [opens](Link::open) conns to other machines: by default, if it is a machine's.
+    fn dials(&self) -> bool {
+        self.host_machine().is_some()
+    }
+    /// A machine id nobody hosts, for links that dial: one the transport takes as a machine's.
+    fn nobody(&self) -> MachineId {
+        MachineId::new("nobody")
+    }
 }
 
 /// A sink that forwards events to an mpsc channel. Send errors (receiver gone) are ignored.
@@ -787,11 +797,29 @@ pub fn closed_conn_whose_peer_goes_away_is_flushed<F: LinkFixture>(mut h: LinkHa
 
 pub fn each_end_names_the_machine_the_other_is<F: LinkFixture>(mut h: LinkHarness<F>) {
     let c = h.connect();
-    assert_eq!(h.host.peer(c.host_conn), h.fixture().machine_of(&c.link));
-    assert_eq!(c.link.peer(c.conn), h.fixture().host_machine());
-    assert_eq!(h.host.peer(ConnId::new(u64::MAX)), None);
+    assert_eq!(
+        h.host.peer(c.host_conn),
+        Ok(h.fixture().machine_of(&c.link))
+    );
+    assert_eq!(c.link.peer(c.conn), Ok(h.fixture().host_machine()));
+}
+
+/// An unknown conn is an error, never "local": a check that lets only local conns through must not let a conn that
+/// just went through.
+pub fn the_peer_of_an_unknown_or_gone_conn_is_an_error_not_local<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let c = h.connect();
+    let gone = h.connect();
+    assert_eq!(
+        h.host.peer(ConnId::new(u64::MAX)),
+        Err(LinkError::UnknownConn)
+    );
     h.host.close(c.host_conn).unwrap();
-    assert_eq!(h.host.peer(c.host_conn), None);
+    assert_eq!(h.host.peer(c.host_conn), Err(LinkError::UnknownConn));
+    drop(gone.link);
+    h.host_events.disconnect_of(gone.host_conn);
+    assert_eq!(h.host.peer(gone.host_conn), Err(LinkError::UnknownConn));
 }
 
 /// Refused once the client's machine is known and before anything else: the host never announces it, and the client's
@@ -900,4 +928,20 @@ pub fn drained_bytes_of_an_unknown_or_closed_conn_is_none<F: LinkFixture>(mut h:
     assert_eq!(c.link.drained_bytes(c.conn), Some(0));
     h.host.close(c.host_conn).unwrap();
     assert_eq!(h.host.drained_bytes(c.host_conn), None);
+}
+
+/// A link that reaches other machines opens the conn and ends it as `PeerGone`; one that reaches none (a local socket,
+/// whose host has no machine) says so.
+pub fn opening_a_conn_to_a_machine_nobody_hosts<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let nobody = h.fixture().nobody();
+    match h.fixture().dials() {
+        false => assert_eq!(h.host.open(&nobody), Err(LinkError::NoPeers)),
+        true => {
+            let conn = h.host.open(&nobody).unwrap();
+            assert_eq!(
+                h.host_events.disconnect_of(conn),
+                (vec![], DisconnectReason::PeerGone)
+            );
+        }
+    }
 }

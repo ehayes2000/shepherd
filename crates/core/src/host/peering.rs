@@ -128,7 +128,7 @@ struct Redial {
     /// Dials in a row that couldn't reach it.
     failures: u32,
     /// When to dial it; `None` while a dial is on its way.
-    due: Option<Timestamp>,
+    due: Option<jiff::Timestamp>,
 }
 
 /// The open pairing.
@@ -223,10 +223,7 @@ impl Peering {
     /// [`PeeringEvent::Tick`].
     pub fn deadline(&self) -> Option<jiff::Timestamp> {
         let expiry = self.pending.as_ref().map(|p| p.expires.instant());
-        let redials = self
-            .redial
-            .values()
-            .filter_map(|r| r.due.as_ref().map(Timestamp::instant));
+        let redials = self.redial.values().filter_map(|r| r.due);
         expiry.into_iter().chain(redials).min()
     }
 
@@ -328,11 +325,7 @@ impl Peering {
     fn tick(&mut self, at: &Timestamp) -> Vec<HostCommand> {
         let mut commands = Vec::new();
         for (peer, redial) in &mut self.redial {
-            if redial
-                .due
-                .as_ref()
-                .is_some_and(|due| due.instant() <= at.instant())
-            {
+            if redial.due.is_some_and(|due| due <= at.instant()) {
                 redial.due = None;
                 commands.push(peers(PeersCommand::Connect { peer: peer.clone() }));
             }
@@ -358,11 +351,9 @@ impl Peering {
             .try_fold(RECONNECT_MIN, |wait, _| wait.checked_mul(2))
             .unwrap_or(RECONNECT_MAX)
             .min(RECONNECT_MAX);
-        let due = at
-            .instant()
-            .checked_add(wait)
-            .ok()
-            .and_then(|instant| Timestamp::parse(instant.to_string()).ok());
+        // A wait past the end of time (it can't be) dials at once rather than never.
+        let now = at.instant();
+        let due = Some(now.checked_add(wait).unwrap_or(now));
         self.redial.insert(peer, Redial { failures, due });
     }
 
