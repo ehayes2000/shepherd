@@ -226,10 +226,7 @@ fn in_agent_layout(agent: AgentKind, session: &AgentSessionId, parts: &[&OsStr])
     match agent {
         AgentKind::Claude => {
             // The session id also names its subagents' directory, so it must be one plain path component.
-            if !matches!(
-                Path::new(session.as_str()).components().collect::<Vec<_>>()[..],
-                [Component::Normal(c)] if c == OsStr::new(session.as_str())
-            ) {
+            if !is_one_component(session.as_str()) {
                 return false;
             }
             let file = format!("{session}.jsonl");
@@ -245,18 +242,31 @@ fn in_agent_layout(agent: AgentKind, session: &AgentSessionId, parts: &[&OsStr])
     }
 }
 
+/// Whether `name` is exactly one plain path component: not empty, `.` or `..`, and without a `/`.
+pub(crate) fn is_one_component(name: &str) -> bool {
+    matches!(
+        Path::new(name).components().collect::<Vec<_>>()[..],
+        [Component::Normal(c)] if c == OsStr::new(name)
+    )
+}
+
 /// The thread id a Codex rollout file name carries: `rollout-<YYYY-MM-DDTHH-MM-SS>-<thread>[_<rollout>].jsonl`, as
 /// `RolloutFileName::parse` reads it.
 fn rollout_thread(name: &OsStr) -> Option<&str> {
+    rollout_name(name).map(|(_, thread)| thread)
+}
+
+/// The time and thread id a Codex rollout file name carries (see [`rollout_thread`]).
+pub(crate) fn rollout_name(name: &OsStr) -> Option<(jiff::civil::DateTime, &str)> {
     let core = name
         .to_str()?
         .strip_prefix("rollout-")?
         .strip_suffix(".jsonl")?;
     let timestamp = core.get(..19)?;
-    jiff::civil::DateTime::strptime("%Y-%m-%dT%H-%M-%S", timestamp).ok()?;
+    let at = jiff::civil::DateTime::strptime("%Y-%m-%dT%H-%M-%S", timestamp).ok()?;
     let ids = core.get(19..)?.strip_prefix('-')?;
     let thread = ids.split_once('_').map_or(ids, |(thread, _)| thread);
-    (!thread.is_empty()).then_some(thread)
+    (!thread.is_empty()).then_some((at, thread))
 }
 
 /// Checks every component of `home/parts` without following symlinks: each directory a real directory, the last a

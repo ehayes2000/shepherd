@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | fixing | task/t41-archive-restore @ 418b8da (on da21144) | 1 | round 1 CHANGES: longer-existing-file guard untested; case-insensitive canonicalize false Changed; untested race guards; hidden-name check |
+| T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | merging | task/t41-archive-restore @ 418b8da (on da21144) | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | building | task/f48-git-signal-death | 0 | resumed: fix per spec plan |
 
 ## Ready to start

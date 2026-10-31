@@ -33,6 +33,7 @@ use crate::ids::{
     PrNumber, RepoId, SessionId, SnapshotId, SnapshotReason,
 };
 use crate::private::{io_err, normalize, open_existing_private_file, open_or_create_private_file};
+use crate::restore::{RestoreError, Resume, checked_path, restore_files};
 
 /// The index schema version this build writes. Older indexes are migrated up to it; newer ones are refused.
 pub const INDEX_VERSION: i64 = 2;
@@ -73,6 +74,8 @@ pub enum ArchiveError {
     /// A capture refused its transcript path, or couldn't read it. Nothing was stored.
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    Restore(#[from] RestoreError),
 }
 
 /// A session as the archive records it. [`Archive::put_session`] takes one and the lookups return them.
@@ -322,6 +325,30 @@ impl Archive {
                 .collect(),
             commits: c.commits.clone(),
         })
+    }
+
+    /// Puts the transcripts of recorded session `session`'s latest snapshot back where its agent's resume looks for
+    /// them when run in `target_cwd` with its home at `agent_home` (the rules are in the `restore` module), and returns
+    /// what the caller needs to resume it. Nothing is overwritten, and a restore that fails leaves no file behind.
+    pub fn restore(
+        &self,
+        session: &SessionId,
+        target_cwd: &Path,
+        agent_home: &Path,
+    ) -> Result<Resume, ArchiveError> {
+        let recorded = self
+            .sessions_where("id = ?1", params![session])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ArchiveError::UnknownSession(session.clone()))?;
+        let cwd = checked_path(target_cwd)?;
+        let home = checked_path(agent_home)?;
+        let latest = self
+            .snapshots(session)?
+            .pop()
+            .ok_or_else(|| RestoreError::NoSnapshot(session.clone()))?;
+        let files = self.read(latest.id)?;
+        Ok(restore_files(&recorded, latest.id, &files, cwd, &home)?)
     }
 
     /// Records a session, or updates everything but its id and creation time if it is already recorded. Its repo is

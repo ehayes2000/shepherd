@@ -7,6 +7,7 @@ mod capture;
 mod ids;
 mod index;
 mod private;
+mod restore;
 
 pub use blob::{BlobError, BlobId, BlobStore, DEFAULT_MAX_BLOB_LEN, Sweep};
 #[cfg(feature = "fault-injection-crash-before-rename")]
@@ -24,3 +25,6 @@ pub use index::{
     Archive, ArchiveError, BadRow, CommitHit, INDEX_VERSION, NewFile, NewSnapshot, ReadFile,
     Session, SessionCommit, Snapshot, SnapshotFile, VerifyReport,
 };
+#[cfg(feature = "fault-injection-pause-before-restore-publish")]
+pub use restore::{PAUSE_BEFORE_PUBLISH_MARKER, PAUSE_BEFORE_PUBLISH_SESSION};
+pub use restore::{RestoreError, Resume};

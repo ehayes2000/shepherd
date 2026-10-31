@@ -27,6 +27,13 @@ Capture treats transcript content as opaque bytes, so only the layout and the pa
   read 2026-10-30: `projects/<project>/<session>.jsonl` is the transcript, `projects/<project>/<session>/subagents/`
   holds subagent transcripts "in the same format", `projects/<project>/<session>/tool-results/` large tool outputs.
   With `CLAUDE_CONFIG_DIR` set, all of it lives under that directory instead of `~/.claude`.
+- Claude Code sessions reference: <https://code.claude.com/docs/en/sessions>, read 2026-10-30, used by restore (T41):
+  "Where transcripts are stored" gives `projects/<project>/<session-id>.jsonl`, `<project>` being "your working
+  directory path with non-alphanumeric characters replaced by `-`", truncated with an unspecified hash past 200
+  characters; "Resume by session ID or name": `--resume <id>` searches the current project dir, then every other one.
+  Nothing there says resume checks the `cwd` inside a transcript. Undocumented, so restore refuses them until T44
+  checks the real agent: a cwd that isn't ASCII, a project dir name over 200 characters. Also for T44: restore
+  encodes the cwd as given, not resolved (macOS `/tmp/x` vs `/private/tmp/x`).
 - Codex, openai/codex at `rust-v0.166.0`:
   - `codex-rs/hooks/src/schema.rs`: `SessionStartCommandInput` and `StopCommandInput` have `session_id: String` and
     `transcript_path: NullableString` (string or null); `codex-rs/hooks/src/events/session_start.rs`: the
@@ -37,6 +44,8 @@ Capture treats transcript content as opaque bytes, so only the layout and the pa
     `...-<thread id>_<rollout id>.jsonl` for a reverted thread.
   - `codex-rs/rollout/src/compression.rs`: rollouts older than 7 days may be compressed in place to `.jsonl.zst`.
     Capture doesn't accept those (a live session's rollout is plain); see the T40 report.
+  - `codex-rs/rollout/src/list.rs`: `find_thread_path_by_id_str` (resume by id) walks `sessions/` matching rollout
+    file names by thread id, with no cwd filter; only the listing (picker) filters by the `session_meta` cwd.
 
 ### Documented vs inferred
 
