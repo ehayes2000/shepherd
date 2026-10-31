@@ -788,6 +788,11 @@ impl Client {
         self.acting_feed().registry.workspace()
     }
 
+    /// This machine's host's workspace, whichever session is selected: what the finder and cleanup work in.
+    pub fn local_workspace(&self) -> Option<&Path> {
+        self.local.registry.workspace()
+    }
+
     /// Every workspace the host of the machine the user is acting on has used, the current one first, see
     /// [`Host::workspaces`] and [`Client::workspace`].
     pub fn workspaces(&self) -> &[PathBuf] {
@@ -1199,6 +1204,23 @@ impl Client {
         }
     }
 
+    /// Peer `machine`, called `name`, is no longer trusted: an open new-session popup or switcher on it goes back to
+    /// this machine, saying why, rather than showing this machine's profiles or workspaces as if they were its.
+    fn untarget(&mut self, machine: &MachineId, name: &str) {
+        if self.target != Some(At::Peer(machine.clone())) {
+            return;
+        }
+        self.target = Some(At::Local);
+        self.picker_scroll = 0;
+        self.switcher_scroll = 0;
+        if matches!(
+            self.popup,
+            Some(Popup::PickProfile | Popup::Workspace { .. })
+        ) {
+            self.set_notice(format!("{name} is no longer a trusted machine"));
+        }
+    }
+
     /// Chooses `machine` for the open new-session popup or switcher, if one is open and it can be reached now.
     fn pick_machine(&mut self, machine: MachineId) -> Vec<ClientCommand> {
         if !matches!(
@@ -1234,7 +1256,9 @@ impl Client {
             .cloned()
             .collect();
         for machine in gone {
-            self.peers.remove(&machine);
+            if let Some(peer) = self.peers.remove(&machine) {
+                self.untarget(&machine, &peer.name);
+            }
             commands.push(ClientCommand::DisconnectPeer(machine));
         }
         for info in listed {

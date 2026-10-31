@@ -490,3 +490,48 @@ fn the_popups_with_a_machine_selector_draw_in_any_window_however_small() {
         }
     }
 }
+
+/// [`three_machines`] in `window`, this machine's host in workspace `here` (if any) and the laptop's in `there` (if
+/// any), with the laptop's `train` selected.
+fn in_workspaces(window: Rect, here: Option<&str>, there: Option<&str>) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    let subscribe = c.connect_named("studio");
+    let mut c = three_machines_from(
+        c,
+        subscribe,
+        window,
+        |host| {
+            if let Some(path) = here {
+                host.select_workspace(path);
+            }
+        },
+        |host| {
+            if let Some(path) = there {
+                host.select_workspace(path);
+            }
+        },
+        json!({}),
+    );
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    c
+}
+
+/// The footer's text: the window's last line.
+fn footer(buf: &Buffer) -> String {
+    let y = buf.area.bottom() - 1;
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+}
+
+#[test]
+fn cleanup_follows_this_machines_workspace_not_the_selected_peers() {
+    let c = in_workspaces(POPUP_WINDOW, None, Some("/there/api"));
+    let shown = footer(&buffer(&c, POPUP_WINDOW));
+    assert!(!shown.contains("Cleanup"), "{shown:?}");
+}
+
+#[test]
+fn cleanup_is_offered_for_this_machines_workspace_with_a_peers_session_selected() {
+    let c = in_workspaces(POPUP_WINDOW, Some("/here/app"), None);
+    let shown = footer(&buffer(&c, POPUP_WINDOW));
+    assert!(shown.contains("Cleanup"), "{shown:?}");
+}

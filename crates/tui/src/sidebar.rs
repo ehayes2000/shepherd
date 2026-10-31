@@ -21,8 +21,8 @@
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
 //! for it is drawn across the window's last lines instead), else a reconnecting note or a hint for help with the
-//! `Detach` and `?` buttons on the right, and a `Cleanup` button on the left while connected with a workspace (which
-//! then takes the hint's place).
+//! `Detach` and `?` buttons on the right, and a `Cleanup` button on the left while connected with a workspace on this
+//! machine ([`Client::local_workspace`]; it then takes the hint's place).
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
 //! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
@@ -188,7 +188,8 @@ const DETACH: &str = "Detach";
 const RESTART: &str = "Restart host";
 /// The footer's button that shows the host's warning again, while it warns ([`Client::host_warning`]).
 const HOST_WARNING: &str = "Host warning";
-/// The footer's button that opens the cleanup view, while connected with a workspace.
+/// The footer's button that opens the cleanup view, while connected with a workspace on this machine (cleanup only ever
+/// works on this machine's host, whichever session is selected).
 const CLEANUP: &str = "Cleanup";
 const HELP: &str = "?";
 /// The collapsed sidebar's `Detach` button.
@@ -250,7 +251,7 @@ pub(crate) fn footer_buttons(
         Some((Target::OfferRestart, RESTART))
     } else if client.host_warning().is_some() {
         Some((Target::ShowHostWarning, HOST_WARNING))
-    } else if *client.connection() == Connection::Ready && client.workspace().is_some() {
+    } else if *client.connection() == Connection::Ready && client.local_workspace().is_some() {
         Some((Target::Cleanup, CLEANUP))
     } else {
         None

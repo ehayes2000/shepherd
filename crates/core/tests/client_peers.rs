@@ -1550,3 +1550,76 @@ fn a_peers_sessions_are_marked_elsewhere_by_its_own_workspace() {
     assert_eq!(elsewhere(&net, "b1"), Some(true));
     assert_eq!(elsewhere(&net, "a1"), Some(false));
 }
+
+#[test]
+fn when_the_selected_sessions_machine_is_unreachable_the_switcher_opens_on_this_machine() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    net.user(Intent::BeginWorkspace);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+}
+
+#[test]
+fn a_machine_that_is_neither_this_one_nor_a_peer_cannot_be_chosen_from_a_peer() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    net.user(Intent::PickMachine(m("m_nowhere")));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(profile_names(&net), ["there-a", "there-b"]);
+}
+
+/// This machine's host reconnects and lists `peers` (id, name) as the ones it trusts.
+fn relist(net: &mut Machines, peers: &[(&str, &str)]) {
+    net.handle(ClientEvent::Disconnected);
+    let hello = net.handle(ClientEvent::Connected { at: at(0) });
+    let subscribe = net.c.answer(
+        &hello,
+        Ok(hello_with_profiles("m_test", &["here-a", "here-b"])),
+    );
+    let caught_up = net.c.answer(&subscribe, Ok(json!({})));
+    let list: Vec<Value> = peers
+        .iter()
+        .map(|(id, name)| json!({ "id": id, "name": name }))
+        .collect();
+    net.c.answer(&caught_up, Ok(json!({ "peers": list })));
+}
+
+#[test]
+fn a_chosen_machine_no_longer_trusted_puts_the_popup_back_on_this_machine_and_says_so() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    relist(&mut net, &[("m_c", "tower")]);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+    assert_eq!(
+        net.c.client().notice(),
+        Some("laptop is no longer a trusted machine")
+    );
+}
+
+#[test]
+fn a_switcher_on_a_machine_no_longer_trusted_goes_back_to_this_machine() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    relist(&mut net, &[]);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+}
+
+#[test]
+fn this_machines_workspace_is_its_hosts_whichever_session_is_selected() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    assert_eq!(
+        net.c.client().local_workspace(),
+        Some(std::path::Path::new("/here/app"))
+    );
+}
