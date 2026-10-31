@@ -295,17 +295,6 @@ fn an_index_from_a_newer_version_is_refused_and_not_modified() {
             "CREATE TABLE future(x INTEGER); INSERT INTO future VALUES (1); PRAGMA user_version = {newer};"
         ),
     );
-    // The index and any SQLite side file (-wal, -shm, -journal) next to it. The archive's own lock files may appear.
-    let index_files = |root: &Path| -> Vec<(PathBuf, Vec<u8>)> {
-        files_under(root)
-            .into_iter()
-            .filter(|(p, _)| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("index.sqlite"))
-            })
-            .collect()
-    };
     let before = index_files(&root);
     assert_eq!(before.len(), 1);
 
@@ -338,6 +327,216 @@ fn an_index_with_a_negative_version_is_refused_and_not_migrated() {
         Err(ArchiveError::BadIndexVersion(-1))
     ));
     assert_eq!(fs::read(root.join("index.sqlite")).unwrap(), before);
+}
+
+/// The index and every SQLite side file (-wal, -shm, -journal) next to it, with their bytes. The archive's own lock
+/// files are not included: they may appear.
+fn index_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    files_under(root)
+        .into_iter()
+        .filter(|(p, _)| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("index.sqlite"))
+        })
+        .collect()
+}
+
+#[test]
+fn a_newer_index_with_unmerged_wal_frames_is_refused_and_not_modified() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    BlobStore::open(&root).unwrap();
+    // Built elsewhere by a connection that stays open while its files are copied, as a crashed newer shepherd would
+    // leave them: the newer version lives only in WAL frames that were never checkpointed into the main file.
+    let src = dir.path().join("src");
+    fs::create_dir(&src).unwrap();
+    let src_index = src.join("index.sqlite");
+    let writer = rusqlite::Connection::open(&src_index).unwrap();
+    let newer = INDEX_VERSION + 1;
+    writer
+        .execute_batch(&format!(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE future(x INTEGER); INSERT INTO future VALUES (1); PRAGMA user_version = {newer};"
+        ))
+        .unwrap();
+    for name in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+        fs::copy(src.join(name), root.join(name)).unwrap();
+        fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    drop(writer);
+    let before = index_files(&root);
+    assert_eq!(before.len(), 3);
+    let wal = fs::metadata(root.join("index.sqlite-wal")).unwrap().len();
+    assert!(wal > 0, "the WAL holds frames the main file doesn't");
+
+    for _ in 0..2 {
+        match Archive::open(&root) {
+            Err(ArchiveError::NewerIndex { found, .. }) => assert_eq!(found, newer),
+            other => panic!("expected NewerIndex, got {other:?}"),
+        }
+    }
+    let after = index_files(&root);
+    assert_eq!(
+        after.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        before.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        "nothing deleted or added"
+    );
+    for ((path, was), (_, is)) in before.iter().zip(&after) {
+        assert!(was == is, "{} was rewritten", path.display());
+    }
+}
+
+#[test]
+fn a_file_that_is_not_sqlite_is_refused_and_left_byte_identical() {
+    for body in [
+        b"this is not a SQLite database, it is a text file\n".repeat(50),
+        b"hi".to_vec(),
+    ] {
+        let dir = tempdir();
+        let root = dir.path().join("archive");
+        BlobStore::open(&root).unwrap();
+        let index = root.join("index.sqlite");
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&index)
+            .unwrap()
+            .write_all(&body)
+            .unwrap();
+        let before = index_files(&root);
+
+        match Archive::open(&root) {
+            Err(ArchiveError::Index(e)) => assert_eq!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::NotADatabase),
+                "{e}"
+            ),
+            other => panic!("expected NotADatabase, got {other:?}"),
+        }
+        assert_eq!(index_files(&root), before, "{} bytes", body.len());
+    }
+}
+
+#[test]
+fn an_archive_under_a_path_with_uri_characters_opens_and_reopens() {
+    let dir = tempdir();
+    let parent = dir.path().join("a ?b#c%41d&e=f");
+    fs::create_dir(&parent).unwrap();
+    let root = parent.join("archive");
+    let first = Archive::open(&root).unwrap();
+    first.put_session(&session("s1", repo('a'))).unwrap();
+    // Opened again while the first handle is live (-wal and -shm exist), and after it closed (they don't).
+    assert_eq!(
+        Archive::open(&root)
+            .unwrap()
+            .sessions(&repo('a'))
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(first);
+    assert_eq!(
+        Archive::open(&root)
+            .unwrap()
+            .sessions(&repo('a'))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !dir.path().join("a ").exists(),
+        "nothing was created at a truncated path"
+    );
+}
+
+/// The v1 fixture plus `extra` SQL, as a v1 index.
+fn plant_v1(root: &Path, extra: &str) {
+    plant_index(
+        root,
+        &format!("{}\n{extra}", include_str!("fixtures/index-v1.sql")),
+    );
+}
+
+/// The planted v1 index, read raw: its schema (every table and index, as SQL) and its rows (every table's contents
+/// as text). A half-applied migration changes one or the other.
+fn v1_state(root: &Path) -> (Vec<String>, Vec<Vec<String>>) {
+    let conn = raw(root);
+    let schema = conn
+        .prepare("SELECT type || ' ' || name || ': ' || coalesce(sql, '') FROM sqlite_master ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let rows = [
+        "repos",
+        "sessions",
+        "snapshots",
+        "snapshot_files",
+        "session_commits",
+    ]
+    .into_iter()
+    .map(|t| {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM {t} ORDER BY rowid"))
+            .unwrap();
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| {
+                    r.get::<_, rusqlite::types::Value>(i)
+                        .map(|v| format!("{v:?}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|cols| cols.join("|"))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    })
+    .collect();
+    (schema, rows)
+}
+
+#[test]
+fn a_v1_row_that_breaks_a_v2_constraint_fails_the_migration_and_leaves_v1_intact() {
+    for bad in [
+        "INSERT INTO snapshots VALUES (2, 's-v1', 1, NULL, 'bogus');",
+        "INSERT INTO sessions VALUES ('s-null-cwd', '1111111111111111111111111111111111111111', 'laptop', 'codex',
+                                      'x', NULL, NULL, NULL, NULL, NULL, 1, NULL);",
+    ] {
+        let dir = tempdir();
+        let root = dir.path().join("archive");
+        plant_v1(&root, bad);
+        let state = v1_state(&root);
+
+        assert!(
+            matches!(Archive::open(&root), Err(ArchiveError::Index(_))),
+            "{bad}"
+        );
+        assert_eq!(user_version(&root), 1, "still v1 after {bad}");
+        assert_eq!(v1_state(&root), state, "v1 schema and rows intact after {bad}");
+    }
+}
+
+#[test]
+fn a_v1_row_with_a_dangling_reference_fails_the_migration_and_leaves_v1_intact() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    plant_v1(
+        &root,
+        "INSERT INTO snapshots VALUES (2, 'nobody', 1, NULL, 'manual');",
+    );
+    let state = v1_state(&root);
+
+    match Archive::open(&root) {
+        Err(ArchiveError::BrokenReference(table)) => assert_eq!(table, "snapshots"),
+        other => panic!("expected BrokenReference, got {other:?}"),
+    }
+    assert_eq!(user_version(&root), 1);
+    assert_eq!(v1_state(&root), state);
 }
 
 // ---- sessions and snapshots ----
@@ -814,6 +1013,42 @@ fn child_process() {
                 .put(&pause_content())
                 .unwrap();
         }
+        "snapshot-paused-mid-put" => {
+            let archive = Archive::open(root).unwrap();
+            let paused = pause_content();
+            // The session exists when this starts; the parent deletes it while the blob write is paused.
+            let result = archive.add_snapshot(&snapshot(
+                "s1",
+                vec![file(FileRole::Main, "/m", &paused)],
+                vec![],
+            ));
+            assert!(
+                matches!(&result, Err(ArchiveError::UnknownSession(s)) if *s == sid("s1")),
+                "the foreign key refused the snapshot: {result:?}"
+            );
+        }
+        opener if opener.starts_with("opener-") => {
+            Archive::open(root)
+                .unwrap()
+                .put_session(&session(opener, repo('a')))
+                .unwrap();
+        }
+        "umask-0" => {
+            // SAFETY: umask only sets this process's file mode mask; this child runs a single test.
+            unsafe { libc::umask(0) };
+            let archive = Archive::open(root).unwrap();
+            archive.put_session(&session("s1", repo('a'))).unwrap();
+            // Checked here, while the connection is open: SQLite removes -wal and -shm when the last one closes.
+            for name in [
+                "index.sqlite",
+                "index.sqlite-wal",
+                "index.sqlite-shm",
+                "index.lock",
+                "blobs.lock",
+            ] {
+                assert_eq!(mode(&root.join(name)), 0o600, "{name} under umask 0");
+            }
+        }
         writer if writer.starts_with("writer-") => {
             let archive = Archive::open(root).unwrap();
             for i in 0..WRITES_PER_CHILD {
@@ -862,6 +1097,91 @@ fn run_child(job: &str, root: &Path) -> Option<i32> {
     let mut c = child(job, root);
     drop(c.stdin.take());
     c.wait_with_output().unwrap().status.code()
+}
+
+/// Waits until `c` reports it is paused mid-put, holding the blob writer lock.
+fn wait_paused(c: &mut Child) {
+    let mut out = BufReader::new(c.stdout.take().unwrap());
+    let mut line = String::new();
+    while !line.trim_end().ends_with(PAUSED) {
+        line.clear();
+        assert_ne!(
+            out.read_line(&mut line).unwrap(),
+            0,
+            "the child paused before exiting"
+        );
+    }
+    // Back to the child, so its later output still has a reader.
+    c.stdout = Some(out.into_inner());
+}
+
+/// Lets a child paused by [`wait_paused`] go on, and returns whether it then succeeded.
+fn release(mut c: Child) -> bool {
+    c.stdin.take().unwrap().write_all(b"go").unwrap();
+    c.wait_with_output().unwrap().status.success()
+}
+
+#[test]
+fn modes_are_exact_under_umask_0_including_sqlites_side_files() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    assert_eq!(
+        run_child("umask-0", &root),
+        Some(0),
+        "the child checked every mode"
+    );
+}
+
+#[test]
+fn foreign_keys_are_enforced_after_open() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    Archive::open(&root)
+        .unwrap()
+        .put_session(&session("s1", repo('a')))
+        .unwrap();
+
+    let mut c = child("snapshot-paused-mid-put", &root);
+    wait_paused(&mut c);
+    // Behind the archive's back (a raw connection doesn't enforce foreign keys), the session goes away.
+    raw(&root)
+        .execute("DELETE FROM sessions WHERE id = 's1'", [])
+        .unwrap();
+    assert!(
+        release(c),
+        "the child's snapshot was refused as UnknownSession"
+    );
+
+    let snapshots: i64 = raw(&root)
+        .query_row("SELECT count(*) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        snapshots, 0,
+        "no snapshot row points at the missing session"
+    );
+}
+
+#[test]
+fn racing_opens_of_a_new_archive_all_succeed() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let mut openers: Vec<_> = (0..6)
+        .map(|i| child(&format!("opener-{i}"), &root))
+        .collect();
+    for c in &mut openers {
+        drop(c.stdin.take());
+    }
+    for (i, c) in openers.iter_mut().enumerate() {
+        assert!(c.wait().unwrap().success(), "opener {i} succeeded");
+    }
+    assert_eq!(
+        Archive::open(&root)
+            .unwrap()
+            .sessions(&repo('a'))
+            .unwrap()
+            .len(),
+        6
+    );
 }
 
 #[test]
@@ -950,6 +1270,21 @@ fn sweep_removes_temps_a_crashed_put_left_and_keeps_every_blob() {
     // A file in a shard that only looks temp-ish is not ours to remove.
     let shard = stale[0].parent().unwrap().to_path_buf();
     fs::write(shard.join("notes.tmp"), b"not a put temp").unwrap();
+    // Nor is a validly named temp in another blob's shard.
+    let other_shard = root
+        .join("blobs")
+        .join(if shard.ends_with("00") { "01" } else { "00" });
+    fs::create_dir_all(&other_shard).unwrap();
+    fs::set_permissions(&other_shard, fs::Permissions::from_mode(0o700)).unwrap();
+    let misplaced = other_shard.join(stale[0].file_name().unwrap());
+    fs::write(&misplaced, b"misplaced").unwrap();
+    // Nor a directory named exactly like a temp in the right shard.
+    let dir_id = BlobId::of(b"a directory").to_string();
+    let dir_shard = root.join("blobs").join(&dir_id[..2]);
+    fs::create_dir_all(&dir_shard).unwrap();
+    fs::set_permissions(&dir_shard, fs::Permissions::from_mode(0o700)).unwrap();
+    let temp_named_dir = dir_shard.join(format!(".{dir_id}.1.0.tmp"));
+    fs::create_dir(&temp_named_dir).unwrap();
     let blobs_before: Vec<_> = files_under(&root.join("blobs"))
         .into_iter()
         .filter(|(p, _)| p.extension().is_some_and(|e| e == "zst"))
@@ -960,7 +1295,10 @@ fn sweep_removes_temps_a_crashed_put_left_and_keeps_every_blob() {
         Sweep::Swept { removed: stale }
     );
 
-    assert_eq!(temps(&root), vec![shard.join("notes.tmp")]);
+    let mut left = vec![shard.join("notes.tmp"), misplaced];
+    left.sort();
+    assert_eq!(temps(&root), left);
+    assert!(temp_named_dir.is_dir(), "the directory is left alone");
     let blobs_after: Vec<_> = files_under(&root.join("blobs"))
         .into_iter()
         .filter(|(p, _)| p.extension().is_some_and(|e| e == "zst"))
@@ -986,16 +1324,7 @@ fn sweep_never_touches_the_temp_of_a_live_writer() {
 
     // A live writer that has written its temp file and is about to rename it.
     let mut writer = child("pause-mid-put", &root);
-    let mut out = BufReader::new(writer.stdout.take().unwrap());
-    let mut line = String::new();
-    while !line.trim_end().ends_with(PAUSED) {
-        line.clear();
-        assert_ne!(
-            out.read_line(&mut line).unwrap(),
-            0,
-            "the child paused before exiting"
-        );
-    }
+    wait_paused(&mut writer);
     assert_eq!(temps(&root).len(), 2, "the live writer's temp is there");
 
     assert_eq!(
@@ -1009,11 +1338,7 @@ fn sweep_never_touches_the_temp_of_a_live_writer() {
         "nothing removed while a writer is live"
     );
 
-    writer.stdin.take().unwrap().write_all(b"go").unwrap();
-    assert!(
-        writer.wait().unwrap().success(),
-        "the writer renamed its temp into place"
-    );
+    assert!(release(writer), "the writer renamed its temp into place");
     let id = BlobId::of(&pause_content());
     assert_eq!(
         BlobStore::open(&root).unwrap().get(&id).unwrap(),

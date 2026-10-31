@@ -193,13 +193,13 @@ impl Archive {
         // here: a symlink or a file others can read is refused. SQLite's own NOFOLLOW can't be used, since it also
         // refuses symlinks in the parents (macOS's /var is one); and it must not create the file itself.
         open_or_create_private_file(&path)?;
+        // Before anything can write: a newer (or not-SQLite) index must stay exactly as it is.
+        pending_migrations(peek_version(&path)?)?;
         let conn = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // Before anything writes: a newer index must stay exactly as it is.
-        pending_migrations(read_version(&conn)?)?;
         let mode: String =
             conn.pragma_update_and_check(None, "journal_mode", "wal", |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -276,19 +276,17 @@ impl Archive {
 
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Checked again under the write lock; the foreign key would refuse it too, less legibly.
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?1)",
-            params![s.session],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(ArchiveError::UnknownSession(s.session.clone()));
-        }
+        // The session may have gone since the check above: the foreign key refuses the row then.
         tx.execute(
             "INSERT INTO snapshots (session_id, captured_at, head_commit, reason) VALUES (?1, ?2, ?3, ?4)",
             params![s.session, Micros(s.captured_at), s.head_commit, s.reason],
-        )?;
+        )
+        .map_err(|e| match e.sqlite_error() {
+            Some(f) if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => {
+                ArchiveError::UnknownSession(s.session.clone())
+            }
+            _ => ArchiveError::Index(e),
+        })?;
         let id = SnapshotId::new(tx.last_insert_rowid());
         for (f, blob) in stored {
             let bytes = i64::try_from(f.content.len())
@@ -496,16 +494,58 @@ impl Archive {
         Ok(report)
     }
 
-    /// Removes the temp files crashed blob writes left behind (see [`BlobStore::sweep_temps`] for why a live writer's
-    /// are never touched), holding the index's write lock throughout. Maintenance: run it when convenient, not on open.
+    /// Removes the temp files crashed blob writes left behind, under the exclusive blob writer lock (see
+    /// [`BlobStore::sweep_temps`] for why a live writer's are never touched). Index rows never point at temps, so the
+    /// index itself isn't locked. Maintenance: run it when convenient, not on open.
     pub fn sweep_temps(&self) -> Result<Sweep, ArchiveError> {
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let sweep = self.blobs.sweep_temps()?;
-        // Nothing was written; ending the transaction releases the lock.
-        tx.rollback()?;
-        Ok(sweep)
+        Ok(self.blobs.sweep_temps()?)
     }
+}
+
+/// Reads the index's `user_version` without changing any of its files. A read-write connection can't be used: closing
+/// it would checkpoint a leftover WAL into the file and delete the WAL. Even a read-only one rewrites the -shm file
+/// (the WAL's index), unless `readonly_shm` makes it build that index in memory, which needs an existing -shm. With
+/// no -shm and no -wal there is no WAL to read, so the main file is read as `immutable` (no locks, no side files). The
+/// last case, a -wal without its -shm, falls back to a plain read-only connection, which may create the -shm.
+fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    let peek = |query: &str| -> Result<i64, ArchiveError> {
+        let conn = Connection::open_with_flags(sqlite_uri(path, query), flags)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        read_version(&conn)
+    };
+    match peek("mode=ro&readonly_shm=1") {
+        Err(ArchiveError::Index(e))
+            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::CannotOpen) =>
+        {
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            if Path::new(&wal).exists() {
+                peek("mode=ro")
+            } else {
+                peek("mode=ro&immutable=1")
+            }
+        }
+        other => other,
+    }
+}
+
+/// `path` as an SQLite URI filename (https://www.sqlite.org/uri.html) with `query`. The path part is %HH-escaped byte
+/// by byte except for characters that never need it, so `?`, `#` and `%` in a directory name can't end or change it.
+fn sqlite_uri(path: &Path, query: &str) -> String {
+    let mut uri = String::from("file:");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-') {
+            uri.push(char::from(b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri.push('?');
+    uri.push_str(query);
+    uri
 }
 
 fn read_version(conn: &Connection) -> Result<i64, ArchiveError> {
