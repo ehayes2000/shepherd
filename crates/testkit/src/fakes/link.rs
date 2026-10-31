@@ -9,9 +9,11 @@
 //!
 //! Closing a conn whose peer has lines it hasn't read leaves the peer's end open, still delivering, until it has read
 //! them (then it gets `PeerGone`) or the closing link is dropped, which cuts the delivery off like an exec ending a
-//! process's threads. [`Link::flush_closed`] waits for those deliveries. Nothing here gives up on a peer by itself
-//! (the real adapters give up after `CLOSE_FLUSH`, which `flush_closed` reports as `TimedOut` all the same), so a
-//! stalled peer's closed conn stays undelivered until the deadline. [`FakeNetwork::wait_until_flushing`] lets a test read only once someone is waiting.
+//! process's threads. [`Link::flush_closed`] waits for those deliveries. Like the real adapters' writers, it gives up
+//! on a closed conn whose peer still hasn't read everything [`CLOSE_FLUSH`] after the close: the peer is cut off
+//! (`PeerGone`), and the give-up is reported (`TimedOut`) to the call it happened in, then forgotten. It gives up only
+//! from inside `flush_closed`, so until someone waits, a paced peer can still read a closed conn's lines however late.
+//! [`FakeNetwork::wait_until_flushing`] lets a test read only once someone is waiting.
 //!
 //! A paused end ([`Link::pause_reading`]) holds what is sent to it like a paced one, until it is resumed. A paced end
 //! can also be shown the first line it is reading as on its way, a few bytes at a time ([`FakeNetwork::trickle`]):
@@ -31,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
+    CLOSE_FLUSH, ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink,
+    MAX_QUEUED,
 };
 use shepherd_core::wire::MAX_LINE;
 
@@ -61,6 +64,8 @@ struct End {
     partial: usize,
     /// The link that closed this end's conn while it still had bytes unread. The end stays until it has read them.
     closed_by: Option<LinkId>,
+    /// When that close happened, so [`Link::flush_closed`] gives up on it [`CLOSE_FLUSH`] later.
+    closed_at: Option<Instant>,
 }
 
 impl End {
@@ -77,6 +82,7 @@ impl End {
             read: 0,
             partial: 0,
             closed_by: None,
+            closed_at: None,
         }
     }
 
@@ -313,6 +319,7 @@ impl Net {
         match self.ends.get_mut(&peer) {
             Some(to) if to.unread > 0 => {
                 to.closed_by = Some(link);
+                to.closed_at = Some(Instant::now());
                 if let Some(sink) = self.ends.remove(&conn).and_then(|this| this.sink) {
                     sink.send(LinkEvent::Disconnected {
                         conn,
@@ -323,6 +330,30 @@ impl Net {
             _ => self.disconnect(conn, DisconnectReason::Closed, DisconnectReason::PeerGone),
         }
         Ok(())
+    }
+
+    /// Gives up on each conn `link` closed that is still delivering [`CLOSE_FLUSH`] after its close, as of `now`: its
+    /// peer is cut off. Returns whether it gave up on any, and when the next one is due.
+    fn give_up(&mut self, link: LinkId, now: Instant) -> (bool, Option<Instant>) {
+        let due = |end: &End| end.closed_at.map(|at| at + CLOSE_FLUSH);
+        let mut expired: Vec<ConnId> = self
+            .ends
+            .iter()
+            .filter(|(_, end)| end.closed_by == Some(link) && due(end).is_some_and(|d| d <= now))
+            .map(|(&conn, _)| conn)
+            .collect();
+        expired.sort();
+        let gave_up = !expired.is_empty();
+        for conn in expired {
+            self.disconnect(conn, DisconnectReason::PeerGone, DisconnectReason::PeerGone);
+        }
+        let next = self
+            .ends
+            .values()
+            .filter(|end| end.closed_by == Some(link))
+            .filter_map(due)
+            .min();
+        (gave_up, next)
     }
 
     /// Whether every conn `link` closed has finished delivering.
@@ -579,23 +610,31 @@ impl FakeNetwork {
         net.flushing > 0
     }
 
-    /// Waits until every conn `link` closed has finished delivering, or `deadline` passes.
+    /// Waits until every conn `link` closed has finished delivering or been given up on, or `deadline` passes.
+    /// `Flushed` only if it gave up on none.
     fn flush_closed(&self, link: LinkId, deadline: Instant) -> FlushOutcome {
         let mut net = self.0.net.lock().unwrap_or_else(PoisonError::into_inner);
         net.flushing += 1;
         self.0.changed.notify_all();
+        let mut gave_up = false;
         let outcome = loop {
+            let now = Instant::now();
+            let (gave_up_now, next_give_up) = net.give_up(link, now);
+            gave_up |= gave_up_now;
             if net.flushed(link) {
-                break FlushOutcome::Flushed;
+                break match gave_up {
+                    true => FlushOutcome::TimedOut,
+                    false => FlushOutcome::Flushed,
+                };
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if deadline <= now {
                 break FlushOutcome::TimedOut;
             }
+            let until = next_give_up.map_or(deadline, |due| due.min(deadline));
             net = self
                 .0
                 .changed
-                .wait_timeout(net, left)
+                .wait_timeout(net, until.saturating_duration_since(now))
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         };

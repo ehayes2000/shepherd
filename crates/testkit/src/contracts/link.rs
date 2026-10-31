@@ -42,7 +42,7 @@ macro_rules! link_contract {
             closed_conn_is_flushed_once_its_peer_has_read_everything,
             flush_closed_times_out_while_a_closed_peer_does_not_read,
             closed_conn_whose_peer_goes_away_is_flushed,
-            a_closed_conn_given_up_on_is_never_flushed,
+            a_give_up_is_reported_once_and_holds_no_later_flush,
             each_end_names_the_machine_the_other_is,
             the_peer_of_an_unknown_or_gone_conn_is_an_error_not_local,
             opening_a_conn_to_a_machine_nobody_hosts,
@@ -787,19 +787,27 @@ pub fn flush_closed_times_out_while_a_closed_peer_does_not_read<F: LinkFixture>(
     assert_eq!(h.host.flush_closed(Duration::ZERO), FlushOutcome::TimedOut);
     // A deadline still ahead is waited for, then given up on. However long this thread was held up since the close,
     // the outcome is the same: past `CLOSE_FLUSH` a link may have given up on the peer, which is no flush either
-    // (`a_closed_conn_given_up_on_is_never_flushed`).
+    // (`a_give_up_is_reported_once_and_holds_no_later_flush`).
     assert_eq!(h.host.flush_closed(QUIET), FlushOutcome::TimedOut);
 }
 
-/// A link may give up delivering to a closed conn whose peer hasn't read for [`CLOSE_FLUSH`], but what it gave up on
-/// was never delivered: `flush_closed` says so, then and later. The bound is well past `CLOSE_FLUSH`, so a link that
-/// gives up does so while it waits; one that never gives up times out. The outcome is the same either way.
-pub fn a_closed_conn_given_up_on_is_never_flushed<F: LinkFixture>(mut h: LinkHarness<F>) {
+/// A link gives up delivering to a closed conn whose peer hasn't read for [`CLOSE_FLUSH`]. What it gave up on was never
+/// delivered, so the next `flush_closed` is `TimedOut`; then the give-up is forgotten, and doesn't hold a later
+/// `flush_closed` for its bound. The first bound is well past `CLOSE_FLUSH`, so the link gives up while it waits. The
+/// last bound is long, and returning well within it is a liveness bound, not a measurement.
+pub fn a_give_up_is_reported_once_and_holds_no_later_flush<F: LinkFixture>(mut h: LinkHarness<F>) {
     let (_peer, conn) = h.stalled_peer();
     stuck_backlog(&mut h, conn);
     h.host.close(conn).unwrap();
     assert_eq!(h.host.flush_closed(2 * CLOSE_FLUSH), FlushOutcome::TimedOut);
-    assert_eq!(h.host.flush_closed(Duration::ZERO), FlushOutcome::TimedOut);
+    let long = 6 * TIMEOUT;
+    let started = Instant::now();
+    assert_eq!(h.host.flush_closed(long), FlushOutcome::Flushed);
+    assert!(
+        started.elapsed() < long / 2,
+        "a conn given up on held flush_closed for {:?}",
+        started.elapsed()
+    );
 }
 
 pub fn closed_conn_whose_peer_goes_away_is_flushed<F: LinkFixture>(mut h: LinkHarness<F>) {

@@ -112,8 +112,8 @@ pub enum FlushOutcome {
     /// Every conn this link closed is done: what was queued for it is written, or its peer left.
     Flushed,
     /// The deadline passed with some closed conn still delivering, or the link gave up on a closed conn's peer that
-    /// wasn't reading (after [`CLOSE_FLUSH`]), so some of what was queued for it was never written. A conn given up on
-    /// stays so for every later call.
+    /// wasn't reading (after [`CLOSE_FLUSH`]), so some of what was queued for it was never written. A give-up is
+    /// reported to the next call, then forgotten: a conn given up on doesn't hold a later call.
     TimedOut,
 }
 

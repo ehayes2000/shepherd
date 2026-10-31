@@ -365,6 +365,7 @@ async fn write_loop(
     if let Some(first) = first
         && let Err(stopped) = write_all(&mut send, first, &shared, &mut end, false).await
     {
+        // Untested: the answer is a few bytes into a fresh stream's window, so it is never held up for `CLOSE_FLUSH`.
         if stopped == Stopped::GaveUp {
             shared.written.give_up();
         }
@@ -403,7 +404,9 @@ async fn write_loop(
             }
             stopped = timeout(left, send.stopped()) => {
                 if stopped.is_err() {
-                    // The peer hadn't taken it all within the bound.
+                    // The peer's transport hadn't acknowledged it all within the bound. Untested: `stopped` resolves
+                    // once the peer has the data, read or not (a paused peer included), so only a peer that went
+                    // silent without closing gets here, which machines on localhost can't play.
                     shared.written.give_up();
                     let _ = send.reset(VarInt::from_u32(0));
                 }

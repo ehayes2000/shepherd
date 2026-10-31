@@ -553,15 +553,15 @@ impl Written {
 }
 
 /// The closed conns of a link whose writers may still be delivering, for `flush_closed`. A writer that gave up is
-/// remembered as a flag once it is forgotten, so a long-lived link holds only the writers still delivering, and every
-/// later `flush_closed` still says the delivery wasn't done.
+/// remembered as a flag once it is forgotten, so a long-lived link holds only the writers still delivering; the flag is
+/// reported to the next `flush_closed`, then forgotten.
 #[derive(Default)]
 pub(crate) struct Closing(Mutex<ClosingState>);
 
 #[derive(Default)]
 struct ClosingState {
     writers: Vec<Arc<Written>>,
-    /// Some closed conn's writer gave up.
+    /// Some closed conn's writer gave up since the last `flush`.
     gave_up: bool,
 }
 
@@ -591,11 +591,12 @@ impl Closing {
     }
 
     /// Waits until every closed conn's writer is done, or `deadline` passes. `Flushed` only if every one finished
-    /// rather than gave up.
+    /// rather than gave up; a give-up is reported this once.
     pub(crate) fn flush(&self, deadline: Instant) -> FlushOutcome {
         let mut state = self.lock();
         state.forget(|written| written.wait(deadline));
-        match state.writers.is_empty() && !state.gave_up {
+        let gave_up = std::mem::take(&mut state.gave_up);
+        match state.writers.is_empty() && !gave_up {
             true => FlushOutcome::Flushed,
             false => FlushOutcome::TimedOut,
         }
@@ -770,7 +771,7 @@ impl Conns {
     }
 
     /// A peer that never reads ends `TimedOut` here, whether its writer is still trying or gave up once the close had
-    /// waited [`CLOSE_FLUSH`].
+    /// waited [`CLOSE_FLUSH`]. A give-up is reported to the next call, then forgotten.
     fn flush_closed(&self, deadline: Instant) -> FlushOutcome {
         self.closing.flush(deadline)
     }

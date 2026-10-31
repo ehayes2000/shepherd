@@ -200,7 +200,8 @@ fn a_swap_proceeds_at_the_bound_when_a_client_never_reads() {
         client.take().is_empty(),
         "the undelivered answer was cut off"
     );
-    // The exec (the old link dropped) cut it off: its `Disconnected` came without the lines it never read.
+    // Cut off, by the link giving up at the bound or else by the exec (the old link dropped): its `Disconnected` came
+    // without the lines it never read.
     assert_eq!(client.disconnect_reason(), Some(DisconnectReason::PeerGone));
 }
 
