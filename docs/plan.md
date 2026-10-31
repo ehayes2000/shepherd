@@ -5,6 +5,9 @@ status and whose `## Specs` section holds its spec. The section between the mark
 `scripts/tasks.py` from those files (the gate checks it's current). Only the PM edits statuses, with
 `scripts/tasks.py set <ID> <status> [--branch ..] [--round ..] [--note ..]`.
 
+**PAUSED (2026-10-31, user's request: machine too slow).** Let in-flight builders (T41, F47, F48) finish; dispatch nothing new,
+run no reviewers or merges until the user resumes. Then: review T41/F47/F48, merge, continue with T31a.
+
 Requests from the user land in `docs/inbox.md` first. Background reading: `manifesto.md`, `docs/architecture.md`,
 `docs/acpp.md`. Task format: the `write-task` skill.
 
