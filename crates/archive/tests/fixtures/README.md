@@ -4,7 +4,7 @@
 
 A version-1 index, for the migration tests (T39).
 
-## `claude/`, `codex/`: capture fixtures (PROVISIONAL)
+## `claude/`, `codex/`, `codex-compressed/`: capture fixtures (PROVISIONAL)
 
 **Provisional.** These were written by hand from the agents' documentation and source, not recorded from a real
 `claude` or `codex` run: builders never run the real agents or read anyone's `~/.claude` / `~/.codex`. T44's opt-in
@@ -13,6 +13,11 @@ A version-1 index, for the migration tests (T39).
 Each has `home/`, a scrubbed agent home (Claude Code's config dir, or `CODEX_HOME`) holding one session's
 transcripts, and `hooks/`, hook payloads (stdin JSON) for that session. In the payloads, `${AGENT_HOME}` stands for
 wherever the test installs `home/`; tests substitute it. Nothing personal: the cwd is `/work/app`, ids are made up.
+
+`codex-compressed/` has only `home/`: the `codex/` session after Codex compressed its rollout in place (T42b). Its
+`rollout-...jsonl.zst` is the `codex/` rollout compressed with `zstd -3 --no-check` (one frame, content size in the
+header, no checksum: what Codex's `zstd::stream::write::Encoder` at level 3 with a pledged size writes); the plain file
+is gone, and `codex/hooks/*`, which name the plain path, are its payloads.
 
 Capture treats transcript content as opaque bytes, so only the layout and the payload fields are load-bearing.
 
@@ -42,8 +47,12 @@ Capture treats transcript content as opaque bytes, so only the layout and the pa
   - `codex-rs/rollout/src/recorder.rs`: rollouts go in `sessions/<year>/<MM>/<DD>/`.
   - `codex-rs/rollout/src/rollout_file_name.rs`: the name is `rollout-<YYYY-MM-DDTHH-MM-SS>-<thread id>.jsonl`, or
     `...-<thread id>_<rollout id>.jsonl` for a reverted thread.
-  - `codex-rs/rollout/src/compression.rs`: rollouts older than 7 days may be compressed in place to `.jsonl.zst`.
-    Capture doesn't accept those (a live session's rollout is plain); see the T40 report.
+  - `codex-rs/rollout/src/compression.rs`: a rollout whose mtime is 7 days old (`MIN_ROLLOUT_AGE`) is compressed in
+    place: `compress_rollout_if_cold_blocking` writes `<rollout>.jsonl` + `COMPRESSED_SUFFIX` (`.zst`) with
+    `encode_zstd_to_writer` (level 3, `set_pledged_src_size`), then removes the plain file. `existing_rollout_path`
+    prefers the plain file to its `.zst` sibling, and `materialize_rollout_for_append_blocking` decompresses a `.zst`
+    back to plain (removing the `.zst`) before Codex appends to a resumed rollout. Capture reads the plain file if it
+    is there, else the `.zst`, decompressed within its byte budget, and archives it under the plain name (T42b).
   - `codex-rs/rollout/src/list.rs`: `find_thread_path_by_id_str` (resume by id) walks `sessions/` matching rollout
     file names by thread id, with no cwd filter; only the listing (picker) filters by the `session_meta` cwd.
 
@@ -57,3 +66,4 @@ Capture treats transcript content as opaque bytes, so only the layout and the pa
 | `claude/home/.../<session>/tool-results/` | the directory | the file in it (capture must not take it) |
 | `codex/hooks/*` | `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`, `source`; `Stop` `turn_id`, `stop_hook_active`, `last_assistant_message` | the ids |
 | `codex/home/sessions/2026/10/30/rollout-...jsonl` | its place and name | its lines (`session_meta` first, as `recorder.rs` writes it; the other item shapes are guesses) |
+| `codex-compressed/home/sessions/2026/10/30/rollout-...jsonl.zst` | its name (`.zst` after the plain name), zstd level 3 with the size pledged | the frame parameters the CLI chose (window size); the content is the plain fixture's |

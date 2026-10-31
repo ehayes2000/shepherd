@@ -405,6 +405,31 @@ fn footer_after_the_notice_clears() {
     insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
 }
 
+/// A session closed with a note on how closing went (T42b): the note is the close notice in the footer, and the closed
+/// session is gone from the sidebar.
+#[test]
+fn footer_with_a_close_note() {
+    // Caught up and live: a notice is only for what happens now.
+    let mut c = ClientDriver::new();
+    c.connect_live_with_bell(false);
+    for (id, name) in [("s1", "fix-login"), ("s2", "docs")] {
+        c.host().new_session(id);
+        c.host().rename(id, name);
+    }
+    c.sync();
+    let screens = Screens::new();
+    let closed = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/closed",
+                         "params": { "worktree_removed": true, "note": "no transcript was found to archive" } });
+    c.host()
+        .append(Some("s2"), Source::new(SourceKind::Shepherd, None), closed);
+    c.sync();
+    assert_eq!(
+        c.client().notice(),
+        Some("closed docs: no transcript was found to archive")
+    );
+    insta::assert_debug_snapshot!(buffer(c.client(), &screens, 80, 24));
+}
+
 #[test]
 fn the_hidden_footer_buttons_cant_be_clicked_while_a_notice_shows() {
     let (mut c, _) = with_notice();

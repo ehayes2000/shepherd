@@ -39,9 +39,12 @@
 //!   `Env::now` when submitted: each finds the repo's root commit and the session's commits since its base through the
 //!   `Worktrees` port (shared with its worker) and then records the session and snapshots its transcript. The answer
 //!   comes back as [`RuntimeEvent::Archive`] and goes to core, which removes a worktree only once its capture worked.
-//!   Bounded: a turn end's capture is dropped while another of that session's waits to start (the waiting one reads the
-//!   transcript as it is by then). Shutting down waits for captures running (within [`CREATE_CLEANUP_GRACE`]) and drops
-//!   their answers: a removal that would follow is left to the next start, which keeps the worktree. An upgrade waits
+//!   Each agent's home is the one its session's profile env gives it ([`AgentHomes::launched_with`]), else the host's.
+//!   An agent running outside any git repo can't be archived (no repo to file it under): its captures are skipped and
+//!   that is logged once per session ([`Archived::outside_repo`]); a capture before a removal fails instead.
+//!   Bounded: a turn end's capture is dropped while another of that agent session's waits to start (the waiting one
+//!   reads the transcript as it is by then). Shutting down waits for captures running (within
+//!   [`CREATE_CLEANUP_GRACE`]) and drops their answers: a removal that would follow is left to the next start, which keeps the worktree. An upgrade waits
 //!   for them too (`Busy`).
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
@@ -172,6 +175,16 @@ pub const TUNNEL_TICK: Duration = Duration::from_millis(5);
 /// The longest wait between looks at stopped tunnel ends that make no progress.
 pub const MAX_TUNNEL_TICK: Duration = MAX_CATCH_UP_TICK;
 
+/// What a capture on the archive's worker came back with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Archived {
+    /// Its [`HostEvent::Captured`], for core.
+    pub event: HostEvent,
+    /// The sessions it skipped because their agent runs outside any git repo (their `cwd`): with no repo to file it
+    /// under, such a conversation can't be archived. Never a capture before a removal, which fails instead.
+    pub outside_repo: Vec<(SessionId, WorktreePath)>,
+}
+
 /// Everything the loop reacts to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -183,8 +196,8 @@ pub enum RuntimeEvent {
     Commands(HostEvent),
     /// The answer to a `Forge` call that ran on its worker thread, for the PR watch.
     Forge(PrEvent),
-    /// The answer to a capture (`Archive` and `Worktrees` calls) that ran on its worker thread, for core.
-    Archive(HostEvent),
+    /// The answer to a capture (`Archive` and `Worktrees` calls) that ran on its worker thread.
+    Archive(Archived),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
     /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
@@ -516,12 +529,15 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A> {
     forge: Worker<F, PrEvent>,
     /// `Forge` calls submitted and not yet answered.
     forge_calls: usize,
-    archive: Worker<A>,
+    archive: Worker<A, Archived>,
     /// `Archive` calls (captures) submitted and not yet answered.
     capture_calls: usize,
-    /// Sessions with a turn end's capture queued and not started yet: another turn end of theirs adds nothing, since
-    /// that capture reads the transcript once it starts. So at most one per session waits on the worker.
-    queued_turn_ends: Arc<Mutex<HashSet<SessionId>>>,
+    /// Agent sessions (a session and its agent's own session id) with a turn end's capture queued and not started
+    /// yet: another turn end of theirs adds nothing, since that capture reads the transcript once it starts. So at
+    /// most one per agent session waits on the worker; a new agent session in place (`/clear`) has its own.
+    queued_turn_ends: Arc<Mutex<HashSet<(SessionId, String)>>>,
+    /// Sessions already logged as running outside a git repo, so unarchivable: said once per session, not every turn.
+    outside_repo: HashSet<SessionId>,
     link: L,
     peers: N,
     log: E,
@@ -694,6 +710,7 @@ impl<
             archive,
             capture_calls: 0,
             queued_turn_ends: Arc::default(),
+            outside_repo: HashSet::new(),
             link,
             peers,
             log,
@@ -1127,8 +1144,20 @@ impl<
                         .map(|deadline| then + until(&at, deadline));
                 }
             }
-            RuntimeEvent::Archive(event) => {
+            RuntimeEvent::Archive(Archived {
+                event,
+                outside_repo,
+            }) => {
                 self.capture_calls = self.capture_calls.saturating_sub(1);
+                for (session, cwd) in outside_repo {
+                    if self.outside_repo.insert(session.clone()) {
+                        tracing::warn!(
+                            %session,
+                            %cwd,
+                            "the agent runs outside a git repo: its conversation can't be archived"
+                        );
+                    }
+                }
                 if let HostEvent::Captured {
                     result: Err(error), ..
                 } = &event
@@ -1593,47 +1622,77 @@ impl<
     ) {
         let turn_end = match (&then, captures.as_slice()) {
             (AfterCapture::Nothing, [job]) if job.reason == CaptureReason::TurnEnd => {
-                Some(job.session.clone())
+                Some((job.session.clone(), job.agent_session_id.clone()))
             }
             _ => None,
         };
-        if let Some(session) = &turn_end
-            && !lock(&self.queued_turn_ends).insert(session.clone())
+        if let Some(key @ (session, _)) = &turn_end
+            && !lock(&self.queued_turn_ends).insert(key.clone())
         {
-            tracing::debug!(%session, "a capture of this session is already waiting");
+            tracing::debug!(%session, "a capture of this agent session is already waiting");
             return;
         }
         let at = self.env.now().instant();
         let this = self.machine.clone();
-        let homes = self.settings.agent_homes.clone();
+        // Each agent's home as its session was launched: its profile's env, as the config says now.
+        let homes: Vec<Option<PathBuf>> = captures.iter().map(|job| self.agent_home(job)).collect();
         let worktrees = self.worktrees.shared();
         let queued = self.queued_turn_ends.clone();
-        let panicked = HostEvent::Captured {
-            then: then.clone(),
-            result: Err(ArchiveError::Failed(
-                "archiving the conversation failed unexpectedly".into(),
-            )),
+        let removing = matches!(then, AfterCapture::Remove { .. });
+        let panicked = Archived {
+            event: HostEvent::Captured {
+                then: then.clone(),
+                result: Err(ArchiveError::Failed(
+                    "archiving the conversation failed unexpectedly".into(),
+                )),
+            },
+            outside_repo: Vec::new(),
         };
         let waiting = turn_end.clone();
         let call = move |archive: &A| {
-            if let Some(session) = &waiting {
-                lock(&queued).remove(session);
+            if let Some(key) = &waiting {
+                lock(&queued).remove(key);
             }
-            HostEvent::Captured {
-                result: capture_all(archive, &*worktrees, &captures, at, &this, &homes),
-                then,
+            let mut outside_repo = Vec::new();
+            let jobs = captures.iter().zip(&homes);
+            let result = capture_all(
+                archive,
+                &*worktrees,
+                jobs,
+                at,
+                &this,
+                removing,
+                &mut outside_repo,
+            );
+            Archived {
+                event: HostEvent::Captured { result, then },
+                outside_repo,
             }
         };
         match self.archive.submit(call, panicked) {
             Ok(()) => self.capture_calls += 1,
             Err(unanswered) => {
                 tracing::error!("the archive thread is gone");
-                if let Some(session) = &turn_end {
-                    lock(&self.queued_turn_ends).remove(session);
+                if let Some(key) = &turn_end {
+                    lock(&self.queued_turn_ends).remove(key);
                 }
-                follow_up.push_back(*unanswered);
+                follow_up.push_back(unanswered.event);
             }
         }
+    }
+
+    /// Where `job`'s agent keeps its transcripts: under the home its profile's env gives it (the env it was launched
+    /// with), else the host's. A session whose profile isn't recorded, or is no longer in the config, gets the host's.
+    fn agent_home(&self, job: &CaptureJob) -> Option<PathBuf> {
+        let none = BTreeMap::new();
+        let env = job
+            .profile
+            .as_deref()
+            .and_then(|name| self.settings.config.profile(name))
+            .map_or(&none, |profile| &profile.env);
+        self.settings
+            .agent_homes
+            .launched_with(job.agent, env, job.cwd.as_path())
     }
 
     /// A new id for a hook of `session`, and the name of the thread it runs on.
@@ -3020,27 +3079,40 @@ fn inspect_orphans(
         .collect())
 }
 
-/// Takes each of `jobs` in order, stopping at the first that fails: finds its repo's root commit and its commits since
-/// its base (`Worktrees`), then records its session and snapshots its transcript (`Archive`). Runs on the archive's
-/// worker thread.
-fn capture_all(
+/// Takes each of `jobs` (with its agent's home) in order, stopping at the first that fails: finds its repo's root commit
+/// and its commits since its base (`Worktrees`), then records its session and snapshots its transcript (`Archive`). A
+/// job whose cwd is in no repo is skipped and added to `outside_repo`, unless `removing` (then it fails). Runs on the
+/// archive's worker thread.
+fn capture_all<'a>(
     archive: &impl Archive,
     worktrees: &impl Worktrees,
-    jobs: &[CaptureJob],
+    jobs: impl IntoIterator<Item = (&'a CaptureJob, &'a Option<PathBuf>)>,
     at: jiff::Timestamp,
     this: &MachineId,
-    homes: &AgentHomes,
+    removing: bool,
+    outside_repo: &mut Vec<(SessionId, WorktreePath)>,
 ) -> Result<(), ArchiveError> {
-    for job in jobs {
-        let home = homes.of(job.agent).ok_or_else(|| {
+    for (job, home) in jobs {
+        let home = home.as_ref().ok_or_else(|| {
             ArchiveError::Refused(format!(
                 "{} sessions have no transcript",
                 job.agent.as_str()
             ))
         })?;
-        let repo = worktrees
-            .root_commit(&RepoRef::new(job.cwd.as_path()))
-            .map_err(|e| ArchiveError::Failed(format!("finding the repo at {}: {e}", job.cwd)))?;
+        let repo = match worktrees.root_commit(&RepoRef::new(job.cwd.as_path())) {
+            Ok(repo) => repo,
+            // Nothing to file it under. Only a removal waits on a capture, and it keeps its worktree on a failure.
+            Err(WorktreeError::NotARepo(_)) if !removing => {
+                outside_repo.push((job.session.clone(), job.cwd.clone()));
+                continue;
+            }
+            Err(e) => {
+                return Err(ArchiveError::Failed(format!(
+                    "finding the repo at {}: {e}",
+                    job.cwd
+                )));
+            }
+        };
         let commits = match &job.base {
             Some(base) => worktrees.commits_since(&job.cwd, base).map_err(|e| {
                 ArchiveError::Failed(format!("listing the commits in {}: {e}", job.cwd))
@@ -3048,7 +3120,7 @@ fn capture_all(
             None => Vec::new(),
         };
         let found = Found { repo, commits };
-        let (session, request) = job.requests(found, at, this, home.to_path_buf());
+        let (session, request) = job.requests(found, at, this, home.clone());
         archive.put_session(&session)?;
         archive.capture(&request)?;
     }

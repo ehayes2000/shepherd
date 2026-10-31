@@ -145,6 +145,55 @@ fn a_transcript_that_cannot_be_read_is_failed_not_missing() {
     assert_eq!(f.snapshots(&session.id), []);
 }
 
+/// A Codex rollout compressed in place: the hook's path is gone, its `.zst` is there. Captured from the `.zst`; one
+/// that can't be read is a failure, never "missing", though the path the hook named isn't there.
+#[test]
+fn a_compressed_codex_rollout_is_captured_and_an_unreadable_one_is_failed_not_missing() {
+    use shepherd_core::ports::{Archive, ArchiveError, ArchivedSession, CaptureRequest};
+    use std::os::unix::fs::PermissionsExt;
+    const THREAD: &str = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b";
+    let f = RealFixture::new();
+    let session = ArchivedSession {
+        agent: AgentKind::Codex,
+        agent_session_id: THREAD.to_owned(),
+        ..shepherd_testkit::contracts::archive::claude_session()
+    };
+    f.port.put_session(&session).unwrap();
+    // The archive crate's provisional fixture: that thread's rollout, compressed as Codex does it.
+    let rollout = format!("sessions/2026/10/30/rollout-2026-10-30T10-00-00-{THREAD}.jsonl");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../archive/tests/fixtures");
+    let path = f.agent_home(AgentKind::Codex).join(&rollout);
+    let compressed = PathBuf::from(format!("{}.zst", path.display()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::copy(
+        fixtures
+            .join("codex-compressed/home")
+            .join(format!("{rollout}.zst")),
+        &compressed,
+    )
+    .unwrap();
+    let plain = std::fs::read(fixtures.join("codex/home").join(&rollout)).unwrap();
+    let capture = |reason| CaptureRequest {
+        session: session.id.clone(),
+        at: session.created_at,
+        head: None,
+        reason,
+        commits: Vec::new(),
+        agent_home: f.agent_home(AgentKind::Codex),
+        transcript_path: path.clone(),
+    };
+    assert_eq!(f.port.capture(&capture(CaptureReason::TurnEnd)), Ok(()));
+    let snapshots = f.snapshots(&session.id);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].transcript, plain);
+
+    std::fs::set_permissions(&compressed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = f.port.capture(&capture(CaptureReason::BeforeRemove));
+    std::fs::set_permissions(&compressed, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(result, Err(ArchiveError::Failed(_))), "{result:?}");
+    assert_eq!(f.snapshots(&session.id).len(), 1);
+}
+
 /// The archive is opened on first use: an archive that can't be opened fails each call (and is tried again on the
 /// next), without stopping the host from starting.
 #[test]

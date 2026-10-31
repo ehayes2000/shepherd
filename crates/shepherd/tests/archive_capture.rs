@@ -32,9 +32,14 @@ const LIMIT: Duration = Duration::from_secs(10);
 const AGENT_SESSION: &str = "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e";
 
 fn transcript() -> PathBuf {
-    PathBuf::from(CLAUDE_HOME)
+    transcript_of(CLAUDE_HOME, AGENT_SESSION)
+}
+
+/// Where Claude Code, its home at `home`, keeps agent session `agent_session`'s transcript for the session's worktree.
+fn transcript_of(home: &str, agent_session: &str) -> PathBuf {
+    PathBuf::from(home)
         .join("projects/-wt-app-claude-1")
-        .join(format!("{AGENT_SESSION}.jsonl"))
+        .join(format!("{agent_session}.jsonl"))
 }
 
 /// A host whose workspace is `<tempdir>/app`, a subscribed client, and a Claude Code session running in its worktree,
@@ -54,6 +59,12 @@ struct Setup {
 
 impl Setup {
     fn new() -> Self {
+        Self::with(support::shell_default_config(), CLAUDE_HOME)
+    }
+
+    /// Like [`Setup::new`], the host resolving `config`, and the session's agent keeping its transcript under
+    /// `claude_home`.
+    fn with(config: shepherd_core::config::RawConfig, claude_home: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = std::fs::canonicalize(tmp.path()).unwrap();
         let app = base.join("app");
@@ -80,6 +91,7 @@ impl Setup {
             .worktrees(worktrees.clone())
             .archive(archive.clone())
             .program("claude", claude)
+            .config(config)
             .build(running, &exe)
             .start();
         let mut client = h.connect();
@@ -103,8 +115,9 @@ impl Setup {
         h.step();
         let id = new_session_id(&client.take(), &req);
         assert!(h.runtime().pty().is_running(&id));
+        let transcript = transcript_of(claude_home, AGENT_SESSION);
         archive.write_transcript(
-            transcript(),
+            &transcript,
             AgentKind::ClaudeCode,
             AGENT_SESSION,
             b"{\"type\":\"user\"}\n",
@@ -123,7 +136,7 @@ impl Setup {
         s.hook(json!({
             "hook_event_name": "SessionStart",
             "session_id": AGENT_SESSION,
-            "transcript_path": transcript(),
+            "transcript_path": transcript,
             "source": "startup",
         }));
         s
@@ -146,6 +159,33 @@ impl Setup {
 
     fn stop(&mut self) -> Value {
         json!({ "hook_event_name": "Stop", "session_id": AGENT_SESSION })
+    }
+
+    /// The agent's `/clear`: it ends agent session [`AGENT_SESSION`] and starts `agent_session` in the same process,
+    /// writing its transcript (`content`) next to the old one.
+    fn clear_to(&mut self, agent_session: &str, content: &[u8]) {
+        self.send_clear_to(agent_session, content);
+        self.h.step();
+    }
+
+    /// [`Setup::clear_to`], without waiting for what it starts on the workers.
+    fn send_clear_to(&mut self, agent_session: &str, content: &[u8]) {
+        let path = transcript_of(CLAUDE_HOME, agent_session);
+        self.archive
+            .write_transcript(&path, AgentKind::ClaudeCode, agent_session, content);
+        self.send_hook(json!({
+            "hook_event_name": "SessionEnd",
+            "session_id": AGENT_SESSION,
+            "transcript_path": transcript(),
+            "reason": "clear",
+        }));
+        self.send_hook(json!({
+            "hook_event_name": "SessionStart",
+            "session_id": agent_session,
+            "transcript_path": path,
+            "source": "clear",
+        }));
+        self.h.poll();
     }
 
     fn close(&mut self) {
@@ -226,6 +266,108 @@ fn a_turn_end_snapshots_the_conversation_with_the_sessions_commits() {
     assert_eq!(recorded.machine, s.h.machine());
     assert_eq!(recorded.cwd, s.path);
     assert!(recorded.base.is_some());
+}
+
+/// `/clear` starts a new agent session in the same shepherd session: the old conversation is captured before its path
+/// is replaced, and the next capture records the session under the new agent session id, which the archive checks the
+/// transcript against.
+#[test]
+fn a_new_agent_session_in_place_keeps_both_conversations() {
+    const NEW: &str = "99887766-5544-4332-8110-ffeeddccbbaa";
+    let mut s = Setup::new();
+    // No turn ended yet: only the `/clear` itself captures the first conversation.
+    s.archive.write_transcript(
+        transcript(),
+        AgentKind::ClaudeCode,
+        AGENT_SESSION,
+        b"first conversation\n",
+    );
+    s.clear_to(NEW, b"second conversation\n");
+    let stop = json!({ "hook_event_name": "Stop", "session_id": NEW });
+    s.hook(stop);
+    let snapshots = s.archive.snapshots();
+    let taken: Vec<(&[u8], PathBuf)> = snapshots
+        .iter()
+        .map(|s| (s.transcript.as_slice(), s.request.transcript_path.clone()))
+        .collect();
+    assert_eq!(
+        taken,
+        [
+            (&b"first conversation\n"[..], transcript()),
+            (
+                &b"second conversation\n"[..],
+                transcript_of(CLAUDE_HOME, NEW)
+            ),
+        ]
+    );
+    assert_eq!(
+        s.reasons(),
+        [CaptureReason::TurnEnd, CaptureReason::TurnEnd]
+    );
+    assert_eq!(s.archive.sessions()[&s.id].agent_session_id, NEW);
+}
+
+/// The old conversation's capture waiting on the worker doesn't swallow the new one's turn end: they are different
+/// transcripts.
+#[test]
+fn a_new_agent_sessions_turn_end_is_not_coalesced_with_the_old_ones() {
+    const NEW: &str = "99887766-5544-4332-8110-ffeeddccbbaa";
+    let mut s = Setup::new();
+    let hold = s.archive.hold_next();
+    let stop = s.stop();
+    s.send_hook(stop);
+    s.wait_held(&hold);
+    // The `/clear`'s capture of the old transcript waits behind the running one; then the new agent session's turn
+    // ends.
+    s.send_clear_to(NEW, b"second conversation\n");
+    s.send_hook(json!({ "hook_event_name": "Stop", "session_id": NEW }));
+    s.h.poll();
+    hold.release();
+    s.h.step();
+    let paths: Vec<PathBuf> = s
+        .archive
+        .snapshots()
+        .iter()
+        .map(|s| s.request.transcript_path.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        [transcript(), transcript(), transcript_of(CLAUDE_HOME, NEW)]
+    );
+}
+
+/// A profile that gives Claude Code a config dir of its own: its transcripts are there, not under the host's.
+#[test]
+fn a_profile_with_its_own_agent_home_is_captured_from_there() {
+    const OWN_HOME: &str = "/home/test/claude-work";
+    let mut config = support::shell_default_config();
+    let claude = shepherd_core::config::RawAgent {
+        env: Some([("CLAUDE_CONFIG_DIR".to_owned(), OWN_HOME.to_owned())].into()),
+        ..shepherd_core::config::RawAgent::default()
+    };
+    config.agents = Some([("claude".to_owned(), claude)].into());
+    let mut s = Setup::with(config, OWN_HOME);
+    let stop = s.stop();
+    s.hook(stop);
+    let snapshots = s.archive.snapshots();
+    assert_eq!(snapshots.len(), 1, "{snapshots:?}");
+    assert_eq!(snapshots[0].request.agent_home, PathBuf::from(OWN_HOME));
+    assert_eq!(
+        snapshots[0].request.transcript_path,
+        transcript_of(OWN_HOME, AGENT_SESSION)
+    );
+    // And so its worktree can go: the capture before removal works too.
+    s.close();
+    s.h.step();
+    assert!(!s.listed(), "removed");
+    assert_eq!(
+        s.reasons(),
+        [
+            CaptureReason::TurnEnd,
+            CaptureReason::Close,
+            CaptureReason::BeforeRemove
+        ]
+    );
 }
 
 #[test]

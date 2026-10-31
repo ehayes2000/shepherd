@@ -1,6 +1,7 @@
 //! The host archives agent conversations (T42): on turn end, on close, and before any worktree removal, which waits
 //! for that capture and keeps the worktree if it fails. Through the public `shepherd_core::host` API.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -119,6 +120,7 @@ fn job(host: &HostDriver, reason: CaptureReason) -> CaptureJob {
         cwd: path(),
         branch: Some(BranchName::new("s1")),
         base: Some(hash(BASE)),
+        profile: Some("claude".to_owned()),
     }
 }
 
@@ -509,7 +511,121 @@ fn an_orphan_is_removed_only_after_the_closed_sessions_that_ran_there_are_captur
     assert!(!removes(&failed));
 }
 
+// ---------- a new agent session in place (`/clear`) ----------
+
+const NEW_TRANSCRIPT: &str = "/home/test/.claude/projects/-wt-s1/def.jsonl";
+
+/// A `SessionStart` hook payload naming agent session `id` and its transcript at `path`, started from `source`.
+fn session_start(id: &str, path: &str, source: &str) -> Value {
+    json!({
+        "hook_event_name": "SessionStart",
+        "session_id": id,
+        "transcript_path": path,
+        "source": source,
+    })
+}
+
+#[test]
+fn a_new_agent_session_in_place_captures_the_old_transcript_before_its_hook_is_translated() {
+    for agent in [AgentKind::ClaudeCode, AgentKind::Codex] {
+        let mut host = running();
+        let commands = hook(
+            &mut host,
+            agent,
+            session_start("def", NEW_TRANSCRIPT, "clear"),
+        );
+        // The old agent session's job, built before the new `agent/started` replaces its id and path.
+        let old = job(&host, CaptureReason::TurnEnd);
+        assert_eq!(
+            captures(&commands),
+            [(&[old][..], &AfterCapture::Nothing)],
+            "{agent:?}"
+        );
+        let at = |want: fn(&HostCommand) -> bool| commands.iter().position(want);
+        let capture = at(|c| matches!(c, HostCommand::Capture { .. }));
+        let translate = at(|c| matches!(c, HostCommand::TranslateHook { .. }));
+        assert!(
+            capture.is_some() && capture < translate,
+            "{agent:?}: {commands:?}"
+        );
+    }
+}
+
+#[test]
+fn a_session_start_of_the_same_agent_session_captures_nothing() {
+    // A resume or a compaction names the agent session it already is.
+    let mut host = running();
+    for source in ["resume", "compact"] {
+        let start = session_start("abc", TRANSCRIPT, source);
+        assert_eq!(captures(&hook(&mut host, AgentKind::ClaudeCode, start)), []);
+    }
+}
+
+#[test]
+fn the_first_session_start_has_no_old_transcript_to_capture() {
+    let mut host = HostDriver::new();
+    host.select_workspace(REPO);
+    host.new_session_with("s1", claude_session_spec());
+    host.worktree_ready_at("s1", BASE);
+    let start = session_start("abc", TRANSCRIPT, "startup");
+    assert_eq!(captures(&hook(&mut host, AgentKind::ClaudeCode, start)), []);
+}
+
+#[test]
+fn after_a_new_agent_session_in_place_a_turn_end_captures_the_new_one() {
+    let mut host = running();
+    host.agent_started_with_transcript("s1", "claude-code", "def", NEW_TRANSCRIPT);
+    let commands = host.turn_ended("s1");
+    let expected = CaptureJob {
+        agent_session_id: "def".to_owned(),
+        transcript_path: PathBuf::from(NEW_TRANSCRIPT),
+        ..job(&host, CaptureReason::TurnEnd)
+    };
+    assert_eq!(
+        captures(&commands),
+        [(&[expected][..], &AfterCapture::Nothing)]
+    );
+}
+
 // ---------- agent homes ----------
+
+#[test]
+fn a_profile_that_sets_its_agents_home_is_where_that_agents_transcripts_are() {
+    let homes = AgentHomes::under(std::path::Path::new("/home/u"));
+    let cwd = std::path::Path::new("/wt/s1");
+    let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    };
+    let claude = |e: &BTreeMap<String, String>| homes.launched_with(AgentKind::ClaudeCode, e, cwd);
+    let codex = |e: &BTreeMap<String, String>| homes.launched_with(AgentKind::Codex, e, cwd);
+
+    // Nothing set: the host's own.
+    assert_eq!(claude(&env(&[])), Some(PathBuf::from("/home/u/.claude")));
+    assert_eq!(codex(&env(&[])), Some(PathBuf::from("/home/u/.codex")));
+    // Each agent's own variable, for that agent only.
+    let set = env(&[
+        ("CLAUDE_CONFIG_DIR", "/cfg/claude"),
+        ("CODEX_HOME", "/cfg/codex"),
+    ]);
+    assert_eq!(claude(&set), Some(PathBuf::from("/cfg/claude")));
+    assert_eq!(codex(&set), Some(PathBuf::from("/cfg/codex")));
+    let only_claude = env(&[("CLAUDE_CONFIG_DIR", "/cfg/claude")]);
+    assert_eq!(codex(&only_claude), Some(PathBuf::from("/home/u/.codex")));
+    // A relative one is relative to where the agent starts, as the agent reads it.
+    let relative = env(&[("CODEX_HOME", "state/codex")]);
+    assert_eq!(codex(&relative), Some(PathBuf::from("/wt/s1/state/codex")));
+    // A `HOME` of its own moves the defaults, under the agent's own variable.
+    let home = env(&[("HOME", "/other"), ("CODEX_HOME", "/cfg/codex")]);
+    assert_eq!(claude(&home), Some(PathBuf::from("/other/.claude")));
+    assert_eq!(codex(&home), Some(PathBuf::from("/cfg/codex")));
+    // Empty counts as unset, as `AgentHomes::resolve` reads the host's.
+    let empty = env(&[("CLAUDE_CONFIG_DIR", ""), ("HOME", "")]);
+    assert_eq!(claude(&empty), Some(PathBuf::from("/home/u/.claude")));
+    assert_eq!(homes.launched_with(AgentKind::Shell, &set, cwd), None);
+}
 
 #[test]
 fn agent_homes_default_under_the_users_home() {

@@ -277,6 +277,51 @@ fn a_worktree_kept_on_close_is_a_notice_once_live() {
     );
 }
 
+/// The host closes `s1`, its worktree removed, its `session/closed` carrying `note` (and, if given, `kept`).
+fn closed_noting(c: &mut ClientDriver, note: &str, kept: Option<&str>) {
+    let mut params = json!({ "worktree_removed": kept.is_none(), "note": note });
+    if let Some(kept) = kept {
+        params["worktree_kept"] = json!(kept);
+    }
+    let frame = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/closed", "params": params });
+    let source = shepherd_core::acpp::Source::new(shepherd_core::acpp::SourceKind::Shepherd, None);
+    c.host().append(Some("s1"), source, frame);
+}
+
+#[test]
+fn a_note_on_close_is_the_close_notice_once_live() {
+    let mut c = with_worktree_session();
+    closed_noting(&mut c, "no transcript was found to archive: gone", None);
+    c.sync();
+    assert_eq!(
+        c.client().notice(),
+        Some("closed shell-1: no transcript was found to archive: gone")
+    );
+}
+
+#[test]
+fn a_kept_worktree_is_the_close_notice_over_a_note() {
+    let mut c = with_worktree_session();
+    closed_noting(&mut c, "something else", Some("it has changes"));
+    c.sync();
+    assert_eq!(
+        c.client().notice(),
+        Some("kept the worktree of shell-1: it has changes")
+    );
+}
+
+#[test]
+fn a_note_on_close_in_the_catch_up_is_no_notice() {
+    let mut c = ClientDriver::new();
+    c.host().select_workspace("/src/app");
+    c.host().new_session("s1");
+    c.host().worktree_ready("s1");
+    closed_noting(&mut c, "no transcript was found to archive: gone", None);
+    c.connect();
+    c.sync();
+    assert_eq!(c.client().notice(), None);
+}
+
 #[test]
 fn a_worktree_kept_on_close_in_the_catch_up_is_no_notice() {
     let mut c = ClientDriver::new();

@@ -76,10 +76,15 @@ struct Setup {
 
 impl Setup {
     fn new(agent: AgentKind, agent_session: &str) -> Self {
+        Self::from_fixture(agent, agent_session, agent.as_str())
+    }
+
+    /// Like [`Setup::new`], the agent home installed from fixture `fixture` (`tests/fixtures/<fixture>/home`).
+    fn from_fixture(agent: AgentKind, agent_session: &str, fixture: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let home = tmp.path().join("agent-home");
-        copy_tree(&fixtures().join(agent.as_str()).join("home"), &home);
+        copy_tree(&fixtures().join(fixture).join("home"), &home);
         let archive = Archive::open(&tmp.path().join("archive")).unwrap();
         archive
             .put_session(&Session {
@@ -106,6 +111,11 @@ impl Setup {
 
     fn codex() -> Self {
         Self::new(AgentKind::Codex, CODEX_SESSION)
+    }
+
+    /// The Codex fixture after Codex compressed its rollout in place (`codex-compressed`).
+    fn codex_compressed() -> Self {
+        Self::from_fixture(AgentKind::Codex, CODEX_SESSION, "codex-compressed")
     }
 
     /// A path in the tempdir, outside the agent home.
@@ -357,6 +367,185 @@ fn codex_capture_accepts_a_reverted_threads_rollout_name() {
     assert_eq!(s.files(id)[0].2, b"{}\n");
 }
 
+// ---------- Codex rollouts compressed in place ----------
+
+/// The fixture's rollout, compressed in place as Codex does it after 7 days.
+const CODEX_ROLLOUT_ZST: &str = "sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b.jsonl.zst";
+
+#[test]
+fn the_compressed_fixture_is_the_plain_rollout_compressed() {
+    let compressed = fs::read(
+        fixtures()
+            .join("codex-compressed/home")
+            .join(CODEX_ROLLOUT_ZST),
+    )
+    .unwrap();
+    assert_eq!(
+        zstd::decode_all(compressed.as_slice()).unwrap(),
+        fixture_bytes("codex", CODEX_ROLLOUT)
+    );
+}
+
+#[test]
+fn a_rollout_compressed_in_place_is_captured_as_the_rollout_it_holds() {
+    // The hook named the plain rollout before Codex compressed it: the payload's path is gone, its `.zst` is there.
+    let s = Setup::codex_compressed();
+    let path = path_field(&payload("codex", "Stop", &s.home), "transcript_path");
+    assert!(!path.exists());
+    let id = s.capture(&path).unwrap();
+    assert_eq!(
+        s.files(id),
+        vec![(
+            FileRole::Rollout,
+            s.real(CODEX_ROLLOUT),
+            fixture_bytes("codex", CODEX_ROLLOUT)
+        )]
+    );
+}
+
+#[test]
+fn a_compressed_rollouts_own_path_is_captured_too() {
+    let s = Setup::codex_compressed();
+    let id = s.capture(&s.home.join(CODEX_ROLLOUT_ZST)).unwrap();
+    assert_eq!(
+        s.files(id),
+        vec![(
+            FileRole::Rollout,
+            s.real(CODEX_ROLLOUT),
+            fixture_bytes("codex", CODEX_ROLLOUT)
+        )]
+    );
+}
+
+#[test]
+fn a_plain_rollout_is_read_before_a_compressed_one_beside_it() {
+    // Codex prefers the plain file (it decompresses a rollout back to plain to append to it).
+    let s = Setup::codex();
+    let stale = zstd::encode_all(&b"stale\n"[..], 3).unwrap();
+    fs::write(s.home.join(CODEX_ROLLOUT_ZST), stale).unwrap();
+    for path in [CODEX_ROLLOUT, CODEX_ROLLOUT_ZST] {
+        let id = s.capture(&s.home.join(path)).unwrap();
+        assert_eq!(
+            s.files(id)[0].2,
+            fixture_bytes("codex", CODEX_ROLLOUT),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_rollout_compressed_since_it_was_captured_adds_no_blob() {
+    let s = Setup::codex();
+    let path = s.home.join(CODEX_ROLLOUT);
+    s.capture(&path).unwrap();
+    assert_eq!(s.archive.blob_writes(), 1);
+    let compressed = zstd::encode_all(fs::read(&path).unwrap().as_slice(), 3).unwrap();
+    fs::write(s.home.join(CODEX_ROLLOUT_ZST), compressed).unwrap();
+    fs::remove_file(&path).unwrap();
+    let id = s.capture(&path).unwrap();
+    assert_eq!(s.archive.blob_writes(), 1);
+    assert_eq!(s.files(id)[0].1, s.real(CODEX_ROLLOUT));
+}
+
+#[test]
+fn a_compressed_rollout_that_inflates_past_the_limit_is_refused_without_inflating_it() {
+    let s = Setup::codex_compressed();
+    let bomb = zstd::encode_all(&vec![0u8; 8 << 20][..], 19).unwrap();
+    assert!(bomb.len() < 4096, "{} bytes", bomb.len());
+    fs::write(s.home.join(CODEX_ROLLOUT_ZST), &bomb).unwrap();
+    let limits = CaptureLimits {
+        max_bytes: 4096,
+        ..CaptureLimits::default()
+    };
+    assert_eq!(
+        s.refused_with(&s.home.join(CODEX_ROLLOUT), limits),
+        CaptureError::TooLarge {
+            path: s.real(CODEX_ROLLOUT_ZST),
+            max: 4096
+        }
+    );
+    assert!(
+        s.archive.capture_bytes_read() <= 4097,
+        "inflated {} bytes",
+        s.archive.capture_bytes_read()
+    );
+}
+
+#[test]
+fn a_compressed_rollout_bigger_than_the_limit_is_refused_unread() {
+    let s = Setup::codex_compressed();
+    let zst = s.home.join(CODEX_ROLLOUT_ZST);
+    let size = fs::metadata(&zst).unwrap().len();
+    let limits = CaptureLimits {
+        max_bytes: size - 1,
+        ..CaptureLimits::default()
+    };
+    assert!(matches!(
+        s.refused_with(&s.home.join(CODEX_ROLLOUT), limits),
+        CaptureError::TooLarge { .. }
+    ));
+    assert_eq!(s.archive.capture_bytes_read(), 0);
+}
+
+#[test]
+fn a_corrupt_compressed_rollout_is_refused() {
+    let s = Setup::codex_compressed();
+    let zst = s.home.join(CODEX_ROLLOUT_ZST);
+    let mut truncated = fs::read(&zst).unwrap();
+    truncated.truncate(truncated.len() / 2);
+    for bytes in [b"not zstd at all\n".to_vec(), truncated] {
+        fs::write(&zst, &bytes).unwrap();
+        let err = s.refused(&s.home.join(CODEX_ROLLOUT));
+        assert!(
+            matches!(&err, CaptureError::Corrupt { path, .. } if *path == s.real(CODEX_ROLLOUT_ZST)),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_symlinked_compressed_rollout_is_refused() {
+    let s = Setup::codex_compressed();
+    let zst = s.home.join(CODEX_ROLLOUT_ZST);
+    let moved = s.outside("rollout.jsonl.zst");
+    fs::rename(&zst, &moved).unwrap();
+    symlink(&moved, &zst).unwrap();
+    assert_eq!(
+        s.refused(&s.home.join(CODEX_ROLLOUT)),
+        CaptureError::Symlink(s.real(CODEX_ROLLOUT_ZST))
+    );
+}
+
+#[test]
+fn a_compressed_rollout_of_another_thread_is_refused() {
+    let s = Setup::codex_compressed();
+    let other = "sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a2b3c-0000-7000-8000-00000000beef.jsonl";
+    fs::copy(
+        s.home.join(CODEX_ROLLOUT_ZST),
+        s.home.join(format!("{other}.zst")),
+    )
+    .unwrap();
+    for path in [other.to_owned(), format!("{other}.zst")] {
+        assert!(
+            matches!(
+                s.refused(&s.home.join(&path)),
+                CaptureError::NotTheSessionsTranscript { .. }
+            ),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_rollout_missing_in_both_forms_is_an_error_naming_the_plain_one() {
+    let s = Setup::codex_compressed();
+    fs::remove_file(s.home.join(CODEX_ROLLOUT_ZST)).unwrap();
+    assert!(matches!(
+        s.refused(&s.home.join(CODEX_ROLLOUT)),
+        CaptureError::Io { path, .. } if path == s.real(CODEX_ROLLOUT)
+    ));
+}
+
 // ---------- refusals ----------
 
 #[test]
@@ -599,7 +788,9 @@ fn a_file_that_is_not_a_rollout_is_refused() {
         format!("{CODEX_SESSION}.jsonl"),
         format!("rollout-{CODEX_SESSION}.jsonl"),
         format!("rollout-2026-13-30T10-00-00-{CODEX_SESSION}.jsonl"),
-        format!("rollout-2026-10-30T10-00-00-{CODEX_SESSION}.jsonl.zst"),
+        format!("rollout-2026-13-30T10-00-00-{CODEX_SESSION}.jsonl.zst"),
+        format!("rollout-2026-10-30T10-00-00-{CODEX_SESSION}.zst"),
+        format!("rollout-2026-10-30T10-00-00-{CODEX_SESSION}.jsonl.gz"),
     ] {
         let path = s.home.join("sessions/2026/10/30").join(&name);
         fs::write(&path, b"{}\n").unwrap();

@@ -18,7 +18,8 @@
 //! ([`Client::close_check`]). If it loses nothing, confirming lets the host remove it (if that is still true when it
 //! closes); if it would lose work, the confirmation lists what and offers to remove it anyway or keep it, and confirming
 //! keeps it. A session is listed while its worktree is being removed, and can't be closed again. When the host keeps a
-//! worktree it tried to remove, the reason is a notice (live entries only, not the catch-up).
+//! worktree it tried to remove, the reason is a notice, and otherwise so is any note on how closing went, e.g. that no
+//! transcript was found to archive (live entries only, not the catch-up).
 //!
 //! Builds (spike T36): the hello carries this client's [`BuildId`], and the answer the host's and what is installed at
 //! its path. A stale host (the installed build is this client's) is asked to update itself in place
@@ -1846,7 +1847,7 @@ impl Client {
         if let Some(id) = env.session() {
             feed.states.entry(id.clone()).or_default().apply(env);
         }
-        self.notice_kept_worktree(env, live);
+        self.notice_closed(env, live);
         let wanted: Vec<SessionId> = self
             .sessions
             .iter()
@@ -1861,23 +1862,28 @@ impl Client {
         commands
     }
 
-    /// A notice saying why the host kept the worktree of a session it closed, for a `live` `session/closed` that says.
-    fn notice_kept_worktree(&mut self, env: &Envelope, live: bool) {
+    /// The close notice of a `live` `session/closed`: why the host kept the session's worktree, if it says, else its
+    /// note.
+    fn notice_closed(&mut self, env: &Envelope, live: bool) {
         let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
             return;
         };
         let ShepherdFrame::SessionClosed(closed) = message.body() else {
             return;
         };
-        let (Some(why), true) = (&closed.worktree_kept, live) else {
+        if !live {
             return;
-        };
+        }
         let name = self
             .sessions
             .iter()
             .find(|s| &s.id == id)
             .map_or(id.as_str(), |s| s.name.as_str());
-        self.set_notice(format!("kept the worktree of {name}: {why}"));
+        match (&closed.worktree_kept, &closed.note) {
+            (Some(why), _) => self.set_notice(format!("kept the worktree of {name}: {why}")),
+            (None, Some(note)) => self.set_notice(format!("closed {name}: {note}")),
+            (None, None) => {}
+        }
     }
 
     /// An alert for each of host `at`'s sessions that wants the user and wasn't in `wanted`, after an entry from it, if
