@@ -10,19 +10,21 @@
 //!   `agent_id` of `SpawnAgentResult`). That pairs the call's task with the subagent exactly: kept for a
 //!   `SubagentStart` still to come, in this turn or a later one, or sent as a corrective `subagent/started` for one
 //!   already announced this turn (the fold replaces a subagent's task with a repeated start's).
-//! - A `SubagentStart` whose id no remembered call named guesses its task only when exactly one call of its type is
-//!   a candidate and that candidate is an open call. Candidates are the open calls not guessed yet, and the
-//!   completed calls no start has claimed (their result named no id, or one no start has used yet, e.g. in another
-//!   format). Else it starts without a task. Only a failed call stops being a candidate.
+//! - A `SubagentStart` for a subagent already started this turn keeps the task it has. One whose id no remembered
+//!   call named guesses its task only when exactly one call of its type is a candidate and that candidate is an open
+//!   call. Candidates are the open calls not guessed yet, and the completed calls no start has claimed (their result
+//!   named no id, or one no start has used yet, e.g. in another format). Else it starts without a task. A failed call
+//!   stops being a candidate at once; a completed one stays until a start claims its id, or it is forgotten (its
+//!   subagent's `SubagentStop`, the [`MAX_NAMED`] bound, or the turn's end for an id-less one).
 //! - A guessed call whose result then names another subagent retracts the guess with a corrective start without a
-//!   task.
+//!   task, unless that subagent's task has since been corrected to another call's.
+//! - Hooks fired inside a subagent carry its `agent_id` and `agent_type`; its permission requests and questions block
+//!   it, and its next tool activity unblocks it.
+//! - `SubagentStop { agent_id }` finishes it.
 //!
 //! So a subagent's task is its own call's, or none, with two exceptions: briefly, a guess its call later retracts;
 //! and a subagent whose call fell out of the [`MAX_NAMED`] remembered ones, or completed without an id in an earlier
 //! turn, can take a guess from a later call.
-//! - Hooks fired inside a subagent carry its `agent_id` and `agent_type`; its permission requests and questions block
-//!   it, and its next tool activity unblocks it.
-//! - `SubagentStop { agent_id }` finishes it.
 
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +134,7 @@ impl Subagents {
                 Some(_) => {
                     if let Some(wrong) = self.started.iter_mut().find(|s| &s.id == guessed)
                         && wrong.task.is_some()
+                        && wrong.task == spawn.task
                     {
                         wrong.task = None;
                         out.push(started_frame(wrong));
@@ -164,9 +167,12 @@ impl Subagents {
     /// `SubagentStart`: the started frame, with the task of the spawning call that named it, or of the one candidate
     /// call of its type.
     pub(crate) fn start(&mut self, id: &str, agent_type: &str) -> Frame {
-        let task = match self.named.iter().position(|n| n.id.as_deref() == Some(id)) {
-            Some(i) => self.named.remove(i).task,
-            None => self.guess(id, agent_type),
+        let named = self.named.iter().position(|n| n.id.as_deref() == Some(id));
+        let task = match (named, self.started.iter().find(|s| s.id == id)) {
+            (Some(i), _) => self.named.remove(i).task,
+            // Started again: it keeps the task it has, and takes no guess.
+            (None, Some(earlier)) => earlier.task.clone(),
+            (None, None) => self.guess(id, agent_type),
         };
         self.blocked.retain(|b| b.id != id);
         self.started.retain(|s| s.id != id);

@@ -434,6 +434,61 @@ fn a_late_codex_subagent_starts_with_its_own_calls_task() {
 }
 
 #[test]
+fn a_second_start_for_a_subagent_keeps_its_task() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PostToolUse.Agent.background"),
+        cc!("SubagentStart"),
+    ]);
+    run.hook(cc!("SubagentStart"));
+    assert_eq!(run.only().task(), Some("Find factorial callers"));
+}
+
+#[test]
+fn a_second_start_for_a_subagent_takes_no_guess_from_an_open_call() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PostToolUse.Agent.background"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Agent.second"),
+        cc!("SubagentStart"),
+    ]);
+    assert_eq!(run.only().task(), Some("Find factorial callers"));
+    // The open call was left unguessed for its own subagent.
+    run.hook(cc!("SubagentStart.second"));
+    assert_eq!(run.subagents()[1].task(), Some("Find fibonacci callers"));
+}
+
+#[test]
+fn a_retraction_spares_a_task_already_corrected_to_its_own_call() {
+    // agent-8b4c takes a guess of the first call; agent-7f3a starts while two calls are open (no guess). The first
+    // call names agent-7f3a: 7f3a gets its task, and 8b4c's guess is retracted. The second call then names 8b4c.
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("SubagentStart.second"),
+        cc!("PreToolUse.Agent.second"),
+        cc!("SubagentStart"),
+        cc!("PostToolUse.Agent"),
+        cc!("PostToolUse.Agent.second"),
+    ]);
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(
+        tasks,
+        [
+            ("agent-8b4c", Some("Find fibonacci callers")),
+            ("agent-7f3a", Some("Find factorial callers"))
+        ]
+    );
+}
+
+#[test]
 fn a_guess_its_call_disowns_is_retracted() {
     // The one open call is guessed for the first start of its type, then its result names another subagent.
     let mut run = Run::claude();
