@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T46 CLI client: list and start sessions | [automation](features/automation.md) | fixing | task/t46-cli-sessions @ d49c4bd | 1 | round 1 CHANGES: CLI hello cwd sets host workspace (reproduced); Incompatible host stalls 60s; peer catch-up deadline; status mapping; PrJson; relative cwd for peers |
-| T62 Machine colors | [multi-machine](features/multi-machine.md) | review | task/t62-machine-colors @ 8c003aa |  | built; color override travels in the hello (PM ok); 6-color palette |
+| T62 Machine colors | [multi-machine](features/multi-machine.md) | merging | task/t62-machine-colors @ 8c003aa | 1 | APPROVE; 2 minors → F56 |
 | T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | review | task/t54-subagent-events @ 99d6dfa |  | built; added subagent/working frame + blocked.agent_type (PM ok); turn end drops background subagents (noted for T55/T44) |
 
 ## Ready to start

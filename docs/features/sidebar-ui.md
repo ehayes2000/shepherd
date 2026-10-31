@@ -211,5 +211,7 @@ session's status disappears when it's selected.
 acceptance:
 - Every status glyph is readable on both the plain and the selected row background (a test over every glyph and both
   backgrounds, like T62's machine-color readability test); snapshot of a selected starting session.
-scope: crates/tui
+- From T62's review: build `UnknownMachineColor`'s list of names from `MachineColor::ALL` (core config.rs ~139), and pin
+  one id that maps to LightMagenta in `the_color_of_an_id_is_pinned_across_builds`.
+scope: crates/tui, crates/core
 
