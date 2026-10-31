@@ -14,7 +14,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | merging | task/f50-flush-tests @ d099b95 | 3 | round 3: reviewer-specified lower bound added, mutation shown on unix+iroh; merged without a 4th review |
 
 ## Ready to start
 
@@ -48,7 +47,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 9 | 1 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
-| [Host hot-swap](features/host-hot-swap.md) | M3 | 5 | 2 | A new build replaces the running host in place without stopping sessions |
+| [Host hot-swap](features/host-hot-swap.md) | M3 | 6 | 1 | A new build replaces the running host in place without stopping sessions |
 | [Multi-machine](features/multi-machine.md) | M4 | 7 | 6 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
