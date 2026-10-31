@@ -14,8 +14,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
-| T39 | Archive index | merging | task/t39-archive-index @ 985b5ef | 4 | approved; PM keeps both close lock and index.live (defence in depth, each alone sufficient) |
-| T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
+| T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
+| T40 | Capture transcripts from Claude Code and Codex | building | task/t40-archive-capture @ 8d11fb1 | 0 |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
 | T42 | Archive port and host capture | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
@@ -80,6 +80,9 @@ acceptance:
 scope: crates/archive, crates/core (hook payload parsing), crates/testkit
 notes: (binding) Builders never run the real `claude`/`codex` and never read the user's `~/.claude*` or `~/.codex`. The
 first fixtures are hand-built from the documented formats and marked provisional; T44's opt-in run re-records them.
+The agents' homes (Claude's config dir, `CODEX_HOME`) are parameters to capture, like T41's `agent_home`; the crate never
+reads `$HOME` or env. "The agent's own transcript directory" is resolved under the given home after canonicalizing, and
+symlinks are refused on every component below it. Hook payload parsing in core stays pure (the path is data).
 
 ### T41: Restore transcripts for a target cwd
 depends: T40

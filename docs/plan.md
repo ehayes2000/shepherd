@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | merging | task/t39-archive-index @ 985b5ef | 4 | approved; PM keeps both close lock and index.live (defence in depth, each alone sufficient) |
+| T40 Capture transcripts from Claude Code and Codex | [conversation-archive](features/conversation-archive.md) | building | task/t40-archive-capture @ 8d11fb1 | 0 |  |
 | F46 Fake claude/codex scripts are fresh executables (macOS scan stall) | [host-and-client](features/host-and-client.md) | building | task/f44-f46-shepherd-tests @ 950354f | 0 |  |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | building | task/f44-f46-shepherd-tests @ 950354f | 0 |  |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
@@ -36,7 +36,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Conversation archive](features/conversation-archive.md) | M3+ | 1 | 6 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
+| [Conversation archive](features/conversation-archive.md) | M3+ | 2 | 5 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 8 | 2 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
