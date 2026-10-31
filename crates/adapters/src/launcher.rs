@@ -496,6 +496,29 @@ wait
                 .collect()
         }
 
+        /// Whether process group `pgid` has a live member launched through this fixture: a stand-in, or a subshell of
+        /// one such as its watchdog, whose arguments name this fixture's fifo. (`ps` prints each process on one line,
+        /// escaping the newlines in a stand-in's script.)
+        fn group_is_ours(&self, pgid: i32) -> bool {
+            let fifo = self.fifo();
+            let Some(fifo) = fifo.to_str() else {
+                return false;
+            };
+            let Ok(out) = std::process::Command::new("ps")
+                .args(["-A", "-o", "pgid=,stat=,args="])
+                .output()
+            else {
+                return false;
+            };
+            String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+                let mut words = line.split_whitespace();
+                let (Some(group), Some(stat)) = (words.next(), words.next()) else {
+                    return false;
+                };
+                group.parse() == Ok(pgid) && !stat.contains('Z') && words.any(|w| w == fifo)
+            })
+        }
+
         /// Signals the stand-in `pid` until it reports that it is alive, or `None` if it never does. Repeated,
         /// because `sh` can lose a trapped signal that arrives while it forks (between `started` and `wait`).
         fn ask_alive(&mut self, pid: i32) -> Option<Report> {
@@ -536,10 +559,14 @@ wait
             for pid in self.recorded_pids() {
                 // Each stand-in leads its own process group (`setsid`), its watchdog included, so this reaches the
                 // stand-in itself too. Killed until the group is empty, as a precaution (untested) against a child
-                // forked while the group is signalled. Bounded: the watchdog ends anything left.
+                // forked while the group is signalled. Bounded: the watchdog ends anything left. Only while the group is
+                // still ours: once it is gone, its id may lead someone else's group, such as a git another test started
+                // (F48).
                 let deadline = std::time::Instant::now() + TIMEOUT;
-                // SAFETY: plain syscall.
-                while unsafe { libc::kill(-pid, libc::SIGKILL) } == 0
+                while self.group_is_ours(pid)
+                    // SAFETY: plain syscall, on a group that has one of our stand-ins in it, so its id can't have been
+                    // reused (short of all of it dying and the id being handed out in between).
+                    && unsafe { libc::kill(-pid, libc::SIGKILL) } == 0
                     && std::time::Instant::now() < deadline
                 {
                     std::thread::sleep(Duration::from_millis(10));
@@ -704,6 +731,31 @@ wait
         assert_eq!(pids.len(), 1, "{pids:?}");
         drop(f);
         assert!(group_gone(pids[0]), "stand-in {} left running", pids[0]);
+    }
+
+    /// A stand-in whose group is gone may have its pid handed to another process leading a group of its own (as a git
+    /// another test runs does) by the time the fixture is dropped: the drop leaves that group alone (F48).
+    #[test]
+    fn a_dropped_fixture_spares_a_group_that_took_a_dead_stand_ins_pid() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let f = StandInFixture::new();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(
+            f.fifo().with_extension("pids"),
+            format!("{}\n", stranger.id()),
+        )
+        .unwrap();
+        drop(f);
+        // A SIGKILL the drop sent would be acted on before this SIGTERM.
+        let id = libc::pid_t::try_from(stranger.id()).unwrap();
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = stranger.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
     }
 
     /// A stand-in nobody stops, as when its test process dies without dropping the fixture, ends with its lifetime,
