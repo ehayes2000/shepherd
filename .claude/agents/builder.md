@@ -42,6 +42,8 @@ needs `--continue`, let the hook run; if main moved only docs, say so instead of
 Never run `rm` on a glob or a variable path (`rm -f $DIR/*`, `rm -rf $D`): the user's permission check flags it as unsafe.
 - Load rounds: `scripts/load-round.sh [-n COPIES] [-r ROUNDS] BINARY [TEST ARGS...]` writes every run's logs to a fresh
   directory, so there is nothing to clear first. Run one load round at a time, never several binaries' rounds at once.
+- Name every scratch file and dir uniquely (task id plus `mktemp`), including commit-message files: other agents share
+  the scratchpad, and one overwrote another's commit message on 2026-10-31.
 - Deleting something you created: `scripts/scratch-rm.sh PATH...` (full paths, no globs, temp dirs only).
 - Scratch worktrees: `git worktree remove --force <path>`.
 

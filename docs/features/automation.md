@@ -14,7 +14,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T45 | Headless UI test harness | building | task/t45-ui-harness |  |  |
+| T45 | Headless UI test harness | review | task/t45-ui-harness @ bf71348 |  | built; harness in tui tests (testkit can't depend on tui); proptest found F55 |
 | T46 | CLI client: list and start sessions | ready |  |  |  |
 | T47 | Prompt an agent and wait for its reply | todo |  |  |  |
 | T48 | Host-owned layout: pages and splits in core | ready |  |  |  |

@@ -14,9 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T45 Headless UI test harness | [automation](features/automation.md) | building | task/t45-ui-harness |  |  |
-| T42b Capture across `/clear` and compressed Codex rollouts | [conversation-archive](features/conversation-archive.md) | fixing | task/t42b-capture-edges @ 8b30a11 | 1 | round 1 CHANGES: unbounded /clear queue; removing guard untested; zstd window cap; compress race → Missing; compact check |
-| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | review | task/f50-flush-tests @ 6a9bc36 | 1 | round 1 fixed (fake gives up after CLOSE_FLUSH, like real writers); 12-copy 12/12 |
+| T45 Headless UI test harness | [automation](features/automation.md) | review | task/t45-ui-harness @ bf71348 |  | built; harness in tui tests (testkit can't depend on tui); proptest found F55 |
+| T42b Capture across `/clear` and compressed Codex rollouts | [conversation-archive](features/conversation-archive.md) | merging | task/t42b-capture-edges @ a4cbc57 | 3 | round 3 APPROVE |
+| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | review | task/f50-flush-tests @ d099b95 | 2 | round 2 fixed; round 3 review (narrow); 12-copy 12/12 |
 
 ## Ready to start
 
@@ -52,7 +52,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Multi-machine](features/multi-machine.md) | M4 | 7 | 6 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
-| [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
+| [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 1 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Status page](features/status-page.md) | M5 | 0 | 3 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
 | [Subagents](features/subagents.md) | M5 | 0 | 3 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |

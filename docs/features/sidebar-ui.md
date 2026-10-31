@@ -18,6 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F29 | Workspace switcher list scrolls and fits the window | done | a27fa98 | 1 | cut/cut_left count chars not columns (→ F30) |
 | F30 | Truncation measures display width | done | faa7403 | 2 | width-0 cut returned 1 column; added helper property table |
 | F34 | The client marks keys that can answer a dialog | done | 274b3e2 | 1 | mixed-version: new client's `answer` not counted by an F31 host (accepted) |
+| F55 | A new session can push the selection out of view | todo |  |  |  |
 
 ## Specs
 
@@ -185,3 +186,17 @@ acceptance:
 - The tui tags key input that can answer (Enter, Esc, Ctrl-C, printable) as `kind: answer` (additive) regardless of encoding
   mode; the quiet watch counts `answer` and `paste`. Table tests over key events × keyboard modes (legacy, kitty flags 1/8).
 scope: crates/core, crates/tui
+
+### F55: A new session can push the selection out of view
+depends: T45
+touches: core::client
+goal: Found by T45's property test (seed 1592590405): when the host lists a new session above the selection, the sidebar
+doesn't scroll the selection back into view, contradicting "the selection keeps itself visible".
+acceptance:
+- Regression test first in core (fix-bug): a full sidebar with the selection at the bottom, the host lists a new session,
+  and the selection stays visible.
+- Re-fit the scroll whenever the session list changes (new, closed, renamed reordering), not only on selection or resize.
+- Remove the known-gap exemption in `crates/tui/tests/ui/invariants.rs` (~150) so the property test checks host-made
+  sessions too, and it passes.
+scope: crates/core, crates/tui (tests)
+

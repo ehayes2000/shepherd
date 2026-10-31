@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
 | F47 | A swap can lose its Accepted answer before exec | done | 98b73d3 | 2 | round 2 APPROVE; minors filed to F50; 12-copy round deferred (machine slow) |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
-| F50 | Tighten F47's flush tests | review | task/f50-flush-tests @ 6a9bc36 | 1 | round 1 fixed (fake gives up after CLOSE_FLUSH, like real writers); 12-copy 12/12 |
+| F50 | Tighten F47's flush tests | review | task/f50-flush-tests @ d099b95 | 2 | round 2 fixed; round 3 review (narrow); 12-copy 12/12 |
 
 ## Specs
 
@@ -149,7 +149,8 @@ acceptance:
 - `FakeClient::is_disconnected` (crates/shepherd/tests/support/mod.rs ~845) also returns true when the host closed with
   lines unread, so the hotswap tests' `assert!(client.is_disconnected())` (hotswap.rs ~171, ~194) pass even if the fake
   never cuts the client off. The two new hotswap tests assert the disconnect really happened (a stricter helper or a
-  delivered `Disconnected`); breaking the fake's cut-off on link drop makes a hotswap test fail.
+  delivered `Disconnected`); breaking the fake's cut-off (on link drop, or by giving up at the flush bound) makes a hotswap
+  test fail. (Amended in round 2: once the fake gives up like the real links, either path cuts the client off.)
 - The unix link contract's second `flush_closed(QUIET)` expecting `TimedOut` (contracts/link.rs ~756) depends on finishing
   within `CLOSE_FLUSH` of the close; restructure so a scheduling stall can't flip it (check right after `close`, or accept
   either outcome once `CLOSE_FLUSH` has passed).

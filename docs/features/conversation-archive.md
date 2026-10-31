@@ -18,7 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | done | 9a91698 | 3 | round 3 APPROVE |
-| T42b | Capture across `/clear` and compressed Codex rollouts | fixing | task/t42b-capture-edges @ 8b30a11 | 1 | round 1 CHANGES: unbounded /clear queue; removing guard untested; zstd window cap; compress race → Missing; compact check |
+| T42b | Capture across `/clear` and compressed Codex rollouts | merging | task/t42b-capture-edges @ a4cbc57 | 3 | round 3 APPROVE |
 | F54 | Record each session's launch agent home | todo |  |  |  |
 | T43 | `shepherd archive` CLI | done | f594ec9 | 2 | round 2 APPROVE; argv faithful-check test → T44 |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
