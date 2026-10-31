@@ -15,7 +15,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | building | task/t31a-iroh-tunnel |  |  |
-| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | merging | task/f48-git-signal-death @ bf08a57 | 2 | round 2 APPROVE; not reproduced (accepted); signal death → Other; fixture drops prove ownership; r4 24-copy 0 failures. Minor: ps retries have no pause (F51) |
 
 ## Ready to start
 
@@ -31,6 +30,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
+| F51 Test cleanup never signals a pid it can't prove is ours | [worktrees](features/worktrees.md) | todo | F48 |
 
 ## Features
 
@@ -46,7 +46,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
-| [Workspaces and worktrees](features/worktrees.md) | M3 | 16 | 3 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
+| [Workspaces and worktrees](features/worktrees.md) | M3 | 17 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 
 <!-- tasks:end -->
 
