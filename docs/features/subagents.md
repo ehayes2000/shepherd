@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | review | task/t54-subagent-events @ 567f041 | 1 | round 1 fixed: pairing by agentId/agent_id; round 2 review |
+| T54 | Subagent lifecycle in the event log | fixing | task/t54-subagent-events @ 567f041 | 2 | round 2 CHANGES: id-less completed spawn makes the fallback guess give another spawn's task |
 | T55 | Subagent tree in the sidebar | todo |  |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 

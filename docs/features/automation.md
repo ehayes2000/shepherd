@@ -15,8 +15,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T45 | Headless UI test harness | done | caa414b | 1 | APPROVE; exemption wider than gap (removed by F55) |
-| T46 | CLI client: list and start sessions | merging | task/t46-cli-sessions @ da0404b | 2 | round 2 APPROVE; 2 minors → T47 |
-| T47 | Prompt an agent and wait for its reply | todo |  |  |  |
+| T46 | CLI client: list and start sessions | done | 627e4d3 | 2 | round 2 APPROVE; 2 minors → T47 |
+| T47 | Prompt an agent and wait for its reply | building | task/t47-prompt-wait |  |  |
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
 | T49 | Render pages and split panes | building | task/t49-render-layout |  |  |
 | T50 | `shepherd ui` CLI and screenshots | todo |  |  |  |
