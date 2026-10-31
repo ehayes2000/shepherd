@@ -1,0 +1,25 @@
+[package]
+name = "shepherd-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Test-only fault injection (decision 0015): `BlobStore::put` exits the process between writing the temp file and
+# renaming it, when the content starts with `CRASH_BEFORE_RENAME`. Inert for any other content.
+fault-injection-crash-before-rename = []
+
+[dependencies]
+sha2.workspace = true
+zstd.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The crate's own tests turn the fault injection on; normal builds of anything that depends on it never do.
+shepherd-archive = { path = ".", features = ["fault-injection-crash-before-rename"] }
+tempfile.workspace = true
+# Tests only: a child process sets a strict umask to prove created modes are exact.
+libc.workspace = true
+
+[lints]
+workspace = true

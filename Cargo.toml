@@ -13,6 +13,7 @@ shepherd-tui = { path = "crates/tui" }
 shepherd-term = { path = "crates/term" }
 shepherd-adapters = { path = "crates/adapters" }
 shepherd-testkit = { path = "crates/testkit" }
+shepherd-archive = { path = "crates/archive" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
@@ -25,6 +26,7 @@ portable-pty = "0.9"
 libc = "0.2"
 toml = "0.9"
 sha2 = "0.10"
+zstd = { version = "0.13", default-features = false }
 tempfile = "3"
 wait-timeout = "0.2"
 unicode-segmentation = "1.13"

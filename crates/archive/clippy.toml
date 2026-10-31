@@ -1,0 +1,22 @@
+# shepherd-archive reads only the paths it is given: no clock, no env, no network (decision 0020).
+# Clippy does not merge config files, so the root settings are repeated here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "times are parameters, never read inside the archive" },
+  { path = "std::time::SystemTime::now", reason = "times are parameters, never read inside the archive" },
+  { path = "std::env::var", reason = "the archive reads only the paths it is given" },
+  { path = "std::env::vars", reason = "the archive reads only the paths it is given" },
+  { path = "std::env::var_os", reason = "the archive reads only the paths it is given" },
+  { path = "std::env::home_dir", reason = "the archive reads only the paths it is given" },
+  { path = "std::env::current_dir", reason = "the archive reads only the paths it is given" },
+  { path = "std::env::temp_dir", reason = "the archive reads only the paths it is given" },
+]
+
+disallowed-types = [
+  { path = "std::net::TcpStream", reason = "the archive never touches the network" },
+  { path = "std::net::TcpListener", reason = "the archive never touches the network" },
+  { path = "std::net::UdpSocket", reason = "the archive never touches the network" },
+]
