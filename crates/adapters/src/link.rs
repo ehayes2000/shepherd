@@ -25,7 +25,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -506,11 +506,13 @@ impl Shared {
     }
 }
 
-/// Whether a conn's writer has exited: everything queued is written, or it gave up. Apart from [`Shared`], so a
-/// closed conn remembered for `flush_closed` doesn't keep its socket open.
+/// Whether a conn's writer has exited: everything queued is written (or its peer went), or it gave up on a peer that
+/// wasn't reading. Apart from [`Shared`], so a closed conn remembered for `flush_closed` doesn't keep its socket open.
 #[derive(Default)]
 pub(crate) struct Written {
     done: Mutex<bool>,
+    /// Set before the writer exits if it gave up: some of what was queued was never written.
+    gave_up: AtomicBool,
     changed: Condvar,
 }
 
@@ -521,6 +523,15 @@ impl Written {
 
     pub(crate) fn is_done(&self) -> bool {
         *self.done()
+    }
+
+    /// The writer is giving up on a peer that isn't reading. Called before it exits.
+    pub(crate) fn give_up(&self) {
+        self.gave_up.store(true, Ordering::SeqCst);
+    }
+
+    fn gave_up(&self) -> bool {
+        self.gave_up.load(Ordering::SeqCst)
     }
 
     /// Waits until the writer has exited, or `deadline` passes. Returns whether it has.
@@ -538,6 +549,62 @@ impl Written {
                 .0;
         }
         true
+    }
+}
+
+/// The closed conns of a link whose writers may still be delivering, for `flush_closed`. A writer that gave up is
+/// remembered as a flag once it is forgotten, so a long-lived link holds only the writers still delivering, and every
+/// later `flush_closed` still says the delivery wasn't done.
+#[derive(Default)]
+pub(crate) struct Closing(Mutex<ClosingState>);
+
+#[derive(Default)]
+struct ClosingState {
+    writers: Vec<Arc<Written>>,
+    /// Some closed conn's writer gave up.
+    gave_up: bool,
+}
+
+impl ClosingState {
+    /// Forgets the writers `done` says are done, noting any that gave up.
+    fn forget(&mut self, mut done: impl FnMut(&Written) -> bool) {
+        let mut gave_up = self.gave_up;
+        self.writers.retain(|written| {
+            let forget = done(written);
+            gave_up |= forget && written.gave_up();
+            !forget
+        });
+        self.gave_up = gave_up;
+    }
+}
+
+impl Closing {
+    fn lock(&self) -> MutexGuard<'_, ClosingState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Remembers a closed conn's writer, forgetting the ones that are done.
+    pub(crate) fn push(&self, written: Arc<Written>) {
+        let mut state = self.lock();
+        state.forget(Written::is_done);
+        state.writers.push(written);
+    }
+
+    /// Waits until every closed conn's writer is done, or `deadline` passes. `Flushed` only if every one finished
+    /// rather than gave up.
+    pub(crate) fn flush(&self, deadline: Instant) -> FlushOutcome {
+        let mut state = self.lock();
+        state.forget(|written| written.wait(deadline));
+        match state.writers.is_empty() && !state.gave_up {
+            true => FlushOutcome::Flushed,
+            false => FlushOutcome::TimedOut,
+        }
+    }
+
+    /// How many writers it still remembers.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().writers.len()
     }
 }
 
@@ -563,16 +630,12 @@ struct Handle {
 #[derive(Clone, Default)]
 struct Conns {
     live: Arc<Mutex<HashMap<ConnId, Handle>>>,
-    closing: Arc<Mutex<Vec<Arc<Written>>>>,
+    closing: Arc<Closing>,
 }
 
 impl Conns {
     fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Handle>> {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn closing(&self) -> MutexGuard<'_, Vec<Arc<Written>>> {
-        self.closing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Registers `stream` as a new conn and starts its threads. With `announce` (host side), the sink gets
@@ -701,23 +764,15 @@ impl Conns {
         handle.shared.wake_reader();
         // Waits for a `Line` being emitted right now; none follow.
         *handle.shared.closed_at() = Some(Instant::now());
-        let mut closing = self.closing();
-        // Forget the closes that are done, so the list holds only the ones still delivering.
-        closing.retain(|written| !written.is_done());
-        closing.push(handle.shared.written.clone());
+        self.closing.push(handle.shared.written.clone());
         // Dropping the handle drops the queue's sender: the writer flushes, then shuts the socket down.
         Ok(())
     }
 
-    /// A peer that never reads usually ends `Flushed` here rather than `TimedOut`: its writer gives up once the close
-    /// has waited [`CLOSE_FLUSH`], which marks it done.
+    /// A peer that never reads ends `TimedOut` here, whether its writer is still trying or gave up once the close had
+    /// waited [`CLOSE_FLUSH`].
     fn flush_closed(&self, deadline: Instant) -> FlushOutcome {
-        let mut closing = self.closing();
-        closing.retain(|written| !written.wait(deadline));
-        match closing.is_empty() {
-            true => FlushOutcome::Flushed,
-            false => FlushOutcome::TimedOut,
-        }
+        self.closing.flush(deadline)
     }
 
     fn drop_all(&self) {
@@ -790,7 +845,10 @@ fn write_loop(mut stream: UnixStream, queue: Receiver<Vec<u8>>, shared: Arc<Shar
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        if write_all(&mut stream, &batch, &shared).is_err() {
+        if let Err(stopped) = write_all(&mut stream, &batch, &shared) {
+            if stopped == Stopped::GaveUp {
+                shared.written.give_up();
+            }
             shared.end(DisconnectReason::PeerGone);
             return;
         }
@@ -803,11 +861,20 @@ fn take(shared: &Shared, line: &[u8]) {
     shared.queued.fetch_sub(line.len(), Ordering::SeqCst);
 }
 
+/// Why a conn's writer stopped short of writing everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stopped {
+    /// A close waited [`CLOSE_FLUSH`] for a peer that isn't reading.
+    GaveUp,
+    /// The write failed: the peer went, or the conn was ended.
+    Failed,
+}
+
 /// Like `Write::write_all`, but gives up once a close has waited `CLOSE_FLUSH` for a peer that isn't reading.
-fn write_all(stream: &mut UnixStream, mut bytes: &[u8], shared: &Shared) -> std::io::Result<()> {
+fn write_all(stream: &mut UnixStream, mut bytes: &[u8], shared: &Shared) -> Result<(), Stopped> {
     while !bytes.is_empty() {
         match stream.write(bytes) {
-            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(0) => return Err(Stopped::Failed),
             Ok(n) => {
                 shared.drained.fetch_add(n as u64, Ordering::SeqCst);
                 bytes = &bytes[n..];
@@ -817,11 +884,11 @@ fn write_all(stream: &mut UnixStream, mut bytes: &[u8], shared: &Shared) -> std:
                     .closed_at()
                     .is_some_and(|at| at.elapsed() > CLOSE_FLUSH)
                 {
-                    return Err(e);
+                    return Err(Stopped::GaveUp);
                 }
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
+            Err(_) => return Err(Stopped::Failed),
         }
     }
     Ok(())
@@ -1184,7 +1251,7 @@ mod tests {
             client_events.disconnect_of(conn);
         }
         // The last close or two may not have been forgotten yet; without pruning, all 50 are.
-        let remembered = host.conns.closing().len();
+        let remembered = host.conns.closing.len();
         assert!(remembered <= 2, "{remembered} closed conns still held");
     }
 

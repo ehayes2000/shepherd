@@ -10,8 +10,8 @@
 //! Closing a conn whose peer has lines it hasn't read leaves the peer's end open, still delivering, until it has read
 //! them (then it gets `PeerGone`) or the closing link is dropped, which cuts the delivery off like an exec ending a
 //! process's threads. [`Link::flush_closed`] waits for those deliveries. Nothing here gives up on a peer by itself
-//! (the unix adapter gives up after `CLOSE_FLUSH`), so a stalled peer's closed conn stays undelivered until the
-//! deadline. [`FakeNetwork::wait_until_flushing`] lets a test read only once someone is waiting.
+//! (the real adapters give up after `CLOSE_FLUSH`, which `flush_closed` reports as `TimedOut` all the same), so a
+//! stalled peer's closed conn stays undelivered until the deadline. [`FakeNetwork::wait_until_flushing`] lets a test read only once someone is waiting.
 //!
 //! A paused end ([`Link::pause_reading`]) holds what is sent to it like a paced one, until it is resumed. A paced end
 //! can also be shown the first line it is reading as on its way, a few bytes at a time ([`FakeNetwork::trickle`]):

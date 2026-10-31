@@ -14,13 +14,14 @@ use shepherd_core::acpp::{Dir, Frame, FrameDraft, PeerTrusted, ShepherdFrame, So
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::upgrade::Preflight;
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::ports::LogId;
+use shepherd_core::ports::{DisconnectReason, LogId};
 use shepherd_core::wire::{
     BuildId, ClientRequest, DigestHasher, ExeDigest, Hello, HookFrame, HostUpgrade,
-    PROTOCOL_VERSION, PeerList, UpgradeAnswer,
+    PROTOCOL_VERSION, PeerList, Tunnel, UpgradeAnswer,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
+use shepherd_testkit::fakes::link::FakeNetwork;
 use shepherd_testkit::fakes::peers::FakePeerNet;
 use shepherd_testkit::fakes::pty::ProgramInput;
 use support::{
@@ -175,7 +176,8 @@ fn a_swap_waits_for_a_slow_client_to_read_its_accepted_answer() {
         serde_json::from_value::<UpgradeAnswer>(answer).unwrap(),
         UpgradeAnswer::Accepted
     );
-    assert!(client.is_disconnected());
+    // Its `Disconnected` really came, once it had read everything: not just a close it has yet to read up to.
+    assert_eq!(client.disconnect_reason(), Some(DisconnectReason::PeerGone));
 }
 
 /// The wait is bounded, in real time: a client that never reads holds the swap for about `CLOSE_FLUSH`, however
@@ -198,7 +200,8 @@ fn a_swap_proceeds_at_the_bound_when_a_client_never_reads() {
         client.take().is_empty(),
         "the undelivered answer was cut off"
     );
-    assert!(client.is_disconnected());
+    // The exec (the old link dropped) cut it off: its `Disconnected` came without the lines it never read.
+    assert_eq!(client.disconnect_reason(), Some(DisconnectReason::PeerGone));
 }
 
 #[test]
@@ -702,4 +705,80 @@ fn a_swap_whose_exec_fails_comes_back_online() {
     b.step();
     assert!(connected_to(&mut b), "B sees A again");
     assert!(connected_to(&mut a), "A sees B again");
+}
+
+// ---------- tunnels across a swap ----------
+
+/// A stale host A trusting B, and B's host letting A in, their links to each other's machines on one fake network.
+fn stale_and_tunnel_peer() -> (Stale, HostHarness) {
+    let machines = FakeNetwork::new();
+    let (a_id, b_id) = (machine_with(KEY_A), machine_with(KEY_B));
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("shepherd");
+    std::fs::write(&exe, b"a newer build").unwrap();
+    let running = BuildId {
+        version: "0.1.0".into(),
+        digest: digest(b"the build the host started as"),
+    };
+    let a = HostHarness::builder()
+        .build(running, &exe)
+        .machines(machines.clone())
+        .machine_key(KEY_A)
+        .log(trusting(b_id, "laptop"))
+        .start();
+    let b = HostHarness::builder()
+        .machines(machines.clone())
+        .machine_key(KEY_B)
+        .start();
+    machines.trust(&b.machine(), &a_id);
+    (Stale { h: a, _dir: dir }, b)
+}
+
+/// T31a: a swap closes the tunnels with the other conns, so a tunnelled client is flushed and cut off before the exec,
+/// like a client of the host's own. The tunnelled client is slow and reads only once the swap waits for it: what was
+/// queued for it (the tunnel's answer) arrives, and its `Disconnected` comes before the old link goes.
+#[test]
+fn a_swap_flushes_and_closes_a_tunnelled_client_before_the_exec() {
+    let (Stale { h: mut a, _dir }, mut b) = stale_and_tunnel_peer();
+    let mut tunnelled = a.connect_paced();
+    let req = tunnelled.request(ClientRequest::Tunnel(Tunnel {
+        machine: b.machine(),
+    }));
+    for _ in 0..4 {
+        a.step();
+        b.step();
+    }
+    assert!(
+        tunnelled.take().is_empty(),
+        "a paced client reads nothing yet"
+    );
+    assert!(tunnelled.unread() > 0, "the tunnel's answer waits for it");
+
+    let mut client = a.connect();
+    assert_eq!(upgrade(&mut a, &mut client), UpgradeAnswer::Accepted);
+    let (net, conn) = (a.network().clone(), tunnelled.conn());
+    let reader = std::thread::spawn(move || {
+        if !net.wait_until_flushing(Duration::from_secs(10)) {
+            return false;
+        }
+        net.deliver(conn, usize::MAX);
+        true
+    });
+    let mut at_exec = None;
+    a.swap(|_| at_exec = tunnelled.disconnect_reason());
+    assert!(
+        reader.join().unwrap(),
+        "the swap never waited for the flush"
+    );
+
+    assert_eq!(
+        response(&tunnelled.take(), &req),
+        Ok(serde_json::Value::Object(Default::default())),
+        "the tunnel's answer was delivered before the exec"
+    );
+    assert_eq!(
+        at_exec,
+        Some(DisconnectReason::PeerGone),
+        "closed before the exec"
+    );
 }

@@ -37,7 +37,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::time::timeout;
 
-use crate::link::{Written, WrittenOnExit};
+use crate::link::{Closing, Stopped, Written, WrittenOnExit};
 #[cfg(doc)]
 use crate::peers::IrohPeers;
 use crate::peers::PeersHandle;
@@ -127,7 +127,7 @@ pub(crate) struct Opening {
 pub(crate) struct Conns {
     sink: Arc<dyn LinkEventSink>,
     live: Mutex<HashMap<ConnId, Handle>>,
-    closing: Mutex<Vec<Arc<Written>>>,
+    closing: Closing,
 }
 
 impl Conns {
@@ -135,16 +135,12 @@ impl Conns {
         Self {
             sink,
             live: Mutex::default(),
-            closing: Mutex::default(),
+            closing: Closing::default(),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Handle>> {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn closing(&self) -> MutexGuard<'_, Vec<Arc<Written>>> {
-        self.closing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Registers a new conn with `peer`. Returns it, its shared state and its queue's receiving end.
@@ -208,20 +204,13 @@ impl Conns {
         *handle.shared.closed_at() = Some(Instant::now());
         // A paused reader reads on, unseen, until the writer is done.
         handle.shared.paused.send_replace(false);
-        let mut closing = self.closing();
-        closing.retain(|written| !written.is_done());
-        closing.push(handle.shared.written.clone());
+        self.closing.push(handle.shared.written.clone());
         // Dropping the handle drops the queue's sender: the writer flushes, then finishes the stream.
         Ok(())
     }
 
     fn flush_closed(&self, deadline: Instant) -> FlushOutcome {
-        let mut closing = self.closing();
-        closing.retain(|written| !written.wait(deadline));
-        match closing.is_empty() {
-            true => FlushOutcome::Flushed,
-            false => FlushOutcome::TimedOut,
-        }
+        self.closing.flush(deadline)
     }
 
     fn with<T>(&self, conn: ConnId, f: impl FnOnce(&ConnShared) -> T) -> Option<T> {
@@ -374,10 +363,11 @@ async fn write_loop(
     let _done = WrittenOnExit(shared.written.clone());
     let mut end = shared.end.subscribe();
     if let Some(first) = first
-        && write_all(&mut send, first, &shared, &mut end, false)
-            .await
-            .is_err()
+        && let Err(stopped) = write_all(&mut send, first, &shared, &mut end, false).await
     {
+        if stopped == Stopped::GaveUp {
+            shared.written.give_up();
+        }
         return;
     }
     loop {
@@ -393,10 +383,10 @@ async fn write_loop(
             break;
         };
         shared.queued.fetch_sub(line.len(), Ordering::SeqCst);
-        if write_all(&mut send, &line, &shared, &mut end, true)
-            .await
-            .is_err()
-        {
+        if let Err(stopped) = write_all(&mut send, &line, &shared, &mut end, true).await {
+            if stopped == Stopped::GaveUp {
+                shared.written.give_up();
+            }
             let _ = send.reset(VarInt::from_u32(0));
             return;
         }
@@ -413,6 +403,8 @@ async fn write_loop(
             }
             stopped = timeout(left, send.stopped()) => {
                 if stopped.is_err() {
+                    // The peer hadn't taken it all within the bound.
+                    shared.written.give_up();
                     let _ = send.reset(VarInt::from_u32(0));
                 }
             }
@@ -429,11 +421,11 @@ async fn write_all(
     shared: &ConnShared,
     end: &mut watch::Receiver<bool>,
     count: bool,
-) -> Result<(), ()> {
+) -> Result<(), Stopped> {
     while !bytes.is_empty() {
         let wrote = tokio::select! {
             biased;
-            () = ended(end) => return Err(()),
+            () = ended(end) => return Err(Stopped::Failed),
             wrote = timeout(WRITE_TICK, send.write(bytes)) => wrote,
         };
         match wrote {
@@ -443,8 +435,8 @@ async fn write_all(
                 }
                 bytes = &bytes[n..];
             }
-            Ok(Err(_)) => return Err(()),
-            Err(_) if shared.flush_expired() => return Err(()),
+            Ok(Err(_)) => return Err(Stopped::Failed),
+            Err(_) if shared.flush_expired() => return Err(Stopped::GaveUp),
             Err(_) => {}
         }
     }
