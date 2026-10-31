@@ -15,8 +15,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | building | task/t47-prompt-wait |  |  |
-| T49 Render pages and split panes | [automation](features/automation.md) | building | task/t49-render-layout |  |  |
-| T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | fixing | task/t54-subagent-events @ 567f041 | 2 | round 2 CHANGES: id-less completed spawn makes the fallback guess give another spawn's task |
+| T49 Render pages and split panes | [automation](features/automation.md) | fixing | task/t49-render-layout @ 6a15c34 | 1 | round 1 CHANGES: menu unreachable under mouse tracking; help; focus highlight, mouse offset, cursor and runtime sizing untested; resize-on-layout-change fights |
+| T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | merging | task/t54-subagent-events @ fa40b4e | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
 
 ## Ready to start
 
@@ -56,7 +56,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Status page](features/status-page.md) | M5 | 0 | 3 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
-| [Subagents](features/subagents.md) | M5 | 0 | 3 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
+| [Subagents](features/subagents.md) | M5 | 0 | 4 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
 | [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 1 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 

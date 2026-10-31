@@ -11,9 +11,10 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | fixing | task/t54-subagent-events @ 567f041 | 2 | round 2 CHANGES: id-less completed spawn makes the fallback guess give another spawn's task |
+| T54 | Subagent lifecycle in the event log | merging | task/t54-subagent-events @ fa40b4e | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
 | T55 | Subagent tree in the sidebar | todo |  |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
+| F57 | Subagent task pairing: cross-turn repeat start and failed guessed call | todo |  |  |  |
 
 ## Specs
 
@@ -66,3 +67,21 @@ acceptance:
 - Tests: a fixture transcript rendered (snapshot), live append, a transcript that's gone or refused shows why, hostile
   content display-safe.
 scope: crates/core, crates/tui, crates/shepherd
+
+### F57: Subagent task pairing: cross-turn repeat start and failed guessed call
+depends: T54
+touches: core::agents::subagents
+goal: From T54's round-5 review (merged with these open): two rare sequences can still leave a subagent with another call's
+task, against the "own call's, or none" rule.
+acceptance:
+- `end_turn` forgets which subagents started, so a repeat SubagentStart in a later turn guesses. Remember started,
+  unstopped ids across turns (bounded like `named`) so a repeat start never guesses. Regression test: UserPromptSubmit,
+  Pre.Agent.second, Post.Agent.second, Start.second, UserPromptSubmit, Pre.Agent, Start.second, PostToolUseFailure.Agent →
+  agent-8b4c keeps "Find fibonacci callers".
+- Decide and test what a failed call that was guessed for a subagent does (retract, or keep, with the reasoning in the doc).
+- Minor: fix the comment in `a_retraction_spares_a_task_already_corrected_to_its_own_call` (7f3a does guess; the sequence is
+  out of documented order on purpose); the retraction compares task text, not origin (note it or track origin); the
+  `wrong.task.is_some()` guard is untested (test or drop).
+- Until this lands, the module doc says the guarantee holds except these cases.
+scope: crates/core
+
