@@ -15,6 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | building | task/t31a-iroh-tunnel |  |  |
+| F51 Test cleanup never signals a pid it can't prove is ours | [worktrees](features/worktrees.md) | building | task/f51-pid-ownership |  |  |
 
 ## Ready to start
 
@@ -30,7 +31,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
-| F51 Test cleanup never signals a pid it can't prove is ours | [worktrees](features/worktrees.md) | todo | F48 |
 
 ## Features
 

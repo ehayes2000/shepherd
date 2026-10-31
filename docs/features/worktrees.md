@@ -27,7 +27,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
 | F48 | repo_root returns an uncanonical /tmp path under load | done | df99fff | 2 | round 2 APPROVE; not reproduced (accepted); signal death → Other; fixture drops prove ownership; r4 24-copy 0 failures. Minor: ps retries have no pause (F51) |
-| F51 | Test cleanup never signals a pid it can't prove is ours | todo |  |  |  |
+| F51 | Test cleanup never signals a pid it can't prove is ours | building | task/f51-pid-ownership |  |  |
 
 ## Specs
 
@@ -361,7 +361,10 @@ acceptance:
 - `Failure::Exit` with a real exit code still maps to `NotARepo` whatever the cause; map only git's "not a git repository"
   exit (128 with that stderr) to NotARepo, others to `Other`, with tests.
 - `group_is_ours` retries `ps` back to back; add a short pause between tries.
-- PM (gate): check-arch's `"#!/` rule also covers `crates/adapters` tests (launcher.rs ~798 writes one today: move it to
-  the stand-in or justify an exemption).
+- check-arch's `"#!/` rule also covers `crates/adapters` (launcher.rs ~798 writes one today: move it to the stand-in or
+  justify an exemption in the rule, in its own commit).
 scope: crates/adapters, scripts/check-arch.sh
+notes: git's messages are localized: if NotARepo keys on stderr text, the port must run git with a fixed locale
+(`LC_ALL=C`) or use a check that doesn't depend on text (e.g. `git rev-parse --is-inside-work-tree` semantics); say which.
+Never kill processes by pattern; tests never exec a just-written file.
 
