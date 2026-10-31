@@ -113,6 +113,24 @@ impl Translators {
         name == Some("Stop")
     }
 
+    /// The agent session a hook payload from `agent` starts, if it starts one: its `SessionStart`, except after a
+    /// compaction (which goes on in the same session), names it as `session_id`. For Claude Code and Codex alike (see
+    /// the translation tables in [`claude`] and [`codex`]): this is the hook whose `agent/started` replaces the
+    /// session's agent session id and transcript path, e.g. after `/clear`.
+    pub fn starts_session(agent: AgentKind, payload: &Value) -> Option<&str> {
+        let name = match agent {
+            AgentKind::ClaudeCode => claude::hook_name(payload),
+            AgentKind::Codex => codex::hook_name(payload),
+            AgentKind::Shell => None,
+        };
+        if name != Some("SessionStart")
+            || payload.get("source").and_then(Value::as_str) == Some("compact")
+        {
+            return None;
+        }
+        payload.get("session_id").and_then(Value::as_str)
+    }
+
     /// Whether hooks from `agent` can be translated.
     pub fn supports(agent: AgentKind) -> bool {
         match agent {

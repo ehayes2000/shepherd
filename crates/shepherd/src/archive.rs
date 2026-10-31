@@ -147,8 +147,10 @@ impl Archive for ShepherdArchive {
             Ok(_) => Ok(()),
             // The crate reports a file it couldn't read as text only: whether the transcript is there at all is asked of
             // the filesystem (by the error's kind, never its text). A missing agent home is a missing transcript too.
+            // The file it couldn't read must be absent as well: a Codex rollout read from its compressed `.zst` beside
+            // the path given is there, just unreadable.
             Err(archive::ArchiveError::Capture(archive::CaptureError::Io { path, message }))
-                if absent(&c.transcript_path) =>
+                if absent(&c.transcript_path) && absent(&path) =>
             {
                 Err(ArchiveError::Missing(format!(
                     "{} doesn't exist ({}: {message})",

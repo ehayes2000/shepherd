@@ -10,6 +10,15 @@
 //!   hook input structs in `codex-rs/hooks/src/schema.rs`): under `CODEX_HOME`,
 //!   `sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<thread id>.jsonl` (a reverted thread appends
 //!   `_<rollout id>`). The hook `session_id` is the thread id and `transcript_path` is that rollout file, or null.
+//!   Codex compresses a rollout untouched for 7 days in place (`codex-rs/rollout/src/compression.rs`:
+//!   `MIN_ROLLOUT_AGE`, `COMPRESSED_SUFFIX`, `compress_rollout_if_cold_blocking`): one zstd frame (level 3, the content
+//!   size pledged) at the same path plus `.zst`, `rollout-...jsonl.zst`, and the plain file is removed. Codex prefers
+//!   the plain file when both are there, and decompresses a compressed one back to plain before appending to it.
+//!   So capture reads the plain rollout if it is there, else its `.zst` (whichever of the two the payload named),
+//!   decompressing it through the budget below, and archives the rollout it holds under the plain name: a restore
+//!   writes a plain rollout, and an unchanged rollout stores no new blob whether or not it was compressed since. A
+//!   plain rollout that vanishes between being chosen and being opened (Codex compressing it then) is chosen again,
+//!   once.
 //!
 //! What capture refuses (an error, and nothing is archived):
 //! - a relative path, or one with a `..` component;
@@ -18,7 +27,11 @@
 //! - a symlink, or anything but a directory, at any component below the home, and a symlink or non-regular file at
 //!   the transcript or any subagent transcript;
 //! - more bytes in all than [`CaptureLimits::max_bytes`], or more files than [`CaptureLimits::max_files`]. A file is
-//!   read at most one byte past what is left of the budget, so an oversized file is never read whole.
+//!   read at most one byte past what is left of the budget, so an oversized file is never read whole. A compressed
+//!   rollout counts what it inflates to, and is inflated at most one byte past what is left; a compressed file that is
+//!   itself bigger than what is left is refused unread;
+//! - a compressed rollout that isn't valid zstd, or asks for a bigger window than Codex ever uses
+//!   ([`CaptureError::Corrupt`]).
 //!
 //! Each file is opened only after its path is checked, and refused if what was opened isn't the file that was checked
 //! or its path no longer resolves to itself (a symlink swapped in on the way). Known gap: a FIFO swapped in between
@@ -112,6 +125,9 @@ pub enum CaptureError {
     TooLarge { path: PathBuf, max: u64 },
     #[error("the session's transcripts are more than {max} files (in {dir})")]
     TooManyFiles { dir: PathBuf, max: usize },
+    /// A compressed rollout that doesn't decompress.
+    #[error("{path} is not a valid zstd file: {reason}")]
+    Corrupt { path: PathBuf, reason: String },
     #[error("{path}: {message}")]
     Io { path: PathBuf, message: String },
 }
@@ -120,7 +136,8 @@ pub enum CaptureError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Captured {
     pub role: FileRole,
-    /// Where it was read: the canonical agent home joined with the payload's path below it.
+    /// Where it was read: the canonical agent home joined with the payload's path below it. For a rollout read from
+    /// its compressed `.zst`, the plain rollout's path, which is what its content is.
     pub path: PathBuf,
     pub content: Vec<u8>,
 }
@@ -133,7 +150,8 @@ fn io(path: &Path, e: std::io::Error) -> CaptureError {
 }
 
 /// Reads `agent`'s transcripts for its session `session` from `transcript_path` (the hook payload's), which must be
-/// that session's transcript under `home`. `read` counts every byte read from a transcript file.
+/// that session's transcript under `home`. `read` counts every byte read from a transcript file (for a compressed
+/// rollout, every byte it inflated to).
 pub(crate) fn read_transcripts(
     agent: AgentKind,
     session: &AgentSessionId,
@@ -151,8 +169,14 @@ pub(crate) fn read_transcripts(
             session: session.clone(),
         });
     }
-    let main = home.join(&rel);
-    let main_meta = walk(&home, &parts)?;
+    let (main, main_file) = match agent {
+        AgentKind::Claude => {
+            let meta = walk(&home, &parts)?;
+            let main = home.join(&rel);
+            (main.clone(), OnDisk::Plain(main, meta))
+        }
+        AgentKind::Codex => codex_rollout(&home, &parts)?,
+    };
     let mut budget = Budget {
         left: limits.max_bytes,
         max: limits.max_bytes,
@@ -174,9 +198,22 @@ pub(crate) fn read_transcripts(
         AgentKind::Claude => FileRole::Main,
         AgentKind::Codex => FileRole::Rollout,
     };
+    let content = match budget.read_on_disk(&main_file) {
+        // Codex compressed the rollout after it was chosen and before it was opened (it writes the `.zst`, then
+        // removes the plain file): choose again, once, rather than call a conversation that is there missing.
+        Err(CaptureError::Io { .. })
+            if agent == AgentKind::Codex
+                && matches!(main_file, OnDisk::Plain(..))
+                && is_absent(&main) =>
+        {
+            let (_, again) = codex_rollout(&home, &parts)?;
+            budget.read_on_disk(&again)?
+        }
+        read => read?,
+    };
     let mut out = vec![Captured {
         role,
-        content: budget.read(&main, &main_meta)?,
+        content,
         path: main,
     }];
     for (path, meta) in subagents {
@@ -235,7 +272,7 @@ fn in_agent_layout(agent: AgentKind, session: &AgentSessionId, parts: &[&OsStr])
         }
         AgentKind::Codex => match parts {
             [sessions, _dirs @ .., name] if *sessions == OsStr::new("sessions") => {
-                rollout_thread(name) == Some(session.as_str())
+                rollout_thread(plain_rollout_name(name)) == Some(session.as_str())
             }
             _ => false,
         },
@@ -269,22 +306,84 @@ pub(crate) fn rollout_name(name: &OsStr) -> Option<(jiff::civil::DateTime, &str)
     (!thread.is_empty()).then_some((at, thread))
 }
 
+/// What Codex compresses a rollout to: its name plus this (`COMPRESSED_SUFFIX` in
+/// `codex-rs/rollout/src/compression.rs`).
+const COMPRESSED_SUFFIX: &str = ".zst";
+
+/// The biggest zstd window (log2 of its bytes) a compressed rollout may ask the decoder for: a frame asking for more is
+/// [`CaptureError::Corrupt`], refused before the window is allocated. Codex compresses at level 3, whose window is at
+/// most 2^21 bytes (zstd 1.5.7 `lib/compress/clevels.h`, the level-3 row of the table for inputs over 256 KB; smaller
+/// inputs get smaller windows). 2^23 (8 MiB) leaves room for a change of level.
+const MAX_WINDOW_LOG: u32 = 23;
+
+/// The plain rollout name a compressed one (`rollout-...jsonl.zst`) stands for; any other name as it is.
+fn plain_rollout_name(name: &OsStr) -> &OsStr {
+    name.as_bytes()
+        .strip_suffix(COMPRESSED_SUFFIX.as_bytes())
+        .filter(|plain| plain.ends_with(b".jsonl"))
+        .map_or(name, OsStr::from_bytes)
+}
+
+/// A transcript file found on disk, with its `lstat`.
+enum OnDisk {
+    Plain(PathBuf, Metadata),
+    /// A rollout Codex compressed in place.
+    Zstd(PathBuf, Metadata),
+}
+
+/// The plain rollout's path at `home/parts` (the last part named either way), and the file holding it: the plain
+/// rollout if it is there, else its compressed `.zst`. Every component is checked as [`walk`] checks it. Neither there
+/// is an error naming the plain one.
+fn codex_rollout(home: &Path, parts: &[&OsStr]) -> Result<(PathBuf, OnDisk), CaptureError> {
+    let Some((name, dirs)) = parts.split_last() else {
+        return Err(CaptureError::WrongType(home.to_path_buf()));
+    };
+    let dir = walk_dirs(home, dirs)?;
+    let plain = dir.join(plain_rollout_name(name));
+    match fs::symlink_metadata(&plain) {
+        Ok(meta) => {
+            check_file(&plain, &meta)?;
+            Ok((plain.clone(), OnDisk::Plain(plain, meta)))
+        }
+        Err(missing) if missing.kind() == ErrorKind::NotFound => {
+            let mut compressed = plain.clone().into_os_string();
+            compressed.push(COMPRESSED_SUFFIX);
+            let compressed = PathBuf::from(compressed);
+            match fs::symlink_metadata(&compressed) {
+                Ok(meta) => {
+                    check_file(&compressed, &meta)?;
+                    Ok((plain, OnDisk::Zstd(compressed, meta)))
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => Err(io(&plain, missing)),
+                Err(e) => Err(io(&compressed, e)),
+            }
+        }
+        Err(e) => Err(io(&plain, e)),
+    }
+}
+
 /// Checks every component of `home/parts` without following symlinks: each directory a real directory, the last a
 /// regular file. Returns the file's `lstat`.
 fn walk(home: &Path, parts: &[&OsStr]) -> Result<Metadata, CaptureError> {
-    let mut at = home.to_path_buf();
     let Some((file, dirs)) = parts.split_last() else {
-        return Err(CaptureError::WrongType(at));
+        return Err(CaptureError::WrongType(home.to_path_buf()));
     };
+    let mut at = walk_dirs(home, dirs)?;
+    at.push(file);
+    let meta = fs::symlink_metadata(&at).map_err(|e| io(&at, e))?;
+    check_file(&at, &meta)?;
+    Ok(meta)
+}
+
+/// Checks each of `home/dirs` without following symlinks, each a real directory. Returns the last.
+fn walk_dirs(home: &Path, dirs: &[&OsStr]) -> Result<PathBuf, CaptureError> {
+    let mut at = home.to_path_buf();
     for dir in dirs {
         at.push(dir);
         let meta = fs::symlink_metadata(&at).map_err(|e| io(&at, e))?;
         check_dir(&at, &meta)?;
     }
-    at.push(file);
-    let meta = fs::symlink_metadata(&at).map_err(|e| io(&at, e))?;
-    check_file(&at, &meta)?;
-    Ok(meta)
+    Ok(at)
 }
 
 fn check_dir(path: &Path, meta: &Metadata) -> Result<(), CaptureError> {
@@ -305,6 +404,11 @@ fn check_file(path: &Path, meta: &Metadata) -> Result<(), CaptureError> {
         return Err(CaptureError::WrongType(path.to_path_buf()));
     }
     Ok(())
+}
+
+/// Nothing is at `path` (a symlink counts as something, and isn't followed).
+fn is_absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(e) if e.kind() == ErrorKind::NotFound)
 }
 
 /// The directory at `path`, if there is one: `None` if nothing is there, an error for a symlink or anything else.
@@ -375,6 +479,51 @@ impl Budget<'_> {
     /// Reads the regular file at `path`, whose `lstat` was `checked`, taking its bytes from the budget. Reads at most
     /// one byte more than is left.
     fn read(&mut self, path: &Path, checked: &Metadata) -> Result<Vec<u8>, CaptureError> {
+        let file = self.open(path, checked)?;
+        let mut content = Vec::new();
+        let n = file
+            .take(self.left.saturating_add(1))
+            .read_to_end(&mut content)
+            .map_err(|e| io(path, e))?;
+        self.take(path, n)?;
+        Ok(content)
+    }
+
+    /// Reads the zstd file at `path`, whose `lstat` was `checked`, and decompresses it, taking what it inflates to
+    /// from the budget. Inflates at most one byte more than is left, and refuses unread a file bigger than what is
+    /// left.
+    fn inflate(&mut self, path: &Path, checked: &Metadata) -> Result<Vec<u8>, CaptureError> {
+        let file = self.open(path, checked)?;
+        if checked.len() > self.left {
+            return Err(self.too_large(path));
+        }
+        let mut decoder =
+            zstd::stream::read::Decoder::new(file.take(self.left)).map_err(|e| io(path, e))?;
+        decoder
+            .window_log_max(MAX_WINDOW_LOG)
+            .map_err(|e| io(path, e))?;
+        let mut content = Vec::new();
+        let n = decoder
+            .take(self.left.saturating_add(1))
+            .read_to_end(&mut content)
+            .map_err(|e| CaptureError::Corrupt {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        self.take(path, n)?;
+        Ok(content)
+    }
+
+    /// Reads `file`, inflating it if it is compressed.
+    fn read_on_disk(&mut self, file: &OnDisk) -> Result<Vec<u8>, CaptureError> {
+        match file {
+            OnDisk::Plain(path, meta) => self.read(path, meta),
+            OnDisk::Zstd(path, meta) => self.inflate(path, meta),
+        }
+    }
+
+    /// Opens the regular file at `path`, whose `lstat` was `checked`, refusing it if it isn't that file any more.
+    fn open(&self, path: &Path, checked: &Metadata) -> Result<File, CaptureError> {
         #[cfg(feature = "fault-injection-pause-before-transcript-open")]
         if self.pause {
             use std::io::Write;
@@ -388,20 +537,24 @@ impl Budget<'_> {
             return Err(CaptureError::Changed(path.to_path_buf()));
         }
         unchanged_path(path)?;
-        let mut content = Vec::new();
-        let n = file
-            .take(self.left.saturating_add(1))
-            .read_to_end(&mut content)
-            .map_err(|e| io(path, e))?;
+        Ok(file)
+    }
+
+    /// Takes `n` bytes, just read from `path`, from the budget: refused if that is more than is left.
+    fn take(&mut self, path: &Path, n: usize) -> Result<(), CaptureError> {
         let n = u64::try_from(n).unwrap_or(u64::MAX);
         self.read.fetch_add(n, Ordering::Relaxed);
         if n > self.left {
-            return Err(CaptureError::TooLarge {
-                path: path.to_path_buf(),
-                max: self.max,
-            });
+            return Err(self.too_large(path));
         }
         self.left -= n;
-        Ok(content)
+        Ok(())
+    }
+
+    fn too_large(&self, path: &Path) -> CaptureError {
+        CaptureError::TooLarge {
+            path: path.to_path_buf(),
+            max: self.max,
+        }
     }
 }

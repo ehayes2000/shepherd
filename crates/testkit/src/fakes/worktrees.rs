@@ -71,6 +71,8 @@ struct State {
     fail_next: Option<WorktreeError>,
     /// Checkouts whose every `status` fails with this, from [`FakeWorktrees::fail_status`].
     failing_status: BTreeMap<PathBuf, WorktreeError>,
+    /// Paths whose every `root_commit` fails with this, from [`FakeWorktrees::fail_root_commit`].
+    failing_root_commit: BTreeMap<PathBuf, WorktreeError>,
 }
 
 /// A create's repo (as the caller named it) and worktree name: what [`Worktrees::cancel_create`] names.
@@ -203,6 +205,11 @@ impl FakeWorktrees {
     /// git does for a worktree whose `.git` file is gone.
     pub fn fail_status(&self, path: impl Into<PathBuf>, error: WorktreeError) {
         self.lock().failing_status.insert(path.into(), error);
+    }
+
+    /// Every `root_commit` asked at `path` fails with `error` from now on.
+    pub fn fail_root_commit(&self, path: impl Into<PathBuf>, error: WorktreeError) {
+        self.lock().failing_root_commit.insert(path.into(), error);
     }
 
     /// The next port call blocks, before it does anything, until the returned [`Hold`] is released or dropped. Calls
@@ -836,6 +843,9 @@ impl Worktrees for FakeWorktrees {
     fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError> {
         let s = self.take_failure()?;
         let path = repo.as_path();
+        if let Some(error) = s.failing_root_commit.get(path) {
+            return Err(error.clone());
+        }
         let (r, top) = s.locate(path).ok_or_else(|| State::not_a_repo(path))?;
         if top != path && !s.dirs.iter().any(|d| d.starts_with(path)) {
             return Err(State::not_a_repo(path));

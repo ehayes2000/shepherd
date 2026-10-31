@@ -337,6 +337,24 @@ fn codex_restore_puts_the_rollout_in_its_dated_sessions_dir() {
 }
 
 #[test]
+fn a_rollout_captured_compressed_is_restored_plain() {
+    // Codex compresses a rollout idle for 7 days in place, `<rollout>.jsonl.zst` (codex-rs/rollout/src/compression.rs),
+    // and reads the plain file first: capture archives what it holds, under the plain name.
+    let s = Setup::new(AgentKind::Codex, CODEX_SESSION);
+    let plain = s.source.join(CODEX_ROLLOUT);
+    let compressed = zstd::encode_all(fs::read(&plain).unwrap().as_slice(), 3).unwrap();
+    fs::write(s.source.join(format!("{CODEX_ROLLOUT}.zst")), compressed).unwrap();
+    fs::remove_file(&plain).unwrap();
+    s.capture(&plain, at(2_000));
+    s.restore().unwrap();
+    assert_eq!(tree(&s.home).last(), Some(&PathBuf::from(CODEX_ROLLOUT)));
+    assert_eq!(
+        fs::read(s.home.join(CODEX_ROLLOUT)).unwrap(),
+        fixture_bytes("codex", CODEX_ROLLOUT)
+    );
+}
+
+#[test]
 fn codex_dirs_come_from_the_date_in_the_rollout_name_not_where_it_was_captured() {
     let s = Setup::new(AgentKind::Codex, CODEX_SESSION);
     let odd = s.source.join("sessions/elsewhere");

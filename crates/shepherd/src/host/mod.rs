@@ -45,11 +45,11 @@ use shepherd_core::ports::{
 pub use env::{Env, RealEnv};
 pub use links::HostLinks;
 pub use runtime::{
-    AdoptedSession, Adoption, CATCH_UP_BATCH, CATCH_UP_TICK, CREATE_CLEANUP_GRACE, CarriedSession,
-    HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, MAX_TUNNEL_TICK, PreflightRunner,
-    RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError,
-    SwapPlan, TUNNEL_HELD_MAX, TUNNEL_HIGH, TUNNEL_LOW, TUNNEL_TICK, adopt_sessions,
-    runtime_channel,
+    AdoptedSession, Adoption, Archived, CATCH_UP_BATCH, CATCH_UP_TICK, CREATE_CLEANUP_GRACE,
+    CarriedSession, HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, MAX_TUNNEL_TICK,
+    MAX_WAITING_TURN_ENDS, PreflightRunner, RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx,
+    SHUTDOWN_GRACE, STALL_TIMEOUT, StartError, SwapPlan, TUNNEL_HELD_MAX, TUNNEL_HIGH, TUNNEL_LOW,
+    TUNNEL_TICK, adopt_sessions, runtime_channel,
 };
 
 /// The host runtime on the real adapters.

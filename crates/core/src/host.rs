@@ -82,8 +82,10 @@
 //! Archive (T42, decision 0020): a session running Claude Code or Codex whose hooks named its agent session and
 //! transcript is captured ([`HostCommand::Capture`], see [`capture`]) when a `Stop` hook ends its agent's turn (the
 //! hook's [`HostCommand::TranslateHook`] carries `turn_end`, and the capture follows once its frames are applied), when it
-//! closes, and before any worktree it ran in is removed. Every removal comes through the last step of its pre-remove
-//! hooks, which captures the closing session (or, for an orphan, each closed session that ran there) and removes the
+//! closes, before any worktree it ran in is removed, and when its agent starts a new agent session in place (`/clear`:
+//! a `SessionStart` naming another agent session, captured as a turn end before that hook's `agent/started` replaces
+//! the transcript path; the next capture records the session under its new agent session id). Every removal comes
+//! through the last step of its pre-remove hooks, which captures the closing session (or, for an orphan, each closed session that ran there) and removes the
 //! worktree only once [`HostEvent::Captured`] says that worked; a failed capture keeps the worktree and says why. A
 //! transcript that doesn't exist ([`ArchiveError::Missing`]: never written, or deleted since) is nothing to save: the
 //! worktree goes, and `session/closed`'s `note` says no transcript was found.
@@ -709,6 +711,7 @@ impl Entry {
             cwd: WorktreePath::new(cwd),
             branch: branch.map(BranchName::new),
             base: self.base.clone(),
+            profile: self.profile.clone(),
         })
     }
 
@@ -1073,7 +1076,17 @@ impl Host {
                     return vec![reply_err(reply, error)];
                 }
                 let turn_end = Translators::ends_turn(agent, &payload);
-                vec![
+                // A new agent session in place (`/clear`): its `agent/started` replaces the transcript path, so the
+                // old transcript is captured first, by a job built from the session as it is now.
+                let replaced = Translators::starts_session(agent, &payload)
+                    .filter(|started| {
+                        self.open(&session)
+                            .and_then(|e| e.agent_session_id.as_deref())
+                            .is_some_and(|current| current != *started)
+                    })
+                    .and_then(|_| self.capture_open(&session, CaptureReason::TurnEnd));
+                let mut commands: Vec<HostCommand> = replaced.into_iter().collect();
+                commands.extend([
                     HostCommand::TranslateHook {
                         session,
                         agent,
@@ -1081,7 +1094,8 @@ impl Host {
                         turn_end,
                     },
                     ack(reply),
-                ]
+                ]);
+                commands
             }
             // The runtime's restart sweep: a session still waiting for its worktree lost it with the old host.
             HostEvent::PtyExited { session, .. } if self.starting(&session) => {

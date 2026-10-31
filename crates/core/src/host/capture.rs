@@ -7,7 +7,8 @@
 //! the archive's calls. A removal waits for its capture's answer ([`HostEvent::Captured`](super::HostEvent::Captured)):
 //! a capture that fails keeps the worktree.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::acpp::Timestamp;
 use crate::config::AgentKind;
@@ -38,6 +39,9 @@ pub struct CaptureJob {
     pub branch: Option<BranchName>,
     /// The commit its worktree's branch started at, if recorded: its commits are those since.
     pub base: Option<CommitHash>,
+    /// The agent profile it was started with, by name, if recorded: the runtime reads its env for the agent's home
+    /// ([`AgentHomes::launched_with`]).
+    pub profile: Option<String>,
 }
 
 /// What the world says about a [`CaptureJob`]'s repo.
@@ -84,6 +88,11 @@ impl CaptureJob {
     }
 }
 
+/// Claude Code's config dir variable.
+pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+/// Codex's home variable.
+pub const CODEX_HOME: &str = "CODEX_HOME";
+
 /// Where each agent keeps its transcripts, resolved once by the host at start (core never reads the environment):
 /// Claude Code's config dir (`CLAUDE_CONFIG_DIR`, or `~/.claude`) and Codex's `CODEX_HOME` (or `~/.codex`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +132,31 @@ impl AgentHomes {
             AgentKind::Codex => Some(&self.codex),
             AgentKind::Shell => None,
         }
+    }
+
+    /// The home of an `agent` launched with `env` added to the host's environment (its profile's env) in `cwd`: where
+    /// it writes its transcripts. The agent's own variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) if `env` sets it, else
+    /// the default under `env`'s `HOME` if it sets that (both agents find the user's home through `$HOME`), else this,
+    /// the host's. Empty counts as unset, as in [`AgentHomes::resolve`]; a relative value is relative to `cwd`, as the
+    /// agent, started there, reads it. `None` for a kind that keeps no transcript.
+    pub fn launched_with(
+        &self,
+        agent: AgentKind,
+        env: &BTreeMap<String, String>,
+        cwd: &Path,
+    ) -> Option<PathBuf> {
+        let var = match agent {
+            AgentKind::ClaudeCode => CLAUDE_CONFIG_DIR,
+            AgentKind::Codex => CODEX_HOME,
+            AgentKind::Shell => return None,
+        };
+        let set = |name: &str| env.get(name).filter(|v| !v.is_empty()).map(|v| cwd.join(v));
+        let home = match (set(var), set("HOME")) {
+            (Some(own), _) => own,
+            (None, Some(home)) => Self::under(&home).of(agent)?.to_path_buf(),
+            (None, None) => self.of(agent)?.to_path_buf(),
+        };
+        Some(home)
     }
 }
 
