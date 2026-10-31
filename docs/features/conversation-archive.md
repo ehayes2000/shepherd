@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
-| T40 | Capture transcripts from Claude Code and Codex | review | task/t40-archive-capture @ f9d2c8f (on 3ab1965) | 1 | PM-accepted: path from SessionStart only; .zst refused for now (→ T42); inode+recanonicalize swap check |
+| T40 | Capture transcripts from Claude Code and Codex | fixing | task/t40-archive-capture @ f9d2c8f | 1 | Blocking: subagent non-regular-file refusal untested (a FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
 | T42 | Archive port and host capture | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
