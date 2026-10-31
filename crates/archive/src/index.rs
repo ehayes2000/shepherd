@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, TransactionBehavior, params};
 
@@ -532,20 +533,18 @@ fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
     }
 }
 
-/// `path` as an SQLite URI filename (https://www.sqlite.org/uri.html) with `query`. The path part is %HH-escaped byte
-/// by byte except for characters that never need it, so `?`, `#` and `%` in a directory name can't end or change it.
+/// The bytes an SQLite URI path keeps as they are: `[A-Za-z0-9/._-]`. Everything else, `?`, `#` and `%` included, is
+/// %HH-escaped, so no directory name can end or change the path.
+const URI_PATH_ESCAPED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'/')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'-');
+
+/// `path` as an SQLite URI filename (https://www.sqlite.org/uri.html) with `query`.
 fn sqlite_uri(path: &Path, query: &str) -> String {
-    let mut uri = String::from("file:");
-    for &b in path.as_os_str().as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-') {
-            uri.push(char::from(b));
-        } else {
-            uri.push_str(&format!("%{b:02X}"));
-        }
-    }
-    uri.push('?');
-    uri.push_str(query);
-    uri
+    let escaped = percent_encode(path.as_os_str().as_bytes(), URI_PATH_ESCAPED);
+    format!("file:{escaped}?{query}")
 }
 
 fn read_version(conn: &Connection) -> Result<i64, ArchiveError> {

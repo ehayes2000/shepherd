@@ -3957,6 +3957,7 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "libc",
+ "percent-encoding",
  "rusqlite",
  "sha2 0.10.9",
  "shepherd-archive",
