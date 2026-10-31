@@ -855,7 +855,8 @@ wait
     fn a_launcher_whose_command_is_not_executable_says_which() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("host");
-        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        // A script without its executable bit: the spawn fails, so it never runs.
+        std::fs::write(&script, "exit 0\n").unwrap();
         let err = ProcessHostLauncher::new(&script, ["host"])
             .launch()
             .unwrap_err();
