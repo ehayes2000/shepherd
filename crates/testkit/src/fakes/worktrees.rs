@@ -126,18 +126,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How commit `c` is named: 40 hex digits, like a real commit hash.
+/// How commit `c` is named: 40 hex digits, like a real commit hash, lowest digit first, so that a test's commits differ
+/// in their first digits and a short prefix names one, as with a real hash.
 fn commit_name(c: Commit) -> String {
-    format!("{c:040x}")
+    format!("{c:040x}").chars().rev().collect()
 }
 
 fn commit_hash(c: Commit) -> CommitHash {
     CommitHash::parse(&commit_name(c)).unwrap_or_else(|e| unreachable!("{e}"))
 }
 
-/// The patch-id of `change`: 40 hex digits starting with `f`, which no commit of a test is named.
+/// The patch-id of `change`: 40 hex digits ending with `f`, which no commit of a test is named.
 fn patch_id(change: usize) -> PatchId {
-    PatchId::parse(&format!("f{change:039x}")).unwrap_or_else(|e| unreachable!("{e}"))
+    let digits: String = format!("{change:039x}").chars().rev().collect();
+    PatchId::parse(&format!("{digits}f")).unwrap_or_else(|e| unreachable!("{e}"))
 }
 
 impl FakeWorktrees {
@@ -459,8 +461,29 @@ impl State {
 
     /// The commit `hash` names, if there is one.
     fn commit_named(&self, hash: &CommitHash) -> Option<Commit> {
-        let c = usize::from_str_radix(hash.as_str(), 16).ok()?;
+        let digits: String = hash.as_str().chars().rev().collect();
+        let c = usize::from_str_radix(&digits, 16).ok()?;
         (c < self.parents.len()).then_some(c)
+    }
+
+    /// The commit `rev` names in repo `r` with `head` checked out: `HEAD`, a local branch, or a full or unique
+    /// abbreviated (at least 4 digits) commit name.
+    fn resolve_rev(&self, r: usize, head: &Head, rev: &str) -> Option<Commit> {
+        let repo = &self.repos[r];
+        if rev == "HEAD" {
+            return repo.resolve(head);
+        }
+        if let Some(&c) = repo.local.get(rev) {
+            return Some(c);
+        }
+        if rev.len() < 4 || !rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return None;
+        }
+        let mut named = (0..self.parents.len()).filter(|&c| commit_name(c).starts_with(rev));
+        match (named.next(), named.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        }
     }
 
     /// Commits reachable from `tip` but not from `base`, oldest first (a commit's parents are older than it).
@@ -781,6 +804,32 @@ impl Worktrees for FakeWorktrees {
             .into_iter()
             .map(|c| (commit_hash(c), s.changes[c].map(patch_id)))
             .collect())
+    }
+
+    /// Every repo shares one commit graph, so any repo has every commit; a name past the graph is unknown.
+    fn patch_id(
+        &self,
+        repo: &RepoRef,
+        commit: &CommitHash,
+    ) -> Result<Option<PatchId>, WorktreeError> {
+        let s = self.take_failure()?;
+        let path = repo.as_path();
+        s.checkout(path).ok_or_else(|| State::not_a_repo(path))?;
+        let c = s
+            .commit_named(commit)
+            .ok_or_else(|| WorktreeError::Other(format!("bad object {commit}")))?;
+        Ok(s.changes[c].map(patch_id))
+    }
+
+    fn resolve_commit(
+        &self,
+        repo: &RepoRef,
+        rev: &str,
+    ) -> Result<Option<CommitHash>, WorktreeError> {
+        let s = self.take_failure()?;
+        let path = repo.as_path();
+        let (r, head) = s.checkout(path).ok_or_else(|| State::not_a_repo(path))?;
+        Ok(s.resolve_rev(r, &head, rev).map(commit_hash))
     }
 
     /// Below a checkout, only directories made with [`FakeWorktrees::add_dir`] exist, as for `repo_root`.

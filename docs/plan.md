@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T43 `shepherd archive` CLI | [conversation-archive](features/conversation-archive.md) | building | task/t43-archive-cli |  |  |
-| F52 Peer conn hardening after the tunnel | [multi-machine](features/multi-machine.md) | building | task/f52-peer-hardening |  |  |
+| T43 `shepherd archive` CLI | [conversation-archive](features/conversation-archive.md) | merging | task/t43-archive-cli @ a208f0a | 2 | round 2 APPROVE; argv faithful-check test → T44 |
+| F52 Peer conn hardening after the tunnel | [multi-machine](features/multi-machine.md) | fixing | task/f52-peer-hardening @ f98992c | 1 | round 1 CHANGES: peer/list local-only; unknown-conn fail-closed untested; exhaustive match; joins.clear; overflow answer; settle untested |
 
 ## Ready to start
 

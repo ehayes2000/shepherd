@@ -7,6 +7,10 @@ fn main() -> ExitCode {
         None => client(),
         Some("host") => return shepherd::host::main(),
         Some("handoff-check") => handoff_check(),
+        Some("archive") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::archive_cli::main(&args)
+        }
         Some("hook") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::hook::main(&args);

@@ -624,6 +624,58 @@ impl GitWorktrees {
             .any(|listed| resolved(Path::new(listed)) == resolved(path)))
     }
 
+    /// Each commit's `git patch-id --stable` among the commits `revs` select, of the patch `git log -p` prints for it,
+    /// with every setting that changes that patch pinned (see `commits_since` for the pins and why). A commit with no
+    /// patch (a merge, or one that changes nothing) is absent.
+    fn patch_ids(
+        &self,
+        dir: &Path,
+        revs: &[&str],
+    ) -> Result<HashMap<CommitHash, PatchId>, WorktreeError> {
+        let mut log = vec![
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "log.showRoot=true",
+            "log",
+            "--no-color",
+            "--no-textconv",
+            "--text",
+            "--no-renames",
+            "--diff-merges=off",
+            "--unified=3",
+            "--inter-hunk-context=0",
+            "--diff-algorithm=myers",
+            "--indent-heuristic",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--submodule=short",
+            "--ignore-submodules=none",
+            "--no-show-signature",
+            "--format=commit %H",
+            "--patch",
+        ];
+        log.extend_from_slice(revs);
+        log.push("--");
+        let patches = self
+            .run_to_file(dir, &log, Some(self.git_timeout), None, &[], None)
+            .map_err(|f| f.into_error("log"))?;
+        let ids = self
+            .git_reading(dir, &["patch-id", "--stable"], patches)
+            .map_err(|f| f.into_error("patch-id"))?;
+        let mut by_commit = HashMap::new();
+        for line in ids.lines() {
+            let parsed = line.split_once(' ').and_then(|(patch, commit)| {
+                Some((CommitHash::parse(commit).ok()?, PatchId::parse(patch).ok()?))
+            });
+            let (commit, patch) = parsed.ok_or_else(|| {
+                WorktreeError::Other(format!("unexpected patch-id output {line:?}"))
+            })?;
+            by_commit.insert(commit, patch);
+        }
+        Ok(by_commit)
+    }
+
     /// The absolute common git dir of the checkout containing `dir`.
     fn common_dir(&self, dir: &Path) -> Result<PathBuf, WorktreeError> {
         let out = self
@@ -1200,47 +1252,7 @@ impl Worktrees for GitWorktrees {
         if commits.is_empty() {
             return Ok(Vec::new());
         }
-        let log = [
-            "-c",
-            "core.quotePath=true",
-            "-c",
-            "log.showRoot=true",
-            "log",
-            "--no-color",
-            "--no-textconv",
-            "--text",
-            "--no-renames",
-            "--diff-merges=off",
-            "--unified=3",
-            "--inter-hunk-context=0",
-            "--diff-algorithm=myers",
-            "--indent-heuristic",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "--submodule=short",
-            "--ignore-submodules=none",
-            "--no-show-signature",
-            "--format=commit %H",
-            "--patch",
-            &range,
-            "--",
-        ];
-        let patches = self
-            .run_to_file(dir, &log, Some(self.git_timeout), None, &[], None)
-            .map_err(|f| f.into_error("log"))?;
-        let ids = self
-            .git_reading(dir, &["patch-id", "--stable"], patches)
-            .map_err(|f| f.into_error("patch-id"))?;
-        let mut by_commit = HashMap::new();
-        for line in ids.lines() {
-            let parsed = line.split_once(' ').and_then(|(patch, commit)| {
-                Some((CommitHash::parse(commit).ok()?, PatchId::parse(patch).ok()?))
-            });
-            let (commit, patch) = parsed.ok_or_else(|| {
-                WorktreeError::Other(format!("unexpected patch-id output {line:?}"))
-            })?;
-            by_commit.insert(commit, patch);
-        }
+        let mut by_commit = self.patch_ids(dir, &[&range])?;
         Ok(commits
             .into_iter()
             .map(|c| {
@@ -1248,6 +1260,48 @@ impl Worktrees for GitWorktrees {
                 (c, patch)
             })
             .collect())
+    }
+
+    /// [`GitWorktrees::patch_ids`] of `commit` alone, so it is the one `commits_since` gives it.
+    fn patch_id(
+        &self,
+        repo: &RepoRef,
+        commit: &CommitHash,
+    ) -> Result<Option<PatchId>, WorktreeError> {
+        let dir = repo.as_path();
+        self.common_dir(dir)?;
+        let one = commit.to_string();
+        let mut ids = self.patch_ids(dir, &["--no-walk", &one])?;
+        Ok(ids.remove(commit))
+    }
+
+    /// `rev-parse --verify --quiet --end-of-options <rev>^{commit}`. Git's "no single commit" (exit 1, which `--quiet`
+    /// keeps silent, for an ambiguous name too) is `None`. The appended `^{commit}` peel already keeps a `rev` that
+    /// starts with `-` from matching one of rev-parse's options (the contract's
+    /// `resolve_commit_never_reads_a_rev_as_an_option` passes on the peel alone); `--end-of-options` is defence in
+    /// depth, so no future option spelling can take it.
+    fn resolve_commit(
+        &self,
+        repo: &RepoRef,
+        rev: &str,
+    ) -> Result<Option<CommitHash>, WorktreeError> {
+        let dir = repo.as_path();
+        self.common_dir(dir)?;
+        let peeled = format!("{rev}^{{commit}}");
+        let args = [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &peeled,
+        ];
+        match self.git(dir, &args) {
+            Ok(out) => CommitHash::parse(out.trim_end_matches('\n'))
+                .map(Some)
+                .map_err(|e| WorktreeError::Other(format!("unexpected rev-parse output: {e}"))),
+            Err(Failure::Exit { code: Some(1), .. }) => Ok(None),
+            Err(f) => Err(f.into_error("rev-parse")),
+        }
     }
 
     /// `rev-list --max-parents=0 HEAD`: the smallest, when the history has several roots.

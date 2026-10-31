@@ -1031,6 +1031,226 @@ fn verify_reports_missing_and_corrupt_blobs_and_orphans_and_deletes_nothing() {
     );
 }
 
+// ---- every session, read-only handles ----
+
+#[test]
+fn all_sessions_lists_every_repos_sessions_oldest_first() {
+    let dir = tempdir();
+    let archive = Archive::open(&dir.path().join("archive")).unwrap();
+    assert_eq!(archive.all_sessions().unwrap(), vec![], "an empty archive");
+    let mut later = session("later", repo('a'));
+    later.created_at = at(2_000_000_000_000_000);
+    let earlier = session("earlier", repo('c'));
+    archive.put_session(&later).unwrap();
+    archive.put_session(&earlier).unwrap();
+    assert_eq!(archive.all_sessions().unwrap(), vec![earlier, later]);
+}
+
+/// An archive with one session and one snapshot, and its root. Every handle on it is closed.
+fn archive_at_rest(dir: &TempDir) -> PathBuf {
+    let root = dir.path().join("archive");
+    let archive = Archive::open(&root).unwrap();
+    archive.put_session(&session("s1", repo('a'))).unwrap();
+    archive
+        .add_snapshot(&snapshot(
+            "s1",
+            vec![file(FileRole::Main, "/m", b"transcript")],
+            vec![commit('c', Some('d'))],
+        ))
+        .unwrap();
+    root
+}
+
+/// Everything under `root` but the archive's own lock files, with a hash of its bytes and its modification time.
+fn archive_files(root: &Path) -> Vec<(PathBuf, BlobId, std::time::SystemTime)> {
+    files_under(root)
+        .into_iter()
+        .filter(|(p, _)| !p.extension().is_some_and(|e| e == "lock" || e == "live"))
+        .map(|(p, bytes)| {
+            let modified = fs::metadata(&p).unwrap().modified().unwrap();
+            (p, BlobId::of(&bytes), modified)
+        })
+        .collect()
+}
+
+/// [`archive_files`] but the -shm and an empty -wal, which SQLite gives a reader of a WAL index that no other handle
+/// has open: the index, every WAL frame and every blob stay as they were.
+fn archive_files_but_reader_side_files(
+    root: &Path,
+) -> Vec<(PathBuf, BlobId, std::time::SystemTime)> {
+    let side = |p: &Path, suffix: &str| {
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy() == format!("index.sqlite{suffix}"))
+    };
+    archive_files(root)
+        .into_iter()
+        .filter(|(p, _, _)| {
+            let empty_wal = side(p, "-wal") && fs::metadata(p).unwrap().len() == 0;
+            !(side(p, "-shm") || empty_wal)
+        })
+        .collect()
+}
+
+/// Reads everything there is to read through `archive`: what the `shepherd archive` commands do.
+fn read_everything(archive: &Archive) -> usize {
+    let sessions = archive.all_sessions().unwrap();
+    let mut read = 0;
+    for s in &sessions {
+        for snap in archive.snapshots(&s.id).unwrap() {
+            read += archive.read(snap.id).unwrap().len();
+        }
+    }
+    assert_eq!(archive.find_by_commit(&hash('c')).unwrap().len(), 1);
+    assert_eq!(archive.find_by_patch_id(&patch('d')).unwrap().len(), 1);
+    let report = archive.verify().unwrap();
+    assert!(report.bad_rows.is_empty() && report.orphans.is_empty());
+    read
+}
+
+#[test]
+fn a_read_only_open_of_an_archive_at_rest_reads_it_and_changes_no_file() {
+    let dir = tempdir();
+    let root = archive_at_rest(&dir);
+    let before = archive_files(&root);
+
+    let archive = Archive::open_read_only(&root).unwrap();
+    assert_eq!(read_everything(&archive), 1);
+    drop(archive);
+
+    assert_eq!(
+        archive_files_but_reader_side_files(&root),
+        before,
+        "no file added, changed or touched"
+    );
+}
+
+#[test]
+fn a_read_only_open_beside_a_live_writer_sees_its_writes_and_never_blocks_it() {
+    let dir = tempdir();
+    let root = archive_at_rest(&dir);
+    let writer = Archive::open(&root).unwrap();
+    let before = archive_files(&root);
+
+    let reader = Archive::open_read_only(&root).unwrap();
+    assert_eq!(read_everything(&reader), 1);
+    drop(reader);
+    assert_eq!(archive_files(&root), before, "the reader changed no file");
+
+    let reader = Archive::open_read_only(&root).unwrap();
+    // The writer writes while the reader is open (and has read), and the reader sees it.
+    assert_eq!(reader.all_sessions().unwrap().len(), 1);
+    writer.put_session(&session("s2", repo('a'))).unwrap();
+    assert_eq!(reader.all_sessions().unwrap().len(), 2);
+    drop(reader);
+    writer.put_session(&session("s3", repo('a'))).unwrap();
+    drop(writer);
+    assert_eq!(
+        Archive::open(&root).unwrap().all_sessions().unwrap().len(),
+        3
+    );
+}
+
+#[test]
+fn a_read_only_open_of_a_missing_archive_says_so_and_creates_nothing() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let result = Archive::open_read_only(&root);
+    assert!(
+        matches!(&result, Err(ArchiveError::NoArchive(p)) if *p == root),
+        "{result:?}"
+    );
+    assert!(!root.exists(), "no root made");
+
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Archive::open_read_only(&root);
+    assert!(
+        matches!(&result, Err(ArchiveError::NoArchive(p)) if *p == root),
+        "{result:?}"
+    );
+    assert_eq!(files_under(&root), vec![], "nothing made in an empty root");
+}
+
+#[test]
+fn a_read_only_open_refuses_an_older_index_and_leaves_it_alone() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    plant_v1(&root, "");
+    let before = archive_files(&root);
+    let result = Archive::open_read_only(&root);
+    assert!(
+        matches!(&result, Err(ArchiveError::OlderIndex { found: 1, .. })),
+        "{result:?}"
+    );
+    assert_eq!(archive_files(&root), before);
+}
+
+#[test]
+fn a_read_only_open_refuses_a_newer_index_and_leaves_it_alone() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let newer = INDEX_VERSION + 1;
+    plant_index(
+        &root,
+        &format!(
+            "PRAGMA journal_mode = WAL; CREATE TABLE future(x INTEGER); PRAGMA user_version = {newer};"
+        ),
+    );
+    let before = archive_files(&root);
+    let result = Archive::open_read_only(&root);
+    assert!(
+        matches!(&result, Err(ArchiveError::NewerIndex { found, .. }) if *found == newer),
+        "{result:?}"
+    );
+    assert_eq!(archive_files(&root), before);
+}
+
+#[test]
+fn a_read_only_handle_refuses_every_write_and_stores_nothing() {
+    let dir = tempdir();
+    let root = archive_at_rest(&dir);
+    // A transcript a read-write handle captures, so a refused capture is refused for being read-only.
+    let home = dir.path().join("claude");
+    let project = home.join("projects").join("-work-s1");
+    fs::create_dir_all(&project).unwrap();
+    let transcript = project.join("agent-s1.jsonl");
+    fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+    let capture = shepherd_archive::Capture {
+        session: sid("s1"),
+        captured_at: at(1_767_229_300_000_000),
+        head_commit: None,
+        reason: SnapshotReason::Manual,
+        commits: vec![],
+        agent_home: &home,
+        transcript_path: &transcript,
+        limits: shepherd_archive::CaptureLimits::default(),
+    };
+    Archive::open(&root).unwrap().capture(&capture).unwrap();
+    let before = archive_files(&root);
+    let archive = Archive::open_read_only(&root).unwrap();
+
+    let captured = archive.capture(&capture);
+    assert!(
+        matches!(captured, Err(ArchiveError::ReadOnly)),
+        "{captured:?}"
+    );
+    assert_eq!(archive.capture_bytes_read(), 0, "no transcript was read");
+
+    let put = archive.put_session(&session("s2", repo('a')));
+    assert!(matches!(put, Err(ArchiveError::ReadOnly)), "{put:?}");
+    let add = archive.add_snapshot(&snapshot(
+        "s1",
+        vec![file(FileRole::Main, "/new", b"a new transcript")],
+        vec![],
+    ));
+    assert!(matches!(add, Err(ArchiveError::ReadOnly)), "{add:?}");
+    let sweep = archive.sweep_temps();
+    assert!(matches!(sweep, Err(ArchiveError::ReadOnly)), "{sweep:?}");
+    assert_eq!(archive.blob_writes(), 0);
+    drop(archive);
+    assert_eq!(archive_files_but_reader_side_files(&root), before);
+}
+
 // ---- processes: crash, concurrency, temp sweep ----
 
 /// The parent passes the child its archive root, and what to do there, through these variables.

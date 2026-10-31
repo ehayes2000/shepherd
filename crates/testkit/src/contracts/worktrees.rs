@@ -87,6 +87,14 @@ macro_rules! worktrees_contract {
             merges_and_empty_commits_have_no_patch_id,
             root_commit_of_a_history_with_two_roots_is_the_smaller,
             root_commit_of_a_non_repo_is_not_a_repo,
+            patch_id_of_a_commit_is_the_one_commits_since_gives_it,
+            patch_id_of_a_merge_or_an_empty_commit_is_none,
+            patch_id_of_a_commit_the_repo_lacks_is_an_error,
+            patch_id_outside_a_repo_is_not_a_repo,
+            resolve_commit_names_hashes_abbreviations_head_and_branches,
+            resolve_commit_of_a_rev_that_names_no_commit_is_none,
+            resolve_commit_never_reads_a_rev_as_an_option,
+            resolve_commit_outside_a_repo_is_not_a_repo,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -973,6 +981,122 @@ pub fn root_commit_of_a_history_with_two_roots_is_the_smaller<F: WorktreesFixtur
 
 pub fn root_commit_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
     let result = f.port().root_commit(&f.not_a_repo());
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
+}
+
+// ---------- patch_id, resolve_commit ----------
+
+/// The same pinned patch as `commits_since`, so a commit found by its patch-id matches the one capture recorded; and a
+/// rebased commit has the patch-id of the commit it was made from.
+pub fn patch_id_of_a_commit_is_the_one_commits_since_gives_it<F: WorktreesFixture>(f: &F) {
+    let (path, base) = base_of(f, "work");
+    f.commit(&path);
+    f.commit(&path);
+    let before = f.port().commits_since(&path, &base).unwrap();
+    let repo = RepoRef::new(path.as_path());
+    for (commit, patch) in &before {
+        assert!(patch.is_some(), "{before:?}");
+        assert_eq!(f.port().patch_id(&repo, commit).as_ref(), Ok(patch));
+    }
+    f.advance_origin();
+    f.rebase_onto_origin_default(&path);
+    let after = f
+        .port()
+        .commits_since(&path, &hash(&f.origin_tip()))
+        .unwrap();
+    assert_eq!(after.len(), 2, "{after:?}");
+    for ((old, old_patch), (new, _)) in before.iter().zip(&after) {
+        assert_ne!(old, new);
+        assert_eq!(f.port().patch_id(&repo, new).as_ref(), Ok(old_patch));
+    }
+    // From the main checkout too: every checkout of the repo has the worktree's commits.
+    let (first, first_patch) = &before[0];
+    assert_eq!(
+        f.port().patch_id(&f.repo(), first).as_ref(),
+        Ok(first_patch)
+    );
+}
+
+pub fn patch_id_of_a_merge_or_an_empty_commit_is_none<F: WorktreesFixture>(f: &F) {
+    let (path, _) = base_of(f, "work");
+    let repo = RepoRef::new(path.as_path());
+    f.commit_empty(&path);
+    let empty = hash(&f.head(path.as_path()));
+    let root = hash(&f.merge_unrelated_root(&path));
+    let merge = hash(&f.head(path.as_path()));
+    assert_eq!(f.port().patch_id(&repo, &empty), Ok(None));
+    assert_eq!(f.port().patch_id(&repo, &merge), Ok(None));
+    assert!(
+        matches!(f.port().patch_id(&repo, &root), Ok(Some(_))),
+        "a root commit has a patch"
+    );
+}
+
+pub fn patch_id_of_a_commit_the_repo_lacks_is_an_error<F: WorktreesFixture>(f: &F) {
+    let unknown = hash(&"deadbeef".repeat(5));
+    let result = f.port().patch_id(&f.repo(), &unknown);
+    assert!(result.is_err(), "{result:?}");
+}
+
+pub fn patch_id_outside_a_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let commit = hash(&f.local_default_tip());
+    let result = f.port().patch_id(&f.not_a_repo(), &commit);
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
+}
+
+/// What `git blame` prints (an abbreviated hash) and what people type (a branch, `HEAD`) name the commit.
+pub fn resolve_commit_names_hashes_abbreviations_head_and_branches<F: WorktreesFixture>(f: &F) {
+    let created = f
+        .port()
+        .create(&f.repo(), &name("work"), BaseSpec::OriginDefault)
+        .unwrap();
+    f.commit(&created.path);
+    let head = f.head(created.path.as_path());
+    let tip = hash(&head);
+    let in_worktree = RepoRef::new(created.path.as_path());
+    let resolve = |repo: &RepoRef, rev: &str| f.port().resolve_commit(repo, rev);
+    assert_eq!(resolve(&in_worktree, &head), Ok(Some(tip.clone())));
+    assert_eq!(resolve(&in_worktree, &head[..12]), Ok(Some(tip.clone())));
+    assert_eq!(resolve(&in_worktree, "HEAD"), Ok(Some(tip.clone())));
+    assert_eq!(resolve(&f.repo(), created.branch.as_str()), Ok(Some(tip)));
+    assert_eq!(
+        resolve(&f.repo(), DEFAULT),
+        Ok(Some(hash(&f.local_default_tip())))
+    );
+}
+
+pub fn resolve_commit_of_a_rev_that_names_no_commit_is_none<F: WorktreesFixture>(f: &F) {
+    for rev in [
+        "no-such-branch".to_owned(),
+        "deadbeef".repeat(5),
+        "deadbeef".to_owned(),
+        String::new(),
+    ] {
+        assert_eq!(
+            f.port().resolve_commit(&f.repo(), &rev),
+            Ok(None),
+            "{rev:?}"
+        );
+    }
+}
+
+/// A rev from the command line that looks like an option is a name like any other: it names no commit, and changes
+/// nothing about the call. (In the git adapter the `^{commit}` peel appended to it already keeps these from matching
+/// one of git's options; `--end-of-options` is kept as defence in depth, and no case here needs it alone.)
+pub fn resolve_commit_never_reads_a_rev_as_an_option<F: WorktreesFixture>(f: &F) {
+    for rev in ["--all", "-h", "--git-dir=/nonexistent", "--end-of-options"] {
+        assert_eq!(f.port().resolve_commit(&f.repo(), rev), Ok(None), "{rev:?}");
+    }
+}
+
+pub fn resolve_commit_outside_a_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let result = f.port().resolve_commit(&f.not_a_repo(), "HEAD");
     assert!(
         matches!(result, Err(WorktreeError::NotARepo(_))),
         "{result:?}"

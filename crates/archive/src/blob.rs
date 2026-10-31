@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
 use crate::private::{
-    create_new_private_file, ensure_private_dir, io_err, normalize, open_existing_private_file,
-    open_or_create_private_file, sync_dir,
+    check_existing_private_dir, create_new_private_file, ensure_private_dir, io_err, normalize,
+    open_existing_private_file, open_or_create_private_file, sync_dir,
 };
 
 /// The largest blob [`BlobStore::put`] accepts and [`BlobStore::get`] inflates, unless set with
@@ -163,6 +163,22 @@ impl BlobStore {
         Ok(Self {
             blobs,
             lock,
+            max_len: DEFAULT_MAX_BLOB_LEN,
+            writes: AtomicU64::new(0),
+            inflated: AtomicU64::new(0),
+        })
+    }
+
+    /// The existing store under `root`, for reading: nothing is created, and `root` and `blobs/` must be private
+    /// directories (not symlinks). A store that doesn't exist is an IO error naming the missing directory.
+    pub(crate) fn open_existing(root: &Path) -> Result<Self, BlobError> {
+        let root = normalize(root);
+        let blobs = root.join("blobs");
+        check_existing_private_dir(&root)?;
+        check_existing_private_dir(&blobs)?;
+        Ok(Self {
+            blobs,
+            lock: root.join("blobs.lock"),
             max_len: DEFAULT_MAX_BLOB_LEN,
             writes: AtomicU64::new(0),
             inflated: AtomicU64::new(0),

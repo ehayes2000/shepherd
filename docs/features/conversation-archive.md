@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | done | 9a91698 | 3 | round 3 APPROVE |
 | T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
-| T43 | `shepherd archive` CLI | building | task/t43-archive-cli |  |  |
+| T43 | `shepherd archive` CLI | merging | task/t43-archive-cli @ a208f0a | 2 | round 2 APPROVE; argv faithful-check test → T44 |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
 
 ## Specs
@@ -194,6 +194,8 @@ acceptance:
 - The run re-records `crates/archive/tests/fixtures` (scrubbed) and settles T41's cwd-rewrite question (amend T41 if needed).
 - Agent state goes to throwaway dirs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` or the agents' documented equivalents), never the
   user's real `~/.claude` / `~/.codex`; the script says up front that it uses the network and costs tokens.
+- From T43's review: `archive restore`'s "print no shell line unless faithful" check on the resume argv
+  (archive_cli.rs ~632) is untested; add a restore test whose agent session id holds U+202E and assert no `cd` line.
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get

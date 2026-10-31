@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
+use rusqlite::config::DbConfig;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, TransactionBehavior, params};
 
@@ -54,6 +55,18 @@ pub enum ArchiveError {
     /// The index was written by a newer shepherd. It is left exactly as it was.
     #[error("the archive index is version {found}; this shepherd understands up to {supported}")]
     NewerIndex { found: i64, supported: i64 },
+    /// A read-only handle found an index from an older shepherd, which only a read-write open migrates. It is left as
+    /// it was.
+    #[error(
+        "the archive index is version {found} and needs migrating to version {supported}: start `shepherd host` once to migrate it"
+    )]
+    OlderIndex { found: i64, supported: i64 },
+    /// [`Archive::open_read_only`] found no index under this root: nothing has been archived there yet.
+    #[error("there is no archive in {0} yet")]
+    NoArchive(PathBuf),
+    /// A write through a handle from [`Archive::open_read_only`]. Nothing was stored.
+    #[error("this archive handle is read-only")]
+    ReadOnly,
     /// SQLite kept another journal mode (named) when asked for WAL.
     #[error("the archive index would not switch to WAL (journal mode is {0})")]
     NotWal(String),
@@ -197,8 +210,11 @@ pub struct Archive {
     /// Fields drop in declaration order after [`Drop::drop`]: `conn` closes, then `live` is released, while `closing`
     /// still holds `index.lock`.
     conn: Mutex<Connection>,
+    /// `None` for a read-only handle on an index no read-write handle ever opened (it has no `index.live`).
     #[expect(dead_code, reason = "held only for its shared lock on index.live")]
-    live: File,
+    live: Option<File>,
+    /// From [`Archive::open_read_only`]: every write is [`ArchiveError::ReadOnly`].
+    read_only: bool,
     index_lock: PathBuf,
     closing: Option<File>,
 }
@@ -270,12 +286,90 @@ impl Archive {
             blobs,
             capture_reads: AtomicU64::new(0),
             conn: Mutex::new(conn),
-            live,
+            live: Some(live),
+            read_only: false,
             index_lock: opening_path,
             closing: None,
         };
         drop(opening);
         Ok(archive)
+    }
+
+    /// Opens the archive under `root` for reading only, while a host may be writing it: nothing is migrated,
+    /// checkpointed or locked against writers, and neither the index nor its WAL frames nor any blob change. Its
+    /// connection is an ordinary read-only one, so it reads what writers commit, through the WAL as SQLite intends,
+    /// and writers never wait for it. (When no other handle has the index open, SQLite gives that connection an empty
+    /// -wal and a -shm, as for any reader of a WAL database; `open` reads past both.) No index is
+    /// [`ArchiveError::NoArchive`]; an index from an older or newer shepherd is [`ArchiveError::OlderIndex`] or
+    /// [`ArchiveError::NewerIndex`], left as it was. Every write through it is [`ArchiveError::ReadOnly`]. Restoring
+    /// through it works: a restore writes only under the agent's home.
+    pub fn open_read_only(root: &Path) -> Result<Self, ArchiveError> {
+        let root = normalize(root);
+        let path = root.join("index.sqlite");
+        if !exists(&path)? {
+            return Err(ArchiveError::NoArchive(root));
+        }
+        let blobs = BlobStore::open_existing(&root)?;
+        open_existing_private_file(&path)?;
+        // Like `open`, while no other opener or closer is busy (if any read-write handle ever made the lock files;
+        // without them there has never been a handle to coordinate with).
+        let opening_path = root.join("index.lock");
+        let opening = if exists(&opening_path)? {
+            let file = open_existing_private_file(&opening_path)?;
+            file.lock().map_err(|e| io_err(&opening_path, e))?;
+            Some(file)
+        } else {
+            None
+        };
+        let live_path = root.join("index.live");
+        let (live, others_live) = if exists(&live_path)? {
+            let live = open_existing_private_file(&live_path)?;
+            let others = match live.try_lock() {
+                Ok(()) => false,
+                Err(TryLockError::WouldBlock) => true,
+                Err(TryLockError::Error(e)) => return Err(io_err(&live_path, e).into()),
+            };
+            (Some(live), others)
+        } else {
+            (None, false)
+        };
+        // At rest, the version is read without changing a byte, as `open` reads it (a WAL with frames but no -shm is
+        // refused the same way), so an index this can't read is left exactly as it was.
+        if !others_live {
+            readable_version(peek_version(&path)?)?;
+        }
+        if let Some(live) = &live {
+            live.lock_shared().map_err(|e| io_err(&live_path, e))?;
+        }
+        let conn = Connection::open_with_flags(
+            sqlite_uri(&path, "mode=ro"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        // Beside live handles, through the connection that joins them (`open` holds `index.lock` to migrate, and so
+        // can't be migrating now).
+        readable_version(read_version(&conn)?)?;
+        let archive = Self {
+            blobs,
+            capture_reads: AtomicU64::new(0),
+            conn: Mutex::new(conn),
+            live,
+            read_only: true,
+            index_lock: opening_path,
+            closing: None,
+        };
+        drop(opening);
+        Ok(archive)
+    }
+
+    fn writable(&self) -> Result<(), ArchiveError> {
+        if self.read_only {
+            return Err(ArchiveError::ReadOnly);
+        }
+        Ok(())
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -297,6 +391,7 @@ impl Archive {
     /// payload gave, which must be that agent session's transcript under `c.agent_home` (the rules are in the
     /// `capture` module: a [`CaptureError`] otherwise, and nothing is stored). Unchanged files add no blobs.
     pub fn capture(&self, c: &Capture<'_>) -> Result<SnapshotId, ArchiveError> {
+        self.writable()?;
         let session = self
             .sessions_where("id = ?1", params![c.session])?
             .into_iter()
@@ -354,6 +449,7 @@ impl Archive {
     /// Records a session, or updates everything but its id and creation time if it is already recorded. Its repo is
     /// recorded too if it is new.
     pub fn put_session(&self, s: &Session) -> Result<(), ArchiveError> {
+        self.writable()?;
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
@@ -391,6 +487,7 @@ impl Archive {
     /// Stores a snapshot's files as blobs, then records the snapshot, its files and its commits in one transaction.
     /// Returns its id. A session that isn't recorded is [`ArchiveError::UnknownSession`] and nothing is stored.
     pub fn add_snapshot(&self, s: &NewSnapshot<'_>) -> Result<SnapshotId, ArchiveError> {
+        self.writable()?;
         if !self.session_exists(&s.session)? {
             return Err(ArchiveError::UnknownSession(s.session.clone()));
         }
@@ -492,6 +589,11 @@ impl Archive {
         id: &AgentSessionId,
     ) -> Result<Vec<Session>, ArchiveError> {
         self.sessions_where("agent = ?1 AND agent_session_id = ?2", params![agent, id])
+    }
+
+    /// Every session in the archive, in every repo, oldest first.
+    pub fn all_sessions(&self) -> Result<Vec<Session>, ArchiveError> {
+        self.sessions_where("1 = 1", params![])
     }
 
     /// Every session in `repo`, oldest first.
@@ -624,6 +726,7 @@ impl Archive {
     /// [`BlobStore::sweep_temps`] for why a live writer's are never touched). Index rows never point at temps, so the
     /// index itself isn't locked. Maintenance: run it when convenient, not on open.
     pub fn sweep_temps(&self) -> Result<Sweep, ArchiveError> {
+        self.writable()?;
         Ok(self.blobs.sweep_temps()?)
     }
 }
@@ -657,21 +760,7 @@ fn peek_version_in_use(path: &Path) -> Result<i64, ArchiveError> {
 /// The caller holds `index.lock` and no other handle is live, so the side files can't change between the look and
 /// the read.
 fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
-    let side = |suffix: &str| {
-        let mut name = path.as_os_str().to_owned();
-        name.push(suffix);
-        PathBuf::from(name)
-    };
-    // `Some(meta)` if something is at `p`. Never followed: a symlink counts as present.
-    let look = |p: &Path| match fs::symlink_metadata(p) {
-        Ok(meta) => Ok(Some(meta)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(ArchiveError::Blob(BlobError::Io {
-            path: p.to_path_buf(),
-            message: e.to_string(),
-        })),
-    };
-    let (wal, shm) = (side("-wal"), side("-shm"));
+    let (wal, shm) = (side_file(path, "-wal"), side_file(path, "-shm"));
     let has_frames = look(&wal)?.is_some_and(|m| m.file_type().is_symlink() || m.len() > 0);
     let query = match (has_frames, look(&shm)?.is_some()) {
         (true, true) => "mode=ro&readonly_shm=1",
@@ -686,6 +775,26 @@ fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
     )?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     read_version(&conn)
+}
+
+/// The SQLite side file of the index at `path` with `suffix` (`-wal`, `-shm`).
+fn side_file(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// `Some(meta)` if something is at `p`. Never followed: a symlink counts as present.
+fn look(p: &Path) -> Result<Option<fs::Metadata>, ArchiveError> {
+    match fs::symlink_metadata(p) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(p, e).into()),
+    }
+}
+
+fn exists(p: &Path) -> Result<bool, ArchiveError> {
+    Ok(look(p)?.is_some())
 }
 
 /// The bytes an SQLite URI path keeps as they are: `[A-Za-z0-9/._-]`. Everything else, `?`, `#` and `%` included, is
@@ -704,6 +813,17 @@ fn sqlite_uri(path: &Path, query: &str) -> String {
 
 fn read_version(conn: &Connection) -> Result<i64, ArchiveError> {
     Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Refuses an index a read-only handle can't read: one from an older shepherd (only `open` migrates) or a newer one.
+fn readable_version(found: i64) -> Result<(), ArchiveError> {
+    if (0..INDEX_VERSION).contains(&found) {
+        return Err(ArchiveError::OlderIndex {
+            found,
+            supported: INDEX_VERSION,
+        });
+    }
+    pending_migrations(found).map(|_| ())
 }
 
 /// The migrations an index at version `found` still needs, or an error if this build can't migrate it.

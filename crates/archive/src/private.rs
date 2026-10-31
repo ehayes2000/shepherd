@@ -72,6 +72,14 @@ fn check_regular_file(path: &Path, meta: &Metadata) -> Result<(), BlobError> {
     Ok(())
 }
 
+/// Checks that `dir` exists and is a real directory, not a symlink, that group and others can't access. Creates
+/// nothing.
+pub(crate) fn check_existing_private_dir(dir: &Path) -> Result<(), BlobError> {
+    let dir = &normalize(dir);
+    let meta = fs::symlink_metadata(dir).map_err(|e| io_err(dir, e))?;
+    check_existing_dir(dir, &meta)
+}
+
 /// Creates `dir` exactly `0700`, or checks that an existing one is a real directory, not a symlink, that group and
 /// others can't access. An existing directory is never chmodded. Missing parents are created `0700` minus the umask
 /// and not chmodded, as `private_fs` does, since a parent may be shared with other things.
