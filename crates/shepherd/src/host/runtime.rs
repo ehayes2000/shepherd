@@ -2140,7 +2140,10 @@ impl<
                 let settings = &self.settings;
                 let config = &settings.config;
                 let result = wire::negotiate(&hello, &self.machine).map(|ok| {
-                    let ok = ok.with_profiles(config).with_notify(config);
+                    let ok = ok
+                        .with_profiles(config)
+                        .with_notify(config)
+                        .with_color(config);
                     let ok = ok.with_warning(settings.warning.clone());
                     let ok = ok.with_machine_name(self.host.machine_name().map(str::to_owned));
                     HostResult::Hello(ok.with_build(settings.build.clone(), installed))

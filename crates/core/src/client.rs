@@ -91,6 +91,7 @@ use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp}
 use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Content, Layout};
+use crate::machine::MachineColor;
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
@@ -592,6 +593,8 @@ struct Feed {
     default_profile: Option<String>,
     /// Alert when a session newly wants the user, from the host's hello answer.
     bell: bool,
+    /// What color the host's machine is drawn in, from its hello answer. `None` when it doesn't say.
+    color: Option<MachineColor>,
 }
 
 impl Feed {
@@ -1041,6 +1044,17 @@ impl Client {
         }
     }
 
+    /// What color `machine`'s name is drawn in: the one its host's hello gives, else [`MachineColor::of`] its id.
+    pub fn machine_color(&self, machine: &MachineId) -> MachineColor {
+        let peer = self.peers.get(machine).map(|p| &p.feed);
+        let from_hello = [Some(&self.local), peer]
+            .into_iter()
+            .flatten()
+            .find(|feed| feed.machine.as_ref() == Some(machine))
+            .and_then(|feed| feed.color);
+        from_hello.unwrap_or_else(|| MachineColor::of(machine))
+    }
+
     /// The terminal view's size, once the runtime has reported it.
     pub fn size(&self) -> Option<PtySize> {
         self.size
@@ -1438,6 +1452,7 @@ impl Client {
         peer.feed.name = ok.name;
         peer.feed.set_profiles(ok.profiles, ok.default_profile);
         peer.feed.bell = ok.notify.bell;
+        peer.feed.color = ok.color;
         let from = peer.feed.subscribe_from();
         let at = At::Peer(machine.clone());
         let subscribe = ClientRequest::Subscribe(Subscribe { from });
@@ -1634,6 +1649,7 @@ impl Client {
                 self.local.name = ok.name.clone();
                 self.local.set_profiles(ok.profiles, ok.default_profile);
                 self.local.bell = ok.notify.bell;
+                self.local.color = ok.color;
                 self.connection = Connection::Ready;
                 self.launched = false;
                 let subscribe = Subscribe {

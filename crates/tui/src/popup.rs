@@ -3,9 +3,9 @@
 //! ([`crate::finder`]), the offer to start a session in an orphan worktree, and the cleanup view ([`crate::cleanup`]).
 //!
 //! While there are peers, the new-session popup and the switcher start with a machine selector (T32): a line asking
-//! which machine, then a row per machine, the chosen one marked `●` and the others `○`. A machine that can't be reached
-//! now is drawn dim with why (`offline: …`) and isn't a control. The new-session popup then also has a `[Start]` button,
-//! which starts the chosen machine's default profile.
+//! which machine, then a row per machine, its name in its color, the chosen one marked `●` and the others `○`. A
+//! machine that can't be reached now is drawn dim with why (`offline: …`) and isn't a control. The new-session popup
+//! then also has a `[Start]` button, which starts the chosen machine's default profile.
 //!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
@@ -25,6 +25,7 @@ use shepherd_core::wire::ProfileInfo;
 
 use crate::draw::{self, ShownLine, shown};
 use crate::layout::Target;
+use crate::machine;
 use crate::sidebar::machine_status;
 use crate::width::{columns, cut, cut_left, pad, tail};
 use crate::{cleanup, finder};
@@ -107,6 +108,8 @@ pub(crate) struct Placed {
     pub controls: Vec<Control>,
     /// Lines drawn dim that aren't controls: a menu's items that can't be chosen.
     pub disabled: Vec<(Position, DisplayText)>,
+    /// Cells restyled once the rest is drawn: each machine's name in its color ([`machine::style`]).
+    pub tints: Vec<(Rect, Style)>,
 }
 
 /// Where the open popup, if any, and its controls are in `window`.
@@ -242,6 +245,7 @@ pub(crate) fn dialog(area: Rect, buttons: &[(&'static str, Target)]) -> Placed {
         area,
         controls,
         disabled: Vec::new(),
+        tints: Vec::new(),
     }
 }
 
@@ -278,6 +282,7 @@ fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
         area,
         controls: Vec::new(),
         disabled: Vec::new(),
+        tints: Vec::new(),
     };
     for ((entry, label), y) in entries.iter().zip(labels).zip(inside.y..inside.bottom()) {
         if entry.unavailable.is_some() {
@@ -383,15 +388,25 @@ fn machine_rows(client: &Client, inside: Rect, limit: u16, placed: &mut Placed) 
         } else {
             OTHER_MARK
         };
+        let lead = format!(" {mark} ");
+        let cols = |text: &str| u16::try_from(columns(text)).unwrap_or(u16::MAX);
+        let name = Rect::new(
+            inside.x.saturating_add(cols(&lead)),
+            y,
+            cols(shown(&group.name).as_str()),
+            1,
+        );
+        let style = machine::style(client, &group.id);
+        placed.tints.push((name.intersection(inside), style));
         if group.status == MachineStatus::Connected {
             placed.controls.push(Control {
                 area: Rect::new(inside.x, y, inside.width, 1),
                 target: Target::MachineRow(group.id.clone()),
-                label: shown(&format!(" {mark} {}", group.name)),
+                label: shown(&format!("{lead}{}", group.name)),
             });
         } else {
             let why = machine_status(&group);
-            let label = shown(&format!(" {mark} {} ({why})", group.name));
+            let label = shown(&format!("{lead}{} ({why})", group.name));
             placed.disabled.push((Position::new(inside.x, y), label));
         }
     }
@@ -603,6 +618,9 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
     for (at, label) in &placed.disabled {
         let room = usize::from(inside.right().saturating_sub(at.x));
         draw::set(buf, at.x, at.y, label, room, dim);
+    }
+    for (area, style) in &placed.tints {
+        buf.set_style(area.intersection(buf.area), *style);
     }
     cursor
 }

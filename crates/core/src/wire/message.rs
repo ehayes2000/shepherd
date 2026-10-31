@@ -33,6 +33,7 @@ use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Layout, LayoutOp};
+use crate::machine::MachineColor;
 use crate::ports::worktrees::WorktreeStatus;
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
@@ -684,6 +685,24 @@ pub struct HelloOk {
     /// place and runs with the defaults. Absent when there is nothing, and from older hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// What color the host's machine is drawn in, from its config's `[machine] color`. `None` when it doesn't say
+    /// (clients then derive one from its id), from older hosts, and when it names a color this client doesn't know.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_color"
+    )]
+    pub color: Option<MachineColor>,
+}
+
+/// A [`HelloOk::color`] as read: a color this client doesn't know (a newer host's), or anything else, is none rather
+/// than a failed hello.
+fn known_color<'de, D>(deserializer: D) -> Result<Option<MachineColor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// `notify` in [`HelloOk`].
@@ -733,6 +752,14 @@ impl HelloOk {
     /// This answer, with `warning` for the user, if any.
     pub fn with_warning(self, warning: Option<String>) -> Self {
         Self { warning, ..self }
+    }
+
+    /// This answer, carrying `config`'s `[machine] color`, if it gives one.
+    pub fn with_color(self, config: &Config) -> Self {
+        Self {
+            color: config.machine_color(),
+            ..self
+        }
     }
 
     /// This answer, carrying `config`'s `[notify]` settings.
@@ -952,6 +979,7 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
         build: None,
         installed: None,
         warning: None,
+        color: None,
     })
 }
 

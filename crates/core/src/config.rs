@@ -11,6 +11,8 @@ use std::time::Duration;
 use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 
+use crate::machine::MachineColor;
+
 // ---------- raw (as written) ----------
 
 /// The config file as written. Every field is optional, and unknown fields are rejected so typos surface as
@@ -33,6 +35,9 @@ pub struct RawConfig {
 pub struct RawMachine {
     /// What this machine is called (see [`crate::machine`]). Defaults to its hostname.
     pub name: Option<String>,
+    /// What color its name is drawn in, everywhere (see [`crate::machine::MachineColor`]). Defaults to the one its id
+    /// derives.
+    pub color: Option<String>,
 }
 
 /// `[defaults]`.
@@ -131,6 +136,10 @@ pub enum ConfigError {
     EmptyMachineName,
     #[error("machine.name is longer than {max} characters")]
     LongMachineName { max: usize },
+    #[error(
+        "machine.color `{0}` is not one of cyan, magenta, blue, light-cyan, light-magenta or light-blue"
+    )]
+    UnknownMachineColor(String),
 }
 
 // ---------- resolved ----------
@@ -291,6 +300,7 @@ pub struct Config {
     cleanup_after_days: u32,
     workspaces: Vec<(WorkspaceKey, WorkspaceHooks)>,
     machine_name: Option<String>,
+    machine_color: Option<MachineColor>,
 }
 
 /// How many days after its PTY exited a session whose branch is merged counts as stale, when the config doesn't say.
@@ -321,6 +331,7 @@ impl Config {
     /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
     /// - `[machine] name` must not be empty or longer than [`crate::machine::MAX_NAME`] grapheme clusters once made
     ///   display-safe and trimmed.
+    /// - `[machine] color`, if given, must name a [`MachineColor`].
     /// - `[workspaces."<key>"]`: `<key>` is an absolute repo path (it has a `/`) or a repo directory's name. Hooks
     ///   must not be empty, and `hook_timeout_s` defaults to [`DEFAULT_HOOK_TIMEOUT`] and must be more than 0.
     pub fn resolve(
@@ -368,10 +379,14 @@ impl Config {
             .map(|(key, workspace)| workspace_hooks(key, workspace))
             .collect::<Result<_, _>>()?;
 
-        let machine_name = raw
-            .machine
-            .and_then(|m| m.name)
+        let machine = raw.machine.unwrap_or_default();
+        let machine_name = machine
+            .name
             .map(|name| crate::machine::configured(&name))
+            .transpose()?;
+        let machine_color = machine
+            .color
+            .map(|color| crate::machine::configured_color(&color))
             .transpose()?;
 
         Ok(Self {
@@ -382,6 +397,7 @@ impl Config {
             cleanup_after_days,
             workspaces,
             machine_name,
+            machine_color,
         })
     }
 
@@ -425,6 +441,11 @@ impl Config {
     /// What `[machine] name` calls this machine, display-safe (see [`crate::machine`]). `None` when it doesn't say.
     pub fn machine_name(&self) -> Option<&str> {
         self.machine_name.as_deref()
+    }
+
+    /// What color `[machine] color` gives this machine. `None` when it doesn't say: it then has the one its id derives.
+    pub fn machine_color(&self) -> Option<MachineColor> {
+        self.machine_color
     }
 
     /// The hooks of the workspace whose repo is at `repo` (as resolved, symlinks followed): the table whose key is

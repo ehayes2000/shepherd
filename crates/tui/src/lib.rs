@@ -25,6 +25,7 @@ pub mod encode;
 mod finder;
 mod keys;
 pub mod layout;
+pub mod machine;
 mod popup;
 mod screen;
 pub mod sidebar;
