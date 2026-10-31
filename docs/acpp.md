@@ -85,6 +85,13 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/worktree/removed`  | `{ path, removed: bool, kept? }` (host log: how removing the orphan worktree at `path` went; neither `removed` nor `kept`: it was already gone) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
 | `_shepherd/machine/renamed`  | `{ name }` (host log: the host started under a name other than the last one recorded, its first start included; see `core::machine`) |
+| `_shepherd/peer/trusted`     | `{ node, name }` (host log: this machine trusts machine `node`, an iroh node id like `machine`, which calls itself `name` (display-safe); recorded by both sides of a pairing. A later one for the same node renames it. See `core::host::peering`) |
+| `_shepherd/peer/removed`     | `{ node }` (host log: `shepherd unpair`; this machine no longer trusts `node` until they pair again) |
+
+The trusted set is the fold of these two over the host log, and is all the host's network endpoint lets in. Pairing
+itself is not logged, only its result: the client↔host requests `_shepherd/pair/start` (a single-use ticket, expiring
+after 10 minutes), `_shepherd/pair/wait`, `_shepherd/pair/join { ticket }`, `_shepherd/peer/list` and
+`_shepherd/peer/remove { peer }` are in `core::wire`.
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.
   When a vendor frame turns out to be generally useful, promote it to a `_shepherd/` method. Never repurpose

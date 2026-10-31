@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use shepherd_core::acpp::{EntryId, Timestamp};
 use shepherd_core::ids::SessionId;
+use shepherd_core::ports::{PairToken, TOKEN_LEN};
 
 pub trait Env {
     /// Wall-clock time, for envelope `ts` and event `at`.
@@ -15,6 +16,8 @@ pub trait Env {
     fn new_session_id(&mut self) -> SessionId;
     /// A fresh, globally unique envelope id.
     fn new_entry_id(&mut self) -> EntryId;
+    /// A fresh pairing token: secret, from OS randomness. Fails only if the OS has none to give.
+    fn pair_token(&mut self) -> Result<PairToken, String>;
 }
 
 /// The real clock and ULIDs.
@@ -44,6 +47,13 @@ impl Env for RealEnv {
     fn new_entry_id(&mut self) -> EntryId {
         EntryId::new(ulid::Ulid::new().to_string())
     }
+
+    /// 16 bytes from the OS.
+    fn pair_token(&mut self) -> Result<PairToken, String> {
+        let mut bytes = [0; TOKEN_LEN];
+        getrandom::fill(&mut bytes).map_err(|e| format!("the OS gave no randomness: {e}"))?;
+        Ok(PairToken::new(bytes))
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +72,13 @@ mod tests {
                 .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
         );
         assert_eq!(LogId::Session(id).validate(), Ok(()));
+    }
+
+    #[test]
+    fn pairing_tokens_differ() {
+        let mut env = RealEnv;
+        assert_ne!(env.pair_token(), env.pair_token());
+        assert!(env.pair_token().is_ok());
     }
 
     #[test]

@@ -85,6 +85,7 @@
 
 pub mod launch;
 pub mod naming;
+pub mod peering;
 pub mod pr;
 pub mod quiet;
 pub mod sizes;
@@ -420,6 +421,8 @@ pub enum HostEvent {
 pub enum HostCommand {
     /// Seal and append this frame to its log, then pass the envelope to [`Host::apply`].
     Append(Box<FrameDraft>),
+    /// A call to the `Peers` port, decided by [`peering::Peering`].
+    Peers(peering::PeersCommand),
     SpawnPty {
         session: SessionId,
         spec: SpawnSpec,

@@ -514,6 +514,8 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
             commands.clone(),
             FakeForge::new(),
             link,
+            shepherd_testkit::fakes::peers::FakePeerNet::new()
+                .peers(support::machine(), tx.peers_sink()),
             log_recording(&app, &recorded),
             TestEnv::new(),
             settings,

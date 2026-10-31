@@ -74,7 +74,8 @@ pub use envelope::{
 };
 pub use frame::{Correlated, Frame, FrameError, Message, PendingRequests, RequestId, Response};
 pub use shepherd::{
-    AgentExited, AgentIdle, AgentStarted, IdleInference, MachineRenamed, Pr, PrChecks, PrState,
-    SessionClosed, SessionCreated, SessionFailed, SessionPr, SessionRenamed, ShepherdFrame,
-    WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
+    AgentExited, AgentIdle, AgentStarted, IdleInference, MachineRenamed, PeerRemoved, PeerTrusted,
+    Pr, PrChecks, PrState, SessionClosed, SessionCreated, SessionFailed, SessionPr, SessionRenamed,
+    ShepherdFrame, WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved,
+    WorktreeRemoving,
 };

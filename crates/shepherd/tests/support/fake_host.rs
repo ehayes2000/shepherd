@@ -266,6 +266,14 @@ impl FakeHost {
             ClientRequest::WorktreeRemove(_) => Ok(HostResult::WorktreeRemove(
                 shepherd_core::wire::WorktreeRemoveOk::default(),
             )),
+            // The client TUI never pairs: the scripted host doesn't either.
+            other @ (ClientRequest::PairStart(_)
+            | ClientRequest::PairWait(_)
+            | ClientRequest::PairJoin(_)
+            | ClientRequest::PeerList(_)
+            | ClientRequest::PeerRemove(_)) => Err(shepherd_core::wire::WireError::MethodNotFound(
+                other.method().as_str().to_owned(),
+            )),
         };
         let fresh = self.driver.log()[before..].to_vec();
         for env in fresh {

@@ -27,6 +27,8 @@ pub enum ShepherdFrame {
     WorktreeRemoved(WorktreeRemoved),
     WorkspaceSelected(WorkspaceSelected),
     MachineRenamed(MachineRenamed),
+    PeerTrusted(PeerTrusted),
+    PeerRemoved(PeerRemoved),
 }
 
 impl ShepherdFrame {
@@ -46,6 +48,8 @@ impl ShepherdFrame {
             Self::WorktreeRemoved(_) => "_shepherd/worktree/removed",
             Self::WorkspaceSelected(_) => "_shepherd/workspace/selected",
             Self::MachineRenamed(_) => "_shepherd/machine/renamed",
+            Self::PeerTrusted(_) => "_shepherd/peer/trusted",
+            Self::PeerRemoved(_) => "_shepherd/peer/removed",
         }
     }
 
@@ -67,6 +71,8 @@ impl ShepherdFrame {
             Self::WorktreeRemoved(p) => to_params(p),
             Self::WorkspaceSelected(p) => to_params(p),
             Self::MachineRenamed(p) => to_params(p),
+            Self::PeerTrusted(p) => to_params(p),
+            Self::PeerRemoved(p) => to_params(p),
         };
         Frame::notification(self.method(), params)
     }
@@ -92,6 +98,8 @@ impl ShepherdFrame {
             "_shepherd/worktree/removed" => Self::WorktreeRemoved(p(params)?),
             "_shepherd/workspace/selected" => Self::WorkspaceSelected(p(params)?),
             "_shepherd/machine/renamed" => Self::MachineRenamed(p(params)?),
+            "_shepherd/peer/trusted" => Self::PeerTrusted(p(params)?),
+            "_shepherd/peer/removed" => Self::PeerRemoved(p(params)?),
             _ => return None,
         })
     }
@@ -303,4 +311,18 @@ pub struct WorkspaceSelected {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineRenamed {
     pub name: String,
+}
+
+/// This machine trusts machine `node` (an iroh node id, as [`MachineId`]s are), which calls itself `name`: they paired
+/// (host log). A later one for the same machine replaces its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerTrusted {
+    pub node: MachineId,
+    pub name: String,
+}
+
+/// This machine no longer trusts machine `node` (host log): `shepherd unpair`. Pairing again trusts it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerRemoved {
+    pub node: MachineId,
 }

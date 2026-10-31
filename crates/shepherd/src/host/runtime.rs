@@ -56,6 +56,11 @@
 //!   same way: a tick stamped with `Env::now` returns the `Forge` calls to make, which run on a worker of their own (each
 //!   bounded, since `gh` waits on the network), their answers coming back as [`RuntimeEvent::Forge`] and going to the
 //!   watch, which returns the `session/pr` frames to append. An upgrade doesn't wait for them: the new image polls again.
+//! - **Peers** (T30). A [`Peering`] beside core decides pairing and trust: it sees every entry appended, and the logs
+//!   on start (so a host that trusts someone binds and dials them at once). The pairing and peer requests go to it,
+//!   with a fresh token from `Env::pair_token` for a pairing, and so do the `Peers` port's events. After each batch of
+//!   its commands, its `sync` pushes what the batch changed (the trusted set, binding). Its deadline (a pairing's expiry)
+//!   is serviced like the others. Shutting down unbinds.
 //! - **Spawn sizes.** Every event goes to core through a [`Sizes`], which keeps the latest size each session's terminal
 //!   was given (a client's resize, even before its PTY exists, or an adopted session's carried size) and spawns its
 //!   PTY at it. A new session's spec asks for the client's view size from its `session/new`, else [`INITIAL_SIZE`].
@@ -74,6 +79,7 @@ use shepherd_core::acpp::{
 use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
+use shepherd_core::host::peering::{Peering, PeeringEvent, PeersCommand};
 use shepherd_core::host::pr::{PrEvent, PrWatch};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::sizes::Sizes;
@@ -85,8 +91,9 @@ use shepherd_core::host::{
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
     CommandError, Commands, ConnId, EventLog, Forge, ForgeError, Link, LinkEvent, LinkEventSink,
-    LogError, LogId, MAX_QUEUED, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef,
-    RunId, WorktreeError, WorktreeName, WorktreePath, Worktrees,
+    LogError, LogId, MAX_QUEUED, PairTicket, Peers, PeersEvent, PeersEventSink, PtyError, PtyEvent,
+    PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId, WorktreeError, WorktreeName, WorktreePath,
+    Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -137,6 +144,8 @@ pub enum RuntimeEvent {
     Shutdown,
     /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
     Preflighted(Preflight),
+    /// What the `Peers` port reports, for the peering.
+    Peers(PeersEvent),
 }
 
 /// Runs the upgrade preflight: `<exe> handoff-check`, bounded. The runtime calls it on a thread of its own.
@@ -254,6 +263,17 @@ impl RuntimeTx {
     /// A sink for a [`Link`] adapter, forwarding into this channel.
     pub fn link_sink(&self) -> Arc<dyn LinkEventSink> {
         Arc::new(self.clone())
+    }
+
+    /// A sink for a [`Peers`] adapter, forwarding into this channel.
+    pub fn peers_sink(&self) -> Arc<dyn PeersEventSink> {
+        Arc::new(self.clone())
+    }
+}
+
+impl PeersEventSink for RuntimeTx {
+    fn send(&self, event: PeersEvent) {
+        RuntimeTx::send(self, RuntimeEvent::Peers(event));
     }
 }
 
@@ -395,7 +415,7 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
+pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
@@ -415,6 +435,7 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
     /// `Forge` calls submitted and not yet answered.
     forge_calls: usize,
     link: L,
+    peers: N,
     log: E,
     env: V,
     settings: RuntimeSettings,
@@ -459,6 +480,9 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V> {
     swap: Option<SwapPlan<P::Token>>,
     /// Why the last accepted swap failed, and what was installed then.
     swap_failed: Option<(Option<ExeDigest>, String)>,
+    peering: Peering,
+    /// When the peering's deadline (a pairing's expiry) is due on the monotonic clock.
+    peer_due: Option<Instant>,
 }
 
 impl<
@@ -469,7 +493,8 @@ impl<
     L: Link,
     E: EventLog,
     V: Env,
-> HostRuntime<P, W, C, F, L, E, V>
+    N: Peers,
+> HostRuntime<P, W, C, F, L, E, V, N>
 {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
     /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`,
@@ -481,13 +506,14 @@ impl<
         commands: C,
         forge: F,
         link: L,
+        peers: N,
         log: E,
         env: V,
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, forge, link, log, env);
+        let ports = (pty, worktrees, commands, forge, link, peers, log, env);
         Self::start_with(ports, settings, tx, rx, Adoption::default())
     }
 
@@ -502,6 +528,7 @@ impl<
         commands: C,
         forge: F,
         link: L,
+        peers: N,
         log: E,
         env: V,
         settings: RuntimeSettings,
@@ -509,12 +536,12 @@ impl<
         rx: RuntimeRx,
         adoption: Adoption,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, forge, link, log, env);
+        let ports = (pty, worktrees, commands, forge, link, peers, log, env);
         Self::start_with(ports, settings, tx, rx, adoption)
     }
 
     fn start_with(
-        (pty, worktrees, commands, forge, link, log, env): (P, W, C, F, L, E, V),
+        (pty, worktrees, commands, forge, link, peers, log, env): (P, W, C, F, L, N, E, V),
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
@@ -523,11 +550,13 @@ impl<
         let mut host = Host::new();
         let mut quiet = QuietWatch::new(&settings.config);
         let mut pr = PrWatch::new();
+        let mut peering = Peering::new();
         for id in log.logs()? {
             for envelope in log.read(id, Seq::ZERO)? {
                 host.apply(&resolved_paths(&envelope));
                 quiet.apply(&envelope);
                 pr.apply(&envelope);
+                peering.apply(&envelope);
             }
         }
         let worktrees = Worker::spawn("worktrees", worktrees, tx.clone(), RuntimeEvent::Worktrees)
@@ -549,6 +578,7 @@ impl<
             forge,
             forge_calls: 0,
             link,
+            peers,
             log,
             env,
             settings,
@@ -578,6 +608,8 @@ impl<
             swapping: false,
             swap: None,
             swap_failed: None,
+            peering,
+            peer_due: None,
         };
         let adopted: BTreeSet<SessionId> = adoption.sessions.iter().map(|s| s.id.clone()).collect();
         let orphans: Vec<SessionId> = runtime
@@ -607,6 +639,9 @@ impl<
         if runtime.pr_due.is_none() && runtime.pr.deadline().is_some() {
             runtime.pr_due = Some(runtime.env.instant());
         }
+        // A host that trusts someone binds now, and dials them; one that never paired stays offline.
+        let sync = runtime.peering.sync();
+        runtime.execute_all(sync);
         Ok(runtime)
     }
 
@@ -709,6 +744,7 @@ impl<
             .chain(self.shutdown_by)
             .chain(self.quiet_due)
             .chain(self.pr_due)
+            .chain(self.peer_due)
             .min()
     }
 
@@ -938,6 +974,10 @@ impl<
                     self.advance_upgrade();
                 }
             }
+            RuntimeEvent::Peers(event) => {
+                log_peers_event(&event);
+                self.peering(PeeringEvent::Peers(event));
+            }
         }
     }
 
@@ -1049,6 +1089,7 @@ impl<
                     }
                 }
                 HostCommand::Reply { to, result } => self.reply(to, result),
+                HostCommand::Peers(command) => self.call_peers(command),
                 HostCommand::CheckPr {
                     session,
                     repo,
@@ -1426,6 +1467,7 @@ impl<
         self.schedule_quiet(envelope.ts());
         self.pr.apply(&envelope);
         self.schedule_pr(envelope.ts());
+        self.peering.apply(&envelope);
         self.release_if_ended(&envelope);
         let line = log_entry_line(envelope);
         let to: Vec<ConnId> = self
@@ -1554,6 +1596,10 @@ impl<
         if self.pr_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
             self.tick_pr();
         }
+        if self.peer_due.is_some_and(|due| due <= now) && self.shutdown_by.is_none() {
+            let at = self.env.now();
+            self.peering(PeeringEvent::Tick { at });
+        }
         if self.shutdown_by.is_some_and(|by| by <= now) && !self.finished {
             tracing::warn!(
                 ptys = self.screens.len(),
@@ -1593,6 +1639,35 @@ impl<
             .pr
             .deadline()
             .map(|deadline| self.env.instant() + until(at, deadline));
+    }
+
+    /// Hands `event` to the peering and executes what it decides, then what that batch changed (`Peering::sync`), and
+    /// schedules its deadline.
+    fn peering(&mut self, event: PeeringEvent) {
+        let commands = self.peering.handle(event);
+        self.execute_all(commands);
+        let sync = self.peering.sync();
+        self.execute_all(sync);
+        let at = self.env.now();
+        self.peer_due = self
+            .peering
+            .deadline()
+            .map(|deadline| self.env.instant() + until(&at, deadline));
+    }
+
+    /// One call to the `Peers` port, which never blocks.
+    fn call_peers(&mut self, command: PeersCommand) {
+        match command {
+            PeersCommand::Bind => self.peers.bind(),
+            PeersCommand::Unbind => self.peers.unbind(),
+            PeersCommand::SetTrusted(trusted) => self.peers.set_trusted(&trusted),
+            PeersCommand::AcceptPairing { id, token, name } => {
+                self.peers.accept_pairing(id, token, &name)
+            }
+            PeersCommand::StopPairing => self.peers.stop_pairing(),
+            PeersCommand::Join { id, ticket, name } => self.peers.join(id, &ticket, &name),
+            PeersCommand::Connect { peer } => self.peers.connect(&peer),
+        }
     }
 
     /// Executes `commands` from a watch beside core, then the events that produced for core.
@@ -1781,6 +1856,39 @@ impl<
                     preflight: None,
                 });
                 self.advance_upgrade();
+            }
+            ClientRequest::PairStart(_) => {
+                let reply = self.reply_to(conn, id);
+                let token = match self.env.pair_token() {
+                    Ok(token) => token,
+                    Err(why) => {
+                        let error =
+                            WireError::Internal(format!("cannot make a pairing token: {why}"));
+                        return self.reply(reply, Err(error));
+                    }
+                };
+                let at = self.env.now();
+                self.peering(PeeringEvent::Start { reply, token, at });
+            }
+            ClientRequest::PairWait(_) => {
+                let reply = self.reply_to(conn, id);
+                self.peering(PeeringEvent::Wait { reply });
+            }
+            ClientRequest::PairJoin(join) => {
+                let reply = self.reply_to(conn, id);
+                let ticket = PairTicket::new(join.ticket);
+                self.peering(PeeringEvent::Join { reply, ticket });
+            }
+            ClientRequest::PeerList(_) => {
+                let reply = self.reply_to(conn, id);
+                self.peering(PeeringEvent::List { reply });
+            }
+            ClientRequest::PeerRemove(remove) => {
+                let reply = self.reply_to(conn, id);
+                self.peering(PeeringEvent::Remove {
+                    reply,
+                    peer: remove.peer,
+                });
             }
             ClientRequest::SessionResume(resume) => {
                 let reply = self.reply_to(conn, id);
@@ -2298,7 +2406,25 @@ impl<
         }
         self.conns.clear();
         self.replies.clear();
+        // Peers see this machine go at once, rather than when its connections time out.
+        self.peers.unbind();
         self.finished = true;
+    }
+}
+
+/// Logs what the `Peers` port reports that nothing else shows: refusals, failed dials and binds, connections.
+fn log_peers_event(event: &PeersEvent) {
+    match event {
+        PeersEvent::Refused { peer } => {
+            tracing::warn!(%peer, "refused a connection from a machine this one doesn't trust")
+        }
+        PeersEvent::BindFailed { error } => tracing::error!(%error, "cannot go online"),
+        PeersEvent::ConnectFailed { peer, error } => {
+            tracing::info!(%peer, %error, "cannot connect to a peer")
+        }
+        PeersEvent::Connected { peer } => tracing::info!(%peer, "peer connected"),
+        PeersEvent::Disconnected { peer } => tracing::info!(%peer, "peer disconnected"),
+        _ => {}
     }
 }
 
