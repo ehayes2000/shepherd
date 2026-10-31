@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | ready |  |  |  |
+| T54 | Subagent lifecycle in the event log | building | task/t54-subagent-events |  |  |
 | T55 | Subagent tree in the sidebar | todo |  |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 

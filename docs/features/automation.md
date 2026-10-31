@@ -15,9 +15,9 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T45 | Headless UI test harness | done | caa414b | 1 | APPROVE; exemption wider than gap (removed by F55) |
-| T46 | CLI client: list and start sessions | ready |  |  |  |
+| T46 | CLI client: list and start sessions | fixing | task/t46-cli-sessions @ d49c4bd | 1 | round 1 CHANGES: CLI hello cwd sets host workspace (reproduced); Incompatible host stalls 60s; peer catch-up deadline; status mapping; PrJson; relative cwd for peers |
 | T47 | Prompt an agent and wait for its reply | todo |  |  |  |
-| T48 | Host-owned layout: pages and splits in core | ready |  |  |  |
+| T48 | Host-owned layout: pages and splits in core | merging | task/t48-host-layout @ 8c7161b | 1 | APPROVE; seeded property tests (b0b110b) |
 | T49 | Render pages and split panes | todo |  |  |  |
 | T50 | `shepherd ui` CLI and screenshots | todo |  |  |  |
 | T51 | Answer an agent's pending question | todo |  |  |  |
@@ -114,6 +114,10 @@ acceptance:
 - Clients fold the layout into their state; with only the default layout (one page, the selected session) today's UI is
   unchanged (every existing snapshot passes).
 scope: crates/core, crates/shepherd, crates/testkit
+- (Amended after the build, before review) `Content::Selected`: "whatever this window has selected", resolved per window;
+  the default layout is one page with one `Selected` pane, so today's UI is unchanged and sidebar clicks stay per window.
+  `Content::Session { machine: Option<MachineId>, id }` can pin a peer's session; `retain_sessions` empties only this host's
+  own unlisted sessions.
 notes: (binding) Decision 0022. Focus and selection: which pane is focused is per window (it's where that window's input
 goes), not host state. PTY size with several panes: a session's PTY is sized to the pane it's shown in on the window that
 last focused it; record the rule in the decision.
@@ -133,6 +137,8 @@ acceptance:
 - Tests through the T45 harness: snapshots of two pages, a three-way split and a tiny window; click-to-focus, border drag,
   pane menu ops; the property test extended with layout ops.
 scope: crates/tui, crates/core
+- From T48's review: a pinned peer's machine id and `ViewKind::Other(name)` are only checked for being non-empty; draw them
+  through `display_safe` and clipped, never raw.
 notes: Decision 0014: every action is clickable; keys are optional extras.
 
 ### T50: `shepherd ui` CLI and screenshots

@@ -863,5 +863,7 @@ not handle splits or tabs". Decision:
   ask the user returns `wants-user` at once.
 - UI is tested through a headless harness (real client + renderer on `TestBackend`, clicking on drawn text), including a
   seeded property test over random UI steps.
+- Panes show `Selected` (each window's own sidebar selection; the default), a pinned `Session { machine?, id }` (a peer's
+  session too), `Empty` or a `View`. Sidebar selection never changes the host's layout.
 Consequences: feature `docs/features/automation.md` (T45-T50); `docs/cli.md` documents every `--json` shape.
 
