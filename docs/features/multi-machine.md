@@ -15,7 +15,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
-| T32 | Create sessions on any machine | todo |  |  |  |
+| T32 | Create sessions on any machine | building | task/t32-new-session-machine |  |  |
+| T32b | Show whether each machine's link is relayed or direct | todo |  |  |  |
 | F52 | Peer conn hardening after the tunnel | todo |  |  |  |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
 
@@ -160,16 +161,28 @@ scope: crates/core, crates/tui, crates/shepherd
 notes: (binding) Per-host client state stays pure core (one connection state per machine); no clock in core.
 
 ### T32: Create sessions on any machine
-depends: T31, T22
-touches: core::client, tui::new_session
+depends: T31b, T22
+touches: core::client, tui::new_session, shepherd tests
 goal: Choose where a new session runs.
 acceptance:
 - The new-session popup has a machine selector, defaulting to the local machine or the machine of the selected session.
 - Workspaces are per machine. The workspace switcher shows the selected machine's workspaces.
 - Scenario: create a session on a remote fake host, then type into it and see the output.
-scope: crates/core, crates/tui
-accepted (decision 0019): show on each machine whether its path is relayed or direct (iroh `Connection::paths()`), since
-relayed typing costs about 26 ms more per keystroke.
+- From T31b: profiles (and the profile picker) come from the chosen machine's host, replacing T31b's implicit "selected
+  session's host" rule; an unreachable machine can't be chosen (shown disabled, with why).
+scope: crates/core, crates/tui, crates/shepherd (tests only)
+notes: point-and-click first (decision 0014): the machine selector is clickable. The relayed/direct indicator is T32b.
+
+### T32b: Show whether each machine's link is relayed or direct
+depends: T32
+touches: ports::peers, adapters::peers, wire (peer list), tui::sidebar
+goal: Accepted in decision 0019: relayed typing costs about 26 ms more per keystroke, so the user sees which machines are
+relayed.
+acceptance:
+- The peers port reports each connected peer's path kind (iroh `Connection::paths()`: direct or relayed), the host's peer
+  list carries it (additive field), and the sidebar's machine header shows it (snapshot).
+- A path that changes (relay → direct after hole punching) updates the header; fake peers port test.
+scope: crates/core, crates/testkit, crates/adapters, crates/shepherd, crates/tui
 
 ### F52: Peer conn hardening after the tunnel
 depends: T31a
