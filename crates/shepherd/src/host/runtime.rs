@@ -796,8 +796,8 @@ impl<
         }
         self.conns.clear();
         self.replies.clear();
-        let deadline = self.env.instant() + CLOSE_FLUSH;
-        if self.link.flush_closed(deadline) == FlushOutcome::TimedOut {
+        // Timed by the link, on the clock it waits with: not `Env::instant`, which tests move by hand.
+        if self.link.flush_closed(CLOSE_FLUSH) == FlushOutcome::TimedOut {
             tracing::warn!("a client didn't read what it was sent before the swap; it is cut off");
         }
     }

@@ -255,8 +255,8 @@ impl Link for UnixListenLink {
         self.conns.queued_bytes(conn)
     }
 
-    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome {
-        self.conns.flush_closed(deadline)
+    fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
+        self.conns.flush_closed(Instant::now() + within)
     }
 }
 
@@ -311,8 +311,8 @@ impl Link for UnixConnectLink {
         self.conns.queued_bytes(conn)
     }
 
-    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome {
-        self.conns.flush_closed(deadline)
+    fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
+        self.conns.flush_closed(Instant::now() + within)
     }
 }
 
@@ -425,9 +425,8 @@ struct Shared {
     /// When `close` was called. The reader holds this lock while it emits a `Line`, so once `close` has set it
     /// and returned, no more `Line`s are emitted.
     closed_at: Mutex<Option<Instant>>,
-    /// Set when the writer exits: everything queued is written, or it gave up.
-    written: Mutex<bool>,
-    written_changed: Condvar,
+    /// Set when the writer exits.
+    written: Arc<Written>,
 }
 
 impl Shared {
@@ -441,22 +440,36 @@ impl Shared {
         let _ = self.reason.set(reason);
         let _ = self.stream.shutdown(Shutdown::Both);
     }
+}
 
-    fn written(&self) -> MutexGuard<'_, bool> {
-        self.written.lock().unwrap_or_else(PoisonError::into_inner)
+/// Whether a conn's writer has exited: everything queued is written, or it gave up. Apart from [`Shared`], so a
+/// closed conn remembered for `flush_closed` doesn't keep its socket open.
+#[derive(Default)]
+struct Written {
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Written {
+    fn done(&self) -> MutexGuard<'_, bool> {
+        self.done.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_done(&self) -> bool {
+        *self.done()
     }
 
     /// Waits until the writer has exited, or `deadline` passes. Returns whether it has.
-    fn wait_written(&self, deadline: Instant) -> bool {
-        let mut written = self.written();
-        while !*written {
+    fn wait(&self, deadline: Instant) -> bool {
+        let mut done = self.done();
+        while !*done {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return false;
             }
-            written = self
-                .written_changed
-                .wait_timeout(written, left)
+            done = self
+                .changed
+                .wait_timeout(done, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
@@ -465,12 +478,12 @@ impl Shared {
 }
 
 /// Marks the writer done when it exits, however it exits.
-struct WrittenOnExit(Arc<Shared>);
+struct WrittenOnExit(Arc<Written>);
 
 impl Drop for WrittenOnExit {
     fn drop(&mut self) {
-        *self.0.written() = true;
-        self.0.written_changed.notify_all();
+        *self.0.done() = true;
+        self.0.changed.notify_all();
     }
 }
 
@@ -486,7 +499,7 @@ struct Handle {
 #[derive(Clone, Default)]
 struct Conns {
     live: Arc<Mutex<HashMap<ConnId, Handle>>>,
-    closing: Arc<Mutex<Vec<Arc<Shared>>>>,
+    closing: Arc<Mutex<Vec<Arc<Written>>>>,
 }
 
 impl Conns {
@@ -494,7 +507,7 @@ impl Conns {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn closing(&self) -> MutexGuard<'_, Vec<Arc<Shared>>> {
+    fn closing(&self) -> MutexGuard<'_, Vec<Arc<Written>>> {
         self.closing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -512,8 +525,7 @@ impl Conns {
             queued: AtomicUsize::new(0),
             reason: OnceLock::new(),
             closed_at: Mutex::new(None),
-            written: Mutex::new(false),
-            written_changed: Condvar::new(),
+            written: Arc::default(),
         });
         let writer_stream = stream.try_clone()?;
         // Fails (EINVAL on macOS) only when the peer has already gone. The conn is still registered and announced,
@@ -600,15 +612,17 @@ impl Conns {
         *handle.shared.closed_at() = Some(Instant::now());
         let mut closing = self.closing();
         // Forget the closes that are done, so the list holds only the ones still delivering.
-        closing.retain(|shared| !*shared.written());
-        closing.push(handle.shared.clone());
+        closing.retain(|written| !written.is_done());
+        closing.push(handle.shared.written.clone());
         // Dropping the handle drops the queue's sender: the writer flushes, then shuts the socket down.
         Ok(())
     }
 
+    /// A peer that never reads usually ends `Flushed` here rather than `TimedOut`: its writer gives up once the close
+    /// has waited [`CLOSE_FLUSH`], which marks it done.
     fn flush_closed(&self, deadline: Instant) -> FlushOutcome {
         let mut closing = self.closing();
-        closing.retain(|shared| !shared.wait_written(deadline));
+        closing.retain(|written| !written.wait(deadline));
         match closing.is_empty() {
             true => FlushOutcome::Flushed,
             false => FlushOutcome::TimedOut,
@@ -664,7 +678,7 @@ fn read_loop(
 }
 
 fn write_loop(mut stream: UnixStream, queue: Receiver<Vec<u8>>, shared: Arc<Shared>) {
-    let _done = WrittenOnExit(shared.clone());
+    let _done = WrittenOnExit(shared.written.clone());
     let mut batch = Vec::with_capacity(WRITE_BATCH);
     while let Ok(first) = queue.recv() {
         take(&shared, &first);
@@ -1031,6 +1045,35 @@ mod tests {
             matches!(&adopted.err(), Some(UnixLinkError::Io(why)) if why.contains("not bound to")),
             "refused for the wrong reason"
         );
+    }
+
+    /// A long-lived host closes conns all day and calls `flush_closed` only for a swap: the closes it remembers for
+    /// that must not pile up meanwhile (each holds its socket open). Each round closes a conn and waits until it has
+    /// delivered; a later close forgets it.
+    #[test]
+    fn closed_conns_that_are_done_are_forgotten() {
+        let dir = short_tempdir();
+        let path = dir.path().join("host.sock");
+        let (mut host, events) = bind(&path).unwrap();
+        for _ in 0..50 {
+            let (sink, client_events) = Events::channel();
+            let (_client, conn) = UnixConnectLink::connect(&path, sink).unwrap();
+            let seen = events.wait_for(
+                |e| matches!(e, LinkEvent::Connected { .. }),
+                Duration::from_secs(10),
+            );
+            let Some(LinkEvent::Connected { conn: host_conn }) = seen.last().cloned() else {
+                unreachable!()
+            };
+            host.send(host_conn, b"bye").unwrap();
+            host.close(host_conn).unwrap();
+            // Its writer is done (it shut the socket down) a moment before it marks itself so; never `flush_closed`,
+            // which would forget the done ones itself.
+            client_events.disconnect_of(conn);
+        }
+        // The last close or two may not have been forgotten yet; without pruning, all 50 are.
+        let remembered = host.conns.closing().len();
+        assert!(remembered <= 2, "{remembered} closed conns still held");
     }
 
     #[test]

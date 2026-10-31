@@ -171,15 +171,22 @@ fn a_swap_waits_for_a_slow_client_to_read_its_accepted_answer() {
     assert!(client.is_disconnected());
 }
 
-/// The wait is bounded: a client that never reads doesn't hold the swap past `CLOSE_FLUSH`.
+/// The wait is bounded, in real time: a client that never reads holds the swap for about `CLOSE_FLUSH`, however
+/// far the host's own clock has moved. The upper bound is a generous liveness bound, not a measurement: a deadline
+/// taken from the (advanced) test clock would hold it for `CLOSE_FLUSH` plus the advance.
 #[test]
 fn a_swap_proceeds_at_the_bound_when_a_client_never_reads() {
     let Stale { mut h, _dir } = stale();
     let mut client = h.connect_paced();
     client.request(ClientRequest::HostUpgrade(HostUpgrade::default()));
     h.step();
+    let advance = Duration::from_secs(60);
+    h.clock().advance(advance);
 
+    let started = std::time::Instant::now();
     h.swap(|_| {});
+    let held = started.elapsed();
+    assert!(held < advance / 2, "the swap was held for {held:?}");
     assert!(
         client.take().is_empty(),
         "the undelivered answer was cut off"

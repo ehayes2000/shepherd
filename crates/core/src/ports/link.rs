@@ -22,7 +22,7 @@
 //! - Dropping a link disconnects all its conns without flushing; their peers see `PeerGone`.
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The most unsent bytes a conn may have queued before it is disconnected as a slow consumer.
 pub const MAX_QUEUED: usize = 8 * 1024 * 1024;
@@ -88,7 +88,8 @@ pub trait LinkEventSink: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushOutcome {
     /// Every conn this link closed is done: what was queued for it is written, or it is gone (its peer left, or the
-    /// link gave up on a peer that wasn't reading).
+    /// link gave up on a peer that wasn't reading). So a peer that never reads may still end as `Flushed`: the unix
+    /// adapter's writer gives up on it after [`CLOSE_FLUSH`], usually just before a caller waiting as long times out.
     Flushed,
     /// The deadline passed with some closed conn still delivering.
     TimedOut,
@@ -114,7 +115,8 @@ pub trait Link {
     /// [`MAX_QUEUED`] (decision 0013).
     fn queued_bytes(&self, conn: ConnId) -> Option<usize>;
     /// Waits until every conn this link has [closed](Link::close) has finished delivering what was queued for it
-    /// (written to the transport, or the conn is gone), or until `deadline`, whichever comes first. Blocks the caller:
-    /// for a process about to exec, which would otherwise cut the deliveries off (decision 0018).
-    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome;
+    /// (written to the transport, or the conn is gone), or until `within` has passed, whichever comes first. The link
+    /// times the wait on the clock it waits with. Blocks the caller: for a process about to exec, which would otherwise
+    /// cut the deliveries off (decision 0018).
+    fn flush_closed(&mut self, within: Duration) -> FlushOutcome;
 }

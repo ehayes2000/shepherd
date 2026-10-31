@@ -420,8 +420,8 @@ impl Link for FakeLink {
         self.net.lock().queued_bytes(self.id, conn)
     }
 
-    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome {
-        self.net.flush_closed(self.id, deadline)
+    fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
+        self.net.flush_closed(self.id, Instant::now() + within)
     }
 }
 
@@ -544,13 +544,13 @@ mod tests {
         let (mut host, events, _client, conn, host_conn, net) = paced();
         host.send(host_conn, b"bye").unwrap();
         host.close(host_conn).unwrap();
-        assert_eq!(host.flush_closed(Instant::now()), FlushOutcome::TimedOut);
+        assert_eq!(host.flush_closed(Duration::ZERO), FlushOutcome::TimedOut);
         net.deliver(conn, usize::MAX);
         assert_eq!(
             events.disconnect_of(conn),
             (vec![b"bye".to_vec()], DisconnectReason::PeerGone)
         );
-        assert_eq!(host.flush_closed(Instant::now()), FlushOutcome::Flushed);
+        assert_eq!(host.flush_closed(Duration::ZERO), FlushOutcome::Flushed);
 
         let (mut host, events, _client, conn, host_conn, _net) = paced();
         host.send(host_conn, b"lost").unwrap();
