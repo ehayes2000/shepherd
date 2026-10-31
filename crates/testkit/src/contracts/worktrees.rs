@@ -89,6 +89,7 @@ macro_rules! worktrees_contract {
 }
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
@@ -104,6 +105,11 @@ pub const REPO_NAME: &str = "app";
 pub const SUBDIR: &str = "src";
 /// A directory inside [`SUBDIR`].
 pub const NESTED: &str = "deep";
+
+/// A liveness bound on one create, or on waiting for one to get somewhere, never a measurement. Generous: on a heavily
+/// loaded machine each of a create's git calls can take minutes (F17). Still well short of the hour a fetch hangs for
+/// in [`WorktreesFixture::hang_origin`].
+pub const CREATE_LIMIT: Duration = Duration::from_secs(1800);
 
 /// One repo (a clone of an origin) plus a port managing worktrees for it.
 pub trait WorktreesFixture {
@@ -137,7 +143,7 @@ pub trait WorktreesFixture {
     fn land_on_origin_default(&self, path: &WorktreePath);
     /// Makes origin unreachable: every fetch from now on fails quickly.
     fn go_offline(&self);
-    /// Makes every fetch from now on hang for at least 10 minutes, and returns a port for the same repo and root whose
+    /// Makes every fetch from now on hang for at least an hour, and returns a port for the same repo and root whose
     /// fetch timeout is `timeout`.
     fn hang_origin(&self, timeout: Duration) -> Self::Port;
     /// Deletes the clone's local default branch (the main checkout is detached first).
@@ -160,8 +166,44 @@ pub trait WorktreesFixture {
 
 /// A create a [`WorktreesFixture::hold_next_create`] holds. Dropping it lets the create go on.
 pub trait HeldCreate {
-    /// Blocks until the held create is waiting, up to `limit` (a liveness bound). Whether it is.
+    /// Blocks until the held create is waiting, up to `limit` (a liveness bound). Whether it is. It can be asked again
+    /// after it said no.
     fn wait_entered(&self, limit: Duration) -> bool;
+}
+
+/// Waits for `held` to say its create is waiting, while that create runs on another thread that sends its result on
+/// `answer`. `Err` says why it isn't: the create answered first (with what, so a failure shows the create's own error),
+/// or `limit` passed with the create still running. `limit` is a liveness bound, never a measurement: on a heavily
+/// loaded machine every git call before the hold can take minutes (F17).
+pub fn wait_held<T: std::fmt::Debug>(
+    held: &(impl HeldCreate + ?Sized),
+    answer: &Receiver<T>,
+    limit: Duration,
+) -> Result<(), String> {
+    /// How long each wait for the hold lasts before the answer is looked at again.
+    const SLICE: Duration = Duration::from_millis(50);
+    let started = Instant::now();
+    loop {
+        if held.wait_entered(SLICE) {
+            return Ok(());
+        }
+        match answer.try_recv() {
+            Ok(answer) => {
+                return Err(format!(
+                    "the create answered before it was held: {answer:?}"
+                ));
+            }
+            Err(TryRecvError::Disconnected) => {
+                return Err("the create's thread ended without answering".into());
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        if started.elapsed() >= limit {
+            return Err(format!(
+                "the create was not held within {limit:?}, and is still running"
+            ));
+        }
+    }
 }
 
 impl HeldCreate for crate::fakes::hold::Hold {
@@ -506,8 +548,8 @@ pub fn create_offline_with_nothing_to_fall_back_to_is_fetch_failed<F: WorktreesF
     assert!(listed_paths(f).is_empty());
 }
 
-/// The time bound is loose because the case must pass under heavy load; a fetch without a timeout would hang for at
-/// least 10 minutes.
+/// A fetch without a timeout would hang for at least an hour, so a create that returns within [`CREATE_LIMIT`] (a
+/// liveness bound, never a measurement) timed it out.
 pub fn create_when_fetch_hangs_times_out_and_falls_back<F: WorktreesFixture>(f: &F) {
     let port = f.hang_origin(Duration::from_millis(300));
     let started = Instant::now();
@@ -515,7 +557,7 @@ pub fn create_when_fetch_hangs_times_out_and_falls_back<F: WorktreesFixture>(f: 
         .create(&f.repo(), &name("hung"), BaseSpec::OriginDefault)
         .unwrap();
     assert!(
-        started.elapsed() < Duration::from_secs(300),
+        started.elapsed() < CREATE_LIMIT,
         "took {:?}",
         started.elapsed()
     );
@@ -545,9 +587,6 @@ pub fn concurrent_creates_all_succeed<F: WorktreesFixture>(f: &F) {
 
 // ---------- cancel_create ----------
 
-/// A liveness bound for a held create, never a measurement.
-const HOLD_LIMIT: Duration = Duration::from_secs(600);
-
 /// A create cancelled while it makes the worktree stops, and leaves nothing: a retry with the same name succeeds.
 pub fn a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried<F: WorktreesFixture>(
     f: &F,
@@ -560,12 +599,15 @@ pub fn a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried<F: Work
     let result = std::thread::scope(|s| {
         let (tx, rx) = std::sync::mpsc::channel();
         s.spawn(move || tx.send(port.create(repo, &name("doomed"), BaseSpec::OriginDefault)));
-        if !held.as_ref().unwrap().wait_entered(HOLD_LIMIT) {
+        if let Err(why) = wait_held(held.as_deref().unwrap(), &rx, CREATE_LIMIT) {
+            // Cancelled before the hold is released, so a create that reaches the hold only after that can't wait
+            // there for good, and the scope with it.
+            port.cancel_create(repo, &name("doomed"));
             drop(held.take());
-            panic!("the create never got going");
+            panic!("{why}");
         }
         port.cancel_create(repo, &name("doomed"));
-        let answer = rx.recv_timeout(HOLD_LIMIT);
+        let answer = rx.recv_timeout(CREATE_LIMIT);
         drop(held.take());
         answer.unwrap_or_else(|_| panic!("the cancelled create never answered"))
     });
@@ -804,4 +846,45 @@ pub fn remove_refuses_a_symlinked_repo_dir_pointing_outside<F: FsWorktreesFixtur
     f.symlink(&link, parent);
     assert_outside(f, &link.join(name));
     assert!(outside.as_path().join(".git").exists(), "{outside}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use shepherd_core::ports::WorktreeError;
+
+    use super::{HeldCreate, wait_held};
+
+    struct Entered(bool);
+
+    impl HeldCreate for Entered {
+        fn wait_entered(&self, _limit: Duration) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_held_create_is_held() {
+        let (_tx, rx) = mpsc::channel::<Result<(), WorktreeError>>();
+        assert_eq!(wait_held(&Entered(true), &rx, Duration::ZERO), Ok(()));
+    }
+
+    /// A create that fails before it gets to the hold: the failure is the create's own error, not a timeout.
+    #[test]
+    fn a_create_that_answers_before_it_is_held_says_what_it_answered() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err::<(), _>(WorktreeError::Timeout("rev-parse".into())))
+            .unwrap();
+        let why = wait_held(&Entered(false), &rx, Duration::from_secs(600)).unwrap_err();
+        assert!(why.contains("Timeout(\"rev-parse\")"), "{why}");
+    }
+
+    #[test]
+    fn a_create_still_running_at_the_bound_says_so() {
+        let (_tx, rx) = mpsc::channel::<Result<(), WorktreeError>>();
+        let why = wait_held(&Entered(false), &rx, Duration::ZERO).unwrap_err();
+        assert!(why.contains("still running"), "{why}");
+    }
 }

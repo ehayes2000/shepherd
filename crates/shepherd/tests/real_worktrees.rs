@@ -19,8 +19,9 @@ use shepherd_core::wire::{
     Subscribe, WireError, WorkspaceSelect, decode_host_message, encode_request,
 };
 
-/// A liveness bound on each read from the host, never a measurement.
-const LIMIT: Duration = Duration::from_secs(120);
+/// A liveness bound on each read from the host, never a measurement. An answer can wait on several real git calls,
+/// each of which can take minutes on a heavily loaded machine (F17), so only a host stuck this long fails the test.
+const LIMIT: Duration = Duration::from_secs(600);
 
 /// Runs git in `dir` with nothing from this process's environment but `PATH`, and no user or system config. The
 /// environment must go: under a git hook (the pre-commit gate) it holds `GIT_DIR` and `GIT_INDEX_FILE`, which would
