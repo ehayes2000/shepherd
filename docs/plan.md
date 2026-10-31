@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | review | task/t31a-iroh-tunnel @ 341ea4f |  | built; Link gained pause_reading + open (decision 0021) |
+| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | fixing | task/t31a-iroh-tunnel @ 341ea4f | 1 | round 1 CHANGES: peer() None for unknown conn let a gone peer's tunnel request through (fail-open; port now Result); held lines on close untested; swap/shutdown tunnel close untested; thresholds; 5ms tick; open contract; redial string parse |
 
 ## Ready to start
 

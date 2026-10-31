@@ -839,7 +839,8 @@ T44's evidence, not assumed.
 Context: T31a tunnels a local client conn to a peer's host over iroh. Flow control needs the host to stop reading one side
 while the other is backed up, and something has to dial a peer. Decision: `Link` gains, additively and with contract cases
 run against the fake, the unix adapter and the iroh adapter:
-- `peer(conn) -> Option<MachineId>` (None for local conns) and `DisconnectReason::Refused`;
+- `peer(conn) -> Result<Option<MachineId>, LinkError>` (`Ok(None)` for a local conn; an unknown or closed conn is an
+  error, so a local-only check fails closed; amended after T31a's review) and `DisconnectReason::Refused`;
 - `drained_bytes(conn)`, which catch-up stall detection uses as its progress signal;
 - `pause_reading(conn, paused)`: no lines are emitted for a paused conn until it is resumed; it still closes;
 - `open(peer)`: dial a trusted peer; a link that can't dial (unix) returns `LinkError::NoPeers`.
