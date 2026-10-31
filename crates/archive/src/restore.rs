@@ -33,9 +33,19 @@
 //!   rather than replace anything there. A failure at any point removes the temps and every file this restore
 //!   published, so a final path holds either a complete file or what was there before. Directories this restore
 //!   created are left (empty).
-//! - Before and after each publish the target directory must still resolve to itself ([`RestoreError::Changed`]
-//!   otherwise). Known gap, as in capture: without `openat` a same-user race can still swap a directory for a symlink
-//!   between that check and the link.
+//! - Before and after each publish the home and every directory below it down to the target must still be the same
+//!   directories, compared by device and inode, never by path text ([`RestoreError::Changed`] otherwise). Known gap,
+//!   as in capture: without `openat` a same-user race can still swap a directory for a symlink between that check and
+//!   the link.
+//!
+//! Race guards that no test reaches (no pause point sits in their window; each is a check-then-act on the same path):
+//! - the two checks around each publish are defence in depth: the pause-point test swaps a directory before
+//!   publishing, which either check alone catches (the check after also catches a swap between the check before and
+//!   the link, which needs a pause point there to prove);
+//! - an existing file's inode compared after opening it, against its `lstat` (a file swapped between the two);
+//! - a created directory's inode through its descriptor against its `lstat` (a directory swapped before its chmod);
+//! - on rollback, only a file still carrying the inode this restore published is removed (one that replaced it since
+//!   is kept).
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -359,9 +369,18 @@ fn needs_writing(home: &Path, target: &Target<'_>) -> Result<bool, RestoreError>
     }
 }
 
+/// A directory's identity: its device and inode.
+type DirId = (u64, u64);
+
+fn id(meta: &Metadata) -> DirId {
+    (meta.dev(), meta.ino())
+}
+
 /// Creates each missing directory of `dirs` below `home` exactly `0700`, checking existing ones are real directories.
-/// Returns the last one.
-fn make_dirs(home: &Path, dirs: &[OsString]) -> Result<PathBuf, RestoreError> {
+/// Returns the identity of `home` and of each directory below it, in order, each with its path.
+fn make_dirs(home: &Path, dirs: &[OsString]) -> Result<Vec<(PathBuf, DirId)>, RestoreError> {
+    let home_meta = fs::metadata(home).map_err(|e| io(home, e))?;
+    let mut chain = vec![(home.to_path_buf(), id(&home_meta))];
     let mut at = home.to_path_buf();
     for dir in dirs {
         at.push(dir);
@@ -372,28 +391,39 @@ fn make_dirs(home: &Path, dirs: &[OsString]) -> Result<PathBuf, RestoreError> {
                 let fd_meta = opened.metadata().map_err(|e| io(&at, e))?;
                 let path_meta = fs::symlink_metadata(&at).map_err(|e| io(&at, e))?;
                 check_dir(&at, &path_meta)?;
-                if (fd_meta.dev(), fd_meta.ino()) != (path_meta.dev(), path_meta.ino()) {
+                if id(&fd_meta) != id(&path_meta) {
                     return Err(RestoreError::Changed(at));
                 }
                 opened
                     .set_permissions(fs::Permissions::from_mode(DIR_MODE))
                     .map_err(|e| io(&at, e))?;
+                chain.push((at.clone(), id(&path_meta)));
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 let meta = fs::symlink_metadata(&at).map_err(|e| io(&at, e))?;
                 check_dir(&at, &meta)?;
+                chain.push((at.clone(), id(&meta)));
             }
             Err(e) => return Err(io(&at, e)),
         }
     }
-    Ok(at)
+    Ok(chain)
 }
 
-/// Fails if `dir` (the canonical home joined with plain components) no longer resolves to itself.
-fn unchanged(dir: &Path) -> Result<(), RestoreError> {
-    let resolved = fs::canonicalize(dir).map_err(|e| io(dir, e))?;
-    if resolved != dir {
-        return Err(RestoreError::Changed(dir.to_path_buf()));
+/// Fails if any directory of `chain` (from [`make_dirs`]) is no longer the same directory: the home by where it
+/// resolves, each one below it by its own `lstat`, so a symlink swapped in (an inode of its own) is caught. Compares
+/// identities, never path text, so a case-insensitive disk's spelling of a name doesn't matter.
+fn unchanged(chain: &[(PathBuf, DirId)]) -> Result<(), RestoreError> {
+    for (i, (path, expected)) in chain.iter().enumerate() {
+        let meta = if i == 0 {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        }
+        .map_err(|e| io(path, e))?;
+        if id(&meta) != *expected {
+            return Err(RestoreError::Changed(path.clone()));
+        }
     }
     Ok(())
 }
@@ -401,6 +431,8 @@ fn unchanged(dir: &Path) -> Result<(), RestoreError> {
 /// A file written to a temp name, waiting to be published.
 struct Staged<'a> {
     dir: PathBuf,
+    /// The home and each directory below it down to `dir`, from [`make_dirs`].
+    chain: Vec<(PathBuf, DirId)>,
     temp: PathBuf,
     target: &'a Target<'a>,
     /// The temp file's inode: the published file is the same one.
@@ -409,7 +441,11 @@ struct Staged<'a> {
 }
 
 /// Writes `content` to a new `0600` temp file in `dir` named after `name`, and syncs it.
-fn write_temp<'a>(dir: PathBuf, target: &'a Target<'a>) -> Result<Staged<'a>, RestoreError> {
+fn write_temp<'a>(
+    chain: Vec<(PathBuf, DirId)>,
+    target: &'a Target<'a>,
+) -> Result<Staged<'a>, RestoreError> {
+    let dir = chain.last().map(|(p, _)| p.clone()).unwrap_or_default();
     loop {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = OsString::from(".");
@@ -429,9 +465,10 @@ fn write_temp<'a>(dir: PathBuf, target: &'a Target<'a>) -> Result<Staged<'a>, Re
         return match written {
             Ok(meta) => Ok(Staged {
                 dir,
+                chain,
                 temp,
                 target,
-                ino: (meta.dev(), meta.ino()),
+                ino: id(&meta),
                 published: false,
             }),
             Err(e) => {
@@ -461,7 +498,7 @@ fn write_targets(home: &Path, targets: &[Target<'_>], pause: bool) -> Result<(),
             let path = s.dir.join(&s.target.name);
             // Only the file this restore published, never one that replaced it since.
             if let Ok(meta) = fs::symlink_metadata(&path)
-                && (meta.dev(), meta.ino()) == s.ino
+                && id(&meta) == s.ino
             {
                 let _ = fs::remove_file(&path);
             }
@@ -480,14 +517,14 @@ fn stage_and_publish<'a>(
     pause: bool,
 ) -> Result<(), RestoreError> {
     for target in todo {
-        let dir = make_dirs(home, &target.dirs)?;
-        staged.push(write_temp(dir, target)?);
+        let chain = make_dirs(home, &target.dirs)?;
+        staged.push(write_temp(chain, target)?);
     }
     if pause {
         pause_before_publish();
     }
     for s in staged.iter_mut() {
-        unchanged(&s.dir)?;
+        unchanged(&s.chain)?;
         let path = s.dir.join(&s.target.name);
         match fs::hard_link(&s.temp, &path) {
             Ok(()) => s.published = true,
@@ -500,7 +537,7 @@ fn stage_and_publish<'a>(
             }
             Err(e) => return Err(io(&path, e)),
         }
-        unchanged(&s.dir)?;
+        unchanged(&s.chain)?;
     }
     Ok(())
 }

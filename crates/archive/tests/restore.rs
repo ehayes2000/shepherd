@@ -400,6 +400,21 @@ fn created_dirs_are_0700_and_files_0600_and_existing_dirs_are_left_alone() {
 }
 
 #[test]
+fn an_existing_dir_whose_name_differs_only_in_case_is_used_where_the_disk_ignores_case() {
+    // On a case-insensitive disk (macOS's default) `Sessions/` is `sessions/`; on a case-sensitive one they are two
+    // dirs. Either way the restore succeeds and the rollout is where Codex will open it.
+    let s = Setup::codex();
+    let upper = s.home.join("Sessions");
+    fs::create_dir(&upper).unwrap();
+    fs::set_permissions(&upper, fs::Permissions::from_mode(0o700)).unwrap();
+    s.restore().unwrap();
+    assert_eq!(
+        fs::read(s.home.join(CODEX_ROLLOUT)).unwrap(),
+        fixture_bytes("codex", CODEX_ROLLOUT)
+    );
+}
+
+#[test]
 fn a_home_reached_through_a_symlink_is_resolved_first() {
     let s = Setup::codex();
     let link = s.outside("home-link");
@@ -452,6 +467,22 @@ fn a_prefix_of_the_content_is_still_different() {
     let before = tree(&s.home);
     let err = s.refused(Path::new(NEW_CWD), &s.home, &before);
     assert!(matches!(err, RestoreError::Exists(p) if p.ends_with(CODEX_ROLLOUT_NAME)));
+}
+
+#[test]
+fn the_content_with_more_bytes_after_it_is_still_different() {
+    // The likeliest real case: the agent kept writing to the transcript after the snapshot was taken.
+    let s = Setup::codex();
+    let rollout = s.home.join(CODEX_ROLLOUT);
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let mut grown = fixture_bytes("codex", CODEX_ROLLOUT);
+    grown.extend_from_slice(b"{\"later\":1}\n");
+    fs::write(&rollout, &grown).unwrap();
+    let before = tree(&s.home);
+    let err = s.refused(Path::new(NEW_CWD), &s.home, &before);
+    let real = fs::canonicalize(&rollout).unwrap();
+    assert_eq!(err, RestoreError::Exists(real));
+    assert_eq!(fs::read(&rollout).unwrap(), grown);
 }
 
 #[test]
@@ -762,6 +793,14 @@ fn a_snapshot_whose_files_dont_fit_the_agents_layout_is_refused() {
             AgentKind::Claude,
             CLAUDE_SESSION,
             vec![(FileRole::Main, &main), (FileRole::Subagent, "/h/s/.jsonl")],
+        ),
+        (
+            AgentKind::Claude,
+            CLAUDE_SESSION,
+            vec![
+                (FileRole::Main, &main),
+                (FileRole::Subagent, "/h/s/.x.jsonl"),
+            ],
         ),
         (
             AgentKind::Claude,
