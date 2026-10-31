@@ -1,7 +1,8 @@
 //! The `Archive` port on the `shepherd-archive` crate (decision 0020). Core can't see that crate's types, so this
 //! converts core's into the crate's, each validated by the crate, and the crate's errors into core's: a capture the
 //! crate refused (a path outside the agent's own place, past its limits) or a value it can't record is
-//! [`ArchiveError::Refused`]; anything else (reading a file, the index, an unknown session) is [`ArchiveError::Failed`].
+//! [`ArchiveError::Refused`]; a transcript that isn't there is [`ArchiveError::Missing`]; anything else (reading a file,
+//! the index, an unknown session) is [`ArchiveError::Failed`].
 //!
 //! The archive is opened on first use, so a host whose archive can't be opened (say, an index from a newer shepherd)
 //! still starts: each call fails, saying why, and the next call tries again. Calls block; the host makes them on a
@@ -142,6 +143,28 @@ impl Archive for ShepherdArchive {
             transcript_path: &c.transcript_path,
             limits: archive::CaptureLimits::default(),
         };
-        self.archive()?.capture(&capture).map(drop).map_err(failed)
+        match self.archive()?.capture(&capture) {
+            Ok(_) => Ok(()),
+            // The crate reports a file it couldn't read as text only: whether the transcript is there at all is asked of
+            // the filesystem (by the error's kind, never its text). A missing agent home is a missing transcript too.
+            Err(archive::ArchiveError::Capture(archive::CaptureError::Io { path, message }))
+                if absent(&c.transcript_path) =>
+            {
+                Err(ArchiveError::Missing(format!(
+                    "{} doesn't exist ({}: {message})",
+                    c.transcript_path.display(),
+                    path.display()
+                )))
+            }
+            Err(e) => Err(failed(e)),
+        }
     }
+}
+
+/// Nothing is at `path` (a symlink counts as something, and isn't followed).
+fn absent(path: &std::path::Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
 }

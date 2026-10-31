@@ -2,7 +2,7 @@
 //! filesystem: a test (or the contract fixture) writes transcripts into it with [`FakeArchive::write_transcript`].
 //!
 //! A capture is refused, as the real archive refuses it, for a transcript path outside the agent home, or one that is
-//! another agent session's; it fails for a session never put, or a transcript that isn't there.
+//! another agent session's; it fails for a session never put; a transcript that isn't there is missing.
 //!
 //! Clones share state, so a test can keep a handle while the code under test owns another.
 //! [`FakeArchive::hold_next`] makes the next call block until the test releases it.
@@ -136,9 +136,10 @@ impl Archive for FakeArchive {
                 capture.agent_home.display()
             )));
         }
-        let transcript = s.transcripts.get(path).ok_or_else(|| {
-            ArchiveError::Failed(format!("{}: No such file or directory", path.display()))
-        })?;
+        let transcript = s
+            .transcripts
+            .get(path)
+            .ok_or_else(|| ArchiveError::Missing(format!("{} doesn't exist", path.display())))?;
         if transcript.agent != session.agent
             || transcript.agent_session_id != session.agent_session_id
         {

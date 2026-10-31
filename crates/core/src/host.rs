@@ -84,7 +84,9 @@
 //! hook's [`HostCommand::TranslateHook`] carries `turn_end`, and the capture follows once its frames are applied), when it
 //! closes, and before any worktree it ran in is removed. Every removal comes through the last step of its pre-remove
 //! hooks, which captures the closing session (or, for an orphan, each closed session that ran there) and removes the
-//! worktree only once [`HostEvent::Captured`] says that worked; a failed capture keeps the worktree and says why.
+//! worktree only once [`HostEvent::Captured`] says that worked; a failed capture keeps the worktree and says why. A
+//! transcript that doesn't exist ([`ArchiveError::Missing`]: never written, or deleted since) is nothing to save: the
+//! worktree goes, and `session/closed`'s `note` says no transcript was found.
 //! Sessions with no transcript (shells) capture nothing, and their worktrees are removed as before. A worktree's base
 //! commit, which its session's commits are counted from, is recorded in its `worktree/created`.
 //!
@@ -430,12 +432,14 @@ pub enum HostEvent {
         force: bool,
         result: Result<CommandOutput, CommandError>,
     },
-    /// The answer to a [`HostCommand::RemoveWorktree`]. `exists`: something is still at the path afterwards.
+    /// The answer to a [`HostCommand::RemoveWorktree`], with the `note` it carried. `exists`: something is still at the
+    /// path afterwards.
     WorktreeRemoved {
         remover: Remover,
         path: WorktreePath,
         result: Result<(), WorktreeError>,
         exists: bool,
+        note: Option<String>,
     },
     /// The runtime has just started, the logs folded: nothing an earlier host run started is still running.
     Restarted,
@@ -565,12 +569,14 @@ pub enum HostCommand {
         path: WorktreePath,
         force: bool,
     },
-    /// Remove worktree `path` (`Worktrees::remove`), and feed the result back as [`HostEvent::WorktreeRemoved`]. Runs
-    /// off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    /// Remove worktree `path` (`Worktrees::remove`), and feed the result back as [`HostEvent::WorktreeRemoved`] with the
+    /// same `note` (for the closing session's `session/closed`). Runs off the runtime thread, like
+    /// [`HostCommand::ProbeWorkspace`].
     RemoveWorktree {
         remover: Remover,
         path: WorktreePath,
         force: bool,
+        note: Option<String>,
     },
     /// Ask the `Forge` port which pull request `branch` of `repo` has (`Forge::pr_for_branch`), and feed the answer to
     /// the [`PrWatch`](pr::PrWatch) as [`PrEvent::Checked`](pr::PrEvent::Checked) with the same `session`. Runs off
@@ -1201,18 +1207,24 @@ impl Host {
                 if let Some(why) = self.still_in_use(&remover, path.as_path()) {
                     return finish(&remover, &path, false, Some(why));
                 }
-                match result {
-                    Ok(()) => vec![HostCommand::RemoveWorktree {
-                        remover,
-                        path,
-                        force,
-                    }],
+                let note = match result {
+                    Ok(()) => None,
+                    // Nothing to save: an agent that never wrote the transcript it named, or one deleted since.
+                    Err(ArchiveError::Missing(why)) => {
+                        Some(format!("no transcript was found to archive: {why}"))
+                    }
                     Err(error) => {
                         let why =
                             format!("archiving its conversation failed, so it was kept: {error}");
-                        finish(&remover, &path, false, Some(why))
+                        return finish(&remover, &path, false, Some(why));
                     }
-                }
+                };
+                vec![HostCommand::RemoveWorktree {
+                    remover,
+                    path,
+                    force,
+                    note,
+                }]
             }
             HostEvent::WorktreeInspected {
                 remover: _,
@@ -1242,15 +1254,21 @@ impl Host {
                 path,
                 result,
                 exists,
+                note,
             } => {
                 if !self.removal_live(&remover, &path) {
                     return Vec::new();
                 }
-                match result {
-                    Ok(()) => finish(&remover, &path, true, None),
+                let (removed, kept) = match result {
+                    Ok(()) => (true, None),
                     // Already gone: nothing was lost and nothing is left.
-                    Err(error) if is_gone(&error, exists) => finish(&remover, &path, false, None),
-                    Err(error) => finish(&remover, &path, false, Some(error.to_string())),
+                    Err(error) if is_gone(&error, exists) => (false, None),
+                    Err(error) => (false, Some(error.to_string())),
+                };
+                match &remover {
+                    // Only a session's close has a note to give: the cleanup view's answer has no room for one.
+                    Remover::Session(session) => vec![closed_noting(session, removed, kept, note)],
+                    Remover::Orphan { .. } => finish(&remover, &path, removed, kept),
                 }
             }
             HostEvent::MachineNamed { name } => match self.machine_name() == Some(name.as_str()) {
@@ -1483,6 +1501,7 @@ impl Host {
                     remover,
                     path,
                     force,
+                    note: None,
                 }];
             }
             return vec![HostCommand::Capture {
@@ -2218,9 +2237,20 @@ fn finish(
 
 /// The `session/closed` that ends session `id`.
 fn closed(id: &SessionId, worktree_removed: bool, worktree_kept: Option<String>) -> HostCommand {
+    closed_noting(id, worktree_removed, worktree_kept, None)
+}
+
+/// The `session/closed` that ends session `id`, with `note` for the user.
+fn closed_noting(
+    id: &SessionId,
+    worktree_removed: bool,
+    worktree_kept: Option<String>,
+    note: Option<String>,
+) -> HostCommand {
     let frame = ShepherdFrame::SessionClosed(SessionClosed {
         worktree_removed,
         worktree_kept,
+        note,
     });
     append(id, frame)
 }

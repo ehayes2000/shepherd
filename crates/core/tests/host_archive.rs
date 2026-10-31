@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Frame, FrameDraft, Source, SourceKind};
 use shepherd_core::config::{AgentKind, WorkspaceHooks};
-use shepherd_core::host::capture::{AfterCapture, CaptureJob, Found};
+use shepherd_core::host::capture::{AfterCapture, AgentHomes, CaptureJob, Found};
 use shepherd_core::host::{
     HostCommand, HostEvent, Inspect, Inspection, PreRemove, Remover, ReplyTo,
 };
@@ -63,7 +63,15 @@ fn listed() -> Result<Inspection, shepherd_core::ports::WorktreeError> {
 }
 
 fn closed(removed: bool, kept: Option<&str>) -> HostCommand {
-    let mut params = json!({ "worktree_removed": removed });
+    closed_with(json!({ "worktree_removed": removed }), kept)
+}
+
+/// A `session/closed` noting `note` about how closing went.
+fn closed_noting(removed: bool, kept: Option<&str>, note: &str) -> HostCommand {
+    closed_with(json!({ "worktree_removed": removed, "note": note }), kept)
+}
+
+fn closed_with(mut params: Value, kept: Option<&str>) -> HostCommand {
     if let Some(kept) = kept {
         params["worktree_kept"] = json!(kept);
     }
@@ -280,6 +288,7 @@ fn a_capture_that_succeeds_lets_the_worktree_go() {
             remover: Remover::Session(sid("s1")),
             path: path(),
             force: false,
+            note: None,
         }]
     );
 }
@@ -300,6 +309,74 @@ fn a_capture_that_fails_keeps_the_worktree_and_says_why() {
         )]
     );
     assert!(!host.host().sessions().iter().any(|s| s.id == sid("s1")));
+}
+
+/// A session started in the worktree while its capture ran (one a newer request would refuse, recorded anyway, say
+/// by another host run) keeps it, even though the capture worked.
+#[test]
+fn a_worktree_a_session_started_in_while_it_was_captured_is_kept() {
+    let (mut host, _) = closed_and_inspected(&[]);
+    host.append(
+        Some("s2"),
+        Source::new(SourceKind::Shepherd, None),
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/created",
+                "params": { "name": "other", "cwd": WORKTREE } }),
+    );
+    let commands = host.captured(remove_s1(), Ok(()));
+    assert_eq!(
+        commands,
+        vec![closed(false, Some("it is still in use by s2"))]
+    );
+}
+
+/// A transcript that doesn't exist (an agent that named one it never wrote, one Claude Code deleted after
+/// `cleanupPeriodDays`) is nothing to save: the worktree goes, and the close says no transcript was found.
+#[test]
+fn a_missing_transcript_lets_the_worktree_go_and_the_close_says_so() {
+    let (mut host, _) = closed_and_inspected(&[]);
+    let missing = ArchiveError::Missing(format!("{TRANSCRIPT} doesn't exist"));
+    let commands = host.captured(remove_s1(), Err(missing));
+    let note = format!("no transcript was found to archive: {TRANSCRIPT} doesn't exist");
+    assert_eq!(
+        commands,
+        vec![HostCommand::RemoveWorktree {
+            remover: Remover::Session(sid("s1")),
+            path: path(),
+            force: false,
+            note: Some(note.clone()),
+        }]
+    );
+    let removed = host.handle(HostEvent::WorktreeRemoved {
+        remover: Remover::Session(sid("s1")),
+        path: path(),
+        result: Ok(()),
+        exists: false,
+        note: Some(note.clone()),
+    });
+    assert_eq!(removed, vec![closed_noting(true, None, &note)]);
+}
+
+#[test]
+fn a_missing_transcript_lets_an_orphan_go() {
+    let mut host = running();
+    host.close_with("s1", CloseWorktree::Keep, hooks(&[]));
+    let reply = ReplyTo::new(99);
+    let then = AfterCapture::Remove {
+        remover: Remover::Orphan {
+            reply,
+            repo: PathBuf::from(REPO),
+            branch: Some("s1".to_owned()),
+        },
+        path: path(),
+        force: false,
+    };
+    host.handle(HostEvent::RemoveOrphan {
+        reply,
+        path: PathBuf::from(WORKTREE),
+        hooks: hooks(&[]),
+    });
+    let commands = host.captured(then, Err(ArchiveError::Missing("gone".into())));
+    assert!(removes(&commands), "{commands:?}");
 }
 
 #[test]
@@ -369,6 +446,7 @@ fn a_capture_for_a_removal_that_ended_does_nothing() {
         path: path(),
         result: Ok(()),
         exists: false,
+        note: None,
     });
     assert_eq!(host.captured(remove_s1(), Ok(())), vec![]);
 }
@@ -429,6 +507,33 @@ fn an_orphan_is_removed_only_after_the_closed_sessions_that_ran_there_are_captur
         "{failed:?}"
     );
     assert!(!removes(&failed));
+}
+
+// ---------- agent homes ----------
+
+#[test]
+fn agent_homes_default_under_the_users_home() {
+    let homes = AgentHomes::resolve(std::path::Path::new("/home/u"), None, None);
+    assert_eq!(homes.claude, PathBuf::from("/home/u/.claude"));
+    assert_eq!(homes.codex, PathBuf::from("/home/u/.codex"));
+}
+
+#[test]
+fn agent_homes_follow_their_variables_and_an_empty_one_counts_as_unset() {
+    let home = std::path::Path::new("/home/u");
+    let set = AgentHomes::resolve(
+        home,
+        Some(std::ffi::OsStr::new("/cfg/claude")),
+        Some(std::ffi::OsStr::new("/cfg/codex")),
+    );
+    assert_eq!(set.claude, PathBuf::from("/cfg/claude"));
+    assert_eq!(set.codex, PathBuf::from("/cfg/codex"));
+    let empty = AgentHomes::resolve(
+        home,
+        Some(std::ffi::OsStr::new("")),
+        Some(std::ffi::OsStr::new("")),
+    );
+    assert_eq!(empty, AgentHomes::under(home));
 }
 
 // ---------- requests ----------

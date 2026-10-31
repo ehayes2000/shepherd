@@ -101,6 +101,21 @@ impl AgentHomes {
         }
     }
 
+    /// The agents' homes for a user whose home directory is `home`, given the values of `CLAUDE_CONFIG_DIR` and
+    /// `CODEX_HOME` (which the caller reads): each one set and not empty wins, else the default under `home`.
+    pub fn resolve(
+        home: &std::path::Path,
+        claude_config_dir: Option<&std::ffi::OsStr>,
+        codex_home: Option<&std::ffi::OsStr>,
+    ) -> Self {
+        let set = |v: Option<&std::ffi::OsStr>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
+        let defaults = Self::under(home);
+        Self {
+            claude: set(claude_config_dir).unwrap_or(defaults.claude),
+            codex: set(codex_home).unwrap_or(defaults.codex),
+        }
+    }
+
     /// `agent`'s home: `None` for a kind that keeps no transcript.
     pub fn of(&self, agent: AgentKind) -> Option<&std::path::Path> {
         match agent {

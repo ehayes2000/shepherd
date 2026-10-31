@@ -78,6 +78,10 @@ pub enum ArchiveError {
     /// its limits, or a value it can't record (e.g. an agent kind it doesn't archive).
     #[error("{0}")]
     Refused(String),
+    /// The transcript doesn't exist (the agent named one it never wrote, or deleted it since): there is nothing to
+    /// save, and nothing was stored.
+    #[error("{0}")]
+    Missing(String),
     /// Something went wrong storing it: reading a file, writing the index, a session it doesn't know.
     #[error("{0}")]
     Failed(String),

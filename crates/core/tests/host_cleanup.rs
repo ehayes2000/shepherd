@@ -242,6 +242,7 @@ fn an_orphan_that_loses_nothing_runs_its_pre_remove_hooks_then_is_removed_and_an
             remover: remover(reply),
             path: path(),
             force: false,
+            note: None,
         }]
     );
     // Its hook is recorded in the host log, with no session.
@@ -251,6 +252,7 @@ fn an_orphan_that_loses_nothing_runs_its_pre_remove_hooks_then_is_removed_and_an
         path: path(),
         result: Ok(()),
         exists: false,
+        note: None,
     });
     assert_eq!(removed, finished(reply, true, None));
 }
@@ -498,6 +500,7 @@ fn results_for_an_orphan_that_is_not_being_removed_do_nothing() {
         path: path(),
         result: Ok(()),
         exists: false,
+        note: None,
     });
     assert_eq!(removed, vec![]);
 }

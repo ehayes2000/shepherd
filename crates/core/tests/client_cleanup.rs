@@ -265,6 +265,7 @@ fn removing_the_safe_ones_removes_them_one_at_a_time_and_never_an_unsafe_one() {
             path: shepherd_core::ports::WorktreePath::new("/wt/s1"),
             result: Ok(()),
             exists: false,
+            note: None,
         });
     c.sync();
     assert_eq!(

@@ -463,12 +463,15 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             ),
         (arb_string(), any::<bool>())
             .prop_map(|(name, auto)| ShepherdFrame::SessionRenamed(SessionRenamed { name, auto })),
-        (any::<bool>(), arb_opt_string()).prop_map(|(worktree_removed, worktree_kept)| {
-            ShepherdFrame::SessionClosed(SessionClosed {
-                worktree_removed,
-                worktree_kept,
-            })
-        }),
+        (any::<bool>(), arb_opt_string(), arb_opt_string()).prop_map(
+            |(worktree_removed, worktree_kept, note)| {
+                ShepherdFrame::SessionClosed(SessionClosed {
+                    worktree_removed,
+                    worktree_kept,
+                    note,
+                })
+            }
+        ),
         arb_string().prop_map(|reason| ShepherdFrame::SessionFailed(SessionFailed { reason })),
         (
             arb_string(),

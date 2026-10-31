@@ -1164,10 +1164,17 @@ impl Worktrees for GitWorktrees {
     }
 
     /// `rev-list --reverse --topo-order base..HEAD`, and each commit's `git patch-id --stable` of the patch `git log -p`
-    /// prints for it. Everything that changes that patch's text is pinned (so a patch-id is the same on every machine
-    /// and whatever the user's diff config): no color, external diff or textconv, no rename detection, 3 lines of
-    /// context, the myers algorithm with the indent heuristic, `a/` and `b/` prefixes. Merges print no patch
-    /// (`--diff-merges=off`), and neither does a commit that changes nothing: both have no patch-id.
+    /// prints for it. Every user setting that changes that patch's text, and so its patch-id, is pinned, so a patch-id is
+    /// the same on every machine; `diff_config_leaves_patch_ids_alone` shows each pin matters. Pinned: paths quoted the
+    /// default way (`core.quotePath=true`), no color, no textconv, everything diffed as text (beats binary attributes
+    /// from the user's attributes file or a repo diff driver's user-level settings), no rename detection, 3 lines of
+    /// context and no hunks merged beyond them, the myers algorithm with the indent heuristic, `a/` and `b/` prefixes,
+    /// submodules shown short and never hidden. Signatures are never shown: `log.showSignature` adds gpg's output to a
+    /// signed commit's patch (the only pin the test can't show, since it signs nothing). Not pinned, because they can't
+    /// change it: external diffs (`git log` runs them only with `--ext-diff`), notes (not printed with an explicit
+    /// format), `diff.relative` (git runs at the checkout's top), and anything that changes only context lines or hunk
+    /// headers, which `patch-id` ignores. Merges print no patch (`--diff-merges=off`), and neither does a commit that
+    /// changes nothing: both have no patch-id.
     fn commits_since(
         &self,
         path: &WorktreePath,
@@ -1193,18 +1200,23 @@ impl Worktrees for GitWorktrees {
             return Ok(Vec::new());
         }
         let log = [
+            "-c",
+            "core.quotePath=true",
             "log",
             "--no-color",
-            "--no-ext-diff",
             "--no-textconv",
+            "--text",
             "--no-renames",
             "--diff-merges=off",
             "--unified=3",
+            "--inter-hunk-context=0",
             "--diff-algorithm=myers",
             "--indent-heuristic",
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "--no-notes",
+            "--submodule=short",
+            "--ignore-submodules=none",
+            "--no-show-signature",
             "--format=commit %H",
             "--patch",
             &range,
@@ -1634,6 +1646,23 @@ mod tests {
             self.git(path.as_path(), &["rebase", "--quiet", &onto]);
         }
 
+        /// A root commit with the same tree as HEAD, merged in (not a fast-forward: the histories are unrelated).
+        fn merge_unrelated_root(&self, path: &WorktreePath) -> String {
+            let dir = path.as_path();
+            let root = self.git(dir, &["commit-tree", "HEAD^{tree}", "-m", "another root"]);
+            self.git(
+                dir,
+                &[
+                    "merge",
+                    "--quiet",
+                    "--no-edit",
+                    "--allow-unrelated-histories",
+                    &root,
+                ],
+            );
+            root
+        }
+
         fn forget_origin_head(&self) {
             self.git(&self.app(), &["remote", "set-head", "origin", "--delete"]);
         }
@@ -1993,8 +2022,9 @@ mod tests {
         assert!(path.as_path().join("untracked.txt").exists());
     }
 
-    /// Diff config changes the patch `git log -p` prints, and so its patch-id: the same commits have the same
-    /// patch-ids on a machine with the user's diff settings as on one without.
+    /// The user's settings change the patch `git log -p` prints, and so its patch-id: the same commits have the same
+    /// patch-ids on a machine with hostile settings as on one without. Each commit is one each pin needs: dropping any
+    /// pin from `commits_since` fails this (checked by hand, one pin at a time).
     #[test]
     fn diff_config_leaves_patch_ids_alone() {
         let f = GitFixture::new();
@@ -2008,33 +2038,79 @@ mod tests {
             .unwrap();
         let base = created.base_commit.unwrap();
         let wt = created.path.as_path();
-        // A long file, then a rename of it with a one-line edit in the middle, so rename detection, context lines and
-        // the diff algorithm would all show.
-        let lines: Vec<String> = (0..40).map(|n| format!("line {n}\n")).collect();
-        std::fs::write(wt.join("long.txt"), lines.concat()).unwrap();
-        f.git(wt, &["add", "long.txt"]);
-        f.git(wt, &["commit", "--quiet", "-m", "long"]);
-        let mut edited = lines.clone();
-        edited[20] = "changed\n".to_owned();
-        std::fs::write(wt.join("long.txt"), edited.concat()).unwrap();
+        let commit = |files: &[(&str, String)], message: &str| {
+            for (name, content) in files {
+                std::fs::write(wt.join(name), content).unwrap();
+                f.git(wt, &["add", "--", name]);
+            }
+            f.git(wt, &["commit", "--quiet", "-m", message]);
+        };
+        let lines =
+            |word: &str| -> Vec<String> { (0..40).map(|n| format!("{word} {n}\n")).collect() };
+        // Context and hunk merging: two edits 8 lines apart in the middle of an existing file, one hunk each with 3
+        // lines of context, merged by more context or `diff.interHunkContext`.
+        commit(&[("mid.txt", lines("line").concat())], "mid");
+        let mut mid = lines("line");
+        mid[12] = "changed 12\n".to_owned();
+        mid[21] = "changed 21\n".to_owned();
+        commit(&[("mid.txt", mid.concat())], "two close hunks");
+        // Renames: a long file moved with a one-line edit.
+        commit(&[("long.txt", lines("moved").concat())], "long");
+        let mut moved = lines("moved");
+        moved[20] = "changed\n".to_owned();
+        std::fs::write(wt.join("long.txt"), moved.concat()).unwrap();
         f.git(wt, &["mv", "long.txt", "moved.txt"]);
         f.git(wt, &["commit", "--quiet", "-am", "move"]);
+        // The diff algorithm: functions swapped among repeated braces.
+        let c = "void a()\n{\n    one();\n}\n\nvoid b()\n{\n    two();\n}\n\nvoid c()\n{\n    three();\n}\n";
+        commit(&[("p.c", c.to_owned())], "c");
+        let swapped = "void b()\n{\n    two();\n}\n\nvoid a()\n{\n    one();\n}\n\nvoid c()\n{\n    three();\n    four();\n}\n";
+        commit(&[("p.c", swapped.to_owned())], "swap");
+        // The indent heuristic: a block inserted after a copy of itself, where it can slide.
+        commit(&[("slide.txt", "1\n2\na\n\nb\n3\n4\n".to_owned())], "slide");
+        commit(
+            &[("slide.txt", "1\n2\na\n\nb\na\n\nb\n3\n4\n".to_owned())],
+            "slid",
+        );
+        // Path quoting: a non-ASCII file name.
+        commit(&[("café.txt", "crème\n".to_owned())], "accents");
+        // Textconv: the repo's own attributes give a diff driver, which the user's config can give a textconv.
+        commit(
+            &[
+                (".gitattributes", "*.up diff=up\n".to_owned()),
+                ("x.up", "lower\n".to_owned()),
+            ],
+            "driver",
+        );
+        // Submodules: a gitlink, which `diff.submodule=log` shows differently and `diff.ignoreSubmodules` hides.
+        let gitlink = format!("160000,{base},sub");
+        f.git(wt, &["update-index", "--add", "--cacheinfo", &gitlink]);
+        f.git(wt, &["commit", "--quiet", "-m", "gitlink"]);
         let plain = f.port.commits_since(&created.path, &base).unwrap();
+        assert_eq!(plain.len(), 11, "{plain:?}");
+        assert!(plain.iter().all(|(_, p)| p.is_some()), "{plain:?}");
+
+        // Attributes from the user's own file that make every text file binary.
+        let attributes = f.tmp().join("home").join("attributes");
+        std::fs::write(&attributes, "*.txt -diff\n*.c -diff\n").unwrap();
         for (key, value) in [
-            ("diff.noprefix", "true"),
-            ("diff.mnemonicPrefix", "true"),
-            ("diff.renames", "false"),
-            ("diff.algorithm", "patience"),
-            ("diff.context", "9"),
-            ("diff.indentHeuristic", "false"),
-            ("diff.external", "false"),
+            ("core.quotePath", "false"),
+            ("core.attributesFile", attributes.to_str().unwrap()),
             ("color.ui", "always"),
+            ("diff.up.textconv", "tr a-z A-Z"),
+            ("diff.renames", "false"),
+            ("diff.context", "9"),
+            ("diff.interHunkContext", "10"),
+            ("diff.algorithm", "patience"),
+            ("diff.indentHeuristic", "false"),
+            ("diff.noprefix", "true"),
+            ("diff.submodule", "log"),
+            ("diff.ignoreSubmodules", "all"),
             ("log.showSignature", "true"),
         ] {
             f.git(&f.app(), &["config", key, value]);
         }
         let configured = f.port.commits_since(&created.path, &base).unwrap();
-        assert!(plain[0].1.is_some(), "{plain:?}");
         assert_eq!(configured, plain);
     }
 

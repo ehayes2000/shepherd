@@ -149,6 +149,10 @@ pub struct SessionClosed {
     /// was already gone, or the user chose to keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_kept: Option<String>,
+    /// Something else about how closing went, for the user: e.g. that no transcript was found to archive before the
+    /// worktree was removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The session couldn't start: its PTY never spawned, e.g. because its worktree couldn't be made.

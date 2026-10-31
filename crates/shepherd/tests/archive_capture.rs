@@ -262,7 +262,13 @@ fn closing_captures_the_conversation_before_the_worktree_is_removed() {
 #[test]
 fn a_capture_that_fails_keeps_the_worktree_and_the_close_says_why() {
     let mut s = Setup::new();
-    s.archive.remove_transcript(&transcript());
+    // The file at the transcript's path is another agent session's: the archive refuses it.
+    s.archive.write_transcript(
+        transcript(),
+        AgentKind::ClaudeCode,
+        "11111111-2222-4333-8444-555555555555",
+        b"{}\n",
+    );
     s.close();
     s.h.step();
     assert!(s.listed(), "kept");
@@ -275,6 +281,57 @@ fn a_capture_that_fails_keeps_the_worktree_and_the_close_says_why() {
     );
     assert!(why.contains(&transcript().display().to_string()), "{why}");
     assert!(s.h.host().sessions().is_empty());
+}
+
+/// A transcript the agent never wrote (or deleted since) is nothing to save: the worktree goes, and the close says no
+/// transcript was found.
+#[test]
+fn a_missing_transcript_lets_the_worktree_go_and_the_close_says_so() {
+    let mut s = Setup::new();
+    s.archive.remove_transcript(&transcript());
+    s.close();
+    s.h.step();
+    assert!(!s.listed(), "removed");
+    assert_eq!(s.reasons(), []);
+    let closed = s.closed();
+    assert!(closed.worktree_removed);
+    assert_eq!(closed.worktree_kept, None);
+    let note = closed.note.expect("a note");
+    assert!(
+        note.starts_with("no transcript was found to archive: "),
+        "{note}"
+    );
+}
+
+/// A capture before removal that answers once shutdown has begun removes nothing: the next start finds the session
+/// still closing and keeps its worktree.
+#[test]
+fn a_capture_that_answers_during_shutdown_leaves_the_worktree() {
+    let mut s = Setup::new();
+    // The archive's calls, in order: the close's capture (put, capture), then the one before removal (put, ...).
+    let close_put = s.archive.hold_next();
+    s.close();
+    s.wait_held(&close_put);
+    let close_capture = s.archive.hold_next();
+    close_put.release();
+    assert!(close_capture.wait_entered(LIMIT), "the close's capture");
+    let before_remove = s.archive.hold_next();
+    close_capture.release();
+    let mut waited = Duration::ZERO;
+    while !before_remove.wait_entered(Duration::from_millis(20)) {
+        assert!(waited < LIMIT, "the capture before removal never started");
+        s.h.runtime_mut().run_next(Duration::from_millis(20));
+        waited += Duration::from_millis(40);
+    }
+    s.h.runtime_mut().handle(RuntimeEvent::Shutdown);
+    before_remove.release();
+    assert!(s.h.runtime_mut().run_until_settled(LIMIT));
+    assert!(s.h.runtime().is_finished());
+    assert_eq!(
+        s.reasons(),
+        [CaptureReason::Close, CaptureReason::BeforeRemove]
+    );
+    assert!(s.listed(), "removed after shutdown began");
 }
 
 /// Captures are bounded: a turn end while another of the session's waits for the archive adds nothing, since the one

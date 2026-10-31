@@ -204,16 +204,9 @@ pub fn open_with_forge(
 /// Where the agents keep their transcripts for this user, read once at start: `CLAUDE_CONFIG_DIR` (else
 /// `<home>/.claude`) and `CODEX_HOME` (else `<home>/.codex`). An empty variable counts as unset.
 pub fn agent_homes_from_env(home: &Path) -> AgentHomes {
-    let var = |name: &str| {
-        std::env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let defaults = AgentHomes::under(home);
-    AgentHomes {
-        claude: var("CLAUDE_CONFIG_DIR").unwrap_or(defaults.claude),
-        codex: var("CODEX_HOME").unwrap_or(defaults.codex),
-    }
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let codex = std::env::var_os("CODEX_HOME");
+    AgentHomes::resolve(home, claude.as_deref(), codex.as_deref())
 }
 
 fn open_inner(

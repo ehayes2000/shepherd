@@ -1517,6 +1517,7 @@ impl<
                     remover,
                     path,
                     force,
+                    note,
                 } => {
                     let panicked = HostEvent::WorktreeRemoved {
                         remover: remover.clone(),
@@ -1525,6 +1526,7 @@ impl<
                             "removing worktree {path} failed unexpectedly"
                         ))),
                         exists: true,
+                        note: note.clone(),
                     };
                     let call = move |worktrees: &W| {
                         let result = worktrees.remove(&path, force);
@@ -1533,6 +1535,7 @@ impl<
                             result,
                             remover,
                             path,
+                            note,
                         }
                     };
                     match self.worktrees.submit(call, panicked) {

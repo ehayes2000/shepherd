@@ -84,6 +84,7 @@ macro_rules! worktrees_contract {
             commits_since_a_base_the_repo_lacks_is_an_error,
             commits_since_in_a_missing_path_is_not_a_repo,
             root_commit_is_the_same_from_every_checkout_of_the_repo,
+            root_commit_of_a_history_with_two_roots_is_the_smaller,
             root_commit_of_a_non_repo_is_not_a_repo,
         );
     };
@@ -163,6 +164,9 @@ pub trait WorktreesFixture {
     /// Fetches, then rebases the branch checked out at `path` onto the clone's `origin/<default>`: its commits are
     /// made again there, with the same changes.
     fn rebase_onto_origin_default(&self, path: &WorktreePath);
+    /// Merges a new root commit (an unrelated history) into the branch checked out at `path`, and returns that root,
+    /// as a [`CommitHash`] spells it.
+    fn merge_unrelated_root(&self, path: &WorktreePath) -> String;
     /// Deletes the clone's `origin/<default>` ref, leaving `origin/HEAD` pointing at it.
     fn delete_remote_tracking_default(&self);
     /// Deletes the clone's `origin/HEAD`, as if it had been made with `git init` + `git remote add` + `git fetch`.
@@ -925,6 +929,17 @@ pub fn root_commit_is_the_same_from_every_checkout_of_the_repo<F: WorktreesFixtu
             .root_commit(&RepoRef::new(f.repo().as_path().join(SUBDIR))),
         Ok(root)
     );
+}
+
+/// A history with several roots (an unrelated one merged in) is named by the smallest, whichever it is.
+pub fn root_commit_of_a_history_with_two_roots_is_the_smaller<F: WorktreesFixture>(f: &F) {
+    let first = f.port().root_commit(&f.repo()).unwrap();
+    let (path, _) = base_of(f, "work");
+    let other = hash(&f.merge_unrelated_root(&path));
+    assert_ne!(first.commit(), &other);
+    let smaller = first.commit().clone().min(other);
+    let root = f.port().root_commit(&RepoRef::new(path.as_path())).unwrap();
+    assert_eq!(root.commit(), &smaller);
 }
 
 pub fn root_commit_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {

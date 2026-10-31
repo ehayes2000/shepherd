@@ -368,6 +368,23 @@ impl FakeWorktrees {
         s.repos[r].local.insert(b, at);
     }
 
+    /// `git merge --allow-unrelated-histories` of a new root commit into the branch checked out at `path`. Returns the
+    /// new root's name, as [`FakeWorktrees::head`] names commits.
+    pub fn merge_unrelated_root(&self, path: &Path) -> String {
+        let mut s = self.lock();
+        let (r, head) = s
+            .checkout(path)
+            .unwrap_or_else(|| panic!("no checkout at {path:?}"));
+        let Head::Branch(b) = head else {
+            panic!("merge into a detached HEAD")
+        };
+        let tip = s.repos[r].local[&b];
+        let root = s.new_commit(Vec::new());
+        let merge = s.new_commit(vec![tip, root]);
+        s.repos[r].local.insert(b, merge);
+        commit_name(root)
+    }
+
     /// An opaque name for the commit checked out at `path`.
     pub fn head(&self, path: &Path) -> String {
         let s = self.lock();
@@ -877,6 +894,10 @@ mod tests {
         fn rebase_onto_origin_default(&self, path: &WorktreePath) {
             self.fake.fetch(&self.repo);
             self.fake.rebase_onto_origin_default(path.as_path());
+        }
+
+        fn merge_unrelated_root(&self, path: &WorktreePath) -> String {
+            self.fake.merge_unrelated_root(path.as_path())
         }
 
         fn forget_origin_head(&self) {

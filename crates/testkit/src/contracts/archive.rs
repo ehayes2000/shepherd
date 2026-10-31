@@ -24,7 +24,8 @@ macro_rules! archive_contract {
             a_capture_for_a_session_never_put_is_failed,
             a_transcript_outside_the_agent_home_is_refused,
             another_agent_sessions_transcript_is_refused,
-            a_transcript_that_is_gone_is_failed,
+            a_transcript_that_is_gone_is_missing,
+            a_transcript_in_a_home_that_doesnt_exist_is_missing,
             a_shell_session_is_refused,
         );
     };
@@ -261,12 +262,37 @@ pub fn another_agent_sessions_transcript_is_refused<F: ArchiveFixture>(f: &F) {
     assert_eq!(f.snapshots(&sid()), []);
 }
 
-pub fn a_transcript_that_is_gone_is_failed<F: ArchiveFixture>(f: &F) {
+/// A transcript that isn't there (never written, or deleted since) is nothing to save: not a failure.
+pub fn a_transcript_that_is_gone_is_missing<F: ArchiveFixture>(f: &F) {
     let path = claude(f, b"{}\n");
     f.remove_transcript(&path);
     let request = capture(f, AgentKind::ClaudeCode, path, CaptureReason::BeforeRemove);
     let result = f.port().capture(&request);
-    assert!(matches!(result, Err(ArchiveError::Failed(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(ArchiveError::Missing(_))),
+        "{result:?}"
+    );
+    assert_eq!(f.snapshots(&sid()), []);
+}
+
+/// An agent home that was never made (the agent never ran as this user) holds no transcript either.
+pub fn a_transcript_in_a_home_that_doesnt_exist_is_missing<F: ArchiveFixture>(f: &F) {
+    f.port()
+        .put_session(&session(AgentKind::ClaudeCode, AGENT_SESSION))
+        .unwrap();
+    let home = f.agent_home(AgentKind::ClaudeCode).join("never-made");
+    let path = home
+        .join("projects/-wt-app")
+        .join(format!("{AGENT_SESSION}.jsonl"));
+    let request = CaptureRequest {
+        agent_home: home,
+        ..capture(f, AgentKind::ClaudeCode, path, CaptureReason::Close)
+    };
+    let result = f.port().capture(&request);
+    assert!(
+        matches!(result, Err(ArchiveError::Missing(_))),
+        "{result:?}"
+    );
     assert_eq!(f.snapshots(&sid()), []);
 }
 
