@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ 985b5ef (on 86b21c1) | 4 | closes under index.lock; index.live shared lock picks at-rest vs live peek; churn test |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | merging | task/t39-archive-index @ 985b5ef | 4 | approved; PM keeps both close lock and index.live (defence in depth, each alone sufficient) |
 | F46 Fake claude/codex scripts are fresh executables (macOS scan stall) | [host-and-client](features/host-and-client.md) | building | task/f44-f46-shepherd-tests @ 950354f | 0 |  |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | building | task/f44-f46-shepherd-tests @ 950354f | 0 |  |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
