@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -53,6 +54,10 @@ pub enum ArchiveError {
     /// SQLite kept another journal mode (named) when asked for WAL.
     #[error("the archive index would not switch to WAL (journal mode is {0})")]
     NotWal(String),
+    /// The index has a WAL file but not the -shm file that goes with it, a state SQLite can't read without changing
+    /// files. The index is left as it was; the user decides what to do with it.
+    #[error("the archive index has a WAL file but no -shm file next to it: {0}")]
+    WalWithoutShm(PathBuf),
     /// The index has a negative `user_version`, which no shepherd writes. It is left as it was.
     #[error("the archive index has version {0}, which no shepherd writes")]
     BadIndexVersion(i64),
@@ -196,9 +201,12 @@ impl Archive {
         open_or_create_private_file(&path)?;
         // Before anything can write: a newer (or not-SQLite) index must stay exactly as it is.
         pending_migrations(peek_version(&path)?)?;
+        // Through a URI too: SQLite reads a plain filename starting with `file:` as one.
         let conn = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            sqlite_uri(&path, "mode=rw"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
         )?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let mode: String =
@@ -503,34 +511,47 @@ impl Archive {
     }
 }
 
-/// Reads the index's `user_version` without changing any of its files. A read-write connection can't be used: closing
-/// it would checkpoint a leftover WAL into the file and delete the WAL. Even a read-only one rewrites the -shm file
-/// (the WAL's index), unless `readonly_shm` makes it build that index in memory, which needs an existing -shm. With
-/// no -shm and no -wal there is no WAL to read, so the main file is read as `immutable` (no locks, no side files). The
-/// last case, a -wal without its -shm, falls back to a plain read-only connection, which may create the -shm.
+/// Reads the index's `user_version` without creating, changing or deleting any of its files. Which connection can do
+/// that depends on the side files, so they are looked at (never opened) first:
+/// - a -wal and its -shm: a read-only connection with `readonly_shm`, which builds the WAL's index in memory instead
+///   of rewriting the -shm. (A read-write connection would checkpoint the WAL into the file and delete it on close; a
+///   plain read-only one rewrites the -shm.)
+/// - no -wal, or an empty one: there are no WAL frames to read, so the main file alone is read as `immutable` (no
+///   locks, no side files). A stray -shm without WAL frames holds nothing.
+/// - a non-empty -wal without its -shm: SQLite can't read that without making a -shm, so it is refused, untouched.
+///
+/// Another process closing the last connection between the look and the open can remove both side files; the open
+/// then fails, possibly leaving an empty -wal, which the next open reads past as above.
 fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_URI;
-    let peek = |query: &str| -> Result<i64, ArchiveError> {
-        let conn = Connection::open_with_flags(sqlite_uri(path, query), flags)?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        read_version(&conn)
+    let side = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
     };
-    match peek("mode=ro&readonly_shm=1") {
-        Err(ArchiveError::Index(e))
-            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::CannotOpen) =>
-        {
-            let mut wal = path.as_os_str().to_owned();
-            wal.push("-wal");
-            if Path::new(&wal).exists() {
-                peek("mode=ro")
-            } else {
-                peek("mode=ro&immutable=1")
-            }
-        }
-        other => other,
-    }
+    // `Some(meta)` if something is at `p`. Never followed: a symlink counts as present.
+    let look = |p: &Path| match fs::symlink_metadata(p) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ArchiveError::Blob(BlobError::Io {
+            path: p.to_path_buf(),
+            message: e.to_string(),
+        })),
+    };
+    let (wal, shm) = (side("-wal"), side("-shm"));
+    let has_frames = look(&wal)?.is_some_and(|m| m.file_type().is_symlink() || m.len() > 0);
+    let query = match (has_frames, look(&shm)?.is_some()) {
+        (true, true) => "mode=ro&readonly_shm=1",
+        (false, _) => "mode=ro&immutable=1",
+        (true, false) => return Err(ArchiveError::WalWithoutShm(wal)),
+    };
+    let conn = Connection::open_with_flags(
+        sqlite_uri(path, query),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    read_version(&conn)
 }
 
 /// The bytes an SQLite URI path keeps as they are: `[A-Za-z0-9/._-]`. Everything else, `?`, `#` and `%` included, is

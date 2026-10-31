@@ -346,13 +346,84 @@ fn index_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 fn a_newer_index_with_unmerged_wal_frames_is_refused_and_not_modified() {
     let dir = tempdir();
     let root = dir.path().join("archive");
-    BlobStore::open(&root).unwrap();
-    // Built elsewhere by a connection that stays open while its files are copied, as a crashed newer shepherd would
-    // leave them: the newer version lives only in WAL frames that were never checkpointed into the main file.
-    let src = dir.path().join("src");
+    plant_newer_wal_index(
+        dir.path(),
+        &root,
+        &["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"],
+    );
+    let wal = fs::metadata(root.join("index.sqlite-wal")).unwrap().len();
+    assert!(wal > 0, "the WAL holds frames the main file doesn't");
+
+    assert_opens_leave_index_files_alone(
+        &root,
+        |r| matches!(r, Err(ArchiveError::NewerIndex { found, .. }) if *found == INDEX_VERSION + 1),
+    );
+}
+
+#[test]
+fn a_newer_wal_mode_index_that_was_closed_cleanly_is_refused_and_not_modified() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let newer = INDEX_VERSION + 1;
+    // Closing the only connection checkpoints the WAL and deletes -wal and -shm: only index.sqlite is left.
+    plant_index(
+        &root,
+        &format!(
+            "PRAGMA journal_mode = WAL; CREATE TABLE future(x INTEGER); PRAGMA user_version = {newer};"
+        ),
+    );
+    assert_eq!(index_files(&root).len(), 1);
+
+    assert_opens_leave_index_files_alone(
+        &root,
+        |r| matches!(r, Err(ArchiveError::NewerIndex { found, .. }) if *found == newer),
+    );
+}
+
+#[test]
+fn a_wal_without_its_shm_is_refused_and_not_touched() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    plant_newer_wal_index(dir.path(), &root, &["index.sqlite", "index.sqlite-wal"]);
+
+    assert_opens_leave_index_files_alone(
+        &root,
+        |r| matches!(r, Err(ArchiveError::WalWithoutShm(p)) if p.ends_with("index.sqlite-wal")),
+    );
+}
+
+#[test]
+fn an_empty_wal_without_its_shm_holds_no_frames_and_is_read_past() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let newer = INDEX_VERSION + 1;
+    plant_index(
+        &root,
+        &format!(
+            "PRAGMA journal_mode = WAL; CREATE TABLE future(x INTEGER); PRAGMA user_version = {newer};"
+        ),
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("index.sqlite-wal"))
+        .unwrap();
+
+    assert_opens_leave_index_files_alone(
+        &root,
+        |r| matches!(r, Err(ArchiveError::NewerIndex { found, .. }) if *found == newer),
+    );
+}
+
+/// Builds a newer-version WAL-mode index in `scratch/src` with a connection that stays open while `names` are copied
+/// into `root`, as a crashed newer shepherd would leave them: the newer version lives only in WAL frames that were
+/// never checkpointed into the main file.
+fn plant_newer_wal_index(scratch: &Path, root: &Path, names: &[&str]) {
+    BlobStore::open(root).unwrap();
+    let src = scratch.join("src");
     fs::create_dir(&src).unwrap();
-    let src_index = src.join("index.sqlite");
-    let writer = rusqlite::Connection::open(&src_index).unwrap();
+    let writer = rusqlite::Connection::open(src.join("index.sqlite")).unwrap();
     let newer = INDEX_VERSION + 1;
     writer
         .execute_batch(&format!(
@@ -360,27 +431,30 @@ fn a_newer_index_with_unmerged_wal_frames_is_refused_and_not_modified() {
              CREATE TABLE future(x INTEGER); INSERT INTO future VALUES (1); PRAGMA user_version = {newer};"
         ))
         .unwrap();
-    for name in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+    for name in names {
         fs::copy(src.join(name), root.join(name)).unwrap();
         fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o600)).unwrap();
     }
     drop(writer);
-    let before = index_files(&root);
-    assert_eq!(before.len(), 3);
-    let wal = fs::metadata(root.join("index.sqlite-wal")).unwrap().len();
-    assert!(wal > 0, "the WAL holds frames the main file doesn't");
+    assert_eq!(index_files(root).len(), names.len());
+}
 
+/// Opens `root` twice, checks each result with `expected`, and asserts that no `index.sqlite*` file was added,
+/// removed or changed by a single byte.
+fn assert_opens_leave_index_files_alone(
+    root: &Path,
+    expected: impl Fn(&Result<Archive, ArchiveError>) -> bool,
+) {
+    let before = index_files(root);
     for _ in 0..2 {
-        match Archive::open(&root) {
-            Err(ArchiveError::NewerIndex { found, .. }) => assert_eq!(found, newer),
-            other => panic!("expected NewerIndex, got {other:?}"),
-        }
+        let result = Archive::open(root);
+        assert!(expected(&result), "unexpected open result: {result:?}");
     }
-    let after = index_files(&root);
+    let after = index_files(root);
     assert_eq!(
         after.iter().map(|(p, _)| p).collect::<Vec<_>>(),
         before.iter().map(|(p, _)| p).collect::<Vec<_>>(),
-        "nothing deleted or added"
+        "no index file added or removed"
     );
     for ((path, was), (_, is)) in before.iter().zip(&after) {
         assert!(was == is, "{} was rewritten", path.display());
@@ -1027,6 +1101,16 @@ fn child_process() {
                 "the foreign key refused the snapshot: {result:?}"
             );
         }
+        "relative-file-root" => {
+            // Run from a scratch cwd with the relative root `file:arch`, which SQLite would read as a URI if it were
+            // ever handed the plain path.
+            let archive = Archive::open(root).unwrap();
+            archive.put_session(&session("s1", repo('a'))).unwrap();
+            drop(archive);
+            assert!(root.join("index.sqlite").is_file());
+            let again = Archive::open(root).unwrap();
+            assert_eq!(again.sessions(&repo('a')).unwrap().len(), 1);
+        }
         opener if opener.starts_with("opener-") => {
             Archive::open(root)
                 .unwrap()
@@ -1078,7 +1162,12 @@ fn child_process() {
 
 /// Starts `child_process` in a new process with `job` on `root`.
 fn child(job: &str, root: &Path) -> Child {
-    Command::new(std::env::current_exe().unwrap())
+    child_command(job, root).spawn().unwrap()
+}
+
+fn child_command(job: &str, root: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args([
             "--exact",
             "child_process",
@@ -1088,9 +1177,81 @@ fn child(job: &str, root: &Path) -> Child {
         .env(CHILD_ROOT, root)
         .env(CHILD_JOB, job)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stdout(Stdio::piped());
+    command
+}
+
+#[test]
+fn a_relative_root_starting_with_file_colon_is_a_path_not_a_uri() {
+    let dir = tempdir();
+    let status = child_command("relative-file-root", Path::new("file:arch"))
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child opened and reopened file:arch");
+    assert!(dir.path().join("file:arch").join("index.sqlite").is_file());
+    assert!(
+        !dir.path().join("arch").exists(),
+        "nothing went to the path a URI parse would give"
+    );
+}
+
+#[test]
+fn open_waits_while_another_process_holds_the_index_lock() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let held = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("index.lock"))
+        .unwrap();
+    held.lock().unwrap();
+
+    let mut opener = child("opener-0", &root);
+    drop(opener.stdin.take());
+    // The child creates blobs.lock just before it asks for index.lock. Spin (no sleep) until it has.
+    while !root.join("blobs.lock").exists() {
+        assert!(
+            opener.try_wait().unwrap().is_none(),
+            "the opener exited before reaching the lock"
+        );
+        std::thread::yield_now();
+    }
+    // A trap only an opener that didn't wait could fall into: an index that isn't SQLite. Creating it must succeed
+    // (the opener hasn't made its own index yet), and the opener must never see it.
+    let trap = root.join("index.sqlite");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&trap)
+        .expect("the opener created no index while the lock was held")
+        .write_all(b"not a database")
+        .unwrap();
+    assert!(
+        opener.try_wait().unwrap().is_none(),
+        "the opener is waiting"
+    );
+    fs::remove_file(&trap).unwrap();
+    drop(held);
+
+    assert!(
+        opener.wait_with_output().unwrap().status.success(),
+        "the opener went on once the lock was released"
+    );
+    assert_eq!(
+        Archive::open(&root)
+            .unwrap()
+            .sessions(&repo('a'))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 fn run_child(job: &str, root: &Path) -> Option<i32> {
