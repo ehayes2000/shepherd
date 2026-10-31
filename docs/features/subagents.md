@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | review | task/t54-subagent-events @ 99d6dfa |  | built; added subagent/working frame + blocked.agent_type (PM ok); turn end drops background subagents (noted for T55/T44) |
+| T54 | Subagent lifecycle in the event log | fixing | task/t54-subagent-events @ 99d6dfa | 1 | round 1 CHANGES: task pairing by type wrong (Codex Post before Start; parallel same-type) → pair by agentId/agent_id; fixture shape |
 | T55 | Subagent tree in the sidebar | todo |  |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 
@@ -49,6 +49,8 @@ acceptance:
   click targets, a tree taller than the sidebar (the selection stays visible), tiny window.
 - From T54: the parent's turn end drops every subagent, including a background one still running (it reappears if it
   blocks). If T44's real-agent round shows background subagents are common, keep unfinished ones listed across a turn end.
+  T54's review: a background subagent whose dialog is open when the parent's Stop fires loses its wait, so the session
+  stops wanting the user until it blocks again (under-alerting). Keeping unfinished ones across a turn end fixes both.
 scope: crates/core, crates/tui
 notes: Decision 0014: the badge is clickable; `⇥` is the optional key.
 
