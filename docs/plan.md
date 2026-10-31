@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ d4e3aa5 | 1 | Blocking: refusing a newer WAL index checkpointed it; migration rollback and newtype validation untested |
-| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | merging | task/t29-machine-identity @ fea91a8 | 3 | approved r3 |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ c3cca50 (on 60089d5) | 2 | read-only version peek; rollback/newtype/lock tests; percent-encoding allowed |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
@@ -29,6 +28,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F46 Fake claude/codex scripts are fresh executables (macOS scan stall) | [host-and-client](features/host-and-client.md) | todo | F45 |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | todo | T36b |
+| T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | todo | T29 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
 
@@ -42,7 +42,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 8 | 2 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 3 | 1 | A new build replaces the running host in place without stopping sessions |
-| [Multi-machine](features/multi-machine.md) | M4 | 1 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
+| [Multi-machine](features/multi-machine.md) | M4 | 2 | 3 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |

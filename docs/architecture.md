@@ -827,6 +827,7 @@ Context: the user's proposal `docs/proposals/conversation-archive.md`; cleanup m
   core's `Archive` port through an adapter in `crates/shepherd`. check-arch enforces both directions.
 - Allowed deps there: `rusqlite` (feature `bundled`, no system SQLite) and `zstd`, plus workspace crates already allowed
   (`sha2`, `serde`, `serde_json`, `jiff`, `thiserror`). Not in core.
+  Amended (T39): `percent-encoding` too, for SQLite URIs (`mode=ro&readonly_shm=1`) that need the path escaped.
 - The archive is on-device only (`~/.shepherd/archive/`, 0700/0600), one per machine; no network ever.
 - Real-agent end-to-end tests (T44) are outside the gate: they need the network, auth and tokens. They live behind an opt-in
   script, `scripts/e2e-agents.sh`, run only by the user (or the PM with the user's go-ahead), with agent state in throwaway
