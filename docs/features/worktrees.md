@@ -26,7 +26,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F33 | Hooks don't queue behind each other or outlive the host | done | 5cf8a10 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
-| F48 | repo_root returns an uncanonical /tmp path under load | building | task/f48-git-signal-death | 0 | resumed: fix per spec plan |
+| F48 | repo_root returns an uncanonical /tmp path under load | merging | task/f48-git-signal-death @ bf08a57 | 2 | round 2 APPROVE; not reproduced (accepted); signal death → Other; fixture drops prove ownership; r4 24-copy 0 failures. Minor: ps retries have no pause (F51) |
+| F51 | Test cleanup never signals a pid it can't prove is ours | todo |  |  |  |
 
 ## Specs
 
@@ -345,4 +346,22 @@ acceptance:
   Drops only signal a pid still known to be ours; (3) a 24-copy round with the diagnostic patch (scratchpad
   `f48-diag.txt`, `f48-load.sh`) to confirm.
 scope: crates/adapters
+
+### F51: Test cleanup never signals a pid it can't prove is ours
+depends: F48
+touches: adapters (tests: launcher, worktrees), scripts/check-arch.sh
+goal: From F48: more test code signals recorded pids without checking they're still ours; with pid reuse that can kill an
+unrelated process on the user's machine.
+acceptance:
+- `StandInFixture::ask_alive` (launcher.rs) sends SIGUSR1 in a loop to a recorded pid; SIGUSR1's default action ends a
+  process. It signals only while the pid is proven ours (F48's `group_is_ours` style check), with a test like F48's
+  "spares a group that took a dead stand-in's pid".
+- The worktrees tests that kill hook pids after a `ps` liveness check (F48 builder saw them at ~1952, ~2042, ~2408, ~2912
+  before F48) prove ownership the same way, or don't need to kill (bounded by the hook's own lifetime).
+- `Failure::Exit` with a real exit code still maps to `NotARepo` whatever the cause; map only git's "not a git repository"
+  exit (128 with that stderr) to NotARepo, others to `Other`, with tests.
+- `group_is_ours` retries `ps` back to back; add a short pause between tries.
+- PM (gate): check-arch's `"#!/` rule also covers `crates/adapters` tests (launcher.rs ~798 writes one today: move it to
+  the stand-in or justify an exemption).
+scope: crates/adapters, scripts/check-arch.sh
 

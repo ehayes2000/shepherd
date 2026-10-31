@@ -379,6 +379,12 @@ mod tests {
             text.trim().parse().ok()
         }
 
+        /// The pid the contract's scripts record in `shell.pid`, once they have.
+        fn shell_pid(&self) -> Option<libc::pid_t> {
+            let text = std::fs::read_to_string(self.dir.join("shell.pid")).ok()?;
+            text.trim().parse().ok()
+        }
+
         /// The recorded child and its process group, if it is running: not exiting (`E`, its SIGKILL delivered) and
         /// not a zombie (`Z`) waiting for launchd (its parent once the hook's shell is gone) to reap it, which may be
         /// a moment after the port returns. Neither runs anything.
@@ -396,9 +402,14 @@ mod tests {
     }
 
     impl Drop for ShellFixture {
+        /// Kills the recorded child only while it is still ours: in the group the script's shell led. Once it has
+        /// died, its pid may name another process, such as a git another test started (F48).
         fn drop(&mut self) {
-            if let Some((pid, _)) = self.running_child() {
-                // SAFETY: plain syscall, on the child our own script started and recorded.
+            let (Some((pid, pgid)), Some(shell)) = (self.running_child(), self.shell_pid()) else {
+                return;
+            };
+            if pgid.parse::<libc::pid_t>().ok() == Some(shell) {
+                // SAFETY: plain syscall, on the child our own script started and recorded, still in its group.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
@@ -460,6 +471,57 @@ mod tests {
         use super::ShellFixture;
 
         shepherd_testkit::commands_contract!(ShellFixture::new());
+    }
+
+    /// A child the script left running in its shell's group is still ours: the drop kills it.
+    #[test]
+    fn a_dropped_fixture_kills_a_leftover_child_of_its_script() {
+        let f = ShellFixture::new();
+        let out = run(&f, shepherd_testkit::contracts::commands::FORK_AND_EXIT);
+        assert_eq!(out.exit, CommandExit::Code(0));
+        let Some((pid, _)) = f.running_child() else {
+            panic!("the script's child isn't running");
+        };
+        drop(f);
+        let started = std::time::Instant::now();
+        loop {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&ps.stdout);
+            let stat = stat.trim();
+            if stat.is_empty() || stat.contains('Z') || stat.contains('E') {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "child {pid} still running ({stat}) after the drop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A child that died may have its pid handed to someone else's process (one leading a group of its own, as a git
+    /// another test runs does) by the time the fixture is dropped: the drop leaves that process alone (F48).
+    #[test]
+    fn a_dropped_fixture_spares_a_process_that_took_its_dead_childs_pid() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let f = ShellFixture::new();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(f.dir.join("shell.pid"), format!("{}\n", std::process::id())).unwrap();
+        std::fs::write(f.dir.join("child.pid"), format!("{}\n", stranger.id())).unwrap();
+        drop(f);
+        // A SIGKILL the drop sent would be acted on before this SIGTERM.
+        let id = libc::pid_t::try_from(stranger.id()).unwrap();
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = stranger.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
     }
 
     fn run(f: &ShellFixture, script: &str) -> CommandOutput {
@@ -556,7 +618,9 @@ mod tests {
     #[test]
     fn a_background_child_can_keep_writing_after_it_returns() {
         let f = ShellFixture::new();
-        let script = "(while [ ! -f go ]; do sleep 0.01; done; head -c 1048576 /dev/zero; echo yes > survived) & \
+        // `shell.pid` too, so a drop after a failure here kills the waiting child as ours.
+        let script = "echo $$ > shell.pid; \
+                      (while [ ! -f go ]; do sleep 0.01; done; head -c 1048576 /dev/zero; echo yes > survived) & \
                       echo $! > child.pid";
         let out = run(&f, script);
         assert_eq!(out.exit, CommandExit::Code(0));

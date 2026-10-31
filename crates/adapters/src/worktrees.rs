@@ -1183,10 +1183,11 @@ impl Failure {
         }
     }
 
-    /// For calls where git exiting with an error means `dir` is not in a repo (or doesn't exist).
+    /// For calls where git exiting with an error means `dir` is not in a repo (or doesn't exist). A git killed by a
+    /// signal didn't exit with one: that says nothing about `dir`.
     fn or_not_a_repo(self, dir: &Path, op: &str) -> WorktreeError {
         match self {
-            Self::Exit { .. } => WorktreeError::NotARepo(dir.to_owned()),
+            Self::Exit { code: Some(_), .. } => WorktreeError::NotARepo(dir.to_owned()),
             other => other.into_error(op),
         }
     }
@@ -2366,6 +2367,42 @@ close $out;
         assert!(!lock.exists());
         assert_nothing_left(&f, "killed");
         retry_succeeds(&f, "killed");
+    }
+
+    /// A port whose `git` is a script that kills itself with SIGKILL, as a stray signal (say, one sent to a reused
+    /// pid) would.
+    fn port_whose_git_is_killed(f: &GitFixture) -> GitWorktrees {
+        let bin = f.tmp().join("killed-bin");
+        std::fs::create_dir(&bin).unwrap();
+        // The body is sourced by the stand-in's own `sh`, so `$$` is the process the port spawned.
+        crate::stand_in::install(&bin.join("git"), "kill -KILL $$\n");
+        let mut env = env(&f.tmp());
+        env.push(("PATH".into(), bin.into()));
+        GitWorktrees::new(f.root())
+            .with_isolated_env(env)
+            .with_git_timeout(TEST_TIMEOUT)
+    }
+
+    /// A git killed by a signal says nothing about the directory it ran in: it is no answer that it isn't a repo (F48).
+    #[test]
+    fn repo_root_reports_a_git_killed_by_a_signal_as_a_failure_not_as_not_a_repo() {
+        let f = GitFixture::new();
+        let result = port_whose_git_is_killed(&f).repo_root(&f.app().join(SUBDIR));
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("killed by a signal")),
+            "{result:?}"
+        );
+    }
+
+    /// Likewise for the calls that only ask for the repo's git dir.
+    #[test]
+    fn default_branch_reports_a_git_killed_by_a_signal_as_a_failure_not_as_not_a_repo() {
+        let f = GitFixture::new();
+        let result = port_whose_git_is_killed(&f).default_branch(&f.repo());
+        assert!(
+            matches!(&result, Err(WorktreeError::Other(m)) if m.contains("killed by a signal")),
+            "{result:?}"
+        );
     }
 
     /// Whether `pid` is a live process (a zombie counts as dead).
