@@ -2374,10 +2374,8 @@ close $out;
     fn port_whose_git_is_killed(f: &GitFixture) -> GitWorktrees {
         let bin = f.tmp().join("killed-bin");
         std::fs::create_dir(&bin).unwrap();
-        let git = bin.join("git");
-        std::fs::write(&git, "#!/bin/sh\nkill -KILL $$\n").unwrap();
-        std::fs::set_permissions(&git, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        // The body is sourced by the stand-in's own `sh`, so `$$` is the process the port spawned.
+        crate::stand_in::install(&bin.join("git"), "kill -KILL $$\n");
         let mut env = env(&f.tmp());
         env.push(("PATH".into(), bin.into()));
         GitWorktrees::new(f.root())

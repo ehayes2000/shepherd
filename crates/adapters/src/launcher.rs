@@ -498,24 +498,31 @@ wait
 
         /// Whether process group `pgid` has a live member launched through this fixture: a stand-in, or a subshell of
         /// one such as its watchdog, whose arguments name this fixture's fifo. (`ps` prints each process on one line,
-        /// escaping the newlines in a stand-in's script.)
+        /// escaping the newlines in a stand-in's script.) `ps` is retried a few times if it can't be run or fails, as
+        /// it can under load; if it never answers, the group counts as not ours: it is never killed unverified, and its
+        /// watchdog ends it within [`STAND_IN_LIFETIME`].
         fn group_is_ours(&self, pgid: i32) -> bool {
             let fifo = self.fifo();
             let Some(fifo) = fifo.to_str() else {
                 return false;
             };
-            let Ok(out) = std::process::Command::new("ps")
-                .args(["-A", "-o", "pgid=,stat=,args="])
-                .output()
-            else {
+            let Some(out) = (0..5).find_map(|_| {
+                std::process::Command::new("ps")
+                    .args(["-A", "-o", "pgid=,stat=,args="])
+                    .output()
+                    .ok()
+                    .filter(|out| out.status.success())
+            }) else {
                 return false;
             };
             String::from_utf8_lossy(&out.stdout).lines().any(|line| {
-                let mut words = line.split_whitespace();
-                let (Some(group), Some(stat)) = (words.next(), words.next()) else {
+                let Some((group, rest)) = line.trim_start().split_once(char::is_whitespace) else {
                     return false;
                 };
-                group.parse() == Ok(pgid) && !stat.contains('Z') && words.any(|w| w == fifo)
+                let Some((stat, args)) = rest.trim_start().split_once(char::is_whitespace) else {
+                    return false;
+                };
+                group.parse() == Ok(pgid) && !stat.contains('Z') && args.contains(fifo)
             })
         }
 
@@ -558,10 +565,11 @@ wait
         fn drop(&mut self) {
             for pid in self.recorded_pids() {
                 // Each stand-in leads its own process group (`setsid`), its watchdog included, so this reaches the
-                // stand-in itself too. Killed until the group is empty, as a precaution (untested) against a child
-                // forked while the group is signalled. Bounded: the watchdog ends anything left. Only while the group is
-                // still ours: once it is gone, its id may lead someone else's group, such as a git another test started
-                // (F48).
+                // stand-in itself too. Killed again for as long as the group has a live member whose arguments name our
+                // fifo ([`StandInFixture::group_is_ours`]), as a precaution (untested) against a stand-in or subshell
+                // forked while the group is signalled. A member without our fifo in its arguments (the watchdog's
+                // `sleep`) isn't waited for: the watchdog ends anything left. Never once no member is verified ours:
+                // its id may then lead someone else's group, such as a git another test started (F48).
                 let deadline = std::time::Instant::now() + TIMEOUT;
                 while self.group_is_ours(pid)
                     // SAFETY: plain syscall, on a group that has one of our stand-ins in it, so its id can't have been

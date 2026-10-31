@@ -473,6 +473,35 @@ mod tests {
         shepherd_testkit::commands_contract!(ShellFixture::new());
     }
 
+    /// A child the script left running in its shell's group is still ours: the drop kills it.
+    #[test]
+    fn a_dropped_fixture_kills_a_leftover_child_of_its_script() {
+        let f = ShellFixture::new();
+        let out = run(&f, shepherd_testkit::contracts::commands::FORK_AND_EXIT);
+        assert_eq!(out.exit, CommandExit::Code(0));
+        let Some((pid, _)) = f.running_child() else {
+            panic!("the script's child isn't running");
+        };
+        drop(f);
+        let started = std::time::Instant::now();
+        loop {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&ps.stdout);
+            let stat = stat.trim();
+            if stat.is_empty() || stat.contains('Z') || stat.contains('E') {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "child {pid} still running ({stat}) after the drop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A child that died may have its pid handed to someone else's process (one leading a group of its own, as a git
     /// another test runs does) by the time the fixture is dropped: the drop leaves that process alone (F48).
     #[test]
@@ -589,7 +618,9 @@ mod tests {
     #[test]
     fn a_background_child_can_keep_writing_after_it_returns() {
         let f = ShellFixture::new();
-        let script = "(while [ ! -f go ]; do sleep 0.01; done; head -c 1048576 /dev/zero; echo yes > survived) & \
+        // `shell.pid` too, so a drop after a failure here kills the waiting child as ours.
+        let script = "echo $$ > shell.pid; \
+                      (while [ ! -f go ]; do sleep 0.01; done; head -c 1048576 /dev/zero; echo yes > survived) & \
                       echo $! > child.pid";
         let out = run(&f, script);
         assert_eq!(out.exit, CommandExit::Code(0));
