@@ -1,0 +1,4 @@
+#!/bin/sh
+# A stand-in executable for tests (`src/stand_in.rs`), only ever run through a symlink to this file. It runs the
+# script at that symlink's path plus `.sh` as its own body, with its arguments and `$0` unchanged.
+. "$0.sh"
