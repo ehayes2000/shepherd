@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
 | F47 | A swap can lose its Accepted answer before exec | done | 98b73d3 | 2 | round 2 APPROVE; minors filed to F50; 12-copy round deferred (machine slow) |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
-| F50 | Tighten F47's flush tests | fixing | task/f50-flush-tests @ d099b95 | 3 | round 3 CHANGES: no lower bound on give-up time (early give-up passed all) |
+| F50 | Tighten F47's flush tests | merging | task/f50-flush-tests @ d099b95 | 3 | round 3: reviewer-specified lower bound added, mutation shown on unix+iroh; merged without a 4th review |
 
 ## Specs
 

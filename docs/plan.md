@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T45 Headless UI test harness | [automation](features/automation.md) | merging | task/t45-ui-harness @ bf71348 | 1 | APPROVE; exemption wider than gap (removed by F55) |
-| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | fixing | task/f50-flush-tests @ d099b95 | 3 | round 3 CHANGES: no lower bound on give-up time (early give-up passed all) |
+| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | merging | task/f50-flush-tests @ d099b95 | 3 | round 3: reviewer-specified lower bound added, mutation shown on unix+iroh; merged without a 4th review |
 
 ## Ready to start
 
@@ -34,6 +33,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | ready | T32 |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
 | T62 Machine colors | [multi-machine](features/multi-machine.md) | ready | T31b |
+| F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | ready | T19b |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
@@ -43,7 +43,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 0 | 9 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 1 | 8 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
