@@ -18,7 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F27 | Worktrees calls run off the host runtime thread | done | db9a442 | 1 | – (2 minors → F28) |
 | F40 | Launcher test stand-ins can leak | done | 24f1b49 | 1 | stand-ins orphaned; now a watchdog per stand-in and a group kill on drop |
 | F45 | Fresh `#!/bin/sh` stand-ins time out under heavy load (handoff, forge) | done | 1709ed0 | 1 | cause: macOS syspolicyd scans each new executable on first exec; fixtures symlink one committed script |
-| F46 | Fake claude/codex scripts are fresh executables (macOS scan stall) | merging | task/f44-f46-shepherd-tests @ acbbde4 | PM spot check | fakes via testkit stand-in; check-arch rule |
+| F46 | Fake claude/codex scripts are fresh executables (macOS scan stall) | done | ec85617 | PM spot check | fake agents via testkit stand-in; check-arch rule |
 
 ## Specs
 

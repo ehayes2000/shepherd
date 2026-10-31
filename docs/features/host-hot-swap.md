@@ -12,8 +12,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T36 | Spike: hot-swap the host on a version mismatch | done | spike merged 4e2ec1d; decision 0018 |  |  |
 | T36a | Build identity in the hello, and a clear mismatch UX | done | 44dac96 | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | T36b | Hot-swap the host by re-exec, keeping sessions running | done | 2de1f2f | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
-| F44 | hotswap_e2e times out under load | merging | task/f44-f46-shepherd-tests @ acbbde4 | PM spot check | stall from macOS scan of copied binaries fixed; residual failures are a product race → F47 |
-| F47 | A swap can lose its Accepted answer before exec | todo |  |  |  |
+| F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
+| F47 | A swap can lose its Accepted answer before exec | building | task/f47-swap-flush @ ec85617 | 0 |  |
 
 ## Specs
 
