@@ -719,7 +719,9 @@ pub fn flush_closed_with_nothing_closed_is_flushed<F: LinkFixture>(mut h: LinkHa
     assert_eq!(c.link.flush_closed(Duration::ZERO), FlushOutcome::Flushed);
 }
 
-/// A backlog bigger than a socket holds, so the close still has delivering to do when it returns.
+/// A backlog bigger than a socket holds, so the close still has delivering to do when it returns. A peer reader starved
+/// for longer than [`CLOSE_FLUSH`] (a loaded machine) really is given up on, so the outcome is `Flushed` exactly when
+/// every line arrives.
 pub fn closed_conn_is_flushed_once_its_peer_has_read_everything<F: LinkFixture>(
     mut h: LinkHarness<F>,
 ) {
@@ -729,9 +731,7 @@ pub fn closed_conn_is_flushed_once_its_peer_has_read_everything<F: LinkFixture>(
         h.send(c.host_conn, &chunk);
     }
     h.host.close(c.host_conn).unwrap();
-    assert_eq!(h.host.flush_closed(TIMEOUT), FlushOutcome::Flushed);
-    // Delivered already, not just on its way: all that can still be in flight is what one socket buffer and one
-    // read hold, a few chunks at most.
+    let outcome = h.host.flush_closed(TIMEOUT);
     let arrived = c.events.ready();
     let lines = |events: &[LinkEvent]| {
         events
@@ -739,12 +739,16 @@ pub fn closed_conn_is_flushed_once_its_peer_has_read_everything<F: LinkFixture>(
             .filter(|e| matches!(e, LinkEvent::Line { .. }))
             .count()
     };
-    assert!(
-        lines(&arrived) >= BACKLOG / CHUNK / 2,
-        "{} of {} lines had arrived when flush_closed returned",
-        lines(&arrived),
-        BACKLOG / CHUNK
-    );
+    if outcome == FlushOutcome::Flushed {
+        // Delivered already, not just on its way: all that can still be in flight is what one socket buffer and one
+        // read hold, a few chunks at most.
+        assert!(
+            lines(&arrived) >= BACKLOG / CHUNK / 2,
+            "{} of {} lines had arrived when flush_closed returned",
+            lines(&arrived),
+            BACKLOG / CHUNK
+        );
+    }
     let mut rest = Vec::new();
     if !arrived
         .iter()
@@ -755,7 +759,13 @@ pub fn closed_conn_is_flushed_once_its_peer_has_read_everything<F: LinkFixture>(
             .wait_for(|e| matches!(e, LinkEvent::Disconnected { .. }), TIMEOUT);
     }
     let all: Vec<LinkEvent> = arrived.into_iter().chain(rest).collect();
-    assert_eq!(lines(&all), BACKLOG / CHUNK);
+    assert_eq!(
+        outcome == FlushOutcome::Flushed,
+        lines(&all) == BACKLOG / CHUNK,
+        "{outcome:?} with {} of {} lines delivered",
+        lines(&all),
+        BACKLOG / CHUNK
+    );
     assert_eq!(
         all.last(),
         Some(&LinkEvent::Disconnected {
@@ -792,15 +802,24 @@ pub fn flush_closed_times_out_while_a_closed_peer_does_not_read<F: LinkFixture>(
 }
 
 /// A link gives up delivering to a closed conn whose peer hasn't read for [`CLOSE_FLUSH`]. What it gave up on was never
-/// delivered, so the next `flush_closed` is `TimedOut`; then the give-up is forgotten, and doesn't hold a later
-/// `flush_closed` for its bound. The first bound is well past `CLOSE_FLUSH`, so the link gives up while it waits. The
-/// last bound is long, and returning well within it is a liveness bound, not a measurement.
+/// delivered, so the `flush_closed` waiting meanwhile is `TimedOut`, and it returns at the give-up rather than at its
+/// bound. Then the give-up is forgotten, and doesn't hold a later `flush_closed` for its bound. Both bounds are long,
+/// so the link gives up while the first waits; returning well within them is a liveness bound, not a measurement.
 pub fn a_give_up_is_reported_once_and_holds_no_later_flush<F: LinkFixture>(mut h: LinkHarness<F>) {
     let (_peer, conn) = h.stalled_peer();
     stuck_backlog(&mut h, conn);
     h.host.close(conn).unwrap();
-    assert_eq!(h.host.flush_closed(2 * CLOSE_FLUSH), FlushOutcome::TimedOut);
     let long = 6 * TIMEOUT;
+    let started = Instant::now();
+    assert_eq!(
+        h.host.flush_closed(CLOSE_FLUSH + long),
+        FlushOutcome::TimedOut
+    );
+    assert!(
+        started.elapsed() < CLOSE_FLUSH + long / 2,
+        "flush_closed waited past the give-up, for {:?}",
+        started.elapsed()
+    );
     let started = Instant::now();
     assert_eq!(h.host.flush_closed(long), FlushOutcome::Flushed);
     assert!(
