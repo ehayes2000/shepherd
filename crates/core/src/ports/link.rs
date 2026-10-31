@@ -109,11 +109,11 @@ pub trait LinkEventSink: Send + Sync + 'static {
 /// How [`Link::flush_closed`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushOutcome {
-    /// Every conn this link closed is done: what was queued for it is written, or it is gone (its peer left, or the
-    /// link gave up on a peer that wasn't reading). So a peer that never reads may still end as `Flushed`: the unix
-    /// adapter's writer gives up on it after [`CLOSE_FLUSH`], usually just before a caller waiting as long times out.
+    /// Every conn this link closed is done: what was queued for it is written, or its peer left.
     Flushed,
-    /// The deadline passed with some closed conn still delivering.
+    /// The deadline passed with some closed conn still delivering, or the link gave up on a closed conn's peer that
+    /// wasn't reading (after [`CLOSE_FLUSH`]), so some of what was queued for it was never written. A give-up is
+    /// reported to the next call, then forgotten: a conn given up on doesn't hold a later call.
     TimedOut,
 }
 
