@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/ui/steps.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │
+ ⌂ choose a workspace  │
+ + New session         │
+ ◌ docs               ×│
+   local · —           │
+ ◌ ┌────────┐         ×│
+   │ Rename │          │
+   │ Close  │          │
+   └────────┘          │
+ ctrl-b ? help Detach ?│

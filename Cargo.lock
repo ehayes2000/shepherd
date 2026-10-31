@@ -4068,6 +4068,7 @@ name = "shepherd-tui"
 version = "0.1.0"
 dependencies = [
  "insta",
+ "proptest",
  "ratatui",
  "serde_json",
  "shepherd-core",
