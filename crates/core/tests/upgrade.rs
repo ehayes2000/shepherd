@@ -150,6 +150,26 @@ fn an_installed_build_that_cannot_use_the_machine_key_says_fix_the_key() {
     assert!(reason.contains("mode 644"), "{reason}");
 }
 
+/// A build older than machine identities ignores `identity_error`, but reads `config_error`: the key's problem is there
+/// too, so such a host refuses the swap instead of handing off to an image with no key.
+#[test]
+fn an_unusable_machine_key_is_a_config_error_to_builds_that_do_not_know_identity_errors() {
+    let build = BuildId {
+        version: "0.1.0".into(),
+        digest: digest(2),
+    };
+    let check = HandoffCheck::of(build.clone(), None)
+        .with_identity_error(Some("the machine key has mode 644".into()));
+    let json = serde_json::to_value(&check).unwrap_or_else(|e| panic!("{e}"));
+    let config_error = json["config_error"].as_str().unwrap_or_default();
+    assert!(config_error.contains("mode 644"), "{json}");
+
+    // A real config error keeps its own message there.
+    let check = HandoffCheck::of(build, Some("unknown field `agnet`".into()))
+        .with_identity_error(Some("the machine key has mode 644".into()));
+    assert_eq!(check.config_error.as_deref(), Some("unknown field `agnet`"));
+}
+
 #[test]
 fn a_check_from_a_build_that_does_not_check_the_config_still_parses() {
     let line = br#"{"build":{"version":"0.1.0","digest":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="},"handoff_versions":[1]}"#;

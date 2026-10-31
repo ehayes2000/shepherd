@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use shepherd::host::{self, HostStartError, LOG_FILE, RuntimeEvent, SOCKET_FILE};
 use shepherd_adapters::JsonlEventLog;
+use shepherd_core::ids::MachineId;
 use shepherd_core::ports::IdentityError;
 
 fn tempdir() -> tempfile::TempDir {
@@ -186,37 +187,64 @@ fn a_machine_key_that_cannot_be_used_stops_the_host_and_is_left_alone() {
     assert_eq!(fs::read_to_string(&key).unwrap(), "short");
 }
 
-/// A key that broke between the preflight and the exec: the new image keeps the id the old one carried and warns,
-/// instead of exiting and taking the adopted sessions with it.
-#[test]
-fn an_adopting_image_falls_back_to_the_carried_machine_id_with_a_warning() {
-    use shepherd_core::ids::MachineId;
+/// Adoption never fails over the machine key: it would take the adopted sessions with it.
+fn unusable_key() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempdir();
     let root = tmp.path().join("shepherd");
     host::prepare_root(&root).unwrap();
-    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
-    write_private(&key, "short");
-    let carried = MachineId::new("ab".repeat(32));
+    write_private(
+        &root.join(shepherd_adapters::identity::IDENTITY_FILE),
+        "short",
+    );
+    (tmp, root)
+}
 
+/// A key that broke between the preflight and the exec: the new image keeps the id the old one carried and warns.
+#[test]
+fn an_adopting_image_with_an_unusable_key_keeps_the_carried_id_and_warns() {
+    let (_tmp, root) = unusable_key();
+    let carried = MachineId::new("ab".repeat(32));
     let (machine, warning) =
-        host::adopted_machine(host::check_machine_key(&root), Some(carried.clone())).unwrap();
+        host::adopted_machine(host::check_machine_key(&root), Some(carried.clone()));
     assert_eq!(machine, carried);
     let warning = warning.expect("a warning");
     assert!(warning.contains("machine key"), "{warning}");
     assert!(warning.contains("32-byte key"), "{warning}");
-
-    // With nothing carried (a handoff from a build older than machine identities) the takeover stops.
-    let Err(err) = host::adopted_machine(host::check_machine_key(&root), None) else {
-        panic!("accepted with no key and nothing carried");
-    };
-    assert!(matches!(err, HostStartError::Identity { .. }), "{err:?}");
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
     assert_eq!(fs::read_to_string(&key).unwrap(), "short");
+}
 
-    // A key that reads is used, whatever was carried.
-    fs::remove_file(&key).unwrap();
+/// The first update from a host older than machine identities carries no id, and its preflight couldn't make a key:
+/// the new image runs as `local`, what that host stamped, and warns.
+#[test]
+fn an_adopting_image_with_no_key_and_no_carried_id_runs_as_local_and_warns() {
+    let (_tmp, root) = unusable_key();
+    let (machine, warning) = host::adopted_machine(host::check_machine_key(&root), None);
+    assert_eq!(machine, MachineId::new(MachineId::LEGACY_LOCAL));
+    let warning = warning.expect("a warning");
+    assert!(warning.contains("machine key"), "{warning}");
+}
+
+/// A key naming another machine than the carried id (the old key was moved aside and the preflight made a new one):
+/// a hot swap keeps the identity it had, until the user restarts the host.
+#[test]
+fn an_adopting_image_whose_key_names_another_machine_keeps_the_carried_id_and_warns() {
+    let tmp = tempdir();
+    let root = tmp.path().join("shepherd");
     let made = host::check_machine_key(&root).unwrap();
+    let carried = MachineId::new("ab".repeat(32));
     let (machine, warning) =
-        host::adopted_machine(host::check_machine_key(&root), Some(carried)).unwrap();
+        host::adopted_machine(host::check_machine_key(&root), Some(carried.clone()));
+    assert_eq!(machine, carried);
+    let warning = warning.expect("a warning");
+    assert!(warning.contains(made.as_str()), "{warning}");
+
+    // The same machine: no warning.
+    let (machine, warning) =
+        host::adopted_machine(host::check_machine_key(&root), Some(made.clone()));
+    assert_eq!((machine, warning), (made.clone(), None));
+    // Nothing carried (an older build): the key.
+    let (machine, warning) = host::adopted_machine(host::check_machine_key(&root), None);
     assert_eq!((machine, warning), (made, None));
 }
 

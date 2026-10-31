@@ -586,15 +586,21 @@ fn an_upgrade_with_an_unusable_machine_key_is_unavailable_and_the_sessions_keep_
     assert_eq!(fs::read(&key).unwrap(), bytes, "the key was replaced");
 }
 
-/// A host older than machine identities has no key: the preflight makes it, so the swap goes ahead, the shell keeps
-/// running, and the new image runs as the machine that key names. (Simulated by removing the key a T29 host made.)
+/// A T29 host whose key was moved aside: the preflight makes a new one, so the swap goes ahead and the shell keeps
+/// running, but the new image keeps running as the machine it was (the carried id) and warns, naming the new key's
+/// machine, until the host is restarted.
 #[test]
-fn an_upgrade_from_a_host_without_a_machine_key_makes_it_and_the_sessions_keep_running() {
+fn an_upgrade_after_the_machine_key_was_moved_aside_makes_one_and_keeps_the_identity_until_restart()
+{
     use shepherd_adapters::KeyFileIdentity;
     use shepherd_core::ports::{MachineIdentity, MachineKey};
     let (mut running, root) = start_host();
     let socket = root.join(shepherd::host::SOCKET_FILE);
     let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    let machine = answered(&seen, Method::Hello).unwrap()["machine"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
     fs::remove_file(&key).unwrap();
 
@@ -613,12 +619,79 @@ fn an_upgrade_from_a_host_without_a_machine_key_makes_it_and_the_sessions_keep_r
     b.input(&session, b"echo after-$((40+2))\n");
     b.request(ClientRequest::Subscribe(Subscribe::default()));
     b.read_until(&mut after, |s| text(&s.output).contains("after-42"));
-    assert_eq!(
-        answered(&after, Method::Hello).unwrap()["machine"],
-        made.as_str()
-    );
+    let hello = answered(&after, Method::Hello).unwrap().clone();
+    assert_ne!(machine, made.as_str());
+    assert_eq!(hello["machine"], machine.as_str(), "{hello}");
+    let warning = hello["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains(made.as_str()), "{hello}");
     let shell = running.shell.unwrap();
     assert!(alive(shell), "the shell {shell} died");
+}
+
+/// The checked-in stand-in script (see `shepherd_adapters`' `stand_in`): run through a symlink, it sources the body at
+/// the symlink's path plus `.sh`. Never a freshly written executable (F45).
+const STAND_IN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../adapters/tests/fixtures/stand-in"
+);
+
+/// T29 review: the machine key breaks between the preflight and the exec. The host's startup path is a symlink, first
+/// to the real binary, then (before the upgrade) to a stand-in that runs the real `handoff-check` and then makes the
+/// key unusable, and execs the real binary for anything else. The new image keeps the id the old one carried, warns,
+/// and the shell keeps running.
+#[test]
+fn a_key_broken_after_the_preflight_keeps_the_carried_machine_id_and_warns() {
+    use std::os::unix::fs::symlink;
+    let (mut running, root) = start_host_with(|home| {
+        let bin = home.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let exe = bin.join("shepherd");
+        symlink(SHEPHERD, &exe).unwrap();
+        exe
+    });
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let home = root.parent().unwrap().to_path_buf();
+    let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    let machine = answered(&seen, Method::Hello).unwrap()["machine"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(machine.len(), 64, "{machine}");
+
+    let exe = home.join("bin").join("shepherd");
+    let body = format!(
+        "real='{SHEPHERD}'\n\
+         if [ \"$1\" = handoff-check ]; then\n  \"$real\" handoff-check || exit $?\n  \
+         chmod 644 \"$HOME/.shepherd/identity.key\"\n  exit 0\nfi\n\
+         exec \"$real\" \"$@\"\n"
+    );
+    fs::write(home.join("bin").join("shepherd.sh"), body).unwrap();
+    let next = home.join("bin").join("shepherd.next");
+    symlink(STAND_IN, &next).unwrap();
+    fs::rename(&next, &exe).unwrap();
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| s.closed);
+    let answer: UpgradeAnswer =
+        serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
+    assert_eq!(answer, UpgradeAnswer::Accepted);
+    // The stand-in ran: the key broke after its check passed.
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&key).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o644);
+
+    let mut b = Client::connect(&socket);
+    b.request(ClientRequest::Subscribe(Subscribe::default()));
+    let mut after = Seen::default();
+    b.read_until(&mut after, |s| answered(s, Method::Subscribe).is_some());
+    let hello = answered(&after, Method::Hello).unwrap().clone();
+    assert_eq!(hello["machine"], machine.as_str(), "{hello}");
+    let warning = hello["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("machine key"), "{hello}");
+    let shell = running.shell.unwrap();
+    assert!(alive(shell), "the shell {shell} died");
+    b.input(&session, b"echo kept-$((40+2))\n");
+    b.read_until(&mut after, |s| text(&s.output).contains("kept-42"));
 }
 
 /// The swap execs the path the host started from, even after a new build was renamed over it: `current_exe()` would

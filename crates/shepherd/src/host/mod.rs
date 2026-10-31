@@ -238,9 +238,8 @@ fn open_adopted_inner(
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
         .map_err(HostStartError::Socket)?;
-    // The previous image's key, read again: updating in place keeps the machine. The preflight checked it; one broken
-    // since falls back to the id the previous image carried, with a warning, rather than stopping the takeover.
-    let (machine, key_warning) = adopted_machine(check_machine_key(root), file.machine.clone())?;
+    // The previous image's key, read again: updating in place keeps the machine. Never fails (see `adopted_machine`).
+    let (machine, key_warning) = adopted_machine(check_machine_key(root), file.machine.clone());
     let (config, warning) = match load_config(root, login_shell.clone()) {
         Ok(config) => (config, None),
         Err(error) => {
@@ -307,25 +306,46 @@ pub fn check_machine_key(root: &Path) -> Result<MachineId, HostStartError> {
         })
 }
 
-/// The machine id a new image adopting sessions runs as: `key`, the id from the machine key as it reads it now, else
-/// `carried`, the one the previous image ran as, with a warning for every client's hello (the key broke after the
-/// preflight checked it). With neither, the takeover stops: a handoff from a build older than machine identities
-/// carries none, and its preflight made the key.
+/// The machine id a new image adopting sessions runs as, and a warning for every client's hello when it isn't the
+/// key's. Adoption never fails over the key, which would take the adopted sessions with it:
+/// - the key reads and names the machine the previous image ran as (`carried`), or nothing was carried (a build older
+///   than machine identities): the key's id;
+/// - the key names another machine (the old one was moved aside and the preflight made a new one): `carried`, so the
+///   swap keeps the identity until the user restarts the host;
+/// - the key can't be used (it broke after the preflight): `carried`;
+/// - neither (an older build's first update, whose preflight couldn't make a key): [`MachineId::LEGACY_LOCAL`], what
+///   that build stamped its entries with.
 pub fn adopted_machine(
     key: Result<MachineId, HostStartError>,
     carried: Option<MachineId>,
-) -> Result<(MachineId, Option<String>), HostStartError> {
+) -> (MachineId, Option<String>) {
+    let restart = "Restart the host once it is fixed";
     match (key, carried) {
-        (Ok(machine), _) => Ok((machine, None)),
-        (Err(error), Some(machine)) => {
-            tracing::error!(%error, "cannot use the machine key after updating in place; keeping the carried id");
+        (Ok(machine), None) => (machine, None),
+        (Ok(machine), Some(carried)) if machine == carried => (machine, None),
+        (Ok(machine), Some(carried)) => {
+            tracing::warn!(%machine, %carried, "the machine key names another machine; keeping the carried id");
             let warning = format!(
-                "the host updated itself but couldn't use its machine key, so it keeps running as the same machine: \
-                 {error}. Restart the host once it is fixed"
+                "the host updated itself, but its machine key now names machine {machine}, so it keeps running as \
+                 {carried} until it is restarted"
             );
-            Ok((machine, Some(warning)))
+            (carried, Some(warning))
         }
-        (Err(error), None) => Err(error),
+        (Err(error), carried) => {
+            tracing::error!(%error, "cannot use the machine key after updating in place");
+            let (machine, as_what) = match carried {
+                Some(carried) => (carried, "the same machine"),
+                None => (
+                    MachineId::new(MachineId::LEGACY_LOCAL),
+                    "`local`, as before machine identities",
+                ),
+            };
+            let warning = format!(
+                "the host updated itself but couldn't use its machine key, so it keeps running as {as_what}: \
+                 {error}. {restart}"
+            );
+            (machine, Some(warning))
+        }
     }
 }
 

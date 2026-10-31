@@ -38,9 +38,17 @@ impl HandoffCheck {
         }
     }
 
-    /// This answer, with why the machine key can't be used, if it can't.
+    /// This answer, with why the machine key can't be used, if it can't. The reason goes in `config_error` too, unless
+    /// that already has one: builds older than machine identities ignore `identity_error` but refuse a swap over
+    /// `config_error`, so they don't hand off to an image with no key.
     pub fn with_identity_error(self, identity_error: Option<String>) -> Self {
+        let config_error = self.config_error.or_else(|| {
+            identity_error
+                .as_ref()
+                .map(|e| format!("cannot use the machine key: {e}"))
+        });
         Self {
+            config_error,
             identity_error,
             ..self
         }
@@ -144,10 +152,11 @@ fn can_hand_off(preflight: &Preflight) -> Result<(), String> {
             let check: HandoffCheck = serde_json::from_slice(line).map_err(|e| {
                 format!("cannot read the installed shepherd's handoff-check answer: {e}")
             })?;
-            if let Some(error) = check.config_error {
-                Err(format!("fix your config first: {error}"))
-            } else if let Some(error) = check.identity_error {
+            // The key first: its reason is in `config_error` too, for older builds.
+            if let Some(error) = check.identity_error {
                 Err(format!("fix the machine key first: {error}"))
+            } else if let Some(error) = check.config_error {
+                Err(format!("fix your config first: {error}"))
             } else if check.handoff_versions.contains(&HANDOFF_VERSION) {
                 Ok(())
             } else {
