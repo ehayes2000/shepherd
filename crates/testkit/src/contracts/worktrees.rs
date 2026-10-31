@@ -1086,7 +1086,9 @@ pub fn resolve_commit_of_a_rev_that_names_no_commit_is_none<F: WorktreesFixture>
     }
 }
 
-/// A rev from the command line that looks like an option is a name like any other: it names no commit.
+/// A rev from the command line that looks like an option is a name like any other: it names no commit, and changes
+/// nothing about the call. (In the git adapter the `^{commit}` peel appended to it already keeps these from matching
+/// one of git's options; `--end-of-options` is kept as defence in depth, and no case here needs it alone.)
 pub fn resolve_commit_never_reads_a_rev_as_an_option<F: WorktreesFixture>(f: &F) {
     for rev in ["--all", "-h", "--git-dir=/nonexistent", "--end-of-options"] {
         assert_eq!(f.port().resolve_commit(&f.repo(), rev), Ok(None), "{rev:?}");

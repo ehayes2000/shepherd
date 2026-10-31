@@ -18,6 +18,8 @@ ulid = "1.2"
 # Pairing tokens (T30): 16 bytes of OS randomness.
 getrandom = "0.3"
 signal-hook = "0.3"
+# Quoting `shepherd archive restore`'s resume lines for a shell (T43).
+shlex = "2"
 tracing = "0.1"
 serde.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

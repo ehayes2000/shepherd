@@ -109,6 +109,10 @@ required). The agent's home is `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, else `~/.clau
 different file already at a target path is never overwritten (an error naming it); identical files are left as they
 are, so restoring twice is fine.
 
+The human output ends with `cd <cwd>` and the resume command, quoted for a POSIX shell (by `shlex`) so a shell reads
+back exactly that directory and id. When that can't be done faithfully (a path that isn't UTF-8, or holds a character
+a terminal would act on), those lines are left out and point to `--json`, never printing a changed path.
+
 ```json
 {
   "session": "<shepherd session id>",

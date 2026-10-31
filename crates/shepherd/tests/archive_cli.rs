@@ -273,27 +273,73 @@ fn list_shows_every_session_oldest_first() {
     );
 }
 
-/// Text from a transcript's session (a name, a branch) can't drive the terminal; JSON carries it as it is.
+/// Text from a session (its name, branch, machine, worktree, transcript paths) can't drive the terminal in any
+/// command's human output, an error included; JSON carries it as it is.
 #[test]
-fn hostile_names_are_printed_display_safe() {
+fn hostile_text_is_printed_display_safe_everywhere() {
+    const BAD: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];
     let home = Home::new();
-    let cwd = home.worktree("x");
+    fs::create_dir(home.path().join(".claude")).unwrap();
+    let cwd = home.path().join("work/gone\u{1b}]0;pwned\u{7}");
     let mut s = claude_session("s-hostile", &cwd);
     s.name = Some("evil\u{1b}]0;pwned\u{7}name\u{1b}[2J".to_owned());
-    Archive::open(&home.archive_root())
-        .unwrap()
-        .put_session(&s)
+    s.branch = Some("feat\u{202e}txt.exe".parse().unwrap());
+    s.machine = "lap\u{202e}top".parse().unwrap();
+    let archive = Archive::open(&home.archive_root()).unwrap();
+    archive.put_session(&s).unwrap();
+    let content = b"hostile transcript\n";
+    archive
+        .add_snapshot(&NewSnapshot {
+            session: s.id.clone(),
+            captured_at: at(1_793_400_600),
+            head_commit: Some(hash('5')),
+            reason: SnapshotReason::TurnEnd,
+            files: vec![NewFile {
+                role: FileRole::Main,
+                original_path: PathBuf::from(format!("/x/\u{1b}[2J\u{7}/{CLAUDE_ID}.jsonl")),
+                content,
+            }],
+            commits: vec![SessionCommit {
+                commit: hash('5'),
+                patch_id: None,
+            }],
+        })
         .unwrap();
-    for args in [&["list"][..], &["show", "s-hostile"]] {
-        let human = ok(&home.shepherd(args));
-        assert!(
-            !human.contains('\u{1b}') && !human.contains('\u{7}'),
-            "{human:?}"
-        );
-        assert!(human.contains("evil"), "{human:?}");
-    }
+    drop(archive);
+    let hex = BlobId::of(content).to_string();
+    let blob = home
+        .archive_root()
+        .join("blobs")
+        .join(&hex[..2])
+        .join(format!("{hex}.zst"));
+
+    let clean = |text: &str, what: &str| {
+        assert!(!text.contains(BAD), "{what}: {text:?}");
+    };
+    clean(&ok(&home.shepherd(&["list"])), "list");
+    let shown = ok(&home.shepherd(&["show", "s-hostile"]));
+    clean(&shown, "show");
+    assert!(
+        shown.contains("evil") && shown.contains("gone"),
+        "{shown:?}"
+    );
+    let found = ok(&home.shepherd(&["find", &"5".repeat(40)]));
+    clean(&found, "find");
+    assert!(found.contains("s-hostile"), "{found:?}");
+    let why = failed(&home.shepherd(&["restore", "s-hostile"]));
+    clean(&why, "restore error");
+    assert!(why.contains("gone"), "{why:?}");
+
+    fs::remove_file(&blob).unwrap();
+    let verify = home.shepherd(&["verify"]);
+    assert_eq!(verify.status.code(), Some(1), "{verify:?}");
+    clean(&stdout(&verify), "verify");
+    clean(&stderr(&verify), "verify error");
+    assert!(stdout(&verify).contains("missing"), "{verify:?}");
+
     let listed = json_of(&home.shepherd(&["list", "--json"]));
     assert_eq!(listed["sessions"][0]["name"], json!(s.name));
+    assert_eq!(listed["sessions"][0]["cwd"], json!(cwd.to_str().unwrap()));
 }
 
 // ---- show ----
@@ -633,6 +679,59 @@ fn restore_never_overwrites_a_different_file() {
     let why = failed(&home.shepherd(&["restore", "s-claude"]));
     assert!(why.contains(main.to_str().unwrap()), "{why}");
     assert_eq!(fs::read(&main).unwrap(), b"the agent kept going\n");
+}
+
+/// The resume lines a shell reads back exactly: a cwd with a space, a quote and shell syntax in it is quoted.
+#[test]
+fn restore_prints_resume_lines_a_shell_reads_back_exactly() {
+    let home = Home::new();
+    fixture(&home);
+    let target = home.worktree("it's here; $HOME `x`");
+    let out = ok(&home.shepherd(&["restore", "s-codex", "--cwd", target.to_str().unwrap()]));
+    let line = |prefix: &str| {
+        out.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("no {prefix:?} line in {out}"))
+            .to_owned()
+    };
+    let cd = shlex::split(&line("  cd ")).unwrap();
+    assert_eq!(cd, [target.to_str().unwrap()], "{out}");
+    let resume = out.lines().last().unwrap();
+    assert_eq!(
+        shlex::split(resume.trim_start()).unwrap(),
+        ["codex", "resume", CODEX_ID],
+        "{out}"
+    );
+    // And a real shell agrees: `cd` there and print where it is.
+    let shell = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("cd {} && pwd", line("  cd ")))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(shell.stdout).unwrap().trim_end(),
+        target.to_str().unwrap()
+    );
+}
+
+/// A cwd that can't be printed as it is (here, with an escape in it) gets no shell line, never a changed path.
+#[test]
+fn restore_prints_no_shell_line_for_a_cwd_it_cant_print_faithfully() {
+    let home = Home::new();
+    fixture(&home);
+    let target = home.worktree("odd\u{1b}[2Jdir");
+    let out = ok(&home.shepherd(&["restore", "s-codex", "--cwd", target.to_str().unwrap()]));
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(!out.contains("  cd "), "{out}");
+    assert!(out.contains("--json"), "{out}");
+    let json = json_of(&home.shepherd(&[
+        "restore",
+        "s-codex",
+        "--cwd",
+        target.to_str().unwrap(),
+        "--json",
+    ]));
+    assert_eq!(json["cwd"], json!(target.to_str().unwrap()));
 }
 
 #[test]

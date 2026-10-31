@@ -1275,8 +1275,11 @@ impl Worktrees for GitWorktrees {
         Ok(ids.remove(commit))
     }
 
-    /// `rev-parse --verify --quiet --end-of-options <rev>^{commit}`: after `--end-of-options` nothing is an option, and
-    /// git's "no single commit" (exit 1, which `--quiet` keeps silent, for an ambiguous name too) is `None`.
+    /// `rev-parse --verify --quiet --end-of-options <rev>^{commit}`. Git's "no single commit" (exit 1, which `--quiet`
+    /// keeps silent, for an ambiguous name too) is `None`. The appended `^{commit}` peel already keeps a `rev` that
+    /// starts with `-` from matching one of rev-parse's options (the contract's
+    /// `resolve_commit_never_reads_a_rev_as_an_option` passes on the peel alone); `--end-of-options` is defence in
+    /// depth, so no future option spelling can take it.
     fn resolve_commit(
         &self,
         repo: &RepoRef,

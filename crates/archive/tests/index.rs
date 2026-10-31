@@ -1209,8 +1209,32 @@ fn a_read_only_open_refuses_a_newer_index_and_leaves_it_alone() {
 fn a_read_only_handle_refuses_every_write_and_stores_nothing() {
     let dir = tempdir();
     let root = archive_at_rest(&dir);
+    // A transcript a read-write handle captures, so a refused capture is refused for being read-only.
+    let home = dir.path().join("claude");
+    let project = home.join("projects").join("-work-s1");
+    fs::create_dir_all(&project).unwrap();
+    let transcript = project.join("agent-s1.jsonl");
+    fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+    let capture = shepherd_archive::Capture {
+        session: sid("s1"),
+        captured_at: at(1_767_229_300_000_000),
+        head_commit: None,
+        reason: SnapshotReason::Manual,
+        commits: vec![],
+        agent_home: &home,
+        transcript_path: &transcript,
+        limits: shepherd_archive::CaptureLimits::default(),
+    };
+    Archive::open(&root).unwrap().capture(&capture).unwrap();
     let before = archive_files(&root);
     let archive = Archive::open_read_only(&root).unwrap();
+
+    let captured = archive.capture(&capture);
+    assert!(
+        matches!(captured, Err(ArchiveError::ReadOnly)),
+        "{captured:?}"
+    );
+    assert_eq!(archive.capture_bytes_read(), 0, "no transcript was read");
 
     let put = archive.put_session(&session("s2", repo('a')));
     assert!(matches!(put, Err(ArchiveError::ReadOnly)), "{put:?}");

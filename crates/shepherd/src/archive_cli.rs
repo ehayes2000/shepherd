@@ -607,18 +607,34 @@ fn restore(
             },
         );
     }
-    let command: Vec<String> = command.iter().map(|a| safe(a)).collect();
-    write(
-        out,
-        &format!(
-            "Restored session {} ({}) for {}.\nResume it with:\n  cd {}\n  {}\n",
-            safe(s.id.as_str()),
-            resume.agent,
-            safe_path(&resume.cwd),
-            safe_path(&resume.cwd),
-            command.join(" "),
+    let mut text = format!(
+        "Restored session {} ({}) for {}.\n",
+        safe(s.id.as_str()),
+        resume.agent,
+        safe_path(&resume.cwd),
+    );
+    match shell_lines(&resume.cwd, &command) {
+        Some((cd, run)) => text.push_str(&format!("Resume it with:\n  cd {cd}\n  {run}\n")),
+        None => text.push_str(
+            "Its directory or id can't be printed as a shell line faithfully: run `shepherd archive restore` with \
+             --json for the exact cwd and command.\n",
         ),
-    )
+    }
+    write(out, &text)
+}
+
+/// `cwd` and `argv` quoted for a POSIX shell, exactly as they are, or `None` if that can't be done faithfully and safely:
+/// a value that isn't UTF-8, or that holds a character a terminal would act on (a display-safe rendering would print a
+/// different path). Quoting is shlex's, never hand-rolled.
+fn shell_lines(cwd: &Path, argv: &[String]) -> Option<(String, String)> {
+    let cwd = cwd.to_str()?;
+    let printable = |s: &str| display_safe(s, s.chars().count()).into_string() == s;
+    if !printable(cwd) || !argv.iter().all(|a| printable(a)) {
+        return None;
+    }
+    let cd = shlex::try_quote(cwd).ok()?.into_owned();
+    let run = shlex::try_join(argv.iter().map(String::as_str)).ok()?;
+    Some((cd, run))
 }
 
 // ---- verify ----

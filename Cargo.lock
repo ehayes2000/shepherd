@@ -3980,6 +3980,7 @@ dependencies = [
  "shepherd-term",
  "shepherd-testkit",
  "shepherd-tui",
+ "shlex",
  "signal-hook 0.3.18",
  "tempfile",
  "thiserror 2.0.21",
