@@ -16,6 +16,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | building | task/t41-archive-restore @ 4380131 | 0 |  |
 | F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | fixing | task/f47-swap-flush @ 2534cdc | 1 | Blocking: deadline from env clock, waited on real clock → port takes a Duration. Minor: prune test |
+| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | building | task/f48-repo-root-spelling @ e074e75 | 0 |  |
 
 ## Ready to start
 
@@ -29,7 +30,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
-| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | todo | F28 |
 
 ## Features
 
