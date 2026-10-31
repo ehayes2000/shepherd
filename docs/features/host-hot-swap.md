@@ -127,8 +127,8 @@ acceptance:
 - 0 failures in a 12-copy round of hotswap_e2e under load.
 scope: crates/core (port), crates/testkit, crates/adapters, crates/shepherd
 notes: (binding) PM-approved port change: `Link` gains an additive way to wait for closed conns to finish flushing, e.g.
-`fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome` (or a joinable close), with a contract case run against
-the fake and the unix adapter. The runtime's single-thread rule (0011) holds: the wait is bounded and only during a swap.
+`fn flush_closed(&mut self, within: Duration) -> FlushOutcome`, with a contract case run against the fake and the unix
+adapter. (Amended after round 1: a duration, not an `Instant` from env, so the port doesn't mix clocks.) The runtime's single-thread rule (0011) holds: the wait is bounded and only during a swap.
 
 ### F49: Shutdown exits without flushing closed connections
 depends: F47
