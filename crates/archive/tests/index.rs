@@ -1039,6 +1039,8 @@ const CHILD_JOB: &str = "T39_CHILD_JOB";
 /// What a paused child prints once its temp file is written and it holds the writer lock.
 const PAUSED: &str = shepherd_archive::PAUSE_MARKER;
 const WRITES_PER_CHILD: usize = 25;
+/// How many times each churning process (and the parent beside them) opens and closes the archive.
+const CHURNS: usize = 40;
 
 fn crash_content() -> Vec<u8> {
     let mut content = shepherd_archive::CRASH_BEFORE_RENAME.to_vec();
@@ -1110,6 +1112,15 @@ fn child_process() {
             assert!(root.join("index.sqlite").is_file());
             let again = Archive::open(root).unwrap();
             assert_eq!(again.sessions(&repo('a')).unwrap().len(), 1);
+        }
+        churner if churner.starts_with("churn-") => {
+            // Opens, writes and closes over and over: each close may remove -wal and -shm.
+            for i in 0..CHURNS {
+                let archive = Archive::open(root).unwrap();
+                archive
+                    .put_session(&session(&format!("{churner}-{i}"), repo('a')))
+                    .unwrap();
+            }
         }
         opener if opener.starts_with("opener-") => {
             Archive::open(root)
@@ -1319,6 +1330,37 @@ fn foreign_keys_are_enforced_after_open() {
     assert_eq!(
         snapshots, 0,
         "no snapshot row points at the missing session"
+    );
+}
+
+#[test]
+fn opens_succeed_while_other_processes_open_and_close_in_a_loop() {
+    let dir = tempdir();
+    let root = dir.path().join("archive");
+    let mut churners: Vec<_> = (0..2)
+        .map(|i| child(&format!("churn-{i}"), &root))
+        .collect();
+    for c in &mut churners {
+        drop(c.stdin.take());
+    }
+    // Opens and reads here meanwhile, each open seeing whatever side files the churners' last close left.
+    for _ in 0..CHURNS {
+        let archive = Archive::open(&root).unwrap();
+        archive.sessions(&repo('a')).unwrap();
+    }
+    for (i, c) in churners.into_iter().enumerate() {
+        assert!(
+            c.wait_with_output().unwrap().status.success(),
+            "churner {i} succeeded"
+        );
+    }
+    assert_eq!(
+        Archive::open(&root)
+            .unwrap()
+            .sessions(&repo('a'))
+            .unwrap()
+            .len(),
+        2 * CHURNS
     );
 }
 

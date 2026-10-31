@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -30,7 +30,7 @@ use crate::ids::{
     AgentKind, AgentSessionId, BadValue, Branch, CommitHash, FileRole, MachineId, PatchId,
     PrNumber, RepoId, SessionId, SnapshotId, SnapshotReason,
 };
-use crate::private::{normalize, open_or_create_private_file};
+use crate::private::{io_err, normalize, open_existing_private_file, open_or_create_private_file};
 
 /// The index schema version this build writes. Older indexes are migrated up to it; newer ones are refused.
 pub const INDEX_VERSION: i64 = 2;
@@ -172,10 +172,36 @@ pub struct VerifyReport {
 }
 
 /// The archive under one root: its blob store and its index.
+///
+/// Two lock files keep opening safe while other processes use the index:
+/// - `<root>/index.lock` serializes every open and every close across processes. [`Archive::open`] holds it
+///   throughout, and dropping an `Archive` takes it before its connection closes, since closing the last connection
+///   checkpoints the WAL and removes -shm and -wal. Every connection to the index belongs to an `Archive`, so whoever
+///   holds it sees the side files in a stable state.
+/// - `<root>/index.live` has a shared lock from every open `Archive`. An opener holding `index.lock` that can take it
+///   exclusively knows no other handle is live, so the files are at rest and are read without changing a byte (see
+///   `peek_version`). If it can't, other handles are using the index and an ordinary read-only connection joins them.
 #[derive(Debug)]
 pub struct Archive {
     blobs: BlobStore,
+    /// Fields drop in declaration order after [`Drop::drop`]: `conn` closes, then `live` is released, while `closing`
+    /// still holds `index.lock`.
     conn: Mutex<Connection>,
+    #[expect(dead_code, reason = "held only for its shared lock on index.live")]
+    live: File,
+    index_lock: PathBuf,
+    closing: Option<File>,
+}
+
+impl Drop for Archive {
+    fn drop(&mut self) {
+        // Best effort: drop can't report an error, and the connection closes either way.
+        if let Ok(file) = open_existing_private_file(&self.index_lock)
+            && file.lock().is_ok()
+        {
+            self.closing = Some(file);
+        }
+    }
 }
 
 impl Archive {
@@ -199,8 +225,21 @@ impl Archive {
         // here: a symlink or a file others can read is refused. SQLite's own NOFOLLOW can't be used, since it also
         // refuses symlinks in the parents (macOS's /var is one); and it must not create the file itself.
         open_or_create_private_file(&path)?;
+        let live_path = root.join("index.live");
+        let live = open_or_create_private_file(&live_path)?;
+        let others_live = match live.try_lock() {
+            Ok(()) => false,
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Error(e)) => return Err(io_err(&live_path, e).into()),
+        };
         // Before anything can write: a newer (or not-SQLite) index must stay exactly as it is.
-        pending_migrations(peek_version(&path)?)?;
+        pending_migrations(if others_live {
+            peek_version_in_use(&path)?
+        } else {
+            peek_version(&path)?
+        })?;
+        // Ours from here on (converting the exclusive lock if we had it): no opener can slip in, we hold index.lock.
+        live.lock_shared().map_err(|e| io_err(&live_path, e))?;
         // Through a URI too: SQLite reads a plain filename starting with `file:` as one.
         let conn = Connection::open_with_flags(
             sqlite_uri(&path, "mode=rw"),
@@ -217,11 +256,15 @@ impl Archive {
         let mut conn = conn;
         migrate(&mut conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        drop(opening);
-        Ok(Self {
+        let archive = Self {
             blobs,
             conn: Mutex::new(conn),
-        })
+            live,
+            index_lock: opening_path,
+            closing: None,
+        };
+        drop(opening);
+        Ok(archive)
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -511,7 +554,22 @@ impl Archive {
     }
 }
 
-/// Reads the index's `user_version` without creating, changing or deleting any of its files. Which connection can do
+/// Reads the index's `user_version` while other `Archive` handles have it open: an ordinary read-only connection,
+/// which shares the WAL and its -shm with them as SQLite intends. It is never the last connection, and a read-only
+/// connection never checkpoints, so closing it changes nothing.
+fn peek_version_in_use(path: &Path) -> Result<i64, ArchiveError> {
+    let conn = Connection::open_with_flags(
+        sqlite_uri(path, "mode=ro"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    read_version(&conn)
+}
+
+/// Reads the index's `user_version`, when no other handle has it open, without creating, changing or deleting any of
+/// its files. Which connection can do
 /// that depends on the side files, so they are looked at (never opened) first:
 /// - a -wal and its -shm: a read-only connection with `readonly_shm`, which builds the WAL's index in memory instead
 ///   of rewriting the -shm. (A read-write connection would checkpoint the WAL into the file and delete it on close; a
@@ -519,9 +577,11 @@ impl Archive {
 /// - no -wal, or an empty one: there are no WAL frames to read, so the main file alone is read as `immutable` (no
 ///   locks, no side files). A stray -shm without WAL frames holds nothing.
 /// - a non-empty -wal without its -shm: SQLite can't read that without making a -shm, so it is refused, untouched.
+/// - a rollback-journal index with a hot -journal is read as `immutable` too, ignoring the journal; only an index from
+///   before WAL (v1) can be in that state, and the read-write open that follows rolls the journal back.
 ///
-/// Another process closing the last connection between the look and the open can remove both side files; the open
-/// then fails, possibly leaving an empty -wal, which the next open reads past as above.
+/// The caller holds `index.lock` and no other handle is live, so the side files can't change between the look and
+/// the read.
 fn peek_version(path: &Path) -> Result<i64, ArchiveError> {
     let side = |suffix: &str| {
         let mut name = path.as_os_str().to_owned();
