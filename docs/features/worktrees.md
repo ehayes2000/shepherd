@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T26 | Search and open | done | 103ca34 | 5 | shared worktree ownership; hook-gap and path-alias bypasses; unresolved root spelling; untested host wiring; fixture briefly set core.bare on the real repo |
 | T37 | Worktree creation has no time cap, runs concurrently, and cancels on close | done | 850906b | 2 | inherited GIT_ASKPASS could hang uncapped creates; 2-reader FIFO gate hang; restack dropped edits |
 | F08 | Clean up after a timed-out worktree create | done | da443a6 | 3 | load flakes (shared short timeout), stale ref lock, untested fallback, TOCTOU dir delete, T20 test flake |
-| F17 | Worktrees contract flake under heavy load | review | task/f17-load-bounds @ d2695c1 (on 597d476) | 1 | cause: 30 s short-call bound under load + fresh-exec stalls; liveness bounds, real errors printed, FIFO gate hang fixed |
+| F17 | Worktrees contract flake under heavy load | merging | task/f17-load-bounds @ d2695c1 | 1 | approved; 5x24 rounds 0 failures per builder |
 | F25 | Clean up after a failed worktree create | done | 8861b54 | 2 (+1 stopped) | cleanup could delete a branch another process made during the fetch |
 | F28 | Workspace from a subdirectory, and `~` in typed paths | done | 6f1c62b | 2 | .git-named bare repo gave a root the port rejects |
 | F32 | Create the worktree branch atomically | done | d93bb15 | 2 | user core.filesRefLockTimeout let cleanup delete another process's lock (pinned =0) |
@@ -325,4 +325,6 @@ acceptance:
 - A detached orphan worktree (no branch) can be adopted and owned.
 - From F33: `next_hook` calls `Commands::new_run()` before `run_alone`; a failed thread spawn leaks that id forever — call
   `new_run` after a successful spawn or forget the id on the error path.
+- From the F17 review: `Entered::wait_entered` (adapters worktrees tests) returns at once forever after the reader thread
+  reports `false`, so `wait_held` busy-loops up to CREATE_LIMIT on a fixture malfunction; remember the reported state and stop.
 scope: crates/shepherd, crates/core
