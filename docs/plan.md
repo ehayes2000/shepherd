@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | building | task/t39-archive-index @ 597d476 | 0 |  |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ d4e3aa5 (on 41cd13a) | 1 | PM-accepted: v2 STRICT schema; exact-hash find_by_commit; flock-based tmp sweep |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | review | task/t29-machine-identity @ cc77bf1 (on 194d6b2) | 2 | preflight checks/creates key; carried id fallback; unlink on failed write |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
