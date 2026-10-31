@@ -562,6 +562,14 @@ fn a_session_start_of_the_same_agent_session_captures_nothing() {
 }
 
 #[test]
+fn a_compaction_captures_nothing_even_naming_another_agent_session() {
+    // A compaction goes on in the same agent session: its `SessionStart` starts none (the translators skip it too).
+    let mut host = running();
+    let start = session_start("def", NEW_TRANSCRIPT, "compact");
+    assert_eq!(captures(&hook(&mut host, AgentKind::ClaudeCode, start)), []);
+}
+
+#[test]
 fn the_first_session_start_has_no_old_transcript_to_capture() {
     let mut host = HostDriver::new();
     host.select_workspace(REPO);

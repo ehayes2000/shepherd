@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use shepherd::host::{CREATE_CLEANUP_GRACE, RuntimeEvent, SHUTDOWN_GRACE};
+use shepherd::host::{CREATE_CLEANUP_GRACE, MAX_WAITING_TURN_ENDS, RuntimeEvent, SHUTDOWN_GRACE};
 use shepherd_core::acpp::{Frame, Seq, ShepherdFrame};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
@@ -367,6 +367,62 @@ fn a_profile_with_its_own_agent_home_is_captured_from_there() {
             CaptureReason::Close,
             CaptureReason::BeforeRemove
         ]
+    );
+}
+
+/// However many `/clear`s arrive while the archive is busy, one session has at most
+/// [`MAX_WAITING_TURN_ENDS`] captures waiting, and the newest (the transcript whose path the last `/clear` replaced) is
+/// never the one dropped.
+#[test]
+fn a_burst_of_new_agent_sessions_waits_bounded_and_keeps_the_newest() {
+    let mut s = Setup::new();
+    let hold = s.archive.hold_next();
+    let stop = s.stop();
+    s.send_hook(stop);
+    s.wait_held(&hold);
+    let id = |i: usize| format!("99887766-5544-4332-8110-{i:012x}");
+    for i in 1..=20 {
+        s.send_clear_to(&id(i), b"later conversation\n");
+    }
+    hold.release();
+    s.h.step();
+    let paths: Vec<PathBuf> = s
+        .archive
+        .snapshots()
+        .iter()
+        .map(|s| s.request.transcript_path.clone())
+        .collect();
+    // The one running when the burst began, then the last two old transcripts.
+    assert_eq!(paths.len(), 1 + MAX_WAITING_TURN_ENDS, "{paths:?}");
+    assert_eq!(
+        paths,
+        [
+            transcript(),
+            transcript_of(CLAUDE_HOME, &id(18)),
+            transcript_of(CLAUDE_HOME, &id(19)),
+        ]
+    );
+}
+
+/// A capture before removal whose cwd is in no repo (as git says) fails like any other: the worktree is kept and the
+/// close says why. Only captures nothing waits on skip such a session.
+#[test]
+fn a_capture_before_removal_outside_any_repo_keeps_the_worktree() {
+    let mut s = Setup::new();
+    s.worktrees.fail_root_commit(
+        s.path.clone(),
+        shepherd_core::ports::WorktreeError::NotARepo(s.path.clone()),
+    );
+    s.close();
+    s.h.step();
+    assert!(s.listed(), "kept");
+    assert_eq!(s.reasons(), []);
+    let closed = s.closed();
+    assert!(!closed.worktree_removed);
+    let why = closed.worktree_kept.expect("why it was kept");
+    assert!(
+        why.starts_with("archiving its conversation failed, so it was kept: "),
+        "{why}"
     );
 }
 

@@ -503,6 +503,30 @@ fn a_corrupt_compressed_rollout_is_refused() {
     }
 }
 
+/// A frame that asks for a bigger window than Codex's level-3 frames ever use is refused before the decoder allocates
+/// it, however little it holds.
+#[test]
+fn a_compressed_rollout_asking_for_a_huge_window_is_refused() {
+    use std::io::Write as _;
+    let s = Setup::codex_compressed();
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.window_log(27).unwrap();
+    encoder.include_contentsize(false).unwrap();
+    encoder.write_all(b"{}\n").unwrap();
+    let frame = encoder.finish().unwrap();
+    assert_eq!(
+        zstd::decode_all(frame.as_slice()).unwrap(),
+        b"{}\n",
+        "a valid frame"
+    );
+    fs::write(s.home.join(CODEX_ROLLOUT_ZST), &frame).unwrap();
+    let err = s.refused(&s.home.join(CODEX_ROLLOUT));
+    assert!(
+        matches!(&err, CaptureError::Corrupt { path, .. } if *path == s.real(CODEX_ROLLOUT_ZST)),
+        "{err:?}"
+    );
+}
+
 #[test]
 fn a_symlinked_compressed_rollout_is_refused() {
     let s = Setup::codex_compressed();
@@ -1011,6 +1035,40 @@ fn child_process() {
     println!("outcome: {result:?}");
 }
 
+/// The Codex variant of [`child_process`]: captures the pausing thread's rollout, by the plain path its hook named.
+#[test]
+fn codex_child_process() {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test plumbing: the parent passes its tempdir to its child"
+    )]
+    let Some(dir) = std::env::var_os(CODEX_CHILD_DIR) else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let home = dir.join("agent-home");
+    let archive = Archive::open(&dir.join("archive")).unwrap();
+    let result = archive.capture(&Capture {
+        session: sid(),
+        captured_at: at(3_000),
+        head_commit: None,
+        reason: SnapshotReason::Manual,
+        commits: Vec::new(),
+        agent_home: &home,
+        transcript_path: &home.join(pausing_rollout()),
+        limits: CaptureLimits::default(),
+    });
+    println!("outcome: {result:?}");
+}
+
+/// The parent passes [`codex_child_process`] its tempdir through this variable.
+const CODEX_CHILD_DIR: &str = "T42B_CODEX_CHILD_DIR";
+
+/// The pausing thread's plain rollout, below the agent home.
+fn pausing_rollout() -> String {
+    format!("sessions/2026/10/30/rollout-2026-10-30T10-00-00-{PAUSING}.jsonl")
+}
+
 /// A Claude session whose agent session id makes capture pause before opening its transcript, with that transcript.
 fn pausing_setup() -> (Setup, PathBuf) {
     let s = Setup::new(AgentKind::Claude, PAUSING);
@@ -1022,14 +1080,14 @@ fn pausing_setup() -> (Setup, PathBuf) {
 /// Captures the pausing session in a child process, runs `swap` while it is paused between checking the transcript's
 /// path and opening it, and returns what the child printed after that.
 fn paused_capture(s: &Setup, swap: impl FnOnce()) -> String {
+    paused_capture_in("child_process", CHILD_DIR, s, swap)
+}
+
+/// [`paused_capture`] in the child test `child`, given the tempdir through `var`.
+fn paused_capture_in(child: &str, var: &str, s: &Setup, swap: impl FnOnce()) -> String {
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "child_process",
-            "--test-threads=1",
-            "--nocapture",
-        ])
-        .env(CHILD_DIR, s.tmp.path())
+        .args(["--exact", child, "--test-threads=1", "--nocapture"])
+        .env(var, s.tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -1080,6 +1138,27 @@ fn a_directory_swapped_for_a_symlink_after_its_check_is_refused() {
     });
     assert!(outcome.contains("Err(Capture(Changed("), "{outcome}");
     assert!(s.archive.snapshots(&sid()).unwrap().is_empty());
+}
+
+/// Codex compresses the rollout (writes its `.zst`, removes the plain file) after capture chose the plain file and
+/// before it opened it: capture looks again and reads the `.zst`, never reporting the conversation missing.
+#[test]
+fn a_rollout_compressed_between_its_check_and_its_open_is_read_compressed() {
+    let s = Setup::new(AgentKind::Codex, PAUSING);
+    let plain = s.home.join(pausing_rollout());
+    let content = b"{\"type\":\"session_meta\"}\n".to_vec();
+    fs::write(&plain, &content).unwrap();
+    let outcome = paused_capture_in("codex_child_process", CODEX_CHILD_DIR, &s, || {
+        let compressed = zstd::encode_all(content.as_slice(), 3).unwrap();
+        fs::write(format!("{}.zst", plain.display()), compressed).unwrap();
+        fs::remove_file(&plain).unwrap();
+    });
+    assert!(outcome.contains("outcome: Ok("), "{outcome}");
+    let snapshots = s.archive.snapshots(&sid()).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    let files = s.files(snapshots[0].id);
+    assert_eq!(files[0].1, s.real(&pausing_rollout()));
+    assert_eq!(files[0].2, content);
 }
 
 #[test]

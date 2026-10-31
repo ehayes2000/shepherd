@@ -42,8 +42,9 @@
 //!   Each agent's home is the one its session's profile env gives it ([`AgentHomes::launched_with`]), else the host's.
 //!   An agent running outside any git repo can't be archived (no repo to file it under): its captures are skipped and
 //!   that is logged once per session ([`Archived::outside_repo`]); a capture before a removal fails instead.
-//!   Bounded: a turn end's capture is dropped while another of that agent session's waits to start (the waiting one
-//!   reads the transcript as it is by then). Shutting down waits for captures running (within
+//!   Bounded: a session's turn ends' captures wait in one list, taken by at most one worker call per session, and at
+//!   most [`MAX_WAITING_TURN_ENDS`] of them (one of an agent session already waiting adds nothing, since that one
+//!   reads the transcript as it is when it starts; past the cap the oldest is dropped). Shutting down waits for captures running (within
 //!   [`CREATE_CLEANUP_GRACE`]) and drops their answers: a removal that would follow is left to the next start, which keeps the worktree. An upgrade waits
 //!   for them too (`Busy`).
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
@@ -174,6 +175,14 @@ pub const TUNNEL_HELD_MAX: usize = MAX_QUEUED;
 pub const TUNNEL_TICK: Duration = Duration::from_millis(5);
 /// The longest wait between looks at stopped tunnel ends that make no progress.
 pub const MAX_TUNNEL_TICK: Duration = MAX_CATCH_UP_TICK;
+
+/// The most turn ends' captures one session can have waiting for the archive's worker: the old agent session's (taken
+/// before a `/clear` replaced its transcript path) and the current one's.
+pub const MAX_WAITING_TURN_ENDS: usize = 2;
+
+/// Each session's turn ends' captures (with their agent's home) whose worker call hasn't started: present while that
+/// call waits, which takes them all when it starts.
+type WaitingTurnEnds = Arc<Mutex<HashMap<SessionId, Vec<(CaptureJob, Option<PathBuf>)>>>>;
 
 /// What a capture on the archive's worker came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,10 +541,8 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A> {
     archive: Worker<A, Archived>,
     /// `Archive` calls (captures) submitted and not yet answered.
     capture_calls: usize,
-    /// Agent sessions (a session and its agent's own session id) with a turn end's capture queued and not started
-    /// yet: another turn end of theirs adds nothing, since that capture reads the transcript once it starts. So at
-    /// most one per agent session waits on the worker; a new agent session in place (`/clear`) has its own.
-    queued_turn_ends: Arc<Mutex<HashSet<(SessionId, String)>>>,
+    /// Turn ends' captures waiting for the worker, by session (see [`HostRuntime::capture`]).
+    waiting_turn_ends: WaitingTurnEnds,
     /// Sessions already logged as running outside a git repo, so unarchivable: said once per session, not every turn.
     outside_repo: HashSet<SessionId>,
     link: L,
@@ -709,7 +716,7 @@ impl<
             forge_calls: 0,
             archive,
             capture_calls: 0,
-            queued_turn_ends: Arc::default(),
+            waiting_turn_ends: Arc::default(),
             outside_repo: HashSet::new(),
             link,
             peers,
@@ -1612,32 +1619,66 @@ impl<
     }
 
     /// Submits `captures` to the archive's worker, stamped with the time now, its answer coming back as
-    /// [`HostEvent::Captured`] with `then`. A turn end's capture is dropped while another of that session's waits to
-    /// start: the waiting one will read the transcript as it is by then.
+    /// [`HostEvent::Captured`] with `then`. Each job gets its agent's home now, on this thread.
+    ///
+    /// A turn end's capture (one job, nothing after it) waits in its session's list of [`WaitingTurnEnds`], and at
+    /// most one worker call per session takes that list when it starts. So one session never has more than one call
+    /// and [`MAX_WAITING_TURN_ENDS`] captures waiting, however many hooks arrive while the worker is busy:
+    /// - one of an agent session already waiting adds nothing, since the waiting one reads the transcript when it
+    ///   starts;
+    /// - past the cap, the oldest waiting one is dropped (and logged), never the newest: after a `/clear` that is the
+    ///   capture of the transcript whose path was just replaced.
     fn capture(
         &mut self,
         captures: Vec<CaptureJob>,
         then: AfterCapture,
         follow_up: &mut VecDeque<HostEvent>,
     ) {
-        let turn_end = match (&then, captures.as_slice()) {
-            (AfterCapture::Nothing, [job]) if job.reason == CaptureReason::TurnEnd => {
-                Some((job.session.clone(), job.agent_session_id.clone()))
+        // Each agent's home as its session was launched: its profile's env, as the config says now.
+        let mut jobs: Vec<(CaptureJob, Option<PathBuf>)> = captures
+            .into_iter()
+            .map(|job| {
+                let home = self.agent_home(&job);
+                (job, home)
+            })
+            .collect();
+        let turn_end = match (&then, jobs.as_slice()) {
+            (AfterCapture::Nothing, [(job, _)]) if job.reason == CaptureReason::TurnEnd => {
+                Some(job.session.clone())
             }
             _ => None,
         };
-        if let Some(key @ (session, _)) = &turn_end
-            && !lock(&self.queued_turn_ends).insert(key.clone())
-        {
-            tracing::debug!(%session, "a capture of this agent session is already waiting");
-            return;
+        if let Some(session) = &turn_end {
+            let mut waiting = lock(&self.waiting_turn_ends);
+            if let Some(queued) = waiting.get_mut(session) {
+                // A call for this session is waiting to start: it takes this job too.
+                let Some((job, home)) = jobs.pop() else {
+                    return;
+                };
+                if queued
+                    .iter()
+                    .any(|(q, _)| q.agent_session_id == job.agent_session_id)
+                {
+                    tracing::debug!(%session, "a capture of this agent session is already waiting");
+                    return;
+                }
+                queued.push((job, home));
+                if queued.len() > MAX_WAITING_TURN_ENDS {
+                    let (dropped, _) = queued.remove(0);
+                    tracing::warn!(
+                        %session,
+                        agent_session = %dropped.agent_session_id,
+                        "too many captures of this session waiting for the archive: dropped the oldest"
+                    );
+                }
+                return;
+            }
+            waiting.insert(session.clone(), std::mem::take(&mut jobs));
         }
         let at = self.env.now().instant();
         let this = self.machine.clone();
-        // Each agent's home as its session was launched: its profile's env, as the config says now.
-        let homes: Vec<Option<PathBuf>> = captures.iter().map(|job| self.agent_home(job)).collect();
         let worktrees = self.worktrees.shared();
-        let queued = self.queued_turn_ends.clone();
+        let waiting = self.waiting_turn_ends.clone();
         let removing = matches!(then, AfterCapture::Remove { .. });
         let panicked = Archived {
             event: HostEvent::Captured {
@@ -1648,22 +1689,41 @@ impl<
             },
             outside_repo: Vec::new(),
         };
-        let waiting = turn_end.clone();
+        let session = turn_end.clone();
         let call = move |archive: &A| {
-            if let Some(key) = &waiting {
-                lock(&queued).remove(key);
-            }
             let mut outside_repo = Vec::new();
-            let jobs = captures.iter().zip(&homes);
-            let result = capture_all(
-                archive,
-                &*worktrees,
-                jobs,
-                at,
-                &this,
-                removing,
-                &mut outside_repo,
-            );
+            let result = match &session {
+                // Each turn end on its own: one that fails doesn't stop the next.
+                Some(session) => {
+                    let jobs = lock(&waiting).remove(session).unwrap_or_default();
+                    let mut result = Ok(());
+                    for (job, home) in &jobs {
+                        let one = [(job, home)];
+                        let r = capture_all(
+                            archive,
+                            &*worktrees,
+                            one,
+                            at,
+                            &this,
+                            removing,
+                            &mut outside_repo,
+                        );
+                        if result.is_ok() {
+                            result = r;
+                        }
+                    }
+                    result
+                }
+                None => capture_all(
+                    archive,
+                    &*worktrees,
+                    jobs.iter().map(|(job, home)| (job, home)),
+                    at,
+                    &this,
+                    removing,
+                    &mut outside_repo,
+                ),
+            };
             Archived {
                 event: HostEvent::Captured { result, then },
                 outside_repo,
@@ -1673,8 +1733,8 @@ impl<
             Ok(()) => self.capture_calls += 1,
             Err(unanswered) => {
                 tracing::error!("the archive thread is gone");
-                if let Some(key) = &turn_end {
-                    lock(&self.queued_turn_ends).remove(key);
+                if let Some(session) = &turn_end {
+                    lock(&self.waiting_turn_ends).remove(session);
                 }
                 follow_up.push_back(unanswered.event);
             }
