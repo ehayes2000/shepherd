@@ -405,6 +405,7 @@ fn a_session_started_in_the_orphan_while_it_is_inspected_keeps_it() {
             base: BaseUsed::Origin {
                 branch: BranchName::new("main"),
             },
+            base_commit: None,
         }),
     );
     let commands = inspected(&mut host, reply, &[], Ok(listed(Ok(clean_merged()))));

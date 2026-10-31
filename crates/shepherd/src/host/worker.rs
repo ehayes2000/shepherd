@@ -77,6 +77,11 @@ impl<W: Send + Sync + 'static, T: Clone + Send + 'static> Worker<W, T> {
         &self.port
     }
 
+    /// The port, shared, for another worker's call that needs it too (a capture asks `Worktrees` about commits).
+    pub fn shared(&self) -> Arc<W> {
+        self.port.clone()
+    }
+
     /// Runs `call` on a new thread called `name`, alongside the worker thread and any other such call. Its result
     /// arrives as [`Worker::submit`]'s does; if it panics, `panicked` does instead. Hands `panicked` back if the thread
     /// can't be started.

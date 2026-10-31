@@ -502,17 +502,21 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             arb_string(),
             arb_string(),
             arb_opt_string(),
+            arb_opt_string(),
             proptest::collection::vec(arb_string(), 0..3)
         )
-            .prop_map(|(path, branch, base, fetch_error, post_create)| {
-                ShepherdFrame::WorktreeCreated(WorktreeCreated {
-                    path,
-                    branch,
-                    base,
-                    fetch_error,
-                    post_create,
-                })
-            }),
+            .prop_map(
+                |(path, branch, base, fetch_error, base_commit, post_create)| {
+                    ShepherdFrame::WorktreeCreated(WorktreeCreated {
+                        path,
+                        branch,
+                        base,
+                        fetch_error,
+                        base_commit,
+                        post_create,
+                    })
+                }
+            ),
         (
             arb_string(),
             proptest::option::of(any::<i32>()),

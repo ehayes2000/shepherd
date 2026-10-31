@@ -76,6 +76,15 @@ macro_rules! worktrees_contract {
             remove_refuses_paths_outside_the_root,
             remove_refuses_dotdot_escapes,
             remove_refuses_the_root_and_repo_dirs,
+            create_reports_the_commit_it_started_from,
+            commits_since_the_base_of_a_fresh_worktree_are_none,
+            commits_since_the_base_are_the_worktrees_commits_oldest_first,
+            commits_since_a_later_base_leave_out_what_it_has,
+            a_rebased_commit_keeps_its_patch_id,
+            commits_since_a_base_the_repo_lacks_is_an_error,
+            commits_since_in_a_missing_path_is_not_a_repo,
+            root_commit_is_the_same_from_every_checkout_of_the_repo,
+            root_commit_of_a_non_repo_is_not_a_repo,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -93,8 +102,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
-    BaseSpec, BaseUsed, BranchName, RepoRef, WorktreeError, WorktreeName, WorktreePath,
-    WorktreeStatus, Worktrees,
+    BaseSpec, BaseUsed, BranchName, CommitHash, PatchId, RepoRef, WorktreeError, WorktreeName,
+    WorktreePath, WorktreeStatus, Worktrees,
 };
 
 /// The origin's default branch in every fixture.
@@ -124,9 +133,10 @@ pub trait WorktreesFixture {
     /// A directory that is not inside any repo.
     fn not_a_repo(&self) -> RepoRef;
 
-    /// The commit checked out at `path`, in whatever form the implementation names commits.
+    /// The commit checked out at `path`, as a [`CommitHash`] spells it.
     fn head(&self, path: &Path) -> String;
-    /// The commit at the tip of the default branch on origin itself (not the clone's view of it).
+    /// The commit at the tip of the default branch on origin itself (not the clone's view of it), as a [`CommitHash`]
+    /// spells it.
     fn origin_tip(&self) -> String;
     /// The commit at the tip of the clone's local default branch.
     fn local_default_tip(&self) -> String;
@@ -150,6 +160,9 @@ pub trait WorktreesFixture {
     fn delete_local_default(&self);
     /// The clone fetches origin. Local branches don't move.
     fn fetch(&self);
+    /// Fetches, then rebases the branch checked out at `path` onto the clone's `origin/<default>`: its commits are
+    /// made again there, with the same changes.
+    fn rebase_onto_origin_default(&self, path: &WorktreePath);
     /// Deletes the clone's `origin/<default>` ref, leaving `origin/HEAD` pointing at it.
     fn delete_remote_tracking_default(&self);
     /// Deletes the clone's `origin/HEAD`, as if it had been made with `git init` + `git remote add` + `git fetch`.
@@ -598,7 +611,7 @@ pub fn a_create_cancelled_while_it_runs_makes_nothing_and_can_be_retried<F: Work
     // A cancel that doesn't stop the create fails the case (after releasing the hold), never hangs it.
     let result = std::thread::scope(|s| {
         let (tx, rx) = std::sync::mpsc::channel();
-        s.spawn(move || tx.send(port.create(repo, &name("doomed"), BaseSpec::OriginDefault)));
+        s.spawn(move || drop(tx.send(port.create(repo, &name("doomed"), BaseSpec::OriginDefault))));
         if let Err(why) = wait_held(held.as_deref().unwrap(), &rx, CREATE_LIMIT) {
             // Cancelled before the hold is released, so a create that reaches the hold only after that can't wait
             // there for good, and the scope with it.
@@ -803,6 +816,123 @@ pub fn remove_refuses_the_root_and_repo_dirs<F: WorktreesFixture>(f: &F) {
     assert_outside(f, &f.root().join(REPO_NAME));
     assert_outside(f, &path.as_path().join("src"));
     assert_eq!(listed_paths(f), vec![path]);
+}
+
+// ---------- commits_since, root_commit ----------
+
+fn hash(name: &str) -> CommitHash {
+    CommitHash::parse(name).unwrap()
+}
+
+/// The base of the commits the worktree makes.
+fn base_of<F: WorktreesFixture>(f: &F, n: &str) -> (WorktreePath, CommitHash) {
+    let created = f
+        .port()
+        .create(&f.repo(), &name(n), BaseSpec::OriginDefault)
+        .unwrap();
+    let base = created
+        .base_commit
+        .unwrap_or_else(|| panic!("{n} has no base commit"));
+    (created.path, base)
+}
+
+pub fn create_reports_the_commit_it_started_from<F: WorktreesFixture>(f: &F) {
+    f.advance_origin();
+    let (path, base) = base_of(f, "fresh");
+    assert_eq!(base, hash(&f.head(path.as_path())));
+    assert_eq!(base, hash(&f.origin_tip()));
+}
+
+pub fn commits_since_the_base_of_a_fresh_worktree_are_none<F: WorktreesFixture>(f: &F) {
+    let (path, base) = base_of(f, "fresh");
+    assert_eq!(f.port().commits_since(&path, &base), Ok(Vec::new()));
+}
+
+pub fn commits_since_the_base_are_the_worktrees_commits_oldest_first<F: WorktreesFixture>(f: &F) {
+    let (path, base) = base_of(f, "work");
+    f.commit(&path);
+    let first = hash(&f.head(path.as_path()));
+    f.commit(&path);
+    let second = hash(&f.head(path.as_path()));
+    let commits = f.port().commits_since(&path, &base).unwrap();
+    let hashes: Vec<&CommitHash> = commits.iter().map(|(c, _)| c).collect();
+    assert_eq!(hashes, [&first, &second]);
+    let patches: Vec<&PatchId> = commits.iter().filter_map(|(_, p)| p.as_ref()).collect();
+    assert_eq!(patches.len(), 2, "each commit changes a file: {commits:?}");
+    assert_ne!(patches[0], patches[1], "different changes: {commits:?}");
+}
+
+/// Commits the base has (here, the first of the worktree's) are left out.
+pub fn commits_since_a_later_base_leave_out_what_it_has<F: WorktreesFixture>(f: &F) {
+    let (path, _) = base_of(f, "work");
+    f.commit(&path);
+    let first = hash(&f.head(path.as_path()));
+    f.commit(&path);
+    let second = hash(&f.head(path.as_path()));
+    let commits = f.port().commits_since(&path, &first).unwrap();
+    let hashes: Vec<&CommitHash> = commits.iter().map(|(c, _)| c).collect();
+    assert_eq!(hashes, [&second]);
+}
+
+/// What finding a session's commit after its branch was rebased relies on.
+pub fn a_rebased_commit_keeps_its_patch_id<F: WorktreesFixture>(f: &F) {
+    let (path, base) = base_of(f, "work");
+    f.commit(&path);
+    f.commit(&path);
+    let before = f.port().commits_since(&path, &base).unwrap();
+    f.advance_origin();
+    f.rebase_onto_origin_default(&path);
+    let new_base = hash(&f.origin_tip());
+    let after = f.port().commits_since(&path, &new_base).unwrap();
+    assert_eq!(after.len(), 2, "{after:?}");
+    for ((old, old_patch), (new, new_patch)) in before.iter().zip(&after) {
+        assert_ne!(old, new, "a rebase makes new commits");
+        assert!(old_patch.is_some(), "{before:?}");
+        assert_eq!(old_patch, new_patch, "the same change");
+    }
+}
+
+pub fn commits_since_a_base_the_repo_lacks_is_an_error<F: WorktreesFixture>(f: &F) {
+    let (path, _) = base_of(f, "work");
+    f.commit(&path);
+    let unknown = hash(&"deadbeef".repeat(5));
+    let result = f.port().commits_since(&path, &unknown);
+    assert!(result.is_err(), "{result:?}");
+}
+
+pub fn commits_since_in_a_missing_path_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let (_, base) = base_of(f, "work");
+    let path = WorktreePath::new(f.root().join(REPO_NAME).join("never-created"));
+    let result = f.port().commits_since(&path, &base);
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
+}
+
+pub fn root_commit_is_the_same_from_every_checkout_of_the_repo<F: WorktreesFixture>(f: &F) {
+    let root = f.port().root_commit(&f.repo()).unwrap();
+    let (path, _) = base_of(f, "work");
+    f.commit(&path);
+    f.advance_origin();
+    f.fetch();
+    assert_eq!(
+        f.port().root_commit(&RepoRef::new(path.as_path())),
+        Ok(root.clone())
+    );
+    assert_eq!(
+        f.port()
+            .root_commit(&RepoRef::new(f.repo().as_path().join(SUBDIR))),
+        Ok(root)
+    );
+}
+
+pub fn root_commit_of_a_non_repo_is_not_a_repo<F: WorktreesFixture>(f: &F) {
+    let result = f.port().root_commit(&f.not_a_repo());
+    assert!(
+        matches!(result, Err(WorktreeError::NotARepo(_))),
+        "{result:?}"
+    );
 }
 
 // ---------- filesystem ----------

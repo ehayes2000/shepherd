@@ -65,8 +65,8 @@ use shepherd_core::ports::worktrees::{
     managed_parts, normalize_lexically, repo_name_from_common_dir,
 };
 use shepherd_core::ports::{
-    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
-    WorktreePath, WorktreeStatus, Worktrees,
+    BaseSpec, BaseUsed, BranchName, CommitHash, Created, PatchId, RepoRef, RepoRoot, Worktree,
+    WorktreeError, WorktreeName, WorktreePath, WorktreeStatus, Worktrees,
 };
 
 use crate::process_group::{kill_group, killed_by_signal, wait_group_gone, wait_unreaped};
@@ -271,15 +271,48 @@ impl GitWorktrees {
         call: Option<&CreateCall>,
         vars: &[(&str, &str)],
     ) -> Result<String, Failure> {
+        let mut stdout = self.run_to_file(dir, args, timeout, call, vars, None)?;
         let io = |e: io::Error| Failure::Io(e.to_string());
-        let mut stdout = tempfile::tempfile().map_err(io)?;
+        String::from_utf8(read_all(&mut stdout).map_err(io)?)
+            .map_err(|e| Failure::Io(e.to_string()))
+    }
+
+    /// Runs git with `stdin` (none: closed) and the git timeout, its output read from `stdin` as the call's input,
+    /// e.g. what an earlier call wrote ([`GitWorktrees::run_to_file`]).
+    fn git_reading(&self, dir: &Path, args: &[&str], stdin: File) -> Result<String, Failure> {
+        let mut stdout =
+            self.run_to_file(dir, args, Some(self.git_timeout), None, &[], Some(stdin))?;
+        let io = |e: io::Error| Failure::Io(e.to_string());
+        String::from_utf8(read_all(&mut stdout).map_err(io)?)
+            .map_err(|e| Failure::Io(e.to_string()))
+    }
+
+    /// [`GitWorktrees::run_with`], reading `stdin` (none: closed), and giving back the file git's output went to.
+    fn run_to_file<S: AsRef<OsStr>>(
+        &self,
+        dir: &Path,
+        args: &[S],
+        timeout: Option<Duration>,
+        call: Option<&CreateCall>,
+        vars: &[(&str, &str)],
+        stdin: Option<File>,
+    ) -> Result<File, Failure> {
+        let io = |e: io::Error| Failure::Io(e.to_string());
+        let stdout = tempfile::tempfile().map_err(io)?;
         let mut stderr = tempfile::tempfile().map_err(io)?;
+        let stdin = match stdin {
+            Some(mut file) => {
+                file.seek(SeekFrom::Start(0)).map_err(io)?;
+                Stdio::from(file)
+            }
+            None => Stdio::null(),
+        };
         let mut command = Command::new("git");
         command
             .arg("-C")
             .arg(dir)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(stdout.try_clone().map_err(io)?)
             .stderr(stderr.try_clone().map_err(io)?);
         match &self.isolated_env {
@@ -372,8 +405,7 @@ impl GitWorktrees {
             Err(e) => Err(Failure::Io(e.to_string())),
             Ok(_) if timed_out => Err(Failure::Timeout),
             Ok(_) if cancelled => Err(Failure::Cancelled),
-            Ok(status) if status.success() => String::from_utf8(read_all(&mut stdout).map_err(io)?)
-                .map_err(|e| Failure::Io(e.to_string())),
+            Ok(status) if status.success() => Ok(stdout),
             Ok(status) => Err(Failure::Exit {
                 code: status.code(),
                 stderr: String::from_utf8_lossy(&read_all(&mut stderr).map_err(io)?)
@@ -939,6 +971,7 @@ impl Worktrees for GitWorktrees {
             )
             .map_err(|f| f.into_error("rev-parse"))?;
         let base_oid = base_oid.trim_end_matches('\n');
+        let base_commit = CommitHash::parse(base_oid).ok();
         if matches!(base, BaseUsed::Origin { .. }) {
             // Moves `origin/<default>` to what was fetched, as a plain fetch would, unless it moved since it was read
             // (e.g. the user's own fetch advanced it: it isn't rewound) or another process holds its lock. Either way
@@ -1010,6 +1043,7 @@ impl Worktrees for GitWorktrees {
                     path: WorktreePath::new(path),
                     branch,
                     base,
+                    base_commit,
                 });
             }
             Err(failure) => {
@@ -1127,6 +1161,99 @@ impl Worktrees for GitWorktrees {
         self.git(&common, &args)
             .map_err(|f| f.into_error("worktree remove"))?;
         Ok(())
+    }
+
+    /// `rev-list --reverse --topo-order base..HEAD`, and each commit's `git patch-id --stable` of the patch `git log -p`
+    /// prints for it. Everything that changes that patch's text is pinned (so a patch-id is the same on every machine
+    /// and whatever the user's diff config): no color, external diff or textconv, no rename detection, 3 lines of
+    /// context, the myers algorithm with the indent heuristic, `a/` and `b/` prefixes. Merges print no patch
+    /// (`--diff-merges=off`), and neither does a commit that changes nothing: both have no patch-id.
+    fn commits_since(
+        &self,
+        path: &WorktreePath,
+        base: &CommitHash,
+    ) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError> {
+        let dir = path.as_path();
+        self.common_dir(dir)?;
+        let range = format!("{base}..HEAD");
+        let listed = self
+            .git(
+                dir,
+                &["rev-list", "--reverse", "--topo-order", &range, "--"],
+            )
+            .map_err(|f| f.into_error("rev-list"))?;
+        let commits = listed
+            .lines()
+            .map(|line| {
+                CommitHash::parse(line)
+                    .map_err(|e| WorktreeError::Other(format!("unexpected rev-list output: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let log = [
+            "log",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--diff-merges=off",
+            "--unified=3",
+            "--diff-algorithm=myers",
+            "--indent-heuristic",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--no-notes",
+            "--format=commit %H",
+            "--patch",
+            &range,
+            "--",
+        ];
+        let patches = self
+            .run_to_file(dir, &log, Some(self.git_timeout), None, &[], None)
+            .map_err(|f| f.into_error("log"))?;
+        let ids = self
+            .git_reading(dir, &["patch-id", "--stable"], patches)
+            .map_err(|f| f.into_error("patch-id"))?;
+        let mut by_commit = HashMap::new();
+        for line in ids.lines() {
+            let parsed = line.split_once(' ').and_then(|(patch, commit)| {
+                Some((CommitHash::parse(commit).ok()?, PatchId::parse(patch).ok()?))
+            });
+            let (commit, patch) = parsed.ok_or_else(|| {
+                WorktreeError::Other(format!("unexpected patch-id output {line:?}"))
+            })?;
+            by_commit.insert(commit, patch);
+        }
+        Ok(commits
+            .into_iter()
+            .map(|c| {
+                let patch = by_commit.remove(&c);
+                (c, patch)
+            })
+            .collect())
+    }
+
+    /// `rev-list --max-parents=0 HEAD`: the smallest, when the history has several roots.
+    fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError> {
+        let dir = repo.as_path();
+        self.common_dir(dir)?;
+        let roots = self
+            .git(dir, &["rev-list", "--max-parents=0", "HEAD", "--"])
+            .map_err(|f| f.into_error("rev-list"))?;
+        let roots = roots
+            .lines()
+            .map(|line| {
+                CommitHash::parse(line)
+                    .map_err(|e| WorktreeError::Other(format!("unexpected rev-list output: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        roots
+            .into_iter()
+            .min()
+            .map(RepoRoot::new)
+            .ok_or_else(|| WorktreeError::Other(format!("{} has no commits", dir.display())))
     }
 }
 
@@ -1501,6 +1628,12 @@ mod tests {
             self.git(&self.app(), &["update-ref", "-d", &tracking]);
         }
 
+        fn rebase_onto_origin_default(&self, path: &WorktreePath) {
+            self.fetch();
+            let onto = format!("origin/{DEFAULT}");
+            self.git(path.as_path(), &["rebase", "--quiet", &onto]);
+        }
+
         fn forget_origin_head(&self) {
             self.git(&self.app(), &["remote", "set-head", "origin", "--delete"]);
         }
@@ -1860,6 +1993,51 @@ mod tests {
         assert!(path.as_path().join("untracked.txt").exists());
     }
 
+    /// Diff config changes the patch `git log -p` prints, and so its patch-id: the same commits have the same
+    /// patch-ids on a machine with the user's diff settings as on one without.
+    #[test]
+    fn diff_config_leaves_patch_ids_alone() {
+        let f = GitFixture::new();
+        let created = f
+            .port
+            .create(
+                &RepoRef::new(f.app()),
+                &WorktreeName::new("work").unwrap(),
+                BaseSpec::OriginDefault,
+            )
+            .unwrap();
+        let base = created.base_commit.unwrap();
+        let wt = created.path.as_path();
+        // A long file, then a rename of it with a one-line edit in the middle, so rename detection, context lines and
+        // the diff algorithm would all show.
+        let lines: Vec<String> = (0..40).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(wt.join("long.txt"), lines.concat()).unwrap();
+        f.git(wt, &["add", "long.txt"]);
+        f.git(wt, &["commit", "--quiet", "-m", "long"]);
+        let mut edited = lines.clone();
+        edited[20] = "changed\n".to_owned();
+        std::fs::write(wt.join("long.txt"), edited.concat()).unwrap();
+        f.git(wt, &["mv", "long.txt", "moved.txt"]);
+        f.git(wt, &["commit", "--quiet", "-am", "move"]);
+        let plain = f.port.commits_since(&created.path, &base).unwrap();
+        for (key, value) in [
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.renames", "false"),
+            ("diff.algorithm", "patience"),
+            ("diff.context", "9"),
+            ("diff.indentHeuristic", "false"),
+            ("diff.external", "false"),
+            ("color.ui", "always"),
+            ("log.showSignature", "true"),
+        ] {
+            f.git(&f.app(), &["config", key, value]);
+        }
+        let configured = f.port.commits_since(&created.path, &base).unwrap();
+        assert!(plain[0].1.is_some(), "{plain:?}");
+        assert_eq!(configured, plain);
+    }
+
     #[test]
     fn auto_setup_merge_always_still_gives_no_upstream() {
         let f = GitFixture::new();
@@ -1940,7 +2118,7 @@ mod tests {
         let repo = &f.repo();
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
-            s.spawn(move || tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault)));
+            s.spawn(move || drop(tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault))));
             let mut held = Some(held);
             assert_held(&mut held, &rx, || f.port.cancel_create(repo, &name(n)));
             f.port.cancel_create(repo, &name(n));
@@ -1958,7 +2136,9 @@ mod tests {
         let repo = &f.repo();
         let created = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
-            s.spawn(move || tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)));
+            s.spawn(move || {
+                drop(tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)))
+            });
             let mut held = Some(held);
             assert_held(&mut held, &rx, || port.cancel_create(repo, &name("long")));
             let witness = port.git(&f.app(), &["-c", "alias.nap=!sleep 900", "nap"]);
@@ -2138,7 +2318,9 @@ close $out;
         let (first, second) = std::thread::scope(|s| {
             let start = |n: &'static str| {
                 let (tx, rx) = std::sync::mpsc::channel();
-                s.spawn(move || tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)));
+                s.spawn(move || {
+                    drop(tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)))
+                });
                 rx
             };
             let (first_entered, second_entered) = (

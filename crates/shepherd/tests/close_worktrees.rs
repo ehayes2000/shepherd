@@ -381,6 +381,7 @@ fn log_recording(app: &Path, recorded: &Path) -> FakeEventLog {
             base: BaseUsed::Origin {
                 branch: BranchName::new("main"),
             },
+            base_commit: None,
         }),
     );
     let mut logs: BTreeMap<LogId, Vec<Envelope>> = BTreeMap::new();
@@ -513,6 +514,7 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
             worktrees,
             commands.clone(),
             FakeForge::new(),
+            shepherd_testkit::fakes::archive::FakeArchive::new(),
             link,
             shepherd_testkit::fakes::peers::FakePeerNet::new()
                 .peers(support::machine(), tx.peers_sink()),

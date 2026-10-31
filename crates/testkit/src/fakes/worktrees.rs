@@ -18,8 +18,8 @@ pub use super::hold::Hold;
 use super::hold::{Gate, HoldSlot};
 use shepherd_core::ports::worktrees::{managed_parts, normalize_lexically};
 use shepherd_core::ports::{
-    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
-    WorktreePath, WorktreeStatus, Worktrees,
+    BaseSpec, BaseUsed, BranchName, CommitHash, Created, PatchId, RepoRef, RepoRoot, Worktree,
+    WorktreeError, WorktreeName, WorktreePath, WorktreeStatus, Worktrees,
 };
 
 /// A commit in the simulated graph.
@@ -61,6 +61,9 @@ struct Repo {
 struct State {
     /// `parents[c]` are commit `c`'s parents.
     parents: Vec<Vec<Commit>>,
+    /// `changes[c]` is the change commit `c` makes, which names its patch-id: its own number, or for a commit a rebase
+    /// made, the change of the commit it was made from.
+    changes: Vec<usize>,
     repos: Vec<Repo>,
     /// Directories inside checkouts, from [`FakeWorktrees::add_dir`]. A checkout itself always exists.
     dirs: BTreeSet<PathBuf>,
@@ -120,6 +123,20 @@ impl Drop for Running<'_> {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How commit `c` is named: 40 hex digits, like a real commit hash.
+fn commit_name(c: Commit) -> String {
+    format!("{c:040x}")
+}
+
+fn commit_hash(c: Commit) -> CommitHash {
+    CommitHash::parse(&commit_name(c)).unwrap_or_else(|e| unreachable!("{e}"))
+}
+
+/// The patch-id of `change`: 40 hex digits starting with `f`, which no commit of a test is named.
+fn patch_id(change: usize) -> PatchId {
+    PatchId::parse(&format!("f{change:039x}")).unwrap_or_else(|e| unreachable!("{e}"))
 }
 
 impl FakeWorktrees {
@@ -331,13 +348,33 @@ impl FakeWorktrees {
         }
     }
 
+    /// `git rebase origin/<default>` in `path`: the commits of its branch that `origin/<default>` doesn't have are made
+    /// again on top of it, with the same changes.
+    pub fn rebase_onto_origin_default(&self, path: &Path) {
+        let mut s = self.lock();
+        let (r, head) = s
+            .checkout(path)
+            .unwrap_or_else(|| panic!("no checkout at {path:?}"));
+        let Head::Branch(b) = head else {
+            panic!("rebase of a detached HEAD")
+        };
+        let repo = &s.repos[r];
+        let (tip, onto) = (repo.local[&b], repo.tracking[&repo.default]);
+        let mut at = onto;
+        for c in s.since(tip, onto) {
+            let change = s.changes[c];
+            at = s.copy_commit(vec![at], change);
+        }
+        s.repos[r].local.insert(b, at);
+    }
+
     /// An opaque name for the commit checked out at `path`.
     pub fn head(&self, path: &Path) -> String {
         let s = self.lock();
         let (r, head) = s
             .checkout(path)
             .unwrap_or_else(|| panic!("no checkout at {path:?}"));
-        format!("c{}", s.repos[r].resolve(&head).unwrap_or(usize::MAX))
+        commit_name(s.repos[r].resolve(&head).unwrap_or(usize::MAX))
     }
 
     /// An opaque name for the commit at the tip of origin's `branch`, or the clone's local `branch`.
@@ -351,7 +388,7 @@ impl FakeWorktrees {
         } else {
             &s.repos[r].local
         };
-        format!("c{}", refs.get(branch).copied().unwrap_or(usize::MAX))
+        commit_name(refs.get(branch).copied().unwrap_or(usize::MAX))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -375,8 +412,27 @@ impl FakeWorktrees {
 
 impl State {
     fn new_commit(&mut self, parents: Vec<Commit>) -> Commit {
+        let c = self.parents.len();
+        self.copy_commit(parents, c)
+    }
+
+    /// A new commit with `parents` that makes `change`.
+    fn copy_commit(&mut self, parents: Vec<Commit>, change: usize) -> Commit {
         self.parents.push(parents);
+        self.changes.push(change);
         self.parents.len() - 1
+    }
+
+    /// The commit `hash` names, if there is one.
+    fn commit_named(&self, hash: &CommitHash) -> Option<Commit> {
+        let c = usize::from_str_radix(hash.as_str(), 16).ok()?;
+        (c < self.parents.len()).then_some(c)
+    }
+
+    /// Commits reachable from `tip` but not from `base`, oldest first (a commit's parents are older than it).
+    fn since(&self, tip: Commit, base: Commit) -> Vec<Commit> {
+        let base = self.reachable(base);
+        self.reachable(tip).difference(&base).copied().collect()
     }
 
     /// The repo and checkout that `path` is in (the checkout itself or any path under it), as git finds them.
@@ -570,6 +626,7 @@ impl Worktrees for FakeWorktrees {
             path: WorktreePath::new(path),
             branch,
             base,
+            base_commit: Some(commit_hash(start)),
         })
     }
 
@@ -669,6 +726,49 @@ impl Worktrees for FakeWorktrees {
         }
         rp.checkouts.remove(&normal);
         Ok(())
+    }
+
+    /// Every commit of the fake makes a change, so each has a patch-id.
+    fn commits_since(
+        &self,
+        path: &WorktreePath,
+        base: &CommitHash,
+    ) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError> {
+        let s = self.take_failure()?;
+        let path = path.as_path();
+        let (r, head) = s.checkout(path).ok_or_else(|| State::not_a_repo(path))?;
+        let tip = s.repos[r]
+            .resolve(&head)
+            .ok_or_else(|| WorktreeError::Other("HEAD has no commits".into()))?;
+        let base = s
+            .commit_named(base)
+            .ok_or_else(|| WorktreeError::Other(format!("unknown revision {base}")))?;
+        Ok(s.since(tip, base)
+            .into_iter()
+            .map(|c| (commit_hash(c), Some(patch_id(s.changes[c]))))
+            .collect())
+    }
+
+    /// Below a checkout, only directories made with [`FakeWorktrees::add_dir`] exist, as for `repo_root`.
+    fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError> {
+        let s = self.take_failure()?;
+        let path = repo.as_path();
+        let (r, top) = s.locate(path).ok_or_else(|| State::not_a_repo(path))?;
+        if top != path && !s.dirs.iter().any(|d| d.starts_with(path)) {
+            return Err(State::not_a_repo(path));
+        }
+        let rp = &s.repos[r];
+        let tip = rp
+            .resolve(&rp.checkouts[&top].head)
+            .ok_or_else(|| WorktreeError::Other("HEAD has no commits".into()))?;
+        let root = s
+            .reachable(tip)
+            .into_iter()
+            .filter(|&c| s.parents[c].is_empty())
+            .map(commit_hash)
+            .min()
+            .ok_or_else(|| WorktreeError::Other("the history has no root".into()))?;
+        Ok(RepoRoot::new(root))
     }
 }
 
@@ -772,6 +872,11 @@ mod tests {
 
         fn delete_remote_tracking_default(&self) {
             self.fake.delete_tracking(&self.repo, DEFAULT);
+        }
+
+        fn rebase_onto_origin_default(&self, path: &WorktreePath) {
+            self.fake.fetch(&self.repo);
+            self.fake.rebase_onto_origin_default(path.as_path());
         }
 
         fn forget_origin_head(&self) {

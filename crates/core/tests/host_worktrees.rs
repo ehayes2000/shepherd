@@ -54,6 +54,7 @@ fn created(path: &str, branch: &str, base: BaseUsed) -> Created {
         path: WorktreePath::new(path),
         branch: BranchName::new(branch),
         base,
+        base_commit: None,
     }
 }
 

@@ -257,6 +257,10 @@ pub struct WorktreeCreated {
     /// Set when fetching origin failed, so `base` is as of the last fetch (or local) and may be behind origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_error: Option<String>,
+    /// The commit the branch started at, which the session's commits are counted from (absent from logs older than
+    /// the archive, T42).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     /// The workspace's post-create hooks, run in order in the worktree before the session's PTY spawns. Each one's
     /// result is a `worktree/hook`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

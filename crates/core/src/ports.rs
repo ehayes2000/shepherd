@@ -1,6 +1,7 @@
 //! Port traits: every capability that touches the world. Implementations live in `shepherd-adapters`,
 //! fakes and contract suites in `shepherd-testkit`. See the `new-port` skill.
 
+pub mod archive;
 pub mod commands;
 pub mod config;
 pub mod event_log;
@@ -12,6 +13,7 @@ pub mod peers;
 pub mod pty;
 pub mod worktrees;
 
+pub use archive::{Archive, ArchiveError, ArchivedSession, CaptureReason, CaptureRequest};
 pub use commands::{
     CommandError, CommandExit, CommandOutput, CommandSpec, Commands, OUTPUT_TAIL, RunId,
 };
@@ -33,6 +35,6 @@ pub use pty::{
     SpawnSpec,
 };
 pub use worktrees::{
-    BaseSpec, BaseUsed, BranchName, Created, Loss, RepoRef, Worktree, WorktreeError, WorktreeName,
-    WorktreePath, WorktreeStatus, Worktrees,
+    BadHash, BaseSpec, BaseUsed, BranchName, CommitHash, Created, Loss, PatchId, RepoRef, RepoRoot,
+    Worktree, WorktreeError, WorktreeName, WorktreePath, WorktreeStatus, Worktrees,
 };

@@ -110,6 +110,7 @@ fn worktree_made(hooks: &[&str]) -> (HostDriver, Vec<HostCommand>) {
             base: BaseUsed::Origin {
                 branch: BranchName::new("main"),
             },
+            base_commit: None,
         }),
     });
     (host, commands)

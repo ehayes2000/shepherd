@@ -448,7 +448,10 @@ fn a_restarted_host_does_not_rename_again() {
     host.user_prompt("s1", "Fix the login redirect bug");
     let restarted = replay(&host);
     assert_eq!(names(&restarted), ["fix-login-redirect-bug"]);
-    let cmds = restarted.handle(HostEvent::HookTranslated { session: sid("s1") });
+    let cmds = restarted.handle(HostEvent::HookTranslated {
+        session: sid("s1"),
+        turn_end: false,
+    });
     assert_eq!(cmds, vec![]);
 }
 
@@ -458,7 +461,10 @@ fn a_restarted_host_names_a_session_whose_prompt_it_never_named() {
     // The host stopped after appending the prompt, before handling what came of it.
     host.prompt_frame("s1", "Fix the login redirect bug", false);
     let restarted = replay(&host);
-    let cmds = restarted.handle(HostEvent::HookTranslated { session: sid("s1") });
+    let cmds = restarted.handle(HostEvent::HookTranslated {
+        session: sid("s1"),
+        turn_end: false,
+    });
     assert_eq!(cmds, vec![auto_renamed("s1", "fix-login-redirect-bug")]);
 }
 
@@ -492,6 +498,7 @@ fn auto_renaming_a_worktree_session_leaves_its_branch_alone() {
             base: BaseUsed::Origin {
                 branch: BranchName::new("main"),
             },
+            base_commit: None,
         }),
     });
     // Only the renamed frame: nothing touches the worktree or its branch.

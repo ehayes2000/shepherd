@@ -16,15 +16,17 @@ pub mod builders {
     };
     use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
     use shepherd_core::config::{AgentKind, WorkspaceHooks};
+    use shepherd_core::host::capture::AfterCapture;
     use shepherd_core::host::sizes::Sizes;
     use shepherd_core::host::{
         Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ReplyTo, ResumeSpec, WorkspaceAsk,
     };
     use shepherd_core::ids::{MachineId, SessionId};
+    use shepherd_core::ports::archive::ArchiveError;
     use shepherd_core::ports::commands::{CommandExit, CommandOutput, CommandSpec};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
     use shepherd_core::ports::worktrees::{
-        BaseUsed, BranchName, Created, WorktreeError, WorktreePath,
+        BaseUsed, BranchName, CommitHash, Created, WorktreeError, WorktreePath,
     };
     use shepherd_core::wire::{
         ClientMessage, ClientNotification, CloseWorktree, HostMessage, HostNotification, LogEntry,
@@ -349,6 +351,7 @@ pub mod builders {
                     base: BaseUsed::Origin {
                         branch: BranchName::new("main"),
                     },
+                    base_commit: None,
                 }),
             )
         }
@@ -369,6 +372,7 @@ pub mod builders {
                     base: BaseUsed::Origin {
                         branch: BranchName::new("main"),
                     },
+                    base_commit: None,
                 }),
             })
         }
@@ -448,7 +452,42 @@ pub mod builders {
         pub fn hook_translated(&mut self, id: &str) -> Vec<HostCommand> {
             self.handle(HostEvent::HookTranslated {
                 session: SessionId::new(id),
+                turn_end: false,
             })
+        }
+
+        /// A `HookTranslated` for `id` of a hook that ended its agent's turn (`Stop`).
+        pub fn turn_ended(&mut self, id: &str) -> Vec<HostCommand> {
+            self.handle(HostEvent::HookTranslated {
+                session: SessionId::new(id),
+                turn_end: true,
+            })
+        }
+
+        /// Like [`HostDriver::worktree_ready`], recording that its branch started at commit `base`.
+        pub fn worktree_ready_at(&mut self, id: &str, base: &str) -> Vec<HostCommand> {
+            self.worktree_result(
+                id,
+                Ok(Created {
+                    path: WorktreePath::new(format!("/wt/{id}")),
+                    branch: BranchName::new(id),
+                    base: BaseUsed::Origin {
+                        branch: BranchName::new("main"),
+                    },
+                    base_commit: Some(
+                        CommitHash::parse(base).unwrap_or_else(|e| panic!("HostDriver: {e}")),
+                    ),
+                }),
+            )
+        }
+
+        /// The answer to a `Capture` that carried `then`.
+        pub fn captured(
+            &mut self,
+            then: AfterCapture,
+            result: Result<(), ArchiveError>,
+        ) -> Vec<HostCommand> {
+            self.handle(HostEvent::Captured { then, result })
         }
     }
 
@@ -700,6 +739,7 @@ pub mod builders {
 /// One shared suite per port: `pub fn suite<P: Port>(make: impl Fn(..) -> P)`, run against the fake and the real
 /// adapter. `make` takes whatever the port is constructed with (e.g. an event sink).
 pub mod contracts {
+    pub mod archive;
     pub mod commands;
     pub mod config;
     pub mod event_log;
@@ -717,6 +757,7 @@ pub mod stand_in;
 
 /// One stateful in-memory fake per port. Each must pass its port's contract suite.
 pub mod fakes {
+    pub mod archive;
     pub mod commands;
     pub mod config;
     pub mod event_log;

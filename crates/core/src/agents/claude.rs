@@ -199,7 +199,7 @@ impl<'a> Hook<'a> {
 }
 
 /// `hook_event_name`, if it is a non-empty identifier that can go into a method name.
-fn hook_name(payload: &Value) -> Option<&str> {
+pub(crate) fn hook_name(payload: &Value) -> Option<&str> {
     payload
         .get("hook_event_name")
         .and_then(Value::as_str)
