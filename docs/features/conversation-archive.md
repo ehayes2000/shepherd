@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
-| T42 | Archive port and host capture | fixing | task/t42-archive-capture @ 98379d9 | 1 | round 1 CHANGES: patch-ids vary with quotePath/interHunkContext; hostile-config test too weak; post-capture in-use recheck untested; missing transcript blocked removal forever (→ ArchiveError::Missing) |
+| T42 | Archive port and host capture | review | task/t42-archive-capture @ 36a1de7 | 2 | round 2 fixed; round 3 review (focused) |
 | T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
@@ -157,6 +157,8 @@ acceptance:
 - From T42: a profile that sets its own `CLAUDE_CONFIG_DIR` / `CODEX_HOME` puts transcripts outside the host's agent home,
   so every capture is refused and that session's worktree can never be removed. Capture uses the agent home the session's
   agent actually ran with (its launch env), falling back to the host's; test with a profile that sets it.
+- From T42: `session/closed` carries an optional `note` (e.g. "no transcript was found"), but the client doesn't show it
+  yet. Show it as the close notice (core client + tui), with a test.
 - From T42's review: an agent session whose cwd is not in a git repo fails `root_commit` on every turn end (a warning each
   time) and is never archived. Archive it under a repo-less key, or say clearly once that it can't be archived.
 scope: crates/core, crates/archive, crates/shepherd

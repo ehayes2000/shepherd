@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | fixing | task/t42-archive-capture @ 98379d9 | 1 | round 1 CHANGES: patch-ids vary with quotePath/interHunkContext; hostile-config test too weak; post-capture in-use recheck untested; missing transcript blocked removal forever (→ ArchiveError::Missing) |
-| T32 Create sessions on any machine | [multi-machine](features/multi-machine.md) | building | task/t32-new-session-machine |  |  |
+| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | review | task/t42-archive-capture @ 36a1de7 | 2 | round 2 fixed; round 3 review (focused) |
+| T32 Create sessions on any machine | [multi-machine](features/multi-machine.md) | merging | task/t32-new-session-machine @ 9dc595d | 2 | round 2 APPROVE; untarget test minors → T32b |
 
 ## Ready to start
 

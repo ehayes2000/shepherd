@@ -59,10 +59,15 @@ fn answer(
 
 /// Reaches peer `machine`, whose host's log is `host`'s.
 fn reach(c: &mut ClientDriver, machine: &str, host: &HostDriver) {
+    let ok = json!({ "version": PROTOCOL_VERSION, "machine": machine });
+    reach_answering(c, machine, host, ok);
+}
+
+/// [`reach`], its host answering the hello with `ok`.
+fn reach_answering(c: &mut ClientDriver, machine: &str, host: &HostDriver, ok: Value) {
     let at = ts("2026-10-29T12:00:00.000Z");
     let tunnel = peer(c, machine, PeerEvent::Connected { at });
     let hello = answer(c, machine, &tunnel, json!({}));
-    let ok = json!({ "version": PROTOCOL_VERSION, "machine": machine });
     let subscribe = answer(c, machine, &hello, ok);
     for envelope in host.log().to_vec() {
         let entry = HostNotification::LogEntry(Box::new(LogEntry { envelope }));
@@ -91,10 +96,24 @@ fn host_with(machine: &str, ids: &[&str]) -> HostDriver {
 fn three_machines(window: Rect) -> ClientDriver {
     let mut c = ClientDriver::new();
     let subscribe = c.connect_named("studio");
+    three_machines_from(c, subscribe, window, |_| {}, |_| {}, json!({}))
+}
+
+/// [`three_machines`] from `c`, connected to its host with `subscribe` asked, `local` and `laptop` run on each host
+/// after its sessions are made, and the laptop's hello answer also saying `laptop_hello`.
+fn three_machines_from(
+    mut c: ClientDriver,
+    subscribe: Vec<ClientCommand>,
+    window: Rect,
+    local: impl FnOnce(&mut HostDriver),
+    laptop: impl FnOnce(&mut HostDriver),
+    laptop_hello: Value,
+) -> ClientDriver {
     for id in ["docs", "api"] {
         c.host().new_session(id);
         c.host().rename(id, id);
     }
+    local(c.host());
     c.sync();
     let caught_up = c.answer(&subscribe, Ok(json!({})));
     let peers = json!({ "peers": [
@@ -102,7 +121,16 @@ fn three_machines(window: Rect) -> ClientDriver {
         { "id": "m_tower", "name": "tower" },
     ] });
     c.answer(&caught_up, Ok(peers));
-    reach(&mut c, "m_laptop", &host_with("m_laptop", &["train"]));
+    let mut laptop_host = HostDriver::new();
+    laptop_host.stamp_machine("m_laptop");
+    laptop_host.new_session("train");
+    laptop_host.rename("train", "train");
+    laptop(&mut laptop_host);
+    let mut ok = json!({ "version": PROTOCOL_VERSION, "machine": "m_laptop" });
+    if let (Some(ok), Some(extra)) = (ok.as_object_mut(), laptop_hello.as_object()) {
+        ok.extend(extra.clone());
+    }
+    reach_answering(&mut c, "m_laptop", &laptop_host, ok);
     reach(&mut c, "m_tower", &host_with("m_tower", &["build"]));
     peer(&mut c, "m_tower", PeerEvent::Disconnected);
     peer(
@@ -271,4 +299,239 @@ fn the_grouped_sidebar_draws_in_any_window_however_small() {
             assert_eq!(buf.area, window);
         }
     }
+}
+
+// ---------- choosing where a new session runs (T32) ----------
+
+/// [`three_machines`] in `window`, with profiles and workspaces: this machine offers `claude` (the default) and `shell`
+/// in workspace `/here/app`, the laptop offers `codex` in `/there/api` after `/there/old`.
+fn with_profiles(window: Rect) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    let hello = c.handle(ClientEvent::Connected {
+        at: ts("2026-10-29T12:00:00.000Z"),
+    });
+    let ok = json!({
+        "version": PROTOCOL_VERSION,
+        "machine": "m_test",
+        "name": "studio",
+        "profiles": [
+            { "name": "claude", "agent": "claude-code" },
+            { "name": "shell", "agent": "shell" },
+        ],
+        "default_profile": "claude",
+    });
+    let subscribe = c.answer(&hello, Ok(ok));
+    let laptop_hello = json!({
+        "profiles": [{ "name": "codex", "agent": "codex" }],
+        "default_profile": "codex",
+    });
+    three_machines_from(
+        c,
+        subscribe,
+        window,
+        |host| {
+            host.select_workspace("/here/app");
+        },
+        |host| {
+            host.select_workspace("/there/old");
+            host.select_workspace("/there/api");
+        },
+        laptop_hello,
+    )
+}
+
+const POPUP_WINDOW: Rect = Rect::new(0, 0, 80, 24);
+
+#[test]
+fn new_session_popup_with_a_machine_selector() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("api")));
+    c.user(Intent::BeginNewSession);
+    insta::assert_debug_snapshot!(buffer(&c, POPUP_WINDOW));
+}
+
+#[test]
+fn new_session_popup_on_the_laptop_offers_its_profiles() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    c.user(Intent::BeginNewSession);
+    insta::assert_debug_snapshot!(buffer(&c, POPUP_WINDOW));
+}
+
+#[test]
+fn clicking_a_machine_in_the_new_session_popup_chooses_it() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("api")));
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let laptop = at(&buf, "○ laptop");
+    assert_eq!(
+        hit(&layout(POPUP_WINDOW), c.client(), laptop.x, laptop.y),
+        Some(Target::MachineRow(m("m_laptop")))
+    );
+    assert_eq!(
+        click(&c, POPUP_WINDOW, laptop, MouseButton::Left),
+        [Intent::PickMachine(m("m_laptop"))]
+    );
+    // The whole line is the row.
+    assert_eq!(
+        hit(&layout(POPUP_WINDOW), c.client(), laptop.x + 20, laptop.y),
+        Some(Target::MachineRow(m("m_laptop")))
+    );
+}
+
+#[test]
+fn an_unreachable_machine_is_drawn_dim_with_why_and_isnt_clickable() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let tower = at(&buf, "○ tower (offline: cannot reach tower)");
+    assert!(buf[(tower.x, tower.y)].modifier.contains(Modifier::DIM));
+    assert_eq!(
+        hit(&layout(POPUP_WINDOW), c.client(), tower.x + 2, tower.y),
+        Some(Target::Popup)
+    );
+    assert_eq!(click(&c, POPUP_WINDOW, tower, MouseButton::Left), []);
+}
+
+#[test]
+fn the_new_session_popups_start_button_confirms_and_its_profile_rows_pick() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let start = at(&buf, "[Start]");
+    assert_eq!(
+        click(&c, POPUP_WINDOW, start, MouseButton::Left),
+        [Intent::Confirm]
+    );
+    let shell = at(&buf, "shell");
+    assert_eq!(
+        click(&c, POPUP_WINDOW, shell, MouseButton::Left),
+        [Intent::PickProfile("shell".into())]
+    );
+}
+
+#[test]
+fn the_wheel_over_the_machines_scrolls_the_profiles() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let laptop = at(&buf, "○ laptop");
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: laptop.x,
+        row: laptop.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let intents = map_event(
+        &event,
+        c.client(),
+        &Modes::default(),
+        POPUP_WINDOW,
+        &mut Pointer::default(),
+    );
+    assert!(
+        matches!(intents[..], [Intent::ScrollPicker { by: 1, .. }]),
+        "{intents:?}"
+    );
+}
+
+#[test]
+fn workspace_switcher_with_a_machine_selector() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    c.user(Intent::BeginWorkspace);
+    insta::assert_debug_snapshot!(buffer(&c, POPUP_WINDOW));
+}
+
+#[test]
+fn clicking_a_machine_in_the_switcher_chooses_it() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    c.user(Intent::BeginWorkspace);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let studio = at(&buf, "○ studio");
+    assert_eq!(
+        click(&c, POPUP_WINDOW, studio, MouseButton::Left),
+        [Intent::PickMachine(m("m_test"))]
+    );
+    let row = at(&buf, "/there/old");
+    assert_eq!(
+        click(&c, POPUP_WINDOW, row, MouseButton::Left),
+        [Intent::PickWorkspace("/there/old".into())]
+    );
+}
+
+#[test]
+fn the_sidebar_shows_the_selected_sessions_machines_workspace() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    at(&buffer(&c, POPUP_WINDOW), "⌂ api");
+    c.user(Intent::SelectSession(SessionId::new("api")));
+    at(&buffer(&c, POPUP_WINDOW), "⌂ app");
+}
+
+#[test]
+fn the_popups_with_a_machine_selector_draw_in_any_window_however_small() {
+    for open in [Intent::BeginNewSession, Intent::BeginWorkspace] {
+        let mut c = with_profiles(POPUP_WINDOW);
+        c.user(open);
+        for cols in 0..44 {
+            for rows in 0..15 {
+                let window = Rect::new(0, 0, cols, rows);
+                let buf = buffer(&c, window);
+                // Every column of every other line.
+                for p in window.positions().filter(|p| p.y % 2 == 0) {
+                    let _ = hit(&layout(window), c.client(), p.x, p.y);
+                }
+                assert_eq!(buf.area, window);
+            }
+        }
+    }
+}
+
+/// [`three_machines`] in `window`, this machine's host in workspace `here` (if any) and the laptop's in `there` (if
+/// any), with the laptop's `train` selected.
+fn in_workspaces(window: Rect, here: Option<&str>, there: Option<&str>) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    let subscribe = c.connect_named("studio");
+    let mut c = three_machines_from(
+        c,
+        subscribe,
+        window,
+        |host| {
+            if let Some(path) = here {
+                host.select_workspace(path);
+            }
+        },
+        |host| {
+            if let Some(path) = there {
+                host.select_workspace(path);
+            }
+        },
+        json!({}),
+    );
+    c.user(Intent::SelectSession(SessionId::new("train")));
+    c
+}
+
+/// The footer's text: the window's last line.
+fn footer(buf: &Buffer) -> String {
+    let y = buf.area.bottom() - 1;
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+}
+
+#[test]
+fn cleanup_follows_this_machines_workspace_not_the_selected_peers() {
+    let c = in_workspaces(POPUP_WINDOW, None, Some("/there/api"));
+    let shown = footer(&buffer(&c, POPUP_WINDOW));
+    assert!(!shown.contains("Cleanup"), "{shown:?}");
+}
+
+#[test]
+fn cleanup_is_offered_for_this_machines_workspace_with_a_peers_session_selected() {
+    let c = in_workspaces(POPUP_WINDOW, Some("/here/app"), None);
+    let shown = footer(&buffer(&c, POPUP_WINDOW));
+    assert!(shown.contains("Cleanup"), "{shown:?}");
 }

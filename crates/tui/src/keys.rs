@@ -160,6 +160,7 @@ fn map_mouse(
         Some(
             Target::Profile(_)
                 | Target::WorkspaceRow(_)
+                | Target::MachineRow(_)
                 | Target::FinderRow(_)
                 | Target::Popup
                 | Target::Confirm
@@ -248,6 +249,7 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::CleanupRemoveSafe => vec![Intent::CleanupRemoveSafe],
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
+        Target::MachineRow(machine) => vec![Intent::PickMachine(machine)],
         Target::Popup => Vec::new(),
     }
 }

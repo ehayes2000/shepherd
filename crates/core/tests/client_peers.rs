@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{Envelope, Seq, Source, SourceKind, Timestamp};
 use shepherd_core::client::{
     Cell, CleanupOutcome, Client, ClientCommand, ClientEvent, Intent, MachineStatus, MenuItem,
-    NOTICE_TIMEOUT, PEER_RETRY, PEER_RETRY_MAX, PeerEvent, SidebarEntry,
+    NOTICE_TIMEOUT, PEER_RETRY, PEER_RETRY_MAX, PeerEvent, Popup, SidebarEntry,
 };
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::host::HostEvent;
@@ -891,20 +891,12 @@ fn build(byte: u8) -> BuildId {
 }
 
 #[test]
-fn with_a_peers_session_selected_workspaces_the_finder_and_cleanup_still_ask_this_machines_host() {
+fn with_a_peers_session_selected_the_finder_and_cleanup_still_ask_this_machines_host() {
     let mut net = with_peer_session_selected();
-    net.user(Intent::BeginWorkspace);
-    net.user(Intent::EditWorkspacePath("/src/other".into()));
-    let select = net.user(Intent::Confirm);
-    net.user(Intent::Dismiss);
     let find = net.user(Intent::BeginFind);
     net.user(Intent::Dismiss);
     let cleanup = net.user(Intent::BeginCleanup);
-    for (what, sent) in [
-        ("workspace", select),
-        ("finder", find),
-        ("cleanup", cleanup),
-    ] {
+    for (what, sent) in [("finder", find), ("cleanup", cleanup)] {
         assert_eq!(requests(&sent).len(), 1, "{what}: {sent:?}");
         assert_eq!(peer_requests(&sent, "m_b").len(), 0, "{what}: {sent:?}");
     }
@@ -1162,4 +1154,472 @@ fn a_peer_answering_hello_as_another_machine_is_a_failed_attempt() {
     );
     net.sync("m_b");
     assert_eq!(net.names(), Vec::<String>::new());
+}
+
+// ---------- choosing where a new session runs (T32) ----------
+
+/// A hello answer from `machine`'s host offering `profiles`, the first the default.
+fn hello_with_profiles(machine: &str, profiles: &[&str]) -> Value {
+    let list: Vec<Value> = profiles
+        .iter()
+        .map(|name| json!({ "name": name, "agent": "shell" }))
+        .collect();
+    json!({
+        "version": PROTOCOL_VERSION,
+        "machine": machine,
+        "profiles": list,
+        "default_profile": profiles.first(),
+        "notify": { "bell": false },
+    })
+}
+
+/// [`Machines::reach`], answering `machine`'s hello with `answer`.
+fn reach_answering(net: &mut Machines, machine: &str, answer: Value) {
+    let subscribe = net.handshake_answering(machine, answer);
+    net.sync(machine);
+    net.answer(machine, &subscribe, Ok(json!({})));
+}
+
+/// This machine (`m_test`, profiles `here-a`, `here-b`) runs `a1`; peer `m_b` (`laptop`, profiles `there-a`,
+/// `there-b`) runs `b1`; peer `m_c` (`tower`) can't be reached. The view is sized.
+fn three_machines() -> Machines {
+    let mut c = ClientDriver::new();
+    c.host().new_session("a1");
+    let (mut net, _) = Machines::from_client(
+        c,
+        hello_with_profiles("m_test", &["here-a", "here-b"]),
+        &[("m_b", "laptop"), ("m_c", "tower")],
+    );
+    net.c.sync();
+    net.host("m_b").new_session("b1");
+    reach_answering(
+        &mut net,
+        "m_b",
+        hello_with_profiles("m_b", &["there-a", "there-b"]),
+    );
+    net.handle(peer(
+        "m_c",
+        PeerEvent::ConnectFailed {
+            at: at(0),
+            error: "cannot reach tower".into(),
+        },
+    ));
+    net.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
+    net
+}
+
+fn profile_names(net: &Machines) -> Vec<String> {
+    net.c
+        .client()
+        .profiles()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// The profile of each session asked of `machine`'s host (this machine's for `None`) among `commands`.
+fn session_news(commands: &[ClientCommand], machine: Option<&str>) -> Vec<Option<String>> {
+    let sent = match machine {
+        Some(machine) => peer_requests(commands, machine),
+        None => requests(commands),
+    };
+    sent.iter()
+        .filter_map(|r| match &r.body {
+            ClientRequest::SessionNew(new) => Some(new.profile.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn with_peers_the_new_session_popup_opens_on_the_selected_sessions_machine() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("b1")));
+    assert_eq!(net.user(Intent::BeginNewSession), []);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(profile_names(&net), ["there-a", "there-b"]);
+}
+
+#[test]
+fn with_a_local_session_selected_the_new_session_popup_opens_on_this_machine() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+}
+
+#[test]
+fn with_nothing_selected_the_new_session_popup_opens_on_this_machine() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.reach("m_b");
+    assert_eq!(net.c.client().selected(), None);
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+}
+
+#[test]
+fn with_peers_the_popup_opens_even_with_one_profile_so_the_machine_can_be_chosen() {
+    let mut c = ClientDriver::new();
+    c.host().new_session("a1");
+    let (mut net, _) = Machines::from_client(
+        c,
+        hello_with_profiles("m_test", &["only"]),
+        &[("m_b", "laptop")],
+    );
+    net.c.sync();
+    net.reach("m_b");
+    assert_eq!(net.user(Intent::BeginNewSession), []);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+}
+
+#[test]
+fn choosing_a_machine_shows_its_hosts_profiles() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.user(Intent::PickMachine(m("m_b"))), []);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(profile_names(&net), ["there-a", "there-b"]);
+    assert_eq!(net.c.client().default_profile(), Some("there-a"));
+}
+
+#[test]
+fn picking_a_profile_starts_the_session_on_the_chosen_machine() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    let sent = net.user(Intent::PickProfile("there-b".into()));
+    assert_eq!(
+        session_news(&sent, Some("m_b")),
+        [Some("there-b".to_owned())]
+    );
+    assert!(!sends_local(&sent));
+    assert_eq!(net.c.client().popup(), None);
+}
+
+#[test]
+fn choosing_this_machine_back_starts_the_session_here() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_test")));
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+    let sent = net.user(Intent::PickProfile("here-b".into()));
+    assert_eq!(session_news(&sent, None), [Some("here-b".to_owned())]);
+    assert_eq!(peer_requests(&sent, "m_b").len(), 0);
+}
+
+#[test]
+fn with_peers_confirming_the_popup_starts_the_chosen_machines_default_profile() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    let sent = net.user(Intent::Confirm);
+    assert_eq!(session_news(&sent, Some("m_b")), [None]);
+    assert_eq!(net.c.client().popup(), None);
+}
+
+#[test]
+fn an_unreachable_machine_cannot_be_chosen() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.user(Intent::PickMachine(m("m_c"))), []);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    // Nor one that isn't a machine at all.
+    net.user(Intent::PickMachine(m("m_nowhere")));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+}
+
+#[test]
+fn when_the_selected_sessions_machine_is_unreachable_the_popup_opens_on_this_machine() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+}
+
+#[test]
+fn a_machine_chosen_and_then_lost_says_so_instead_of_starting_elsewhere() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    let sent = net.user(Intent::PickProfile("there-a".into()));
+    assert_eq!(sent, []);
+    assert_eq!(net.c.client().notice(), Some("not connected to laptop"));
+}
+
+#[test]
+fn choosing_a_machine_with_no_popup_open_does_nothing() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    assert_eq!(net.user(Intent::PickMachine(m("m_b"))), []);
+    assert_eq!(net.c.client().popup_machine(), None);
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+}
+
+#[test]
+fn each_popup_starts_from_the_default_machine_again() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    net.user(Intent::Dismiss);
+    net.user(Intent::BeginNewSession);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+}
+
+#[test]
+fn choosing_a_machine_scrolls_the_profiles_back_to_the_top() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::ScrollPicker { by: 1, shown: 1 });
+    assert_eq!(net.c.client().picker_scroll(), 1);
+    net.user(Intent::PickMachine(m("m_b")));
+    assert_eq!(net.c.client().picker_scroll(), 0);
+}
+
+#[test]
+fn the_new_session_key_still_starts_on_the_selected_sessions_machine() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("b1")));
+    let sent = net.user(Intent::NewSession);
+    assert_eq!(session_news(&sent, Some("m_b")), [None]);
+}
+
+// ---------- workspaces per machine (T32) ----------
+
+/// The paths of the workspace selects asked of `machine`'s host (this machine's for `None`) among `commands`.
+fn workspace_selects(commands: &[ClientCommand], machine: Option<&str>) -> Vec<String> {
+    let sent = match machine {
+        Some(machine) => peer_requests(commands, machine),
+        None => requests(commands),
+    };
+    sent.iter()
+        .filter_map(|r| match &r.body {
+            ClientRequest::WorkspaceSelect(w) => Some(w.path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`three_machines`], this machine's host in workspace `/here/app`, and the laptop's in `/there/api` after
+/// `/there/old`.
+fn three_machines_in_workspaces() -> Machines {
+    let mut c = ClientDriver::new();
+    c.host().select_workspace("/here/app");
+    c.host().new_session("a1");
+    let (mut net, _) = Machines::from_client(
+        c,
+        hello_with_profiles("m_test", &["here-a"]),
+        &[("m_b", "laptop"), ("m_c", "tower")],
+    );
+    net.c.sync();
+    net.host("m_b").select_workspace("/there/old");
+    net.host("m_b").select_workspace("/there/api");
+    net.host("m_b").new_session("b1");
+    net.reach("m_b");
+    net
+}
+
+fn paths(list: &[std::path::PathBuf]) -> Vec<&str> {
+    list.iter().filter_map(|p| p.to_str()).collect()
+}
+
+#[test]
+fn the_workspace_is_the_selected_sessions_machines() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    assert_eq!(
+        net.c.client().workspace(),
+        Some(std::path::Path::new("/there/api"))
+    );
+    net.user(Intent::SelectSession(sid("a1")));
+    assert_eq!(
+        net.c.client().workspace(),
+        Some(std::path::Path::new("/here/app"))
+    );
+}
+
+#[test]
+fn the_switcher_opens_on_the_selected_sessions_machine_and_lists_its_workspaces() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(
+        paths(net.c.client().workspaces()),
+        ["/there/api", "/there/old"]
+    );
+}
+
+#[test]
+fn choosing_another_machine_in_the_switcher_lists_its_workspaces() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::ScrollSwitcher { by: 1, shown: 1 });
+    assert_eq!(net.c.client().switcher_scroll(), 1);
+    net.user(Intent::PickMachine(m("m_test")));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+    assert_eq!(
+        net.c.client().workspace(),
+        Some(std::path::Path::new("/here/app"))
+    );
+    assert_eq!(net.c.client().switcher_scroll(), 0);
+    // An unreachable one can't be chosen here either.
+    net.user(Intent::PickMachine(m("m_c")));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+}
+
+#[test]
+fn a_workspace_picked_in_the_switcher_is_selected_on_its_machine() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::PickMachine(m("m_b")));
+    let sent = net.user(Intent::PickWorkspace("/there/old".into()));
+    assert_eq!(workspace_selects(&sent, Some("m_b")), ["/there/old"]);
+    assert!(!sends_local(&sent));
+}
+
+#[test]
+fn a_path_typed_in_the_switcher_is_opened_on_its_machine_which_closes_it_once_agreed() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::EditWorkspacePath("/there/new".into()));
+    let sent = net.user(Intent::Confirm);
+    assert_eq!(workspace_selects(&sent, Some("m_b")), ["/there/new"]);
+    assert!(!sends_local(&sent));
+    assert!(matches!(
+        net.c.client().popup(),
+        Some(Popup::Workspace { .. })
+    ));
+    net.answer("m_b", &sent, Ok(json!({})));
+    assert_eq!(net.c.client().popup(), None);
+}
+
+#[test]
+fn a_path_a_peer_refuses_is_shown_in_the_switcher() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::EditWorkspacePath("/nope".into()));
+    let sent = net.user(Intent::Confirm);
+    net.answer(
+        "m_b",
+        &sent,
+        Err(WireError::InvalidParams("/nope is not a git repo".into())),
+    );
+    assert_eq!(
+        net.c.client().popup(),
+        Some(&Popup::Workspace {
+            path: "/nope".into(),
+            error: Some("/nope is not a git repo".into()),
+        })
+    );
+}
+
+#[test]
+fn a_peers_sessions_are_marked_elsewhere_by_its_own_workspace() {
+    let mut net = three_machines_in_workspaces();
+    net.host("m_b").select_workspace("/there/old");
+    net.sync("m_b");
+    let elsewhere = |net: &Machines, id: &str| {
+        net.c
+            .client()
+            .sessions()
+            .iter()
+            .find(|s| s.id == sid(id))
+            .map(|s| s.elsewhere)
+    };
+    assert_eq!(elsewhere(&net, "b1"), Some(true));
+    assert_eq!(elsewhere(&net, "a1"), Some(false));
+}
+
+#[test]
+fn when_the_selected_sessions_machine_is_unreachable_the_switcher_opens_on_this_machine() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    net.user(Intent::BeginWorkspace);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+}
+
+#[test]
+fn a_machine_that_is_neither_this_one_nor_a_peer_cannot_be_chosen_from_a_peer() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    net.user(Intent::PickMachine(m("m_nowhere")));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(profile_names(&net), ["there-a", "there-b"]);
+}
+
+/// This machine's host reconnects and lists `peers` (id, name) as the ones it trusts.
+fn relist(net: &mut Machines, peers: &[(&str, &str)]) {
+    net.handle(ClientEvent::Disconnected);
+    let hello = net.handle(ClientEvent::Connected { at: at(0) });
+    let subscribe = net.c.answer(
+        &hello,
+        Ok(hello_with_profiles("m_test", &["here-a", "here-b"])),
+    );
+    let caught_up = net.c.answer(&subscribe, Ok(json!({})));
+    let list: Vec<Value> = peers
+        .iter()
+        .map(|(id, name)| json!({ "id": id, "name": name }))
+        .collect();
+    net.c.answer(&caught_up, Ok(json!({ "peers": list })));
+}
+
+#[test]
+fn a_chosen_machine_no_longer_trusted_puts_the_popup_back_on_this_machine_and_says_so() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    relist(&mut net, &[("m_c", "tower")]);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(profile_names(&net), ["here-a", "here-b"]);
+    assert_eq!(
+        net.c.client().notice(),
+        Some("laptop is no longer a trusted machine")
+    );
+}
+
+#[test]
+fn a_switcher_on_a_machine_no_longer_trusted_goes_back_to_this_machine() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    relist(&mut net, &[]);
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
+    assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+}
+
+#[test]
+fn this_machines_workspace_is_its_hosts_whichever_session_is_selected() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    assert_eq!(
+        net.c.client().local_workspace(),
+        Some(std::path::Path::new("/here/app"))
+    );
 }

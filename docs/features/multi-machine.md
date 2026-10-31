@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
-| T32 | Create sessions on any machine | building | task/t32-new-session-machine |  |  |
+| T32 | Create sessions on any machine | merging | task/t32-new-session-machine @ 9dc595d | 2 | round 2 APPROVE; untarget test minors → T32b |
 | T32b | Show whether each machine's link is relayed or direct | todo |  |  |  |
 | F52 | Peer conn hardening after the tunnel | todo |  |  |  |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
@@ -182,6 +182,8 @@ acceptance:
 - The peers port reports each connected peer's path kind (iroh `Connection::paths()`: direct or relayed), the host's peer
   list carries it (additive field), and the sidebar's machine header shows it (snapshot).
 - A path that changes (relay → direct after hole punching) updates the header; fake peers port test.
+- From T32's review (core client.rs `untarget`): test that dropping some other peer leaves a popup on `m_b` alone with no
+  notice; assert the scroll resets (or drop them); assert the notice in the switcher's untrust test.
 scope: crates/core, crates/testkit, crates/adapters, crates/shepherd, crates/tui
 
 ### F52: Peer conn hardening after the tunnel

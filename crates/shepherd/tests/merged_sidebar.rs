@@ -1,6 +1,7 @@
 //! One sidebar across machines (T31b), end to end: a client runtime on machine A's host lists the sessions of A and of
 //! B, a trusted peer it reaches through a tunnel on A's host, drives B's session on B's host, keeps B's sessions while
-//! B is gone, and picks up where it left off once B is back. The client's conns are tapped: what it sends on each is
+//! B is gone, and picks up where it left off once B is back; and a session made on B from the new-session popup (T32)
+//! runs on B's host and takes the keys. The client's conns are tapped: what it sends on each is
 //! recorded, and a test can hand the runtime an event as if it came on one of them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -445,4 +446,32 @@ fn session_rename(host: &mut HostHarness, session: &SessionId, name: &str) {
     host.step();
     client.close();
     host.step();
+}
+
+#[test]
+fn a_session_made_on_a_peer_from_the_new_session_popup_runs_there_and_takes_the_keys() {
+    let mut w = World::new();
+    let mine = session_on(&mut w.a, "mine");
+    w.client.start();
+    w.settle(true);
+    w.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
+    w.user(Intent::SelectSession(mine.clone()));
+
+    // The popup opens on the selected session's machine; the laptop is chosen instead.
+    w.user(Intent::BeginNewSession);
+    assert_eq!(w.client.client().popup_machine(), Some(&w.a.machine()));
+    w.user(Intent::PickMachine(w.b.machine()));
+    w.user(Intent::Confirm);
+
+    let made: Vec<SessionId> = w.b.host().sessions().into_iter().map(|s| s.id).collect();
+    let [theirs] = &made[..] else {
+        panic!("expected one session on B, got {made:?}");
+    };
+    assert_eq!(w.a.host().sessions().len(), 1, "none made on A");
+    assert_eq!(w.client.client().selected(), Some(theirs));
+    assert_eq!(w.sidebar()[..3], ["# testbox", "mine", "# laptop"]);
+
+    w.user(Intent::keys("hello from A"));
+    assert_eq!(w.screen(theirs), "hello from A");
+    assert_eq!(w.screen(&mine), "");
 }

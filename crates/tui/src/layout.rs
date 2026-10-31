@@ -76,6 +76,9 @@ pub enum Target {
     Profile(String),
     /// A workspace's row in the open workspace switcher.
     WorkspaceRow(PathBuf),
+    /// A machine's row in the open new-session popup or workspace switcher (while there are peers). Only a machine
+    /// that can be reached now has one.
+    MachineRow(MachineId),
     /// A result's row in the open finder.
     FinderRow(FinderItem),
     /// The open dialog's button that answers yes: `[Close]`, `[Save]`, `[Open]` or `[Start session]`.
