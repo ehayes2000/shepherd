@@ -1,6 +1,7 @@
 //! Host and client runtimes. They are generic over ports so scenario tests can run them with fakes.
 
 pub mod archive;
+pub mod archive_cli;
 pub mod build;
 pub mod client;
 pub mod hook;

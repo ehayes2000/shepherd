@@ -399,6 +399,25 @@ pub trait Worktrees {
     /// clone. A history with several roots is named by the smallest. A path outside any checkout, or one that doesn't
     /// exist, is [`WorktreeError::NotARepo`]; a repo with no commits is an error.
     fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError>;
+
+    /// The patch-id of `commit` in the repo `repo` is in: the one [`Worktrees::commits_since`] gives it, from the same
+    /// patch, or `None` for a merge or a commit that changes nothing. A commit the repo doesn't have is an error; a path
+    /// outside any checkout, or one that doesn't exist, is [`WorktreeError::NotARepo`].
+    fn patch_id(
+        &self,
+        repo: &RepoRef,
+        commit: &CommitHash,
+    ) -> Result<Option<PatchId>, WorktreeError>;
+
+    /// The commit `rev` names in the repo `repo` is in: a full or abbreviated hash, a branch, `HEAD`, or any other
+    /// revision git understands. `None` if it names no commit (unknown, ambiguous, or another kind of object). `rev` is
+    /// only ever a revision, never an option, whatever it starts with. A path outside any checkout, or one that doesn't
+    /// exist, is [`WorktreeError::NotARepo`].
+    fn resolve_commit(
+        &self,
+        repo: &RepoRef,
+        rev: &str,
+    ) -> Result<Option<CommitHash>, WorktreeError>;
 }
 
 /// The repo name used under the managed root, from the absolute path `git rev-parse --git-common-dir` prints: the
