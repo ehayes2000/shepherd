@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
-| T40 | Capture transcripts from Claude Code and Codex | building | task/t40-archive-capture @ 8d11fb1 | 0 |  |
+| T40 | Capture transcripts from Claude Code and Codex | review | task/t40-archive-capture @ f9d2c8f (on 3ab1965) | 1 | PM-accepted: path from SessionStart only; .zst refused for now (→ T42); inode+recanonicalize swap check |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
 | T42 | Archive port and host capture | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
@@ -114,6 +114,10 @@ acceptance:
   creates (F37).
 - Sessions without an agent transcript (plain shells) capture nothing and never block removal.
 scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
+- From T40: on `/clear` (a new agent session in the same shepherd session) capture the old transcript before the host
+  replaces its path, then `put_session` with the new agent session id before the next capture (capture checks against the
+  indexed id). Codex rollouts compressed in place after 7 days (`.jsonl.zst`) must be captured too (decompress through the
+  archive's bounded reader, or archive the `.zst` as is with a role/flag) so a long-idle Codex session can still be removed.
 notes: (binding) The archive root is `~/.shepherd/archive/` (resolved once at host start). `machine` in rows is T29's
 `MachineId`. Times come from the host's Tick, never a clock in core.
 

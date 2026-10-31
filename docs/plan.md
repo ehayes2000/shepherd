@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T40 Capture transcripts from Claude Code and Codex | [conversation-archive](features/conversation-archive.md) | building | task/t40-archive-capture @ 8d11fb1 | 0 |  |
+| T40 Capture transcripts from Claude Code and Codex | [conversation-archive](features/conversation-archive.md) | review | task/t40-archive-capture @ f9d2c8f (on 3ab1965) | 1 | PM-accepted: path from SessionStart only; .zst refused for now (→ T42); inode+recanonicalize swap check |
 | F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | building | task/f47-swap-flush @ ec85617 | 0 |  |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | fixing | task/t30-pairing @ 0539136 | 1 | Blocking: printed ticket cut to 128 chars (real ones ~244). PM: CLI validates tickets before join; Ctrl-C stops the pairing |
 
