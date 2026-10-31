@@ -6,7 +6,8 @@
 //! `send` never blocks. The reader splits the stream with `wire::Decoder` and is the only thread that emits the
 //! conn's `Line`s and its `Disconnected`, so `Disconnected` is sent once, after every `Line`. Whoever decides a
 //! conn is over (close, slow consumer, bad line, write error) records the reason, first one wins, and shuts the
-//! socket down, which ends the reader.
+//! socket down, which ends the reader. A closed conn's writer keeps delivering what was queued in the background;
+//! the link remembers it until it is done, so `flush_closed` can wait for it.
 //!
 //! Anyone who can connect to the socket can drive the user's agents, so it is private: its directory must not be
 //! accessible to group or others (it is created exactly `0700` if missing, and an existing one that is open to
@@ -22,12 +23,13 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use shepherd_core::ports::{
-    ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
+    CLOSE_FLUSH, ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink,
+    MAX_QUEUED,
 };
 use shepherd_core::wire::Decoder;
 
@@ -41,8 +43,6 @@ pub const MAX_SOCKET_PATH: usize = 107;
 
 /// How long a blocked write waits before checking whether its conn was closed.
 const WRITE_TICK: Duration = Duration::from_millis(50);
-/// How long `close` keeps trying to deliver queued lines to a peer that isn't reading.
-const CLOSE_FLUSH: Duration = Duration::from_secs(2);
 /// The writer batches queued lines into writes of about this size.
 const WRITE_BATCH: usize = 64 * 1024;
 const READ_BUF: usize = 64 * 1024;
@@ -254,6 +254,10 @@ impl Link for UnixListenLink {
     fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
         self.conns.queued_bytes(conn)
     }
+
+    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome {
+        self.conns.flush_closed(deadline)
+    }
 }
 
 impl Drop for UnixListenLink {
@@ -305,6 +309,10 @@ impl Link for UnixConnectLink {
     }
     fn queued_bytes(&self, conn: ConnId) -> Option<usize> {
         self.conns.queued_bytes(conn)
+    }
+
+    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome {
+        self.conns.flush_closed(deadline)
     }
 }
 
@@ -417,6 +425,9 @@ struct Shared {
     /// When `close` was called. The reader holds this lock while it emits a `Line`, so once `close` has set it
     /// and returned, no more `Line`s are emitted.
     closed_at: Mutex<Option<Instant>>,
+    /// Set when the writer exits: everything queued is written, or it gave up.
+    written: Mutex<bool>,
+    written_changed: Condvar,
 }
 
 impl Shared {
@@ -430,6 +441,37 @@ impl Shared {
         let _ = self.reason.set(reason);
         let _ = self.stream.shutdown(Shutdown::Both);
     }
+
+    fn written(&self) -> MutexGuard<'_, bool> {
+        self.written.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until the writer has exited, or `deadline` passes. Returns whether it has.
+    fn wait_written(&self, deadline: Instant) -> bool {
+        let mut written = self.written();
+        while !*written {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            written = self
+                .written_changed
+                .wait_timeout(written, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+}
+
+/// Marks the writer done when it exits, however it exits.
+struct WrittenOnExit(Arc<Shared>);
+
+impl Drop for WrittenOnExit {
+    fn drop(&mut self) {
+        *self.0.written() = true;
+        self.0.written_changed.notify_all();
+    }
 }
 
 struct Handle {
@@ -439,13 +481,21 @@ struct Handle {
 }
 
 /// The live conns of one link. A conn is removed when it is closed, dropped as a slow consumer, or right before
-/// its `Disconnected` is sent.
+/// its `Disconnected` is sent. Closed conns whose writers may still be delivering are kept apart, for
+/// `flush_closed`.
 #[derive(Clone, Default)]
-struct Conns(Arc<Mutex<HashMap<ConnId, Handle>>>);
+struct Conns {
+    live: Arc<Mutex<HashMap<ConnId, Handle>>>,
+    closing: Arc<Mutex<Vec<Arc<Shared>>>>,
+}
 
 impl Conns {
     fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Handle>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn closing(&self) -> MutexGuard<'_, Vec<Arc<Shared>>> {
+        self.closing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Registers `stream` as a new conn and starts its threads. With `announce` (host side), the sink gets
@@ -462,6 +512,8 @@ impl Conns {
             queued: AtomicUsize::new(0),
             reason: OnceLock::new(),
             closed_at: Mutex::new(None),
+            written: Mutex::new(false),
+            written_changed: Condvar::new(),
         });
         let writer_stream = stream.try_clone()?;
         // Fails (EINVAL on macOS) only when the peer has already gone. The conn is still registered and announced,
@@ -546,8 +598,21 @@ impl Conns {
         let _ = handle.shared.reason.set(DisconnectReason::Closed);
         // Waits for a `Line` being emitted right now; none follow.
         *handle.shared.closed_at() = Some(Instant::now());
+        let mut closing = self.closing();
+        // Forget the closes that are done, so the list holds only the ones still delivering.
+        closing.retain(|shared| !*shared.written());
+        closing.push(handle.shared.clone());
         // Dropping the handle drops the queue's sender: the writer flushes, then shuts the socket down.
         Ok(())
+    }
+
+    fn flush_closed(&self, deadline: Instant) -> FlushOutcome {
+        let mut closing = self.closing();
+        closing.retain(|shared| !shared.wait_written(deadline));
+        match closing.is_empty() {
+            true => FlushOutcome::Flushed,
+            false => FlushOutcome::TimedOut,
+        }
     }
 
     fn drop_all(&self) {
@@ -599,6 +664,7 @@ fn read_loop(
 }
 
 fn write_loop(mut stream: UnixStream, queue: Receiver<Vec<u8>>, shared: Arc<Shared>) {
+    let _done = WrittenOnExit(shared.clone());
     let mut batch = Vec::with_capacity(WRITE_BATCH);
     while let Ok(first) = queue.recv() {
         take(&shared, &first);

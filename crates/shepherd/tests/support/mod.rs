@@ -744,6 +744,11 @@ impl FakeClient {
         }
     }
 
+    /// Its conn on its own link, e.g. to [`FakeNetwork::deliver`] to it from another thread.
+    pub fn conn(&self) -> ConnId {
+        self.conn
+    }
+
     /// A paced client reads only through this: up to `max_bytes` of what the host sent (at least one line, if
     /// any is waiting). Returns the bytes read.
     pub fn read(&mut self, max_bytes: usize) -> usize {
@@ -833,9 +838,11 @@ impl FakeClient {
         let _ = self.link.close(self.conn);
     }
 
+    /// Disconnected, or closed by the host with lines still unread: a paced client gets its `Disconnected` only once
+    /// it has read them, as from a socket.
     pub fn is_disconnected(&mut self) -> bool {
         self.pump();
-        self.disconnected
+        self.disconnected || self.net.closed_by_peer(self.conn)
     }
 }
 

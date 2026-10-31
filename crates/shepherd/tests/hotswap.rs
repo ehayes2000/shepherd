@@ -138,6 +138,55 @@ fn a_stale_host_accepts_closes_every_connection_and_hands_over_its_sessions() {
     );
 }
 
+/// F47: the exec ends every link thread, so an `Accepted` still queued for a slow client when the conns close would
+/// be lost. `swap` closes the conns and then drops the old link, as the exec does, losing whatever is undelivered.
+/// The client reads only once the swap is waiting for it to, so without that wait it never gets the answer.
+#[test]
+fn a_swap_waits_for_a_slow_client_to_read_its_accepted_answer() {
+    let Stale { mut h, _dir } = stale();
+    let mut client = h.connect_paced();
+    let req = client.request(ClientRequest::HostUpgrade(HostUpgrade::default()));
+    h.step();
+    assert!(client.take().is_empty(), "a paced client reads nothing yet");
+
+    let (net, conn) = (h.network().clone(), client.conn());
+    let reader = std::thread::spawn(move || {
+        if !net.wait_until_flushing(Duration::from_secs(10)) {
+            return false;
+        }
+        net.deliver(conn, usize::MAX);
+        true
+    });
+    h.swap(|_| {});
+    assert!(
+        reader.join().unwrap(),
+        "the swap never waited for the flush"
+    );
+
+    let answer = response(&client.take(), &req).expect("upgrade answered before the exec");
+    assert_eq!(
+        serde_json::from_value::<UpgradeAnswer>(answer).unwrap(),
+        UpgradeAnswer::Accepted
+    );
+    assert!(client.is_disconnected());
+}
+
+/// The wait is bounded: a client that never reads doesn't hold the swap past `CLOSE_FLUSH`.
+#[test]
+fn a_swap_proceeds_at_the_bound_when_a_client_never_reads() {
+    let Stale { mut h, _dir } = stale();
+    let mut client = h.connect_paced();
+    client.request(ClientRequest::HostUpgrade(HostUpgrade::default()));
+    h.step();
+
+    h.swap(|_| {});
+    assert!(
+        client.take().is_empty(),
+        "the undelivered answer was cut off"
+    );
+    assert!(client.is_disconnected());
+}
+
 #[test]
 fn a_preflight_killed_by_a_signal_is_unavailable_and_changes_nothing() {
     let killed = PreflightRunner::new(|_| Preflight::Signaled(9));

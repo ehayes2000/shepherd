@@ -17,12 +17,18 @@
 //!   [`DisconnectReason::Protocol`].
 //! - `close` delivers the lines already queued, then disconnects: the closing end sees `Closed`, the other end
 //!   `PeerGone`. Once `close` returns, no more `Line`s are emitted for that conn.
+//! - Delivering what a closed conn had queued happens in the background, for up to [`CLOSE_FLUSH`] on a peer that
+//!   isn't reading. [`Link::flush_closed`] waits for it, so a process about to exec (decision 0018) doesn't cut it off.
 //! - Dropping a link disconnects all its conns without flushing; their peers see `PeerGone`.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 /// The most unsent bytes a conn may have queued before it is disconnected as a slow consumer.
 pub const MAX_QUEUED: usize = 8 * 1024 * 1024;
+
+/// How long a closed conn keeps trying to deliver its queued lines to a peer that isn't reading.
+pub const CLOSE_FLUSH: Duration = Duration::from_secs(2);
 
 /// One connection on a link. Assigned by the adapter, unique per adapter instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -78,6 +84,16 @@ pub trait LinkEventSink: Send + Sync + 'static {
     fn send(&self, event: LinkEvent);
 }
 
+/// How [`Link::flush_closed`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// Every conn this link closed is done: what was queued for it is written, or it is gone (its peer left, or the
+    /// link gave up on a peer that wasn't reading).
+    Flushed,
+    /// The deadline passed with some closed conn still delivering.
+    TimedOut,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LinkError {
     #[error("unknown conn")]
@@ -97,4 +113,8 @@ pub trait Link {
     /// rises while the peer doesn't read and falls as it drains, so a sender can pace itself well below
     /// [`MAX_QUEUED`] (decision 0013).
     fn queued_bytes(&self, conn: ConnId) -> Option<usize>;
+    /// Waits until every conn this link has [closed](Link::close) has finished delivering what was queued for it
+    /// (written to the transport, or the conn is gone), or until `deadline`, whichever comes first. Blocks the caller:
+    /// for a process about to exec, which would otherwise cut the deliveries off (decision 0018).
+    fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome;
 }
