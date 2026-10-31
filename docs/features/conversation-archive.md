@@ -212,6 +212,9 @@ acceptance:
   user's real `~/.claude` / `~/.codex`; the script says up front that it uses the network and costs tokens.
 - From T43's review: `archive restore`'s "print no shell line unless faithful" check on the resume argv
   (archive_cli.rs ~632) is untested; add a restore test whose agent session id holds U+202E and assert no `cd` line.
+- From T54: add a subagent round for both agents (start, permission block, finish, a background subagent outliving the
+  parent's turn) to re-record `crates/core/tests/fixtures/{claude,codex}` subagent fixtures, and settle whether the Agent
+  tool's PreToolUse always precedes SubagentStart.
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get

@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | building | task/t54-subagent-events |  |  |
+| T54 | Subagent lifecycle in the event log | review | task/t54-subagent-events @ 99d6dfa |  | built; added subagent/working frame + blocked.agent_type (PM ok); turn end drops background subagents (noted for T55/T44) |
 | T55 | Subagent tree in the sidebar | todo |  |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 
@@ -47,6 +47,8 @@ acceptance:
 - A subagent blocked on a prompt turns the parent's glyph `▲`, collapsed or not.
 - Tests through the T45 harness: snapshots collapsed and expanded, the `▲` bubble, finished-dimmed then gone at turn end,
   click targets, a tree taller than the sidebar (the selection stays visible), tiny window.
+- From T54: the parent's turn end drops every subagent, including a background one still running (it reappears if it
+  blocks). If T44's real-agent round shows background subagents are common, keep unfinished ones listed across a turn end.
 scope: crates/core, crates/tui
 notes: Decision 0014: the badge is clickable; `⇥` is the optional key.
 

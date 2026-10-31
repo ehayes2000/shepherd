@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T32b | Show whether each machine's link is relayed or direct | ready |  |  |  |
 | F52 | Peer conn hardening after the tunnel | done | cc35bba | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
-| T62 | Machine colors | building | task/t62-machine-colors |  |  |
+| T62 | Machine colors | review | task/t62-machine-colors @ 8c003aa |  | built; color override travels in the hello (PM ok); 6-color palette |
 | T63 | Flat sidebar by default; group by machine on demand | todo |  |  |  |
 | T64 | Machines panel | todo |  |  |  |
 | T65 | New session: machine first, then agent | todo |  |  |  |

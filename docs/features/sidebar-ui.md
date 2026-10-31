@@ -19,6 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F30 | Truncation measures display width | done | faa7403 | 2 | width-0 cut returned 1 column; added helper property table |
 | F34 | The client marks keys that can answer a dialog | done | 274b3e2 | 1 | mixed-version: new client's `answer` not counted by an F31 host (accepted) |
 | F55 | A new session can push the selection out of view | todo |  |  |  |
+| F56 | The starting glyph is invisible on a selected row | todo |  |  |  |
 
 ## Specs
 
@@ -201,4 +202,14 @@ acceptance:
 - From T45's review: `Ui::event`'s doc says it handles events as the runtime does, but it skips `from_legacy_terminal`
   (the runtime applies it when the keyboard isn't enhanced); say the harness models an enhanced terminal.
 scope: crates/core, crates/tui (tests)
+
+### F56: The starting glyph is invisible on a selected row
+depends: T62
+touches: tui::sidebar
+goal: From T62's builder: the "starting" glyph `◌` is DarkGray, the same as the selected row's background, so a starting
+session's status disappears when it's selected.
+acceptance:
+- Every status glyph is readable on both the plain and the selected row background (a test over every glyph and both
+  backgrounds, like T62's machine-color readability test); snapshot of a selected starting session.
+scope: crates/tui
 
