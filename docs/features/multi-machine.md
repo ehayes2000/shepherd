@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
 | T32 | Create sessions on any machine | done | 482db06 | 2 | round 2 APPROVE; untarget test minors → T32b |
 | T32b | Show whether each machine's link is relayed or direct | todo |  |  |  |
-| F52 | Peer conn hardening after the tunnel | merging | task/f52-peer-hardening @ 81515bc | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
+| F52 | Peer conn hardening after the tunnel | done | cc35bba | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
 
 ## Specs

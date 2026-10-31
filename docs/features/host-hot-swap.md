@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
 | F47 | A swap can lose its Accepted answer before exec | done | 98b73d3 | 2 | round 2 APPROVE; minors filed to F50; 12-copy round deferred (machine slow) |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
-| F50 | Tighten F47's flush tests | todo |  |  |  |
+| F50 | Tighten F47's flush tests | building | task/f50-flush-tests |  |  |
 
 ## Specs
 
@@ -143,7 +143,7 @@ scope: crates/shepherd
 
 ### F50: Tighten F47's flush tests
 depends: F47, T31a
-touches: shepherd tests (hotswap, support), testkit::contracts::link
+touches: shepherd tests (hotswap, support), testkit::contracts::link, adapters (link, iroh_link)
 goal: From F47's round-2 review: two of its tests can stay green when the thing they guard breaks.
 acceptance:
 - `FakeClient::is_disconnected` (crates/shepherd/tests/support/mod.rs ~845) also returns true when the host closed with
@@ -160,5 +160,5 @@ acceptance:
   29 of 32 lines). `flush_closed` reports `TimedOut` when a writer gave up rather than finished, on unix and iroh links,
   with a contract case.
 - Run the 12-copy hotswap_e2e round F47 deferred (when the machine allows): 0 failures.
-scope: crates/shepherd (tests), crates/testkit
+scope: crates/shepherd (tests), crates/testkit, crates/adapters (link writers)
 
