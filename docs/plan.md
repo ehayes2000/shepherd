@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | fixing | task/t31a-iroh-tunnel @ 341ea4f | 1 | round 1 CHANGES: peer() None for unknown conn let a gone peer's tunnel request through (fail-open; port now Result); held lines on close untested; swap/shutdown tunnel close untested; thresholds; 5ms tick; open contract; redial string parse |
+| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | review | task/t31a-iroh-tunnel @ 834906b | 1 | round 1 fixed; swap-path tunnel close test moved to F50 |
 
 ## Ready to start
 
@@ -27,7 +27,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F05 Validated types can't be deserialized around their validation | [foundation](features/foundation.md) | todo | T04 |
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
-| F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
 

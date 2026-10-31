@@ -142,7 +142,7 @@ acceptance:
 scope: crates/shepherd
 
 ### F50: Tighten F47's flush tests
-depends: F47
+depends: F47, T31a
 touches: shepherd tests (hotswap, support), testkit::contracts::link
 goal: From F47's round-2 review: two of its tests can stay green when the thing they guard breaks.
 acceptance:
@@ -153,6 +153,8 @@ acceptance:
 - The unix link contract's second `flush_closed(QUIET)` expecting `TimedOut` (contracts/link.rs ~756) depends on finishing
   within `CLOSE_FLUSH` of the close; restructure so a scheduling stall can't flip it (check right after `close`, or accept
   either outcome once `CLOSE_FLUSH` has passed).
+- From T31a: removing the tunnel ends from `close_conns` (the swap path) passes every test; add a swap test with an open
+  tunnel showing the tunnelled client is flushed and closed before exec.
 - Run the 12-copy hotswap_e2e round F47 deferred (when the machine allows): 0 failures.
 scope: crates/shepherd (tests), crates/testkit
 

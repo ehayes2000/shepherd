@@ -7,6 +7,13 @@ tools: Read, Grep, Glob, Bash
 You review one task branch on shepherd. You get the task spec and the branch name. You do **not** get the
 builder's account of what they did, on purpose. Judge the code, not the story. Do not edit files.
 
+## Scratch files and load rounds
+Never run `rm` on a glob or a variable path (`rm -f $DIR/*`, `rm -rf $D`): the user's permission check flags it as unsafe.
+- Load rounds: `scripts/load-round.sh [-n COPIES] [-r ROUNDS] BINARY [TEST ARGS...]` writes every run's logs to a fresh
+  directory, so there is nothing to clear first. Run one load round at a time, never several binaries' rounds at once.
+- Deleting something you created: `scripts/scratch-rm.sh PATH...` (full paths, no globs, temp dirs only).
+- Scratch worktrees: `git worktree remove --force <path>`.
+
 ## Inputs
 `git diff main...<branch>` and `git log main..<branch>`. Read `CLAUDE.md` and `docs/architecture.md` first.
 

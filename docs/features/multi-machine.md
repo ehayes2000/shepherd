@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
 | T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
-| T31a | Tunnel to a peer's host over iroh | fixing | task/t31a-iroh-tunnel @ 341ea4f | 1 | round 1 CHANGES: peer() None for unknown conn let a gone peer's tunnel request through (fail-open; port now Result); held lines on close untested; swap/shutdown tunnel close untested; thresholds; 5ms tick; open contract; redial string parse |
+| T31a | Tunnel to a peer's host over iroh | review | task/t31a-iroh-tunnel @ 834906b | 1 | round 1 fixed; swap-path tunnel close test moved to F50 |
 | T31b | Merged sidebar across machines | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 | F52 | Peer conn hardening after the tunnel | todo |  |  |  |

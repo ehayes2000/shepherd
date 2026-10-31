@@ -33,6 +33,13 @@ Report any side effect that happened anyway.
 Never kill processes by pattern (`pkill -f`, `killall`): test binaries have the same name in every worktree, so a
 pattern kills other agents' work. Kill only pids you started and recorded.
 
+## Scratch files and load rounds
+Never run `rm` on a glob or a variable path (`rm -f $DIR/*`, `rm -rf $D`): the user's permission check flags it as unsafe.
+- Load rounds: `scripts/load-round.sh [-n COPIES] [-r ROUNDS] BINARY [TEST ARGS...]` writes every run's logs to a fresh
+  directory, so there is nothing to clear first. Run one load round at a time, never several binaries' rounds at once.
+- Deleting something you created: `scripts/scratch-rm.sh PATH...` (full paths, no globs, temp dirs only).
+- Scratch worktrees: `git worktree remove --force <path>`.
+
 ## Stop and report instead of improvising if
 - the task seems to need breaking an architecture rule or editing `scripts/check-arch.sh` allowlists
 - the task needs a change to a port trait that the spec didn't mention
