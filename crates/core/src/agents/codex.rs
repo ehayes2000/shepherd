@@ -32,7 +32,8 @@
 //! `task_name`) of the `spawn_agent` call that spawned it (`function_hook_tool_name` in
 //! `codex-rs/core/src/tools/registry.rs`). `spawn_agent` returns its `SpawnAgentResult { agent_id }` before the
 //! child's `SubagentStart` runs (`run_pending_session_start_hooks` in `codex-rs/core/src/hook_runtime.rs`), so its
-//! `PostToolUse` usually pairs them first; else they pair by `agent_type` (default `default`, `DEFAULT_ROLE_NAME`).
+//! `PostToolUse` usually pairs them first; else by `agent_type` (default `default`, `DEFAULT_ROLE_NAME`) when that
+//! is unambiguous (see `agents::subagents`).
 //! Codex has no hook for a subagent's questions, so only permission requests block one.
 //!
 //! Codex has no `Notification` hook, so there is no idle notification and no permission-dialog notification; and no
@@ -53,7 +54,7 @@ use crate::acpp::{
 };
 use crate::ids::SessionId;
 
-use super::subagents::Subagents;
+use super::subagents::{Subagents, ToolOutcome};
 
 /// The agent name in `source.agent` and `_shepherd/agent/started`.
 pub const AGENT: &str = "codex";
@@ -449,8 +450,12 @@ fn post_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
     let mut out = vec![(Dir::FromAgent, frame)];
+    // Codex has no failure hook: a failed tool completes too, so a failed `spawn_agent` stays a candidate.
     let spawned = spawned_agent(hook.field("tool_response"));
-    let corrected = state.subagents.tool_done(id, spawned.as_deref());
+    let outcome = ToolOutcome::Completed {
+        spawned: spawned.as_deref(),
+    };
+    let corrected = state.subagents.tool_done(id, outcome);
     out.extend(corrected.map(|f| (Dir::Internal, f)));
     if let Some(agent) = hook.str("agent_id") {
         out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));

@@ -62,6 +62,9 @@ value or one the reference lists. Inferred means a value we picked that fits the
 - Subagents: `SubagentStart` fires "when a subagent is spawned", `SubagentStop` "when a subagent finishes". Hooks
   inside a subagent carry its `agent_id` and `agent_type`. `SubagentStart` has no task, so the translator pairs it
   with the `Agent` tool call that spawned it: exactly, by the `agentId` the call's `PostToolUse` names (a foreground
-  call's when the subagent is done, a background launch's at once); before that, by type when only one open call
-  has it (inferred: that the call's `PreToolUse` comes before the subagent's `SubagentStart`). A `SubagentStop` hook can keep a subagent from stopping (exit code 2).
+  call's when the subagent is done, a background launch's at once); otherwise by type, only when the one call of
+  that type still unclaimed is an open one (inferred: that the call's `PreToolUse` comes before the subagent's
+  `SubagentStart`). A completed call whose `agentId` no start claims (none, as in older `Task` results, or one in
+  another format) stays a candidate, so the guess is left out rather than wrong. A `SubagentStop` hook can keep a
+  subagent from stopping (exit code 2).
 - `idle_prompt` doesn't fire while a background subagent is still running.

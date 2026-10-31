@@ -340,6 +340,92 @@ fn a_background_claude_subagent_named_at_launch_starts_with_its_task() {
 }
 
 #[test]
+fn a_call_naming_an_id_no_subagent_starts_with_leaves_the_other_calls_task_out() {
+    // If the result's `agentId` isn't the hooks' `agent_id` (a different format), the call it names is still a
+    // candidate for the next start of its type: two candidates, so no guess.
+    let mut post = cc!("PostToolUse.Agent.background");
+    post["tool_response"]["agentId"] = json!("7f3a");
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+        post,
+        cc!("SubagentStart"),
+    ]);
+    assert_eq!(run.only().task(), None);
+}
+
+#[test]
+fn a_completed_call_naming_no_id_leaves_the_other_calls_task_out() {
+    // An older `Task` result has no `agentId`.
+    let mut post = cc!("PostToolUse.Agent");
+    post["tool_response"] = json!("factorial is called from src/main.rs:12.");
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+        post,
+        cc!("SubagentStart"),
+    ]);
+    assert_eq!(run.only().task(), None);
+}
+
+#[test]
+fn a_call_already_guessed_lends_its_task_to_no_other_start() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("SubagentStart"),
+        cc!("SubagentStart.second"),
+    ]);
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(
+        tasks,
+        [
+            ("agent-7f3a", Some("Find factorial callers")),
+            ("agent-8b4c", None)
+        ]
+    );
+}
+
+#[test]
+fn a_call_from_an_earlier_turn_names_its_subagent_to_no_one() {
+    // Named before the turn ended, started after: the name is forgotten.
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PostToolUse.Agent.background"),
+        cc!("Stop"),
+        cc!("UserPromptSubmit.second"),
+        cc!("SubagentStart"),
+    ]);
+    assert_eq!(run.only().task(), None);
+}
+
+#[test]
+fn a_subagent_from_an_earlier_turn_gets_no_corrective_start() {
+    // Started in one turn, named by a call in the next: the fold dropped it at the turn end, so nothing is sent.
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+        cc!("SubagentStart"),
+        cc!("Stop"),
+        cc!("UserPromptSubmit.second"),
+        cc!("PreToolUse.Agent"),
+    ]);
+    run.hook(cc!("PostToolUse.Agent"));
+    assert_eq!(run.subagent_frames(), vec![]);
+    assert!(run.subagents().is_empty());
+}
+
+#[test]
 fn an_agent_call_without_a_type_or_description_spawns_general_purpose_with_its_prompt() {
     let mut run = Run::claude();
     run.hooks(vec![
@@ -730,6 +816,21 @@ fn a_spawn_agent_call_without_a_type_or_message_spawns_default_with_its_task_nam
         run.subagent_frames(),
         vec![started("agent-a1b2", "default", Some("changelog-typos"))]
     );
+}
+
+#[test]
+fn a_spawn_agent_result_naming_no_id_leaves_the_other_calls_task_out() {
+    let mut post = cx!("PostToolUse.spawn_agent");
+    post["tool_response"] = json!("Spawned agent Ada");
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PreToolUse.spawn_agent.second"),
+        post,
+        cx!("SubagentStart"),
+    ]);
+    assert_eq!(run.only().task(), None);
 }
 
 #[test]
