@@ -115,11 +115,12 @@ use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
     AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr, SessionClosed,
     SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp,
-    WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
+    UiLayout, WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
 };
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
 use crate::ids::{MachineId, SessionId};
+use crate::layout::{Layout, LayoutOp};
 use crate::ports::archive::{ArchiveError, CaptureReason};
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
@@ -443,6 +444,10 @@ pub enum HostEvent {
         exists: bool,
         note: Option<String>,
     },
+    /// A client asked for the screen layout (`_shepherd/ui/get`).
+    UiGet { reply: ReplyTo },
+    /// A client asked to change the screen layout by `op` (`_shepherd/ui/apply`).
+    UiApply { reply: ReplyTo, op: LayoutOp },
     /// The runtime has just started, the logs folded: nothing an earlier host run started is still running.
     Restarted,
     /// The runtime has just started, the logs folded, and this machine is called `name` (see [`crate::machine::name`]).
@@ -778,6 +783,8 @@ pub struct Host {
     cleaning: BTreeSet<PathBuf>,
     /// What this machine was last recorded as being called (`machine/renamed`).
     machine_name: Option<String>,
+    /// The latest `ui/layout` in the host log, as recorded: see [`Host::layout`].
+    layout: Option<Layout>,
 }
 
 impl Host {
@@ -819,6 +826,21 @@ impl Host {
     /// What this machine was last recorded as being called, if it ever was (see [`HostEvent::MachineNamed`]).
     pub fn machine_name(&self) -> Option<&str> {
         self.machine_name.as_deref()
+    }
+
+    /// The screen layout: the latest recorded (the default before any), with every pane showing one of this host's own
+    /// sessions that is closed, or not known, showing nothing (a peer's session is kept: it is the peer's to list).
+    /// Computed from the whole fold, so it is the same whichever log is replayed first.
+    pub fn layout(&self) -> Layout {
+        self.layout
+            .clone()
+            .unwrap_or_default()
+            .retain_sessions(|id| self.listed(id))
+    }
+
+    /// Session `id` is listed: created and not closed (it may be closing).
+    fn listed(&self, id: &SessionId) -> bool {
+        self.sessions.get(id).is_some_and(|e| !e.closed)
     }
 
     /// The selected workspace, if any.
@@ -1291,6 +1313,33 @@ impl Host {
                     name,
                 }))],
             },
+            HostEvent::UiGet { reply } => vec![HostCommand::Reply {
+                to: reply,
+                result: Ok(HostResult::Layout(self.layout())),
+            }],
+            HostEvent::UiApply { reply, op } => {
+                let layout = self.layout();
+                let next = match layout.apply(&op, |id| self.listed(id)) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        return vec![reply_err(
+                            reply,
+                            WireError::InvalidParams(error.to_string()),
+                        )];
+                    }
+                };
+                let answer = HostCommand::Reply {
+                    to: reply,
+                    result: Ok(HostResult::Layout(next.clone())),
+                };
+                match next == layout {
+                    true => vec![answer],
+                    false => vec![
+                        append_host(ShepherdFrame::UiLayout(UiLayout { layout: next })),
+                        answer,
+                    ],
+                }
+            }
             HostEvent::Restarted => {
                 let why = || Some("the host stopped before the worktree was removed".to_owned());
                 let sessions = self
@@ -1835,6 +1884,9 @@ impl Host {
                 }
                 ShepherdFrame::MachineRenamed(renamed) => {
                     self.machine_name = Some(renamed.name.clone());
+                }
+                ShepherdFrame::UiLayout(recorded) => {
+                    self.layout = Some(recorded.layout.clone());
                 }
                 _ => {}
             }

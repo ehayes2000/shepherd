@@ -90,7 +90,7 @@
 //!   consumer and both ends are closed, logged with why. At most
 //!   [`MAX_OPEN_PER_PEER`](shepherd_core::ports::MAX_OPEN_PER_PEER) tunnels to one machine are open
 //!   at once (the most its one connection carries); one more is refused at once.
-//! - **Local only.** Pairing, trust and updating the host (core's [`peering::refused_to_peers`]) are refused on another
+//! - **Local only.** Pairing, trust, updating the host and the screen layout (core's [`peering::refused_to_peers`]) are refused on another
 //!   machine's conn, like a tunnel through this host; a conn the link no longer knows is refused too, never taken for
 //!   a local one.
 //! - **Spawn sizes.** Every event goes to core through a [`Sizes`], which keeps the latest size each session's terminal
@@ -132,7 +132,7 @@ use shepherd_core::ports::{
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
     HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SessionNew,
-    SubscribeFrom, UpgradeAnswer, WireError,
+    SubscribeFrom, UiApply, UpgradeAnswer, WireError,
 };
 use shepherd_term::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Screen};
 
@@ -2298,6 +2298,14 @@ impl<
                 });
             }
             ClientRequest::Tunnel(tunnel) => self.tunnel(conn, id, tunnel.machine, first),
+            ClientRequest::UiGet(_) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::UiGet { reply });
+            }
+            ClientRequest::UiApply(UiApply { op }) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::UiApply { reply, op });
+            }
             ClientRequest::SessionResume(resume) => {
                 let reply = self.reply_to(conn, id);
                 let session = resume.session;

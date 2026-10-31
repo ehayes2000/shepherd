@@ -266,6 +266,8 @@ impl FakeHost {
             ClientRequest::WorktreeRemove(_) => Ok(HostResult::WorktreeRemove(
                 shepherd_core::wire::WorktreeRemoveOk::default(),
             )),
+            ClientRequest::UiGet(_) => Ok(HostResult::Layout(self.driver.host().layout())),
+            ClientRequest::UiApply(apply) => reply_of(self.driver.ui_apply(apply.op)),
             // The client TUI never pairs or tunnels yet: the scripted host doesn't either.
             other @ (ClientRequest::PairStart(_)
             | ClientRequest::PairWait(_)

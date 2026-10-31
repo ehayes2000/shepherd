@@ -90,6 +90,7 @@ use jiff::SignedDuration;
 use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp};
 use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
+use crate::layout::{Content, Layout};
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
@@ -798,6 +799,26 @@ impl Client {
     /// [`Host::workspaces`] and [`Client::workspace`].
     pub fn workspaces(&self) -> &[PathBuf] {
         self.acting_feed().registry.workspaces()
+    }
+
+    /// The screen layout this machine's host records (decision 0022), folded from its log: the default until it records
+    /// one, and every pane of a session that closed showing nothing. A peer's host's layout is that machine's windows',
+    /// not this one's.
+    pub fn host_layout(&self) -> Layout {
+        self.local.registry.layout()
+    }
+
+    /// The layout as this window shows it: [`Client::host_layout`] with every [`Content::Selected`] pane showing this
+    /// client's selected session (naming its machine when a peer's host has it), or nothing with none selected.
+    pub fn layout(&self) -> Layout {
+        let shown = match &self.selected {
+            None => Content::Empty,
+            Some(id) => match self.homes.get(id) {
+                Some(At::Peer(machine)) => Content::peer_session(machine.clone(), id.clone()),
+                Some(At::Local) | None => Content::session(id.clone()),
+            },
+        };
+        self.host_layout().resolve_selected(&shown)
     }
 
     /// Open sessions, grouped by machine (this one first, then the peers by name), each group newest first.

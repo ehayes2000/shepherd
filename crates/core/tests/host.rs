@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
 use shepherd_core::config::AgentKind;
@@ -12,6 +13,7 @@ use shepherd_core::host::{
     ResumeSpec, ResumeTarget, ResumeUnavailable, WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::SessionId;
+use shepherd_core::layout::{Content, LayoutOp, Pane, Ratio, SplitDir};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::wire::{HostResult, InputKind, SessionNewOk, WireError};
 use shepherd_testkit::builders::{
@@ -952,6 +954,10 @@ enum Op {
     Input(u8),
     Resize(u8),
     SelectWorkspace(u8),
+    /// Show session `i` in the current page's first pane (a layout op, decision 0022).
+    Show(u8),
+    /// Split the current page's first pane, showing session `i` in the new half.
+    Split(u8),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -963,7 +969,9 @@ fn op() -> impl Strategy<Value = Op> {
         (id.clone(), proptest::option::of(-1i32..3)).prop_map(|(i, c)| Op::Exit(i, c)),
         id.clone().prop_map(Op::Input),
         id.clone().prop_map(Op::Resize),
-        id.prop_map(Op::SelectWorkspace),
+        id.clone().prop_map(Op::SelectWorkspace),
+        id.clone().prop_map(Op::Show),
+        id.prop_map(Op::Split),
     ]
 }
 
@@ -1000,9 +1008,47 @@ fn run(ops: Vec<Op>) -> HostDriver {
             Op::SelectWorkspace(i) => {
                 select(&mut host, &format!("/src/w{i}"));
             }
+            Op::Show(i) | Op::Split(i) => {
+                let layout = host.host().layout();
+                let mut pane = &layout.current_page().root;
+                while let Pane::Split { a, .. } = pane {
+                    pane = a;
+                }
+                let content = Content::session(sid(&id(i)));
+                let op = match op {
+                    Op::Show(_) => LayoutOp::Put {
+                        pane: pane.id(),
+                        content,
+                    },
+                    _ => LayoutOp::Split {
+                        pane: pane.id(),
+                        dir: SplitDir::Vertical,
+                        ratio: Ratio::default(),
+                        content,
+                    },
+                };
+                let reply = host.reply_to();
+                host.handle(HostEvent::UiApply { reply, op });
+            }
         }
     }
     host
+}
+
+/// The sessions the leaves of `pane` show.
+fn shown_sessions(pane: &Pane) -> Vec<SessionId> {
+    match pane {
+        Pane::Leaf {
+            content: Content::Session { machine: None, id },
+            ..
+        } => vec![id.clone()],
+        Pane::Leaf { .. } => Vec::new(),
+        Pane::Split { a, b, .. } => {
+            let mut shown = shown_sessions(a);
+            shown.extend(shown_sessions(b));
+            shown
+        }
+    }
 }
 
 /// The appended envelopes split into their logs (the host log and one per session), each in seq order.
@@ -1108,7 +1154,24 @@ fn created_ts() -> impl Strategy<Value = String> {
         .prop_map(|(secs, nanos, digits, offset)| rfc3339(secs, nanos, digits, offset))
 }
 
+/// The proptest config for this file: a fixed seed (`0x5eed_0048`, or `PROPTEST_RNG_SEED` to try another), `cases` cases,
+/// and no failure-persistence file, so every run of the gate checks the same cases (as T45's UI invariants do).
+fn fixed_seed(cases: u32) -> ProptestConfig {
+    let seed = match ProptestConfig::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => 0x5eed_0048,
+    };
+    ProptestConfig {
+        cases,
+        rng_seed: RngSeed::Fixed(seed),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
+    #![proptest_config(fixed_seed(ProptestConfig::default().cases))]
+
     #[test]
     fn sessions_are_ordered_by_created_instant_then_id(stamps in proptest::collection::vec(created_ts(), 1..12)) {
         let mut host = HostDriver::new();
@@ -1134,9 +1197,16 @@ proptest! {
         interleavings in proptest::collection::vec(proptest::collection::vec(any::<u16>(), 1..40), 1..6),
     ) {
         let host = run(ops);
+        let listed: Vec<SessionId> = host.host().sessions().into_iter().map(|s| s.id).collect();
+        for page in host.host().layout().pages() {
+            for session in shown_sessions(&page.root) {
+                prop_assert!(listed.contains(&session), "{} is shown but not listed", session);
+            }
+        }
         for picks in &interleavings {
             let replayed = replay_interleaved(logs(&host), picks);
             prop_assert_eq!(replayed.sessions(), host.host().sessions());
+            prop_assert_eq!(replayed.layout(), host.host().layout());
             prop_assert_eq!(&replayed, host.host());
         }
     }

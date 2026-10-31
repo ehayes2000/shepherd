@@ -301,6 +301,23 @@ fn another_machine_may_not_update_this_machines_host() {
 }
 
 #[test]
+fn another_machine_may_not_change_this_machines_layout() {
+    let mut a = assert_refused_from_peer(ClientRequest::UiApply(shepherd_core::wire::UiApply {
+        op: shepherd_core::layout::LayoutOp::PageNew {
+            name: Some("theirs".into()),
+            content: shepherd_core::layout::Content::Empty,
+        },
+    }));
+    a.step();
+    assert_eq!(a.host().layout(), shepherd_core::layout::Layout::default());
+}
+
+#[test]
+fn another_machine_may_not_read_this_machines_layout() {
+    assert_refused_from_peer(ClientRequest::UiGet(shepherd_core::wire::UiGet {}));
+}
+
+#[test]
 fn another_machine_may_not_list_this_machines_peers() {
     let (_, msgs) = ask_from_peer(ClientRequest::PeerList(PeerList {}));
     let why = refusal(&msgs, &1.into());

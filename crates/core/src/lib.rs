@@ -9,6 +9,7 @@ pub mod config;
 pub mod display;
 pub mod host;
 pub mod ids;
+pub mod layout;
 pub mod machine;
 pub mod ports;
 pub mod session;

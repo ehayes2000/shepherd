@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::Frame;
 use crate::ids::MachineId;
+use crate::layout::Layout;
 
 /// One frame from the initial `_shepherd/*` table, by method.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +30,7 @@ pub enum ShepherdFrame {
     MachineRenamed(MachineRenamed),
     PeerTrusted(PeerTrusted),
     PeerRemoved(PeerRemoved),
+    UiLayout(UiLayout),
 }
 
 impl ShepherdFrame {
@@ -50,6 +52,7 @@ impl ShepherdFrame {
             Self::MachineRenamed(_) => "_shepherd/machine/renamed",
             Self::PeerTrusted(_) => "_shepherd/peer/trusted",
             Self::PeerRemoved(_) => "_shepherd/peer/removed",
+            Self::UiLayout(_) => "_shepherd/ui/layout",
         }
     }
 
@@ -73,6 +76,7 @@ impl ShepherdFrame {
             Self::MachineRenamed(p) => to_params(p),
             Self::PeerTrusted(p) => to_params(p),
             Self::PeerRemoved(p) => to_params(p),
+            Self::UiLayout(p) => to_params(p),
         };
         Frame::notification(self.method(), params)
     }
@@ -100,6 +104,7 @@ impl ShepherdFrame {
             "_shepherd/machine/renamed" => Self::MachineRenamed(p(params)?),
             "_shepherd/peer/trusted" => Self::PeerTrusted(p(params)?),
             "_shepherd/peer/removed" => Self::PeerRemoved(p(params)?),
+            "_shepherd/ui/layout" => Self::UiLayout(p(params)?),
             _ => return None,
         })
     }
@@ -337,4 +342,11 @@ pub struct PeerTrusted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRemoved {
     pub node: MachineId,
+}
+
+/// The screen layout is now `layout` (host log; decision 0022): every window draws it. The latest one is current, with
+/// the panes of sessions closed since showing nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiLayout {
+    pub layout: Layout,
 }
