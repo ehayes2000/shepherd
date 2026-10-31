@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
-| T42 | Archive port and host capture | review | task/t42-archive-capture @ 36a1de7 | 2 | round 2 fixed; round 3 review (focused) |
+| T42 | Archive port and host capture | merging | task/t42-archive-capture @ 36a1de7 | 3 | round 3 APPROVE |
 | T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |

@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | review | task/t42-archive-capture @ 36a1de7 | 2 | round 2 fixed; round 3 review (focused) |
-| T32 Create sessions on any machine | [multi-machine](features/multi-machine.md) | merging | task/t32-new-session-machine @ 9dc595d | 2 | round 2 APPROVE; untarget test minors → T32b |
+| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | merging | task/t42-archive-capture @ 36a1de7 | 3 | round 3 APPROVE |
 
 ## Ready to start
 
@@ -28,6 +27,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F50 Tighten F47's flush tests | [host-hot-swap](features/host-hot-swap.md) | todo | F47, T31a |
+| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | todo | T32 |
 | F52 Peer conn hardening after the tunnel | [multi-machine](features/multi-machine.md) | todo | T31a |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
@@ -43,7 +43,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 9 | 1 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 5 | 2 | A new build replaces the running host in place without stopping sessions |
-| [Multi-machine](features/multi-machine.md) | M4 | 5 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
+| [Multi-machine](features/multi-machine.md) | M4 | 6 | 3 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |

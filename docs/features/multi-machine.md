@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
-| T32 | Create sessions on any machine | merging | task/t32-new-session-machine @ 9dc595d | 2 | round 2 APPROVE; untarget test minors → T32b |
+| T32 | Create sessions on any machine | done | 482db06 | 2 | round 2 APPROVE; untarget test minors → T32b |
 | T32b | Show whether each machine's link is relayed or direct | todo |  |  |  |
 | F52 | Peer conn hardening after the tunnel | todo |  |  |  |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
