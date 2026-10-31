@@ -16,7 +16,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
-| T41 | Restore transcripts for a target cwd | merging | task/t41-archive-restore @ 418b8da (on da21144) | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
+| T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
@@ -118,6 +118,8 @@ scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
   replaces its path, then `put_session` with the new agent session id before the next capture (capture checks against the
   indexed id). Codex rollouts compressed in place after 7 days (`.jsonl.zst`) must be captured too (decompress through the
   archive's bounded reader, or archive the `.zst` as is with a role/flag) so a long-idle Codex session can still be removed.
+- From T41's review: `RestoreError::Changed`'s doc comment (crates/archive/src/restore.rs ~112) still says "stopped
+  resolving to itself"; it now means "is no longer the same directory (device and inode)". Fix the wording.
 notes: (binding) The archive root is `~/.shepherd/archive/` (resolved once at host start). `machine` in rows is T29's
 `MachineId`. Times come from the host's Tick, never a clock in core.
 

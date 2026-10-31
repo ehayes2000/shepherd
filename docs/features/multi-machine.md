@@ -12,8 +12,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
 | T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
-| T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split | | see T31a/T31b |
-| T31a | Tunnel to a peer's host over iroh | todo |  |  |  |
+| T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
+| T31a | Tunnel to a peer's host over iroh | building | task/t31a-iroh-tunnel |  |  |
 | T31b | Merged sidebar across machines | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 
@@ -119,7 +119,7 @@ accepted (decision 0019): the host owns the only iroh endpoint. The client reach
 median, direct is about 0.2–0.5 ms.
 
 ### T31a: Tunnel to a peer's host over iroh
-depends: T31, F47
+depends: T30, F47
 touches: ports::link, adapters::link (iroh), adapters::peers, shepherd::host::runtime, wire
 goal: A client on this machine can open a conn to a trusted peer's host through its own local host.
 acceptance:
