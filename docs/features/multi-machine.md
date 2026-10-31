@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
-| T30 | Pairing and trusted peers | todo |  |  |  |
+| T30 | Pairing and trusted peers | building | task/t30-pairing @ 112bbcc | 0 | notes added |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 
@@ -74,6 +74,24 @@ accepted (decision 0019): ticket = `iroh_tickets` `PairTicket {addr, name, token
 (consumed by the first attempt), and expires after 10 min; the pair ALPN is accepted only while one is pending. Trust is
 enforced in iroh's `after_handshake` hook against the set core folds from `peer/trusted`. Discovery: `presets::N0` address lookup
 plus a `MemoryLookup` seeded from a last-address cache. Verify the pkarr/DNS route, which the spike couldn't exercise.
+notes: (binding)
+- `Peers` port (trait in core, stateful fake in testkit, per-case contract run against the fake and the iroh adapter). Its
+  surface covers: bind with the machine key from T29 (`IrohMachineKey::secret()`), set the trusted set (data pushed from
+  core), start/stop accepting the pair ALPN, dial a peer for pairing with a token, and events (pairing request with token
+  and name, paired, connection from a trusted peer, refused untrusted). Write the trait in the PR description before coding.
+- The real adapter's contract runs two endpoints on localhost with relays and address lookup disabled: no network in the
+  gate. The pkarr/DNS discovery check is a manual step in `scripts/e2e-agents.sh`'s sibling `scripts/e2e-peers.sh`
+  (opt-in, run by the user), not in the gate.
+- The host binds its endpoint lazily: only while it has at least one trusted peer or a pending pairing. A host that never
+  paired never goes online (so existing real-host tests and users who don't pair make no network calls).
+- The 16-byte token comes from the runtime (OS randomness), reaches core as an event field, and is compared in constant
+  time in the adapter; expiry is driven by Tick in core. A wrong token consumes the pending pairing.
+- CLI: `shepherd pair` (asks the local host for a ticket, prints it, waits until joined or expired), `shepherd join
+  <ticket>`, `shepherd peers` (list names and ids) and `shepherd unpair <name|id>` (appends `_shepherd/peer/removed`;
+  the adapter drops the peer's connections at once). Frames are additive and documented in docs/acpp.md.
+- Peer names and ids shown anywhere go through display_safe. The last-address cache is `~/.shepherd/peer-addrs.json`
+  (0600, private_fs), non-authoritative.
+- Tests never touch the real `~/.shepherd`; no test reaches n0's relays.
 
 ### T31: Remote link and merged sidebar
 depends: T30, T12

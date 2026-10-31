@@ -15,6 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ c3cca50 (on 60089d5) | 2 | read-only version peek; rollback/newtype/lock tests; percent-encoding allowed |
+| T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
@@ -28,7 +29,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F46 Fake claude/codex scripts are fresh executables (macOS scan stall) | [host-and-client](features/host-and-client.md) | todo | F45 |
 | F44 hotswap_e2e times out under load | [host-hot-swap](features/host-hot-swap.md) | todo | T36b |
-| T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | todo | T29 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
 
