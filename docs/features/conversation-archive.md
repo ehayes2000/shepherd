@@ -17,7 +17,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
-| T42 | Archive port and host capture | review | task/t42-archive-capture @ 98379d9 |  | built; Created gains base_commit (PM ok); disclosed a --no-verify WIP commit undone during rebase; profile-set agent home blocks removal (→ T42b) |
+| T42 | Archive port and host capture | fixing | task/t42-archive-capture @ 98379d9 | 1 | round 1 CHANGES: patch-ids vary with quotePath/interHunkContext; hostile-config test too weak; post-capture in-use recheck untested; missing transcript blocked removal forever (→ ArchiveError::Missing) |
 | T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
@@ -133,7 +133,8 @@ pub struct ArchivedSession { pub id: SessionId, pub repo: RepoRoot /* the repo's
 pub struct CaptureRequest { pub session: SessionId, pub at: jiff::Timestamp, pub head: Option<CommitHash>,
     pub reason: CaptureReason /* TurnEnd | Close | BeforeRemove | Manual */, pub commits: Vec<(CommitHash, Option<PatchId>)>,
     pub agent_home: PathBuf, pub transcript_path: PathBuf }
-pub enum ArchiveError { Refused(String) /* capture refused the path or limits */, Failed(String) /* IO, index */ }
+pub enum ArchiveError { Refused(String) /* capture refused the path or limits */, Missing(String) /* no transcript file:
+    nothing to capture, removal proceeds (amended after T42's review) */, Failed(String) /* IO, index */ }
 ```
 `CommitHash`, `PatchId` and `RepoRoot` are validated hex newtypes in core (not free strings). `Worktrees` gains
 `commits_since(&self, path: &WorktreePath, base: &CommitHash) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError>`
@@ -156,6 +157,8 @@ acceptance:
 - From T42: a profile that sets its own `CLAUDE_CONFIG_DIR` / `CODEX_HOME` puts transcripts outside the host's agent home,
   so every capture is refused and that session's worktree can never be removed. Capture uses the agent home the session's
   agent actually ran with (its launch env), falling back to the host's; test with a profile that sets it.
+- From T42's review: an agent session whose cwd is not in a git repo fails `root_commit` on every turn end (a warning each
+  time) and is never archived. Archive it under a repo-less key, or say clearly once that it can't be archived.
 scope: crates/core, crates/archive, crates/shepherd
 
 ### T43: `shepherd archive` CLI

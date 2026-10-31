@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | review | task/t42-archive-capture @ 98379d9 |  | built; Created gains base_commit (PM ok); disclosed a --no-verify WIP commit undone during rebase; profile-set agent home blocks removal (→ T42b) |
-| T31b Merged sidebar across machines | [multi-machine](features/multi-machine.md) | merging | task/t31b-merged-sidebar @ cd3c0e2 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
+| T42 Archive port and host capture | [conversation-archive](features/conversation-archive.md) | fixing | task/t42-archive-capture @ 98379d9 | 1 | round 1 CHANGES: patch-ids vary with quotePath/interHunkContext; hostile-config test too weak; post-capture in-use recheck untested; missing transcript blocked removal forever (→ ArchiveError::Missing) |
 
 ## Ready to start
 
@@ -43,7 +42,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 9 | 1 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 5 | 2 | A new build replaces the running host in place without stopping sessions |
-| [Multi-machine](features/multi-machine.md) | M4 | 4 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
+| [Multi-machine](features/multi-machine.md) | M4 | 5 | 3 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
