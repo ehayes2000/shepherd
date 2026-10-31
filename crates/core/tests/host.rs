@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::{
-    Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo, ResumeSpec, ResumeTarget,
-    ResumeUnavailable, WorkspaceAsk, expand_home,
+    AgentTranscript, Host, HostCommand, HostEvent, HostSession, NewSessionSpec, ReplyTo,
+    ResumeSpec, ResumeTarget, ResumeUnavailable, WorkspaceAsk, expand_home,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -522,6 +522,95 @@ fn the_agent_session_id_is_captured_from_agent_started() {
         }))
     );
     assert_eq!(host.host().sessions()[0].resume, Ok(()));
+}
+
+// ---------- agent transcript ----------
+
+fn transcript(host: &HostDriver, id: &str) -> Option<AgentTranscript> {
+    host.host().agent_transcript(&sid(id))
+}
+
+#[test]
+fn the_transcript_path_from_a_hook_reaches_the_host() {
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started_with_transcript(
+        "s1",
+        "claude-code",
+        "abc123",
+        "/h/.claude/projects/-w/abc123.jsonl",
+    );
+    assert_eq!(
+        transcript(&host, "s1"),
+        Some(AgentTranscript {
+            agent: AgentKind::ClaudeCode,
+            agent_session_id: "abc123".to_owned(),
+            transcript_path: "/h/.claude/projects/-w/abc123.jsonl".into(),
+        })
+    );
+}
+
+#[test]
+fn a_session_whose_agent_reported_no_transcript_path_has_no_transcript() {
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started("s1", "claude-code", Some("abc123"));
+    assert_eq!(transcript(&host, "s1"), None);
+}
+
+#[test]
+fn a_new_agent_session_without_a_path_forgets_the_old_sessions_path() {
+    // `/clear` starts a new agent session: the old transcript is not the new session's.
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started_with_transcript("s1", "claude-code", "first", "/t/first.jsonl");
+    host.agent_started("s1", "claude-code", Some("second"));
+    assert_eq!(transcript(&host, "s1"), None);
+}
+
+#[test]
+fn a_resume_of_the_same_agent_session_keeps_its_transcript_path() {
+    // The host's own `agent/started` on resume names the agent session but not its transcript.
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started_with_transcript("s1", "claude-code", "abc123", "/t/abc123.jsonl");
+    host.pty_exited("s1", Some(0));
+    let cmds = host.resume("s1", claude_resume_spec());
+    assert!(matches!(cmds.first(), Some(HostCommand::Append(_))));
+    assert_eq!(
+        transcript(&host, "s1").map(|t| t.transcript_path),
+        Some("/t/abc123.jsonl".into())
+    );
+}
+
+#[test]
+fn the_latest_transcript_path_wins() {
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started_with_transcript("s1", "claude-code", "first", "/t/first.jsonl");
+    host.agent_started_with_transcript("s1", "claude-code", "second", "/t/second.jsonl");
+    let t = transcript(&host, "s1").expect("a transcript");
+    assert_eq!(
+        (t.agent_session_id.as_str(), t.transcript_path),
+        ("second", "/t/second.jsonl".into())
+    );
+}
+
+#[test]
+fn a_shell_session_has_no_agent_transcript() {
+    let mut host = HostDriver::new();
+    host.new_session("s1");
+    host.agent_started_with_transcript("s1", "claude-code", "abc123", "/t/abc123.jsonl");
+    assert_eq!(transcript(&host, "s1"), None);
+}
+
+#[test]
+fn a_closed_session_has_no_agent_transcript() {
+    let mut host = HostDriver::new();
+    host.new_session_with("s1", claude_session_spec());
+    host.agent_started_with_transcript("s1", "claude-code", "abc123", "/t/abc123.jsonl");
+    host.close("s1");
+    assert_eq!(transcript(&host, "s1"), None);
 }
 
 #[test]

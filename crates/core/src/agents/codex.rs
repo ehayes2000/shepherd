@@ -493,6 +493,7 @@ fn session_start(state: &mut CodexTranslation, hook: &Hook) -> Frames {
         agent_session_id: agent_session_id.map(str::to_owned),
         pid: None,
         command: None,
+        transcript_path: hook.str("transcript_path").map(str::to_owned),
     })
     .to_frame();
     state.end_turn();

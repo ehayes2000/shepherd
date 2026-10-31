@@ -247,6 +247,16 @@ pub struct ResumeTarget {
     pub agent_session_id: String,
 }
 
+/// Where an agent session's transcript is, as its agent's hooks said: [`Host::agent_transcript`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTranscript {
+    pub agent: AgentKind,
+    /// The agent's own id for its session.
+    pub agent_session_id: String,
+    /// The hook payload's `transcript_path`, as given: never computed by shepherd.
+    pub transcript_path: PathBuf,
+}
+
 /// Why a session can't be resumed. Its text is short, for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ResumeUnavailable {
@@ -604,6 +614,8 @@ struct Entry {
     cwd: Option<PathBuf>,
     /// The agent's own session id, from the latest `agent/started` that had one.
     agent_session_id: Option<String>,
+    /// Where the agent writes that agent session's transcript, from the `agent/started` that named it.
+    transcript_path: Option<PathBuf>,
     workspace: Option<PathBuf>,
     warning: Option<String>,
     /// It has a `session/renamed`, by the user or by shepherd: it is never auto-named again.
@@ -752,6 +764,20 @@ impl Host {
     /// What resuming open session `id` runs, or why it can't be resumed. `None` for a session that isn't open.
     pub fn resume_target(&self, id: &SessionId) -> Option<Result<ResumeTarget, ResumeUnavailable>> {
         self.open(id).map(Entry::resume_target)
+    }
+
+    /// Open session `id`'s current agent session and the transcript its hooks named. `None` for a session that isn't
+    /// open, doesn't run Claude Code or Codex, or whose agent hasn't reported both yet.
+    pub fn agent_transcript(&self, id: &SessionId) -> Option<AgentTranscript> {
+        let entry = self.open(id)?;
+        let agent = entry
+            .agent
+            .filter(|a| matches!(a, AgentKind::ClaudeCode | AgentKind::Codex))?;
+        Some(AgentTranscript {
+            agent,
+            agent_session_id: entry.agent_session_id.clone()?,
+            transcript_path: entry.transcript_path.clone()?,
+        })
     }
 
     /// When open session `id`'s PTY exited, or it failed to start: the `ts` of that entry. `None` while it isn't exited
@@ -1053,6 +1079,7 @@ impl Host {
                     agent_session_id: Some(target.agent_session_id),
                     pid: None,
                     command: None,
+                    transcript_path: None,
                 });
                 vec![
                     append(&session, started),
@@ -1651,6 +1678,7 @@ impl Host {
                     profile: created.profile.clone(),
                     cwd: created.cwd.as_ref().map(PathBuf::from),
                     agent_session_id: None,
+                    transcript_path: None,
                     workspace: created.workspace.as_ref().map(PathBuf::from),
                     warning: None,
                     renamed: false,
@@ -1741,6 +1769,15 @@ impl Host {
                     if env.source().kind == SourceKind::Shepherd && entry.phase == Phase::Exited {
                         entry.phase = Phase::Running;
                         entry.exited_at = None;
+                    }
+                    // A transcript path belongs to the agent session it came with: a new agent session without one
+                    // forgets the old path; the host's own `agent/started` on resume names the same session and
+                    // keeps it.
+                    if started.transcript_path.is_some()
+                        || (started.agent_session_id.is_some()
+                            && started.agent_session_id != entry.agent_session_id)
+                    {
+                        entry.transcript_path = started.transcript_path.as_ref().map(PathBuf::from);
                     }
                     if let Some(agent_session) = &started.agent_session_id {
                         entry.agent_session_id = Some(agent_session.clone());

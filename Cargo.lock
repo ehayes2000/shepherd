@@ -3959,6 +3959,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "rusqlite",
+ "serde_json",
  "sha2 0.10.9",
  "shepherd-archive",
  "tempfile",

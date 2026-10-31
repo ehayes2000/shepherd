@@ -13,7 +13,7 @@ value or one the reference lists. Inferred means a value we picked that fits the
 | fixture | documented | inferred |
 |---|---|---|
 | all | common fields `session_id`, `transcript_path`, `cwd`, `hook_event_name`, and `prompt_id`, `permission_mode`, `effort` where they appear | the `session_id`, path and `prompt_id` values, and which optional common fields each fixture carries |
-| `SessionStart.{startup,compact,clear}` | `source` (`startup`, `compact`, `clear`), `model` | `def456` as the new session id after `/clear` |
+| `SessionStart.{startup,compact,clear}` | `source` (`startup`, `compact`, `clear`), `model` | `def456` as the new session id after `/clear`, and its transcript `def456.jsonl` (the documented layout names a transcript by its session: `projects/<project>/<session>.jsonl`) |
 | `UserPromptSubmit`, `.second` | `prompt` | prompt texts |
 | `PreToolUse.Bash` | `tool_name`, `tool_input` (Bash: `command`, `description`, `timeout`, `run_in_background`), `tool_use_id` | `toolu_01ABC123` |
 | `PreToolUse.Read` | `tool_input.file_path` (always absolute) | path, `toolu_02DEF456` |

@@ -3,6 +3,7 @@
 //! internal crate, reads only the paths it is given, and never reads a clock, the environment or the network.
 
 mod blob;
+mod capture;
 mod ids;
 mod index;
 mod private;
@@ -12,6 +13,9 @@ pub use blob::{BlobError, BlobId, BlobStore, DEFAULT_MAX_BLOB_LEN, Sweep};
 pub use blob::{CRASH_BEFORE_RENAME, CRASH_EXIT_CODE};
 #[cfg(feature = "fault-injection-pause-before-rename")]
 pub use blob::{PAUSE_BEFORE_RENAME, PAUSE_MARKER};
+pub use capture::{Capture, CaptureError, CaptureLimits};
+#[cfg(feature = "fault-injection-pause-before-transcript-open")]
+pub use capture::{PAUSE_BEFORE_OPEN_MARKER, PAUSE_BEFORE_OPEN_SESSION};
 pub use ids::{
     AgentKind, AgentSessionId, BadValue, Branch, CommitHash, FileRole, MachineId, PatchId,
     PrNumber, RepoId, SessionId, SnapshotId, SnapshotReason,

@@ -1,6 +1,6 @@
 {
   "session_id": "def456",
-  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-app/abc123.jsonl",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-app/def456.jsonl",
   "cwd": "/Users/dev/app",
   "hook_event_name": "SessionStart",
   "source": "clear"

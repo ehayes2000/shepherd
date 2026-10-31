@@ -16,7 +16,7 @@ they list. Inferred means a value we picked that fits the documented type.
 | fixture | documented | inferred |
 |---|---|---|
 | all | common fields `session_id`, `transcript_path` (string or null), `cwd`, `hook_event_name`, `model`; `permission_mode` on the events that carry it; `turn_id` on turn-scoped events | the id, path, model and `turn_id` values |
-| `SessionStart.{startup,compact,clear}` | `source` (`startup`, `resume`, `clear`, `compact`, `fork`) | the new session id after `/clear` |
+| `SessionStart.{startup,compact,clear}` | `source` (`startup`, `resume`, `clear`, `compact`, `fork`) | the new session id after `/clear`, and its own rollout file named by that thread id (`rollout_file_name.rs`) |
 | `UserPromptSubmit` | `prompt` | prompt text |
 | `PreToolUse.Bash`, `PostToolUse.Bash` | `tool_name` (`Bash`), `tool_input.command`, `tool_use_id`, `tool_response` | `call_bash_1`, the output text |
 | `PermissionRequest.Bash` | `tool_name`, `tool_input` including `tool_input.description` (may be null), and no `tool_use_id` | that its `tool_input` otherwise equals the matching `PreToolUse`'s |

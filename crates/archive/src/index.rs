@@ -17,6 +17,7 @@ use std::fs::{self, File, TryLockError};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRe
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, TransactionBehavior, params};
 
 use crate::blob::{BlobError, BlobId, BlobStore, Sweep};
+use crate::capture::{Capture, CaptureError, read_transcripts};
 use crate::ids::{
     AgentKind, AgentSessionId, BadValue, Branch, CommitHash, FileRole, MachineId, PatchId,
     PrNumber, RepoId, SessionId, SnapshotId, SnapshotReason,
@@ -68,6 +70,9 @@ pub enum ArchiveError {
     UnknownSession(SessionId),
     #[error("snapshot {0} is not in the archive")]
     UnknownSnapshot(SnapshotId),
+    /// A capture refused its transcript path, or couldn't read it. Nothing was stored.
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
 }
 
 /// A session as the archive records it. [`Archive::put_session`] takes one and the lookups return them.
@@ -184,6 +189,8 @@ pub struct VerifyReport {
 #[derive(Debug)]
 pub struct Archive {
     blobs: BlobStore,
+    /// Bytes read from transcript files by captures through this handle.
+    capture_reads: AtomicU64,
     /// Fields drop in declaration order after [`Drop::drop`]: `conn` closes, then `live` is released, while `closing`
     /// still holds `index.lock`.
     conn: Mutex<Connection>,
@@ -258,6 +265,7 @@ impl Archive {
         conn.pragma_update(None, "foreign_keys", true)?;
         let archive = Self {
             blobs,
+            capture_reads: AtomicU64::new(0),
             conn: Mutex::new(conn),
             live,
             index_lock: opening_path,
@@ -275,6 +283,45 @@ impl Archive {
     /// How many blob files this handle has written (see [`BlobStore::writes`]).
     pub fn blob_writes(&self) -> u64 {
         self.blobs.writes()
+    }
+
+    /// How many bytes captures through this handle have read from transcript files.
+    pub fn capture_bytes_read(&self) -> u64 {
+        self.capture_reads.load(Ordering::Relaxed)
+    }
+
+    /// Snapshots the transcripts of recorded session `c.session` from `c.transcript_path`, the path its agent's hook
+    /// payload gave, which must be that agent session's transcript under `c.agent_home` (the rules are in the
+    /// `capture` module: a [`CaptureError`] otherwise, and nothing is stored). Unchanged files add no blobs.
+    pub fn capture(&self, c: &Capture<'_>) -> Result<SnapshotId, ArchiveError> {
+        let session = self
+            .sessions_where("id = ?1", params![c.session])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ArchiveError::UnknownSession(c.session.clone()))?;
+        let files = read_transcripts(
+            session.agent,
+            &session.agent_session_id,
+            c.agent_home,
+            c.transcript_path,
+            c.limits,
+            &self.capture_reads,
+        )?;
+        self.add_snapshot(&NewSnapshot {
+            session: c.session.clone(),
+            captured_at: c.captured_at,
+            head_commit: c.head_commit.clone(),
+            reason: c.reason,
+            files: files
+                .iter()
+                .map(|f| NewFile {
+                    role: f.role,
+                    original_path: f.path.clone(),
+                    content: &f.content,
+                })
+                .collect(),
+            commits: c.commits.clone(),
+        })
     }
 
     /// Records a session, or updates everything but its id and creation time if it is already recorded. Its repo is

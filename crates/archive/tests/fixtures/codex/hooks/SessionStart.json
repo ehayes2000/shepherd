@@ -1,0 +1,9 @@
+{
+  "session_id": "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b",
+  "transcript_path": "${AGENT_HOME}/sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b.jsonl",
+  "cwd": "/work/app",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "source": "startup"
+}

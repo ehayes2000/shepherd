@@ -1,0 +1,14 @@
+{
+  "session_id": "7d3c2a10-5b8e-4f61-9a2d-0c1e2f3a4b5c",
+  "transcript_path": "${AGENT_HOME}/projects/-work-app/7d3c2a10-5b8e-4f61-9a2d-0c1e2f3a4b5c.jsonl",
+  "cwd": "/work/app",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_id": "a1b2c3d4",
+  "agent_type": "Explore",
+  "agent_transcript_path": "${AGENT_HOME}/projects/-work-app/7d3c2a10-5b8e-4f61-9a2d-0c1e2f3a4b5c/subagents/agent-a1b2c3d4.jsonl",
+  "last_assistant_message": "README.md",
+  "background_tasks": [],
+  "session_crons": []
+}
