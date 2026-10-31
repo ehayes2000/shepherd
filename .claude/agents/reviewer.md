@@ -13,6 +13,8 @@ Never run `rm` on a glob or a variable path (`rm -f $DIR/*`, `rm -rf $D`): the u
   directory, so there is nothing to clear first. Run one load round at a time, never several binaries' rounds at once.
 - Deleting something you created: `scripts/scratch-rm.sh PATH...` (full paths, no globs, temp dirs only).
 - Scratch worktrees: `git worktree remove --force <path>`.
+- Name scratch dirs and worktrees uniquely (include your task id and a random suffix, e.g. `mktemp -d`): other agents share
+  the scratchpad and may remove a generic name like `wt` or `target`. Run `scripts/check.sh` only from inside your worktree.
 - Mutation builds use your own `CARGO_TARGET_DIR` in your scratch dir, never the builder's worktree `target/`: cargo's
   artifact hashes don't depend on the source path, so builds of two trees in one target dir overwrite each other.
 

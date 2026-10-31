@@ -15,3 +15,5 @@ decision), and moves it to "Filed" with a pointer to where it went.
 <!-- PM moves items here: "- <item> → <where it went>" -->
 - Conversation archive (proposal `docs/proposals/conversation-archive.md`) → `docs/features/conversation-archive.md`
   (T38–T44) and decision 0020.
+- Prompt agents from a CLI (manager/subagents), manage the UI from a CLI (splits, pages), test complex UI (several
+  pages) → `docs/features/automation.md` (T45-T50) and decision 0022.

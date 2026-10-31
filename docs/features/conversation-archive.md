@@ -18,7 +18,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | done | 9a91698 | 3 | round 3 APPROVE |
-| T42b | Capture across `/clear` and compressed Codex rollouts | building | task/t42b-capture-edges |  |  |
+| T42b | Capture across `/clear` and compressed Codex rollouts | fixing | task/t42b-capture-edges @ 8b30a11 | 1 | round 1 CHANGES: unbounded /clear queue; removing guard untested; zstd window cap; compress race → Missing; compact check |
+| F54 | Record each session's launch agent home | todo |  |  |  |
 | T43 | `shepherd archive` CLI | done | f594ec9 | 2 | round 2 APPROVE; argv faithful-check test → T44 |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
 
@@ -166,6 +167,17 @@ scope: crates/core, crates/archive, crates/shepherd, crates/tui
 notes: (binding) `agent_home` stays a parameter to the archive crate; the session's launch env is known to the host (the
 profile's env), resolved in core purely from that data, never by reading the process env in core. Builders never run the
 real agents; compressed-rollout fixtures are built from the documented format and marked provisional (T44 re-records).
+
+### F54: Record each session's launch agent home
+depends: T42b
+touches: core::host (session/created), shepherd::host
+goal: From T42b: capture resolves the agent home from the profile env as configured now, so editing the config after a
+session launched can point capture at the wrong place (refused, so the worktree is kept).
+acceptance:
+- `session/created` records the agent home the session launched with (optional additive field; old logs fall back to
+  today's resolution). Capture uses it. Test: edit the profile's `CLAUDE_CONFIG_DIR` after launch; capture still reads
+  from where the agent wrote.
+scope: crates/core, crates/shepherd
 
 ### T43: `shepherd archive` CLI
 depends: T42, T41

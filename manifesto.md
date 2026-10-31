@@ -59,4 +59,7 @@ for all features. We should use hexagonal architecture to ensure that all behavi
 
 The initial version will be a multiplexer that just swaps sessions. It will not handle splits or tabs
 
+(2026-10-31: amended. Agents and scripts will drive shepherd from a CLI, including the screen layout: pages and splits
+are now in scope, owned by the host. See decision 0022 and `docs/features/automation.md`.)
+
 

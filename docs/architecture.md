@@ -848,3 +848,20 @@ The runtime joins the unix and iroh links into one `Link` (`HostLinks`: local co
 best-effort per line: lines already handed to the loop before a pause are held by the tunnel. A hard bound would need
 credits on `Link` (like the PTY acks); not now.
 Consequences: every `Link` implementation provides these. Requests that only local clients may make check `peer(conn)`.
+
+### 0022: Automation: the host owns the layout; prompts can wait for the reply (2026-10-31)
+Context: the user wants agents and scripts to drive shepherd: prompt an agent from a CLI (manager and subagents), arrange
+the screen from a CLI (pages, splits), and test complex UI headless. This amends the manifesto's "the initial version will
+not handle splits or tabs". Decision:
+- The screen layout (pages, split panes, what each pane shows) is pure data in `core::layout`, owned by the host,
+  recorded in its log and broadcast to clients, changed through `_shepherd/ui/apply` (local clients only, per 0021). Every
+  window shows the same layout, drawn at its own size. Focus is per window (it decides where that window's input goes).
+- A session's PTY is sized to the pane showing it on the window that last focused that pane.
+- `_shepherd/session/prompt` is answered by the host, which types the prompt into the agent (only when it's at its prompt)
+  so every client sees it. `shepherd prompt --wait` waits for the turn to end and returns the agent's last reply, read from
+  its transcript through a `Transcripts` port (archive-crate adapter, same path checks as capture). An agent that stops to
+  ask the user returns `wants-user` at once.
+- UI is tested through a headless harness (real client + renderer on `TestBackend`, clicking on drawn text), including a
+  seeded property test over random UI steps.
+Consequences: feature `docs/features/automation.md` (T45-T50); `docs/cli.md` documents every `--json` shape.
+

@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
 | F47 | A swap can lose its Accepted answer before exec | done | 98b73d3 | 2 | round 2 APPROVE; minors filed to F50; 12-copy round deferred (machine slow) |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
-| F50 | Tighten F47's flush tests | building | task/f50-flush-tests |  |  |
+| F50 | Tighten F47's flush tests | review | task/f50-flush-tests @ 6a9bc36 | 1 | round 1 fixed (fake gives up after CLOSE_FLUSH, like real writers); 12-copy 12/12 |
 
 ## Specs
 
