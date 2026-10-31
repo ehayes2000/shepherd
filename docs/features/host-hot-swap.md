@@ -155,6 +155,10 @@ acceptance:
   either outcome once `CLOSE_FLUSH` has passed).
 - From T31a: removing the tunnel ends from `close_conns` (the swap path) passes every test; add a swap test with an open
   tunnel showing the tunnelled client is flushed and closed before exec.
+- From T31a's review: a link's writer marks a closed conn done on any exit, including the reset when `CLOSE_FLUSH` runs
+  out, so `flush_closed` reports `Flushed` for a conn whose peer got only part of what was queued (seen under load 115:
+  29 of 32 lines). `flush_closed` reports `TimedOut` when a writer gave up rather than finished, on unix and iroh links,
+  with a contract case.
 - Run the 12-copy hotswap_e2e round F47 deferred (when the machine allows): 0 failures.
 scope: crates/shepherd (tests), crates/testkit
 

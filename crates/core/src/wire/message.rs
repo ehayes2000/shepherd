@@ -58,10 +58,11 @@ pub enum Method {
     PairJoin,
     PeerList,
     PeerRemove,
+    Tunnel,
 }
 
 impl Method {
-    pub const ALL: [Method; 18] = [
+    pub const ALL: [Method; 19] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -80,6 +81,7 @@ impl Method {
         Self::PairJoin,
         Self::PeerList,
         Self::PeerRemove,
+        Self::Tunnel,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -102,6 +104,7 @@ impl Method {
             Self::PairJoin => "_shepherd/pair/join",
             Self::PeerList => "_shepherd/peer/list",
             Self::PeerRemove => "_shepherd/peer/remove",
+            Self::Tunnel => "_shepherd/tunnel",
         }
     }
 
@@ -137,6 +140,7 @@ pub enum ClientRequest {
     PairJoin(PairJoin),
     PeerList(PeerList),
     PeerRemove(PeerRemove),
+    Tunnel(Tunnel),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -450,6 +454,16 @@ pub struct PeerRemove {
     pub peer: String,
 }
 
+/// `_shepherd/tunnel`: as the first request on a conn to the local host, makes the conn a tunnel to the host of
+/// `machine`, a trusted peer (decision 0019). Answered with [`HostResult::Ack`] once that host accepted it; from then
+/// on every line passes both ways unchanged, so the client speaks to that host as to its own, starting with its hello.
+/// Answered with [`WireError::InvalidParams`] saying why not (the machine isn't trusted, doesn't trust this one, or
+/// can't be reached), and the conn is closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tunnel {
+    pub machine: MachineId,
+}
+
 /// A trusted machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -557,6 +571,7 @@ impl ClientRequest {
             Self::PairJoin(_) => Method::PairJoin,
             Self::PeerList(_) => Method::PeerList,
             Self::PeerRemove(_) => Method::PeerRemove,
+            Self::Tunnel(_) => Method::Tunnel,
         }
     }
 
@@ -580,6 +595,7 @@ impl ClientRequest {
             Self::PairJoin(p) => json(p),
             Self::PeerList(p) => json(p),
             Self::PeerRemove(p) => json(p),
+            Self::Tunnel(p) => json(p),
         }
     }
 
@@ -605,6 +621,7 @@ impl ClientRequest {
             Method::PairJoin => Self::PairJoin(invalid_params(params)?),
             Method::PeerList => Self::PeerList(invalid_params(params)?),
             Method::PeerRemove => Self::PeerRemove(invalid_params(params)?),
+            Method::Tunnel => Self::Tunnel(invalid_params(params)?),
         })
     }
 }

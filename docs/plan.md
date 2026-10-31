@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | review | task/t31a-iroh-tunnel @ 834906b | 1 | round 1 fixed; swap-path tunnel close test moved to F50 |
+| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | merging | task/t31a-iroh-tunnel @ 834906b | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 
 ## Ready to start
 

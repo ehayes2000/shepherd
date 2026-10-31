@@ -137,6 +137,7 @@ pub fn hand_off(
 ) -> Result<HandedOff, String> {
     let listener = host
         .link_mut()
+        .local_mut()
         .hand_over()
         .map_err(|e| format!("cannot hand the listener over: {e}"))?;
     host.close_conns();
@@ -183,7 +184,7 @@ pub fn hand_off(
 pub fn undo(host: &mut RealHost, handed: &HandedOff) {
     let _ = handoff::set_inherited(&handed.file.fds(), false);
     let _ = std::fs::remove_file(&handed.path);
-    if let Err(e) = host.link_mut().take_back() {
+    if let Err(e) = host.link_mut().local_mut().take_back() {
         tracing::error!(error = %e, "cannot take the listener back; no new clients can connect");
     }
 }

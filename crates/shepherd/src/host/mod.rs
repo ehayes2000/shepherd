@@ -8,11 +8,13 @@
 //! 3. Only then is the socket bound.
 //! 4. The machine key (`identity.key`, T29) is read, or made on the first run, with the lock held. One that can't be
 //!    used stops the host and is never replaced. The `Peers` port (T30) is built with it, but binds nothing until
-//!    the host trusts a machine or pairs.
+//!    the host trusts a machine or pairs. The host's link to other machines (tunnels, T31a) is made on that port and
+//!    joins the socket's link as one ([`HostLinks`]).
 //! 5. Once serving, `shepherd host` releases its stderr (`shepherd_adapters::launcher::release_stderr`), which tells
 //!    a client that launched it that it started. A startup error before that is printed there, for that client.
 
 mod env;
+mod links;
 mod run_files;
 mod runtime;
 pub mod swap;
@@ -29,8 +31,8 @@ use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    Discovery, GhForge, GitWorktrees, IrohMachineKey, IrohPeers, JsonlEventLog, KeyFileIdentity,
-    PortablePty, ShellCommands, TomlConfigSource, UnixLinkError, UnixListenLink,
+    Discovery, GhForge, GitWorktrees, IrohLink, IrohMachineKey, IrohPeers, JsonlEventLog,
+    KeyFileIdentity, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
 use shepherd_core::ids::MachineId;
@@ -39,11 +41,12 @@ use shepherd_core::ports::{
 };
 
 pub use env::{Env, RealEnv};
+pub use links::HostLinks;
 pub use runtime::{
     AdoptedSession, Adoption, CATCH_UP_BATCH, CATCH_UP_TICK, CREATE_CLEANUP_GRACE, CarriedSession,
-    HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, PreflightRunner, RuntimeEvent,
-    RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError, SwapPlan,
-    adopt_sessions, runtime_channel,
+    HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, MAX_TUNNEL_TICK, PreflightRunner,
+    RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError,
+    SwapPlan, TUNNEL_HIGH, TUNNEL_LOW, TUNNEL_TICK, adopt_sessions, runtime_channel,
 };
 
 /// The host runtime on the real adapters.
@@ -52,11 +55,14 @@ pub type RealHost = HostRuntime<
     GitWorktrees,
     ShellCommands,
     GhForge,
-    UnixListenLink,
+    RealLinks,
     JsonlEventLog,
     RealEnv,
     IrohPeers,
 >;
+
+/// The real host's links: its socket, and its link to other machines.
+pub type RealLinks = HostLinks<UnixListenLink, IrohLink>;
 
 /// Files under the root.
 pub const SOCKET_FILE: &str = "host.sock";
@@ -197,8 +203,11 @@ fn open_inner(
     prepare_root(root)?;
     let log = JsonlEventLog::open(root).map_err(|e| log_error(root, e))?;
     let (tx, rx) = runtime_channel();
-    let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
-        .map_err(HostStartError::Socket)?;
+    let local = UnixListenLink::bind(
+        root.join(SOCKET_FILE),
+        RealLinks::local_sink(tx.link_sink()),
+    )
+    .map_err(HostStartError::Socket)?;
     let config = load_config(root, login_shell)?;
     let key = load_machine_key(root)?;
     let machine = key.machine_id();
@@ -209,6 +218,7 @@ fn open_inner(
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
     let peers = peers(root, Some(&key), &tx)?;
+    let link = HostLinks::new(local, peers.link(RealLinks::peers_sink(tx.link_sink())));
     HostRuntime::start(
         pty, worktrees, commands, forge, link, peers, log, RealEnv, settings, tx, rx,
     )
@@ -240,8 +250,12 @@ fn open_adopted_inner(
     let (lock, listener) = unsafe { (swap::own(file.lock), swap::own(file.listener)) };
     let log = JsonlEventLog::adopt(root, lock).map_err(|e| log_error(root, e))?;
     let (tx, rx) = runtime_channel();
-    let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
-        .map_err(HostStartError::Socket)?;
+    let local = UnixListenLink::adopt(
+        root.join(SOCKET_FILE),
+        listener,
+        RealLinks::local_sink(tx.link_sink()),
+    )
+    .map_err(HostStartError::Socket)?;
     // The previous image's key, read again: updating in place keeps the machine. Never fails (see `adopted_machine`).
     let key = load_machine_key(root);
     let key_id = key.as_ref().map(|k| k.machine_id()).map_err(Clone::clone);
@@ -293,6 +307,7 @@ fn open_adopted_inner(
     let usable = key.ok().filter(|k| k.machine_id() == machine);
     let peers =
         peers(root, usable.as_ref(), &tx).map_err(|e| HostStartError::Adopt(e.to_string()))?;
+    let link = HostLinks::new(local, peers.link(RealLinks::peers_sink(tx.link_sink())));
     HostRuntime::adopt(
         pty,
         worktrees,

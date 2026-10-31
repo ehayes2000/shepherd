@@ -24,7 +24,12 @@ use support::*;
 
 /// A previous host's log for session `s_a`: created, then renamed until it holds more than `bytes` of names.
 fn big_history(bytes: usize) -> FakeEventLog {
-    let name = "n".repeat(8 * 1024);
+    history_of(bytes, 8 * 1024)
+}
+
+/// [`big_history`], with names `name_len` long.
+fn history_of(bytes: usize, name_len: usize) -> FakeEventLog {
+    let name = "n".repeat(name_len);
     let mut prev = HostDriver::new();
     prev.new_session("s_a");
     for i in 0..bytes / name.len() + 1 {
@@ -215,6 +220,41 @@ fn a_client_that_stops_reading_mid_catch_up_is_closed_after_the_stall_window() {
     }));
     h.step();
     assert_eq!(entries(&other.take()).len(), 1);
+}
+
+/// One huge line on its way over a slow link: the client hasn't read a whole line for longer than the stall window, so
+/// its queue never shrank, but the link kept delivering bytes of it, so it isn't stalled.
+#[test]
+fn a_client_whose_line_is_still_on_its_way_after_the_stall_window_is_not_closed() {
+    let watched = STALL_TIMEOUT * 5 / 4;
+    // Lines longer than the bytes moved meanwhile, a byte per check every `CATCH_UP_TICK`.
+    let line = (watched.as_millis() / CATCH_UP_TICK.as_millis()) as usize + 1024;
+    let mut h = HostHarness::builder()
+        .log(history_of(MAX_QUEUED * 3 / 2, line))
+        .start();
+    let mut slow = h.connect_paced();
+    let req = slow.subscribe_all();
+    h.step();
+    // The first two entries (the machine's name in the host log, the session's creation) are short: past them, the
+    // next is one of the long ones.
+    slow.read(1);
+    slow.read(1);
+    h.step();
+    let clock = h.clock();
+    let queued = slow.unread();
+    run_deadlines(&mut h, |_| {
+        slow.trickle(1);
+        clock.elapsed() > watched
+    });
+    assert!(!slow.is_disconnected());
+    assert_eq!(slow.unread(), queued, "nothing was read");
+
+    let mut msgs = Vec::new();
+    run_deadlines(&mut h, |_| {
+        slow.read(usize::MAX);
+        msgs.extend(slow.take());
+        msgs.iter().any(|m| is_response(m, &req))
+    });
 }
 
 #[test]

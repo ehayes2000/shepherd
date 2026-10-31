@@ -11,6 +11,8 @@
 //!   with [`NO_PAIRING`]. Node ids are compared as `EndpointId`s, parsed from the canonical ids core pushes.
 //! - **A link connection** that passes is greeted with a one-way stream, so the dialler knows it was accepted rather
 //!   than about to be refused; it holds the connection (iroh's keep-alive keeps it up) until it closes or is dropped.
+//!   The conns of the `Link` between machines ([`IrohPeers::link`], T31a) are streams on these connections, opened by
+//!   either side; a conn opened to a peer with no connection held dials it first.
 //! - **Pairing.** The joiner opens one stream and sends `{token, name, addr}` as JSON; the inviter takes the open pairing
 //!   (so it is used up whatever the token), compares the token in constant time ([`subtle`]), reports the attempt, and
 //!   then either answers `{name}` or closes with [`REFUSED`]. Each side keeps the other's address.
@@ -33,21 +35,23 @@ use std::time::Duration;
 
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::endpoint::{
-    AfterHandshakeOutcome, Connection, ConnectionError, EndpointHooks, Side, VarInt, presets,
+    AfterHandshakeOutcome, Connection, ConnectionError, EndpointHooks, QuicTransportConfig, Side,
+    VarInt, presets,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr};
 use iroh_tickets::{ParseError, Ticket};
 use serde::{Deserialize, Serialize};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
-    PeersEventSink, TOKEN_LEN,
+    ConnectError, DisconnectReason, JoinError, LinkEventSink, PairTicket, PairToken, PairingError,
+    PairingId, Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 
 use crate::identity::IrohMachineKey;
+use crate::iroh_link::{self, Conns, IrohLink, Opening, STREAM_WINDOW};
 use crate::private_fs;
 
 /// Connections between trusted machines.
@@ -176,6 +180,7 @@ enum Command {
     Connect(MachineId),
     Addr(std_mpsc::Sender<Option<EndpointAddr>>),
     Learn(EndpointAddr),
+    Open(Opening),
 }
 
 /// The open pairing.
@@ -194,11 +199,13 @@ struct State {
 }
 
 /// What the command task, the hook and the connection tasks share.
-struct Shared {
+pub(crate) struct Shared {
     sink: Arc<dyn PeersEventSink>,
     lookup: MemoryLookup,
     cache: Option<PathBuf>,
     state: Mutex<State>,
+    /// The conns of the link streams peers open are taken into, if a link was made.
+    link: Mutex<Option<Arc<Conns>>>,
 }
 
 impl Shared {
@@ -208,6 +215,21 @@ impl Shared {
 
     fn send(&self, event: PeersEvent) {
         self.sink.send(event);
+    }
+
+    fn link(&self) -> Option<Arc<Conns>> {
+        self.link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A connection with trusted `peer`, held already, if any.
+    fn held(&self, peer: EndpointId) -> Option<Connection> {
+        self.state()
+            .conns
+            .get(&peer)
+            .and_then(|held| held.first().cloned())
     }
 
     /// Keeps `addr` for dialling its node: in the lookup, and in the cache.
@@ -241,10 +263,12 @@ impl Shared {
             }
         }
         let shared = self.clone();
+        let accepting = conn.clone();
         tokio::spawn(async move {
             conn.closed().await;
             shared.release(peer, &conn);
         });
+        tokio::spawn(accept_streams(accepting, self.clone()));
         true
     }
 
@@ -328,7 +352,38 @@ impl EndpointHooks for TrustHook {
 
 /// `Peers` on an iroh endpoint. See the module docs.
 pub struct IrohPeers {
+    handle: PeersHandle,
+}
+
+/// What a link between machines needs of the port: a way to its runtime, and what it shares. Keeps the runtime thread
+/// going while the link lives.
+pub(crate) struct PeersHandle {
     commands: UnboundedSender<Command>,
+    shared: Arc<Shared>,
+}
+
+impl PeersHandle {
+    fn send(&self, command: Command) {
+        // The runtime thread only stops when every handle is dropped.
+        let _ = self.commands.send(command);
+    }
+
+    /// Carries `opening` on once the runtime has a stream to its peer.
+    pub(crate) fn open(&self, opening: Opening) {
+        self.send(Command::Open(opening));
+    }
+
+    /// Stops taking streams into `conns`, a link being dropped.
+    pub(crate) fn unlink(&self, conns: &Arc<Conns>) {
+        let mut link = self
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if link.as_ref().is_some_and(|l| Arc::ptr_eq(l, conns)) {
+            *link = None;
+        }
+    }
 }
 
 impl IrohPeers {
@@ -352,13 +407,14 @@ impl IrohPeers {
             lookup,
             cache,
             state: Mutex::new(State::default()),
+            link: Mutex::new(None),
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let (commands, rx) = unbounded_channel();
         let actor = Actor {
-            shared,
+            shared: shared.clone(),
             secret: key.map(|k| k.secret().clone()),
             discovery,
             endpoint: None,
@@ -366,7 +422,26 @@ impl IrohPeers {
         std::thread::Builder::new()
             .name("peers".into())
             .spawn(move || runtime.block_on(actor.run(rx)))?;
-        Ok(Self { commands })
+        Ok(Self {
+            handle: PeersHandle { commands, shared },
+        })
+    }
+
+    /// The `Link` between machines on this port's endpoint (see [`crate::iroh_link`]), reporting to `sink`. Streams
+    /// peers open are taken into the last link made.
+    pub fn link(&self, sink: Arc<dyn LinkEventSink>) -> IrohLink {
+        let conns = Arc::new(Conns::new(sink));
+        *self
+            .handle
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(conns.clone());
+        let handle = PeersHandle {
+            commands: self.handle.commands.clone(),
+            shared: self.handle.shared.clone(),
+        };
+        IrohLink::new(conns, handle)
     }
 
     /// The cache file in `root` (`~/.shepherd`).
@@ -388,8 +463,7 @@ impl IrohPeers {
     }
 
     fn send(&self, command: Command) {
-        // The runtime thread only stops when this value is dropped.
-        let _ = self.commands.send(command);
+        self.handle.send(command);
     }
 }
 
@@ -515,7 +589,22 @@ impl Actor {
                 if !self.shared.state().trusted.contains(&node) {
                     return self.shared.send(fail(ConnectError::Untrusted));
                 }
-                tokio::spawn(dial(endpoint, self.shared.clone(), node));
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    let _ = dial(endpoint, shared, node).await;
+                });
+            }
+            Command::Open(opening) => {
+                let endpoint = self.endpoint.clone();
+                let node = opening.peer.as_str().parse::<EndpointId>().ok();
+                let trusted = node.filter(|node| self.shared.state().trusted.contains(node));
+                match (endpoint, trusted) {
+                    (Some(endpoint), Some(node)) => {
+                        tokio::spawn(open(endpoint, self.shared.clone(), node, opening));
+                    }
+                    // Not bound, not a machine id, or a machine this one doesn't trust: nobody to reach.
+                    _ => iroh_link::not_opened(opening, DisconnectReason::PeerGone),
+                }
             }
             Command::Addr(answer) => {
                 let _ = answer.send(self.endpoint.as_ref().map(Endpoint::addr));
@@ -542,6 +631,11 @@ impl Actor {
         };
         let bound = match built {
             Ok(builder) => builder
+                .transport_config(
+                    QuicTransportConfig::builder()
+                        .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+                        .build(),
+                )
                 .secret_key(secret)
                 .alpns(vec![LINK_ALPN.to_vec(), PAIR_ALPN.to_vec()])
                 .address_lookup(self.shared.lookup.clone())
@@ -697,16 +791,24 @@ async fn join(
     }
 }
 
-/// Dials trusted peer `node` on the link ALPN, and holds the connection once it greets this machine.
-async fn dial(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId) {
-    let fail = |error| PeersEvent::ConnectFailed {
-        peer: machine(node),
-        error,
+/// Dials trusted peer `node` on the link ALPN, and holds the connection once it greets this machine. A failure is
+/// reported ([`PeersEvent::ConnectFailed`]) and returned.
+async fn dial(
+    endpoint: Endpoint,
+    shared: Arc<Shared>,
+    node: EndpointId,
+) -> Result<Connection, ConnectError> {
+    let failed = |error: ConnectError| {
+        shared.send(PeersEvent::ConnectFailed {
+            peer: machine(node),
+            error: error.clone(),
+        });
+        Err(error)
     };
     let conn = match timeout(DIAL_LIMIT, endpoint.connect(node, LINK_ALPN)).await {
         Ok(Ok(conn)) => conn,
-        Ok(Err(error)) => return shared.send(fail(ConnectError::Unreachable(error.to_string()))),
-        Err(_) => return shared.send(fail(ConnectError::Unreachable("no answer".into()))),
+        Ok(Err(error)) => return failed(ConnectError::Unreachable(error.to_string())),
+        Err(_) => return failed(ConnectError::Unreachable("no answer".into())),
     };
     let greeted = timeout(DIAL_LIMIT, async {
         let mut recv = conn.accept_uni().await.ok()?;
@@ -715,17 +817,48 @@ async fn dial(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId) {
     .await;
     match greeted {
         // Untrusted meanwhile: `hold` closed it.
-        Ok(Some(_)) => {
-            if !shared.hold(node, conn) {
-                shared.send(fail(ConnectError::Untrusted));
-            }
-        }
-        _ if closed_with(conn.close_reason().as_ref(), REFUSED) => {
-            shared.send(fail(ConnectError::Refused))
-        }
+        Ok(Some(_)) => match shared.hold(node, conn.clone()) {
+            true => Ok(conn),
+            false => failed(ConnectError::Untrusted),
+        },
+        _ if closed_with(conn.close_reason().as_ref(), REFUSED) => failed(ConnectError::Refused),
         _ => {
             conn.close(VarInt::from_u32(0), b"no greeting");
-            shared.send(fail(ConnectError::Unreachable("no greeting".into())));
+            failed(ConnectError::Unreachable("no greeting".into()))
+        }
+    }
+}
+
+/// Opens a link conn to trusted peer `node`: a stream on the connection held with it, dialling it first if none is.
+async fn open(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId, opening: Opening) {
+    let conn = match shared.held(node) {
+        Some(conn) => conn,
+        None => match dial(endpoint, shared, node).await {
+            Ok(conn) => conn,
+            Err(ConnectError::Refused) => {
+                return iroh_link::not_opened(opening, DisconnectReason::Refused);
+            }
+            Err(_) => return iroh_link::not_opened(opening, DisconnectReason::PeerGone),
+        },
+    };
+    match timeout(DIAL_LIMIT, conn.open_bi()).await {
+        Ok(Ok((send, recv))) => iroh_link::opened(opening, send, recv).await,
+        _ => iroh_link::not_opened(opening, DisconnectReason::PeerGone),
+    }
+}
+
+/// Takes the streams `peer` opens on `conn`, a held connection, into the link (if one was made), until it closes.
+async fn accept_streams(conn: Connection, shared: Arc<Shared>) {
+    let peer = machine(conn.remote_id());
+    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+        match shared.link() {
+            Some(conns) => {
+                tokio::spawn(conns.accepted(peer.clone(), send, recv));
+            }
+            None => {
+                let _ = send.reset(VarInt::from_u32(0));
+                let _ = recv.stop(VarInt::from_u32(0));
+            }
         }
     }
 }

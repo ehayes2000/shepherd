@@ -21,8 +21,17 @@
 //! accepted, records it in `peer/trusted` and answers. Names peers give are display-safe before they are recorded
 //! ([`crate::machine::peer_name`]).
 //!
-//! Not all of this is host state: a pairing, the joins in flight and which peers are connected are known only to this
-//! host run. The runtime keeps one [`Peering`], applies every entry it appends (and replays the logs into it on start),
+//! Reconnecting: a trusted peer whose connection goes ([`PeersEvent::Disconnected`]) is dialled again
+//! [`RECONNECT_MIN`] later, and each dial that can't reach it ([`ConnectError::Unreachable`]) doubles the wait, up to
+//! [`RECONNECT_MAX`]; a connection starts the waits over. A peer that refuses this machine isn't dialled again (until
+//! the endpoint is bound again), nor is anyone once the endpoint is unbound.
+//!
+//! Tunnels (`_shepherd/tunnel`, T31a): one of this machine's own clients may make its conn, with its first request,
+//! a tunnel to the host of a machine this one trusts ([`Peering::tunnel`]); the runtime splices it. Why one couldn't
+//! open is said in the peer's name ([`Peering::tunnel_failed`]).
+//!
+//! Not all of this is host state: a pairing, the joins in flight which peers are connected and when to dial each again
+//! are known only to this host run. The runtime keeps one [`Peering`], applies every entry it appends (and replays the logs into it on start),
 //! hands it the port's events and the requests, services its [`Peering::deadline`] with ticks stamped with the clock,
 //! and after executing each batch of its commands executes [`Peering::sync`], which pushes what changed.
 
@@ -34,11 +43,15 @@ use super::{HostCommand, ReplyTo, append_host};
 use crate::acpp::{Envelope, Frame, PeerRemoved, PeerTrusted, ShepherdFrame, Timestamp};
 use crate::ids::MachineId;
 use crate::machine::{UNNAMED, peer_name};
-use crate::ports::{PairTicket, PairToken, PairingId, PeersEvent};
+use crate::ports::{ConnectError, DisconnectReason, PairTicket, PairToken, PairingId, PeersEvent};
 use crate::wire::{HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError};
 
 /// How long a pairing stays open.
 pub const PAIRING_TTL: SignedDuration = SignedDuration::from_mins(10);
+/// How long after a trusted peer's connection goes it is dialled again.
+pub const RECONNECT_MIN: SignedDuration = SignedDuration::from_secs(1);
+/// The longest wait between dials of a trusted peer that can't be reached.
+pub const RECONNECT_MAX: SignedDuration = SignedDuration::from_mins(1);
 
 /// The requests, time passing, and what the `Peers` port reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,32 +63,19 @@ pub enum PeeringEvent {
         at: Timestamp,
     },
     /// `_shepherd/pair/wait`.
-    Wait {
-        reply: ReplyTo,
-    },
+    Wait { reply: ReplyTo },
     /// `_shepherd/pair/join`.
-    Join {
-        reply: ReplyTo,
-        ticket: PairTicket,
-    },
+    Join { reply: ReplyTo, ticket: PairTicket },
     /// `_shepherd/peer/list`.
-    List {
-        reply: ReplyTo,
-    },
+    List { reply: ReplyTo },
     /// `_shepherd/peer/remove`, naming the peer by id or name.
-    Remove {
-        reply: ReplyTo,
-        peer: String,
-    },
+    Remove { reply: ReplyTo, peer: String },
     /// It is `at`: the deadline the runtime scheduled, or later.
-    Tick {
-        at: Timestamp,
-    },
+    Tick { at: Timestamp },
     /// The client `reply` was to answer went away (`shepherd pair` stopped with Ctrl-C).
-    Gone {
-        reply: ReplyTo,
-    },
-    Peers(PeersEvent),
+    Gone { reply: ReplyTo },
+    /// What the port reported, at `at`.
+    Peers { event: PeersEvent, at: Timestamp },
 }
 
 /// A call to the `Peers` port.
@@ -118,6 +118,17 @@ pub struct Peering {
     bound: bool,
     /// The trusted set the port was last given (it starts with none).
     pushed: BTreeSet<MachineId>,
+    /// Trusted peers to dial again, by how many dials in a row failed.
+    redial: BTreeMap<MachineId, Redial>,
+}
+
+/// A trusted peer to dial again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Redial {
+    /// Dials in a row that couldn't reach it.
+    failures: u32,
+    /// When to dial it; `None` while a dial is on its way.
+    due: Option<jiff::Timestamp>,
 }
 
 /// The open pairing.
@@ -148,6 +159,7 @@ impl Peering {
             ShepherdFrame::PeerRemoved(removed) => {
                 self.trusted.remove(&removed.node);
                 self.connected.remove(&removed.node);
+                self.redial.remove(&removed.node);
             }
             ShepherdFrame::MachineRenamed(renamed) => self.name = Some(renamed.name.clone()),
             _ => {}
@@ -187,7 +199,7 @@ impl Peering {
             PeeringEvent::Remove { reply, peer } => self.remove(reply, &peer),
             PeeringEvent::Tick { at } => self.tick(&at),
             PeeringEvent::Gone { reply } => self.gone(reply),
-            PeeringEvent::Peers(event) => self.port_event(event),
+            PeeringEvent::Peers { event, at } => self.port_event(event, &at),
         };
         let mut out = self.bind_if_wanted();
         out.extend(commands);
@@ -201,14 +213,54 @@ impl Peering {
         if !self.wanted() && self.bound {
             self.bound = false;
             self.connected.clear();
+            self.redial.clear();
             out.push(peers(PeersCommand::Unbind));
         }
         out
     }
 
-    /// When the open pairing expires, if one is open: when to send the next [`PeeringEvent::Tick`].
+    /// When the open pairing expires or a peer is to be dialled again, whichever comes first: when to send the next
+    /// [`PeeringEvent::Tick`].
     pub fn deadline(&self) -> Option<jiff::Timestamp> {
-        self.pending.as_ref().map(|p| p.expires.instant())
+        let expiry = self.pending.as_ref().map(|p| p.expires.instant());
+        let redials = self.redial.values().filter_map(|r| r.due);
+        expiry.into_iter().chain(redials).min()
+    }
+
+    /// Whether a conn may become a tunnel to `machine`'s host: it must be from one of this machine's own clients
+    /// (`from` is `None`: not a peer's conn), this must be its first request, and this machine must trust `machine`.
+    pub fn tunnel(
+        &self,
+        machine: &MachineId,
+        from: Option<&MachineId>,
+        first: bool,
+    ) -> Result<(), WireError> {
+        let refuse = |why: &str| Err(WireError::InvalidParams(why.to_owned()));
+        if from.is_some() {
+            return refuse("a tunnel can only be opened by this machine's own clients");
+        }
+        if !first {
+            return refuse("a tunnel must be the first request on its connection");
+        }
+        if !self.trusted.contains_key(machine) {
+            return refuse("no trusted machine has that id: pair with it first (`shepherd pair`)");
+        }
+        Ok(())
+    }
+
+    /// Why a tunnel to `machine` couldn't open, given how its conn to that host ended before it was accepted.
+    pub fn tunnel_failed(&self, machine: &MachineId, reason: &DisconnectReason) -> WireError {
+        let name = self
+            .trusted
+            .get(machine)
+            .cloned()
+            .unwrap_or_else(|| machine.to_string());
+        WireError::InvalidParams(match reason {
+            DisconnectReason::Refused => {
+                format!("{name} doesn't trust this machine: pair them again with `shepherd pair`")
+            }
+            _ => format!("cannot reach {name}"),
+        })
     }
 
     /// The endpoint is needed: something is trusted, a pairing is open, or a join is in flight.
@@ -271,16 +323,38 @@ impl Peering {
     }
 
     fn tick(&mut self, at: &Timestamp) -> Vec<HostCommand> {
+        let mut commands = Vec::new();
+        for (peer, redial) in &mut self.redial {
+            if redial.due.is_some_and(|due| due <= at.instant()) {
+                redial.due = None;
+                commands.push(peers(PeersCommand::Connect { peer: peer.clone() }));
+            }
+        }
         let expired = self
             .pending
             .as_ref()
             .is_some_and(|p| p.expires.instant() <= at.instant());
-        if !expired {
-            return Vec::new();
+        if expired {
+            commands.push(peers(PeersCommand::StopPairing));
+            commands.extend(self.end_pending(|| PairOutcome::Expired, "the pairing expired"));
         }
-        let mut commands = vec![peers(PeersCommand::StopPairing)];
-        commands.extend(self.end_pending(|| PairOutcome::Expired, "the pairing expired"));
         commands
+    }
+
+    /// Dials trusted `peer` again after `failures` dials in a row couldn't reach it: [`RECONNECT_MIN`] from `at`,
+    /// doubled for each failure, at most [`RECONNECT_MAX`]. Nothing while the endpoint isn't bound.
+    fn redial(&mut self, peer: MachineId, failures: u32, at: &Timestamp) {
+        if !self.bound || !self.trusted.contains_key(&peer) {
+            return;
+        }
+        let wait = (0..failures)
+            .try_fold(RECONNECT_MIN, |wait, _| wait.checked_mul(2))
+            .unwrap_or(RECONNECT_MAX)
+            .min(RECONNECT_MAX);
+        // A wait past the end of time (it can't be) dials at once rather than never.
+        let now = at.instant();
+        let due = Some(now.checked_add(wait).unwrap_or(now));
+        self.redial.insert(peer, Redial { failures, due });
     }
 
     /// Forgets `reply`; once nobody is left to tell how the open pairing ends, it is stopped.
@@ -294,7 +368,11 @@ impl Peering {
         if pending.start == Some(reply) {
             pending.start = None;
         }
-        // Another client going (or this one between its start's answer and its wait) leaves the pairing alone.
+        // Kept while its start (its ticket not shown yet) or a waiter is still there. Once the start is answered, a
+        // client going between that answer and its wait leaves nobody holding the pairing, so it is stopped. With two
+        // clients this can race: client A's start is answered, client B's wait goes before A's wait arrives, and B
+        // leaving stops A's pairing (A's wait is then told no pairing is open). Only a request this pairing holds
+        // stops it: some other request going leaves it alone.
         if !held || pending.start.is_some() || !pending.waiters.is_empty() {
             return Vec::new();
         }
@@ -335,7 +413,7 @@ impl Peering {
         ]
     }
 
-    fn port_event(&mut self, event: PeersEvent) -> Vec<HostCommand> {
+    fn port_event(&mut self, event: PeersEvent, at: &Timestamp) -> Vec<HostCommand> {
         match event {
             PeersEvent::PairingOpen { id, ticket } => match &mut self.pending {
                 Some(pending) if pending.id == id => match pending.start.take() {
@@ -410,6 +488,7 @@ impl Peering {
                 None => Vec::new(),
             },
             PeersEvent::Connected { peer } => {
+                self.redial.remove(&peer);
                 if self.trusted.contains_key(&peer) {
                     self.connected.insert(peer);
                 }
@@ -417,12 +496,24 @@ impl Peering {
             }
             PeersEvent::Disconnected { peer } => {
                 self.connected.remove(&peer);
+                self.redial(peer, 0, at);
+                Vec::new()
+            }
+            PeersEvent::ConnectFailed {
+                peer,
+                error: ConnectError::Unreachable(_),
+            } => {
+                let failures = self.redial.get(&peer).map_or(0, |r| r.failures);
+                self.redial(peer, failures.saturating_add(1), at);
+                Vec::new()
+            }
+            // A peer that refuses this machine, or a dial with no endpoint: dialling again changes nothing.
+            PeersEvent::ConnectFailed { peer, .. } => {
+                self.redial.remove(&peer);
                 Vec::new()
             }
             // The port already failed or refused it; nothing follows from it.
-            PeersEvent::BindFailed { .. }
-            | PeersEvent::ConnectFailed { .. }
-            | PeersEvent::Refused { .. } => Vec::new(),
+            PeersEvent::BindFailed { .. } | PeersEvent::Refused { .. } => Vec::new(),
         }
     }
 

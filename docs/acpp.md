@@ -91,7 +91,9 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 The trusted set is the fold of these two over the host log, and is all the host's network endpoint lets in. Pairing
 itself is not logged, only its result: the client↔host requests `_shepherd/pair/start` (a single-use ticket, expiring
 after 10 minutes), `_shepherd/pair/wait`, `_shepherd/pair/join { ticket }`, `_shepherd/peer/list` and
-`_shepherd/peer/remove { peer }` are in `core::wire`.
+`_shepherd/peer/remove { peer }` are in `core::wire`. So is `_shepherd/tunnel { machine }` (T31a): as the first request on
+a client's conn to its own host, it makes the conn a tunnel to a trusted machine's host, which the client then speaks to
+directly (the tunnel itself is not logged either).
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.
   When a vendor frame turns out to be generally useful, promote it to a `_shepherd/` method. Never repurpose

@@ -20,9 +20,18 @@
 //! - Delivering what a closed conn had queued happens in the background, for up to [`CLOSE_FLUSH`] on a peer that
 //!   isn't reading. [`Link::flush_closed`] waits for it, so a process about to exec (decision 0018) doesn't cut it off.
 //! - Dropping a link disconnects all its conns without flushing; their peers see `PeerGone`.
+//! - While a conn's reading is [paused](Link::pause_reading), none of its `Line`s are emitted: what its peer sends
+//!   waits in the transport, so the peer's own queue grows (back-pressure). Resuming emits them, in order.
+//!
+//! Links between machines (decision 0019) also [open](Link::open) conns to another machine's host. Such a conn is
+//! announced with `Connected` once that host accepted it, and each end knows which machine the other is
+//! ([`Link::peer`]). A host that doesn't trust this machine refuses it: the conn ends with
+//! [`DisconnectReason::Refused`] and that host never announces it.
 
 use std::fmt;
 use std::time::Duration;
+
+use crate::ids::MachineId;
 
 /// The most unsent bytes a conn may have queued before it is disconnected as a slow consumer.
 pub const MAX_QUEUED: usize = 8 * 1024 * 1024;
@@ -52,7 +61,7 @@ impl fmt::Display for ConnId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEvent {
-    /// A client connected to a host-side link.
+    /// A client connected to a host-side link, or a conn this link [opened](Link::open) was accepted.
     Connected { conn: ConnId },
     /// One line from the peer, without its `\n`.
     Line { conn: ConnId, line: Vec<u8> },
@@ -73,6 +82,8 @@ pub enum DisconnectReason {
     SlowConsumer,
     /// The peer broke framing, e.g. a line over the decoder limit.
     Protocol(String),
+    /// The machine this end [opened](Link::open) a conn to doesn't trust this one.
+    Refused,
 }
 
 /// Where a link pushes its events, from its own threads.
@@ -103,6 +114,9 @@ pub enum LinkError {
     InvalidLine,
     #[error("link io: {0}")]
     Io(String),
+    /// This link reaches no other machines: it can't [open](Link::open) conns.
+    #[error("this link reaches no other machines")]
+    NoPeers,
 }
 
 pub trait Link {
@@ -119,4 +133,20 @@ pub trait Link {
     /// times the wait on the clock it waits with. Blocks the caller: for a process about to exec, which would otherwise
     /// cut the deliveries off (decision 0018).
     fn flush_closed(&mut self, within: Duration) -> FlushOutcome;
+    /// The machine `conn` is with, as the transport authenticated it, or `None` for a conn with this machine's own user
+    /// (a local socket, which only that user can reach). A conn that is unknown (never was, or closed or gone) is
+    /// [`LinkError::UnknownConn`], never `None`: a caller allowing something only to local conns must refuse it.
+    fn peer(&self, conn: ConnId) -> Result<Option<MachineId>, LinkError>;
+    /// How many bytes sent to `conn` the transport has delivered so far, counted as they are written, so one long line
+    /// counts as it goes. It only rises, and it rises while the peer reads even when [`Link::queued_bytes`] doesn't
+    /// fall (new lines keep coming, or one huge line is on its way): it tells a slow peer from one that stopped
+    /// reading. `None` if `conn` is unknown.
+    fn drained_bytes(&self, conn: ConnId) -> Option<u64>;
+    /// Stops (`true`) or resumes (`false`) reading `conn`. See the module docs.
+    fn pause_reading(&mut self, conn: ConnId, paused: bool) -> Result<(), LinkError>;
+    /// Opens a conn to the host of machine `peer` and returns it at once; lines sent to it before it is announced
+    /// (`Connected`) wait in its queue. It ends with [`DisconnectReason::Refused`] if that host doesn't trust this
+    /// machine, and with [`DisconnectReason::PeerGone`] if it can't be reached. A link that reaches no other machines
+    /// returns [`LinkError::NoPeers`].
+    fn open(&mut self, peer: &MachineId) -> Result<ConnId, LinkError>;
 }
