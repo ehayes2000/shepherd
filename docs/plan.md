@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ d4e3aa5 (on 41cd13a) | 1 | PM-accepted: v2 STRICT schema; exact-hash find_by_commit; flock-based tmp sweep |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ d4e3aa5 | 1 | Blocking: refusing a newer WAL index checkpointed it; migration rollback and newtype validation untested |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | fixing | task/t29-machine-identity @ cc77bf1 | 2 | Blocking: pre-T29 host ignores identity_error → adopt as local with warning, never Err. Minors: carried-id wiring untested, id mismatch keeps carried id |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
