@@ -707,6 +707,7 @@ pub mod contracts {
     pub mod identity;
     pub mod launcher;
     pub mod link;
+    pub mod peers;
     pub mod pty;
     pub mod pty_handoff;
     pub mod worktrees;
@@ -724,6 +725,7 @@ pub mod fakes {
     pub mod identity;
     pub mod launcher;
     pub mod link;
+    pub mod peers;
     pub mod pty;
     pub mod worktrees;
 }

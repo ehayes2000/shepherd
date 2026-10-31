@@ -29,7 +29,7 @@ use super::WireError;
 use super::base64::serde_bytes;
 use super::build::{BuildId, ExeDigest};
 use super::codec::frame;
-use crate::acpp::{Envelope, RequestId, Seq};
+use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::worktrees::WorktreeStatus;
@@ -53,10 +53,15 @@ pub enum Method {
     WorktreeList,
     WorktreeCleanup,
     WorktreeRemove,
+    PairStart,
+    PairWait,
+    PairJoin,
+    PeerList,
+    PeerRemove,
 }
 
 impl Method {
-    pub const ALL: [Method; 13] = [
+    pub const ALL: [Method; 18] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -70,6 +75,11 @@ impl Method {
         Self::WorktreeList,
         Self::WorktreeCleanup,
         Self::WorktreeRemove,
+        Self::PairStart,
+        Self::PairWait,
+        Self::PairJoin,
+        Self::PeerList,
+        Self::PeerRemove,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -87,6 +97,11 @@ impl Method {
             Self::WorktreeList => "_shepherd/worktree/list",
             Self::WorktreeCleanup => "_shepherd/worktree/cleanup",
             Self::WorktreeRemove => "_shepherd/worktree/remove",
+            Self::PairStart => "_shepherd/pair/start",
+            Self::PairWait => "_shepherd/pair/wait",
+            Self::PairJoin => "_shepherd/pair/join",
+            Self::PeerList => "_shepherd/peer/list",
+            Self::PeerRemove => "_shepherd/peer/remove",
         }
     }
 
@@ -117,6 +132,11 @@ pub enum ClientRequest {
     WorktreeList(WorktreeList),
     WorktreeCleanup(WorktreeCleanup),
     WorktreeRemove(WorktreeRemove),
+    PairStart(PairStart),
+    PairWait(PairWait),
+    PairJoin(PairJoin),
+    PeerList(PeerList),
+    PeerRemove(PeerRemove),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -372,6 +392,75 @@ pub enum UpgradeAnswer {
     Accepted,
 }
 
+/// `_shepherd/pair/start`: open a pairing on this host (`shepherd pair`), replacing any open one. Answered with
+/// [`PairStartOk`] once the ticket is ready, or an error saying why there is none (the network endpoint couldn't be
+/// bound). The pairing is single use and expires; `_shepherd/pair/wait` says how it ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairStart {}
+
+/// The host's answer to `_shepherd/pair/start`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairStartOk {
+    /// What the other machine's `shepherd join` takes.
+    pub ticket: String,
+    /// When the pairing stops being accepted.
+    pub expires: Timestamp,
+}
+
+/// `_shepherd/pair/wait`: answered with [`PairOutcome`] once the open pairing ends, or [`WireError::InvalidParams`]
+/// at once when none is open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairWait {}
+
+/// How an open pairing ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum PairOutcome {
+    /// `peer` joined: each machine now trusts the other.
+    Paired { peer: PeerInfo },
+    /// Machine `peer`, calling itself `name`, used the ticket with the wrong token, which used it up.
+    Refused { peer: MachineId, name: String },
+    /// Nobody joined in time.
+    Expired,
+    /// A newer `_shepherd/pair/start` replaced it.
+    Replaced,
+}
+
+/// `_shepherd/pair/join`: pair with the machine whose `shepherd pair` printed `ticket`. Answered with the
+/// [`PeerInfo`] of the machine joined once each trusts the other, or [`WireError::InvalidParams`] saying why not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairJoin {
+    pub ticket: String,
+}
+
+/// `_shepherd/peer/list`: answered with [`PeerListOk`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerList {}
+
+/// The trusted peers, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerListOk {
+    pub peers: Vec<PeerInfo>,
+}
+
+/// `_shepherd/peer/remove`: stop trusting `peer`, a trusted machine's id or name (`shepherd unpair`). Answered with
+/// the [`PeerInfo`] of the machine removed, or [`WireError::InvalidParams`] when no peer, or more than one, matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerRemove {
+    pub peer: String,
+}
+
+/// A trusted machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub id: MachineId,
+    /// What it calls itself, display-safe.
+    pub name: String,
+    /// The host has a connection with it now.
+    #[serde(default)]
+    pub connected: bool,
+}
+
 /// Bytes typed into a session's PTY. `data` is base64 on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInput {
@@ -463,6 +552,11 @@ impl ClientRequest {
             Self::WorktreeList(_) => Method::WorktreeList,
             Self::WorktreeCleanup(_) => Method::WorktreeCleanup,
             Self::WorktreeRemove(_) => Method::WorktreeRemove,
+            Self::PairStart(_) => Method::PairStart,
+            Self::PairWait(_) => Method::PairWait,
+            Self::PairJoin(_) => Method::PairJoin,
+            Self::PeerList(_) => Method::PeerList,
+            Self::PeerRemove(_) => Method::PeerRemove,
         }
     }
 
@@ -481,6 +575,11 @@ impl ClientRequest {
             Self::WorktreeList(p) => json(p),
             Self::WorktreeCleanup(p) => json(p),
             Self::WorktreeRemove(p) => json(p),
+            Self::PairStart(p) => json(p),
+            Self::PairWait(p) => json(p),
+            Self::PairJoin(p) => json(p),
+            Self::PeerList(p) => json(p),
+            Self::PeerRemove(p) => json(p),
         }
     }
 
@@ -501,6 +600,11 @@ impl ClientRequest {
             Method::WorktreeList => Self::WorktreeList(invalid_params(params)?),
             Method::WorktreeCleanup => Self::WorktreeCleanup(invalid_params(params)?),
             Method::WorktreeRemove => Self::WorktreeRemove(invalid_params(params)?),
+            Method::PairStart => Self::PairStart(invalid_params(params)?),
+            Method::PairWait => Self::PairWait(invalid_params(params)?),
+            Method::PairJoin => Self::PairJoin(invalid_params(params)?),
+            Method::PeerList => Self::PeerList(invalid_params(params)?),
+            Method::PeerRemove => Self::PeerRemove(invalid_params(params)?),
         })
     }
 }
@@ -620,6 +724,11 @@ pub enum HostResult {
     WorktreeList(WorktreeListOk),
     WorktreeCleanup(WorktreeCleanupOk),
     WorktreeRemove(WorktreeRemoveOk),
+    PairStart(PairStartOk),
+    PairWait(PairOutcome),
+    PairJoin(PeerInfo),
+    PeerList(PeerListOk),
+    PeerRemove(PeerInfo),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -634,6 +743,11 @@ impl HostResult {
             Self::WorktreeList(r) => json(r),
             Self::WorktreeCleanup(r) => json(r),
             Self::WorktreeRemove(r) => json(r),
+            Self::PairStart(r) => json(r),
+            Self::PairWait(r) => json(r),
+            Self::PairJoin(r) => json(r),
+            Self::PeerList(r) => json(r),
+            Self::PeerRemove(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -647,6 +761,11 @@ impl HostResult {
             Method::WorktreeList => Self::WorktreeList(serde_json::from_value(result)?),
             Method::WorktreeCleanup => Self::WorktreeCleanup(serde_json::from_value(result)?),
             Method::WorktreeRemove => Self::WorktreeRemove(serde_json::from_value(result)?),
+            Method::PairStart => Self::PairStart(serde_json::from_value(result)?),
+            Method::PairWait => Self::PairWait(serde_json::from_value(result)?),
+            Method::PairJoin => Self::PairJoin(serde_json::from_value(result)?),
+            Method::PeerList => Self::PeerList(serde_json::from_value(result)?),
+            Method::PeerRemove => Self::PeerRemove(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

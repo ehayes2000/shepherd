@@ -12,6 +12,10 @@ fn main() -> ExitCode {
             shepherd::hook::main(&args);
             return ExitCode::SUCCESS;
         }
+        Some(command @ ("pair" | "join" | "peers" | "unpair")) => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::peers::main(command, &args)
+        }
         Some(other) => Err(format!("unknown command `{other}`")),
     };
     match result {

@@ -77,7 +77,7 @@ dependencies are done.
 | `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
 | `MachineIdentity` | host | T29 | `~/.shepherd/identity.key` (an iroh secret key; `KeyFileIdentity`) |
-| `Peers` | host | T30 | iroh |
+| `Peers` | host | T30 | iroh endpoint bound lazily with the machine key (`IrohPeers`; trust in the `after_handshake` hook) |
 
 ## Out of scope for the initial feature set
 

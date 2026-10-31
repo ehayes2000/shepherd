@@ -8,6 +8,7 @@ pub mod forge;
 pub mod identity;
 pub mod launcher;
 pub mod link;
+pub mod peers;
 pub mod pty;
 pub mod worktrees;
 
@@ -20,6 +21,10 @@ pub use forge::{Check, Forge, ForgeError, Pr, PrChecks, PrState};
 pub use identity::{IdentityError, MachineIdentity, MachineKey};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};
 pub use link::{ConnId, DisconnectReason, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED};
+pub use peers::{
+    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
+    PeersEventSink, TOKEN_LEN,
+};
 pub use pty::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize,
     SpawnSpec,

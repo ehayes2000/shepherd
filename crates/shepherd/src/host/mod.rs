@@ -7,7 +7,8 @@
 //!    could mistake the first host's socket for a stale one and replace it.
 //! 3. Only then is the socket bound.
 //! 4. The machine key (`identity.key`, T29) is read, or made on the first run, with the lock held. One that can't be
-//!    used stops the host and is never replaced.
+//!    used stops the host and is never replaced. The `Peers` port (T30) is built with it, but binds nothing until
+//!    the host trusts a machine or pairs.
 //! 5. Once serving, `shepherd host` releases its stderr (`shepherd_adapters::launcher::release_stderr`), which tells
 //!    a client that launched it that it started. A startup error before that is printed there, for that client.
 
@@ -28,8 +29,8 @@ use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    GhForge, GitWorktrees, JsonlEventLog, KeyFileIdentity, PortablePty, ShellCommands,
-    TomlConfigSource, UnixLinkError, UnixListenLink,
+    Discovery, GhForge, GitWorktrees, IrohMachineKey, IrohPeers, JsonlEventLog, KeyFileIdentity,
+    PortablePty, ShellCommands, TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
 use shepherd_core::ids::MachineId;
@@ -54,6 +55,7 @@ pub type RealHost = HostRuntime<
     UnixListenLink,
     JsonlEventLog,
     RealEnv,
+    IrohPeers,
 >;
 
 /// Files under the root.
@@ -198,15 +200,17 @@ fn open_inner(
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
     let config = load_config(root, login_shell)?;
-    let machine = check_machine_key(root)?;
+    let key = load_machine_key(root)?;
+    let machine = key.machine_id();
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
     let settings = settings(root, home, config, shepherd, None, machine);
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
+    let peers = peers(root, Some(&key), &tx)?;
     HostRuntime::start(
-        pty, worktrees, commands, forge, link, log, RealEnv, settings, tx, rx,
+        pty, worktrees, commands, forge, link, peers, log, RealEnv, settings, tx, rx,
     )
     .map_err(|e| start_error(root, e))
 }
@@ -239,7 +243,9 @@ fn open_adopted_inner(
     let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
         .map_err(HostStartError::Socket)?;
     // The previous image's key, read again: updating in place keeps the machine. Never fails (see `adopted_machine`).
-    let (machine, key_warning) = adopted_machine(check_machine_key(root), file.machine.clone());
+    let key = load_machine_key(root);
+    let key_id = key.as_ref().map(|k| k.machine_id()).map_err(Clone::clone);
+    let (machine, key_warning) = adopted_machine(key_id, file.machine.clone());
     let (config, warning) = match load_config(root, login_shell.clone()) {
         Ok(config) => (config, None),
         Err(error) => {
@@ -268,7 +274,14 @@ fn open_adopted_inner(
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (a, b) => a.or(b),
     };
-    let settings = settings(root, home, config, file.exe.clone(), warning, machine);
+    let settings = settings(
+        root,
+        home,
+        config,
+        file.exe.clone(),
+        warning,
+        machine.clone(),
+    );
     // Sessions are adopted by now, so a root that can't be resolved doesn't stop the takeover: it is used as it is.
     let dir = root.join(WORKTREES_DIR);
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&dir).unwrap_or_else(|error| {
@@ -276,12 +289,17 @@ fn open_adopted_inner(
         dir
     }));
     let commands = ShellCommands::new();
+    // Only the key of the machine it runs as can bind: a host keeping a carried id stays offline until restarted.
+    let usable = key.ok().filter(|k| k.machine_id() == machine);
+    let peers =
+        peers(root, usable.as_ref(), &tx).map_err(|e| HostStartError::Adopt(e.to_string()))?;
     HostRuntime::adopt(
         pty,
         worktrees,
         commands,
         GhForge::new(),
         link,
+        peers,
         log,
         RealEnv,
         settings,
@@ -296,14 +314,30 @@ fn open_adopted_inner(
 /// by `handoff-check` before a host older than machine identities updates in place. Making it is `O_EXCL`, so a
 /// running host and a `handoff-check` can't both make one.
 pub fn check_machine_key(root: &Path) -> Result<MachineId, HostStartError> {
+    load_machine_key(root).map(|key| key.machine_id())
+}
+
+/// This machine's key, from `root`, made when there is none (see [`check_machine_key`]).
+fn load_machine_key(root: &Path) -> Result<IrohMachineKey, HostStartError> {
     let identity = KeyFileIdentity::new(root);
     identity
         .load_or_create()
-        .map(|key| key.machine_id())
         .map_err(|error| HostStartError::Identity {
             path: identity.path(),
             error,
         })
+}
+
+/// The `Peers` port on n0's relays and address lookup, binding with `key` (none: it never binds), keeping peers'
+/// last addresses in `<root>/peer-addrs.json`. It binds nothing until the runtime asks.
+fn peers(
+    root: &Path,
+    key: Option<&IrohMachineKey>,
+    tx: &RuntimeTx,
+) -> Result<IrohPeers, HostStartError> {
+    let cache = Some(IrohPeers::cache_in(root));
+    IrohPeers::new(key, Discovery::N0, cache, tx.peers_sink())
+        .map_err(|e| HostStartError::Thread(e.to_string()))
 }
 
 /// The machine id a new image adopting sessions runs as, and a warning for every client's hello when it isn't the

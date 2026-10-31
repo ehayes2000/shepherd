@@ -23,7 +23,8 @@ use shepherd_core::host::Host;
 use shepherd_core::host::upgrade::{HandoffCheck, Preflight};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    ConnId, EventLog, Link, LinkEvent, LinkEventSink, MachineIdentity, MachineKey, PtyEventSink,
+    ConnId, EventLog, Link, LinkEvent, LinkEventSink, MachineIdentity, MachineKey, PairToken,
+    PtyEventSink, TOKEN_LEN,
 };
 use shepherd_core::wire::{
     BuildId, ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
@@ -35,6 +36,7 @@ use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::forge::FakeForge;
 use shepherd_testkit::fakes::identity::FakeIdentity;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
+use shepherd_testkit::fakes::peers::{FakePeerNet, FakePeers};
 use shepherd_testkit::fakes::pty::{FakePty, FakePtyToken, ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 
@@ -60,7 +62,12 @@ const WORKER_LIMIT: Duration = Duration::from_secs(10);
 
 /// The harness machine's id: its key's, as the runtime gets it from the `MachineIdentity` port.
 pub fn machine() -> MachineId {
-    FakeIdentity::holding(&MACHINE_KEY)
+    machine_with(MACHINE_KEY)
+}
+
+/// The id of the machine with `key`, as the runtime gets it from the `MachineIdentity` port.
+pub fn machine_with(key: [u8; 32]) -> MachineId {
+    FakeIdentity::holding(&key)
         .load_or_create()
         .expect("the harness key loads")
         .machine_id()
@@ -96,7 +103,8 @@ pub fn shell_default_config() -> RawConfig {
     }
 }
 
-/// A deterministic [`Env`]: session ids `s_t1`, `s_t2`, ..., entry ids `e1`, `e2`, ..., timestamps 1 ms apart from
+/// A deterministic [`Env`]: session ids `s_t1`, `s_t2`, ..., entry ids `e1`, `e2`, ..., pairing tokens of all 1s, all
+/// 2s, ..., timestamps 1 ms apart from
 /// `2026-10-29T12:00:00.000Z`, and a monotonic clock that only moves through [`Clock::advance`]. Advancing the clock
 /// moves the timestamps by as much, so wall and monotonic time agree.
 #[derive(Clone)]
@@ -110,6 +118,7 @@ struct Counters {
     sessions: u64,
     entries: u64,
     ticks: u64,
+    tokens: u8,
 }
 
 /// The test's handle on a [`TestEnv`]'s monotonic clock.
@@ -184,6 +193,12 @@ impl Env for TestEnv {
         c.entries += 1;
         EntryId::new(format!("e{}", c.entries))
     }
+
+    fn pair_token(&mut self) -> Result<PairToken, String> {
+        let mut c = self.counters();
+        c.tokens += 1;
+        Ok(PairToken::new([c.tokens; TOKEN_LEN]))
+    }
 }
 
 /// A scripted program for [`FakePty`].
@@ -202,8 +217,16 @@ pub fn echo_shell() -> Program {
     })
 }
 
-pub type Runtime =
-    HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, FakeEventLog, TestEnv>;
+pub type Runtime = HostRuntime<
+    FakePty,
+    FakeWorktrees,
+    FakeCommands,
+    FakeForge,
+    FakeLink,
+    FakeEventLog,
+    TestEnv,
+    FakePeers,
+>;
 
 /// Builds a [`HostHarness`].
 pub struct HarnessBuilder {
@@ -218,9 +241,23 @@ pub struct HarnessBuilder {
     commands: FakeCommands,
     forge: FakeForge,
     preflight: Option<PreflightRunner>,
+    peers: FakePeerNet,
+    key: [u8; 32],
 }
 
 impl HarnessBuilder {
+    /// Puts this host's `Peers` port on `peers`, e.g. so two harnesses can pair.
+    pub fn peer_net(mut self, peers: FakePeerNet) -> Self {
+        self.peers = peers;
+        self
+    }
+
+    /// Runs as the machine with `key` instead of [`MACHINE_KEY`].
+    pub fn machine_key(mut self, key: [u8; 32]) -> Self {
+        self.key = key;
+        self
+    }
+
     /// Runs `preflight` for upgrades instead of one that always passes.
     pub fn preflight(mut self, preflight: PreflightRunner) -> Self {
         self.preflight = Some(preflight);
@@ -287,9 +324,12 @@ impl HarnessBuilder {
             forge,
             build,
             preflight,
+            peers,
+            key,
         } = self;
         let dir = tempfile::tempdir().expect("tempdir for run files");
         let mut settings = settings(config, dir.path().join("run"));
+        settings.machine = machine_with(key);
         if let Some(preflight) = preflight {
             settings.preflight = preflight;
         }
@@ -304,10 +344,12 @@ impl HarnessBuilder {
             log,
             env.clone(),
             settings.clone(),
+            &peers,
         );
         let mut harness = HostHarness {
             runtime: Some(runtime),
             net,
+            peers,
             programs,
             worktrees,
             commands,
@@ -363,9 +405,10 @@ fn build_runtime(
     log: FakeEventLog,
     env: TestEnv,
     settings: RuntimeSettings,
+    peers: &FakePeerNet,
 ) -> Runtime {
     let sinks = (|sink| sink, |sink| sink);
-    runtime_in(net, programs, workers, log, env, sinks, settings)
+    runtime_in(net, programs, workers, log, env, sinks, settings, peers)
 }
 
 /// A host runtime on fakes with any `EventLog` (e.g. a wrapper that counts reads), listening on `net`, its link's
@@ -377,7 +420,7 @@ pub fn runtime_with<E: EventLog>(
     log: E,
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers> {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
@@ -389,7 +432,7 @@ pub fn runtime_with_sinks<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers> {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
     let workers = (
         FakeWorktrees::new(WORKTREE_ROOT),
@@ -397,7 +440,16 @@ pub fn runtime_with_sinks<E: EventLog>(
         FakeForge::new(),
     );
     let sinks = (link_sink, pty_sink);
-    runtime_in(net, programs, workers, log, env, sinks, settings)
+    runtime_in(
+        net,
+        programs,
+        workers,
+        log,
+        env,
+        sinks,
+        settings,
+        &FakePeerNet::new(),
+    )
 }
 
 /// The ports that run on worker threads: `Worktrees`, `Commands` and `Forge`.
@@ -406,6 +458,7 @@ type WorkerPorts = (FakeWorktrees, FakeCommands, FakeForge);
 /// The link's and the PTY's event sink wrappers.
 type Sinks<FL, FP> = (FL, FP);
 
+#[allow(clippy::too_many_arguments)]
 fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
@@ -414,7 +467,8 @@ fn runtime_in<E: EventLog, FL, FP>(
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv>
+    peer_net: &FakePeerNet,
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers>
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
@@ -428,8 +482,9 @@ where
     let link = net
         .listen(link_sink(tx.link_sink()))
         .expect("fake host listens");
+    let peers = peer_net.peers(settings.machine.clone(), tx.peers_sink());
     HostRuntime::start(
-        pty, worktrees, commands, forge, link, log, env, settings, tx, rx,
+        pty, worktrees, commands, forge, link, peers, log, env, settings, tx, rx,
     )
     .expect("host runtime starts")
 }
@@ -439,6 +494,8 @@ where
 pub struct HostHarness {
     runtime: Option<Runtime>,
     net: FakeNetwork,
+    /// The network its `Peers` port is on.
+    peers: FakePeerNet,
     programs: Vec<(String, Program)>,
     worktrees: FakeWorktrees,
     commands: FakeCommands,
@@ -462,6 +519,8 @@ impl HostHarness {
             commands: FakeCommands::new(),
             forge: FakeForge::new(),
             preflight: None,
+            peers: FakePeerNet::new(),
+            key: MACHINE_KEY,
         }
     }
 
@@ -520,6 +579,16 @@ impl HostHarness {
         &self.net
     }
 
+    /// The network the host's `Peers` port is on, e.g. to see whether it is bound.
+    pub fn peer_net(&self) -> &FakePeerNet {
+        &self.peers
+    }
+
+    /// This host's machine id.
+    pub fn machine(&self) -> MachineId {
+        self.settings.machine.clone()
+    }
+
     /// Connects a client and steps, so the host has seen it.
     pub fn connect(&mut self) -> FakeClient {
         let client = FakeClient::connect(&self.net);
@@ -560,12 +629,16 @@ impl HostHarness {
         }
         let adoption = adopt_sessions(&mut pty, plan);
         let link = self.net.listen(tx.link_sink()).expect("fake host listens");
+        let peers = self
+            .peers
+            .peers(self.settings.machine.clone(), tx.peers_sink());
         let runtime = HostRuntime::adopt(
             pty,
             self.worktrees.clone(),
             self.commands.clone(),
             self.forge.clone(),
             link,
+            peers,
             log,
             self.env.clone(),
             self.settings.clone(),
@@ -594,6 +667,7 @@ impl HostHarness {
             log,
             self.env.clone(),
             self.settings.clone(),
+            &self.peers,
         );
         self.runtime = Some(runtime);
         self.step();
@@ -602,7 +676,9 @@ impl HostHarness {
     /// [`HostHarness::restart`], with the config changed to `config`, as if the user edited it meanwhile.
     pub fn restart_with_config(&mut self, config: RawConfig) {
         let run_root = self.settings.run_root.clone();
+        let machine = self.settings.machine.clone();
         self.settings = settings(config, run_root);
+        self.settings.machine = machine;
         self.restart();
     }
 
@@ -750,6 +826,11 @@ impl FakeClient {
     pub fn take(&mut self) -> Vec<HostMessage> {
         self.pump();
         std::mem::take(&mut self.inbox)
+    }
+
+    /// Hangs up, as a client killed with Ctrl-C does.
+    pub fn close(&mut self) {
+        let _ = self.link.close(self.conn);
     }
 
     pub fn is_disconnected(&mut self) -> bool {

@@ -47,3 +47,17 @@ pub fn name(config: &Config, hostname: Option<&str>) -> String {
     }
     host
 }
+
+/// What a peer is recorded as being called when the name it gives has nothing to show.
+pub const UNNAMED_PEER: &str = "unnamed machine";
+
+/// The name a peer gives itself (untrusted text from the network, T30), as it is recorded and shown: display-safe,
+/// trimmed and cut to [`MAX_NAME`] grapheme clusters, else [`UNNAMED_PEER`].
+pub fn peer_name(claimed: &str) -> String {
+    let name = safe(claimed);
+    let name = display_safe(&name, MAX_NAME).as_str().trim_end().to_owned();
+    if name.is_empty() {
+        return UNNAMED_PEER.to_owned();
+    }
+    name
+}

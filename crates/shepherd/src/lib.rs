@@ -4,6 +4,7 @@ pub mod build;
 pub mod client;
 pub mod hook;
 pub mod host;
+pub mod peers;
 pub mod screen_guard;
 pub mod terminal;
 
