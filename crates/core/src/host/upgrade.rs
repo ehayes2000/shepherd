@@ -20,6 +20,11 @@ pub struct HandoffCheck {
     /// Why the config can't be used, if it can't. Absent from builds that don't check it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
+    /// Why the machine key (`~/.shepherd/identity.key`, T29) can't be used, if it can't: the new image would have no
+    /// identity. Checking makes the key when there is none, so a swap from a host older than machine identities finds it.
+    /// Absent from builds that don't check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_error: Option<String>,
 }
 
 impl HandoffCheck {
@@ -29,6 +34,15 @@ impl HandoffCheck {
             build,
             handoff_versions: vec![HANDOFF_VERSION],
             config_error,
+            identity_error: None,
+        }
+    }
+
+    /// This answer, with why the machine key can't be used, if it can't.
+    pub fn with_identity_error(self, identity_error: Option<String>) -> Self {
+        Self {
+            identity_error,
+            ..self
         }
     }
 }
@@ -132,6 +146,8 @@ fn can_hand_off(preflight: &Preflight) -> Result<(), String> {
             })?;
             if let Some(error) = check.config_error {
                 Err(format!("fix your config first: {error}"))
+            } else if let Some(error) = check.identity_error {
+                Err(format!("fix the machine key first: {error}"))
             } else if check.handoff_versions.contains(&HANDOFF_VERSION) {
                 Ok(())
             } else {

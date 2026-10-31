@@ -198,7 +198,7 @@ fn open_inner(
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
     let config = load_config(root, login_shell)?;
-    let machine = load_machine(root)?;
+    let machine = check_machine_key(root)?;
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
     let settings = settings(root, home, config, shepherd, None, machine);
@@ -238,9 +238,9 @@ fn open_adopted_inner(
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
         .map_err(HostStartError::Socket)?;
-    // The previous image's key, read again: updating in place keeps the machine. Read before any session is adopted,
-    // like the log and the listener, so a key that can't be used stops the takeover cleanly.
-    let machine = load_machine(root)?;
+    // The previous image's key, read again: updating in place keeps the machine. The preflight checked it; one broken
+    // since falls back to the id the previous image carried, with a warning, rather than stopping the takeover.
+    let (machine, key_warning) = adopted_machine(check_machine_key(root), file.machine.clone())?;
     let (config, warning) = match load_config(root, login_shell.clone()) {
         Ok(config) => (config, None),
         Err(error) => {
@@ -265,6 +265,10 @@ fn open_adopted_inner(
         "took over from the previous host image"
     );
     // The path the previous image execed is this one's startup path: `current_exe()` may already name another file.
+    let warning = match (warning, key_warning) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    };
     let settings = settings(root, home, config, file.exe.clone(), warning, machine);
     // Sessions are adopted by now, so a root that can't be resolved doesn't stop the takeover: it is used as it is.
     let dir = root.join(WORKTREES_DIR);
@@ -289,9 +293,10 @@ fn open_adopted_inner(
     .map_err(|e| start_error(root, e))
 }
 
-/// This machine's id, from its key in `root` (`identity.key`), which the first run makes. The log's lock must be held
-/// already, so no other host is making one at the same time.
-fn load_machine(root: &Path) -> Result<MachineId, HostStartError> {
+/// This machine's id, from its key in `root` (`identity.key`), which is made when there is none: by the first run, or
+/// by `handoff-check` before a host older than machine identities updates in place. Making it is `O_EXCL`, so a
+/// running host and a `handoff-check` can't both make one.
+pub fn check_machine_key(root: &Path) -> Result<MachineId, HostStartError> {
     let identity = KeyFileIdentity::new(root);
     identity
         .load_or_create()
@@ -300,6 +305,28 @@ fn load_machine(root: &Path) -> Result<MachineId, HostStartError> {
             path: identity.path(),
             error,
         })
+}
+
+/// The machine id a new image adopting sessions runs as: `key`, the id from the machine key as it reads it now, else
+/// `carried`, the one the previous image ran as, with a warning for every client's hello (the key broke after the
+/// preflight checked it). With neither, the takeover stops: a handoff from a build older than machine identities
+/// carries none, and its preflight made the key.
+pub fn adopted_machine(
+    key: Result<MachineId, HostStartError>,
+    carried: Option<MachineId>,
+) -> Result<(MachineId, Option<String>), HostStartError> {
+    match (key, carried) {
+        (Ok(machine), _) => Ok((machine, None)),
+        (Err(error), Some(machine)) => {
+            tracing::error!(%error, "cannot use the machine key after updating in place; keeping the carried id");
+            let warning = format!(
+                "the host updated itself but couldn't use its machine key, so it keeps running as the same machine: \
+                 {error}. Restart the host once it is fixed"
+            );
+            Ok((machine, Some(warning)))
+        }
+        (Err(error), None) => Err(error),
+    }
 }
 
 /// The config under `root`, resolved with the user's login shell.

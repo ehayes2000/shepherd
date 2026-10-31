@@ -4,8 +4,9 @@
 //! The file goes through the shared [`private_fs`] helpers (decision 0010): the root is made `0700` (or checked), and
 //! the key is created `0600` with `O_CREAT|O_EXCL`, never over anything already there. An existing key file is opened
 //! without following a symlink and checked through its descriptor: one group or others can access, one that isn't a
-//! regular file, or one that doesn't hold exactly 32 bytes is an error, and is left as it is. A host that died while
-//! writing a new key leaves a short file, which is then reported the same way rather than replaced.
+//! regular file, or one that doesn't hold exactly 32 bytes is an error, and is left as it is. A new key that can't be
+//! written in full (a full disk) is removed again; a host killed while writing one leaves a short file, which is then
+//! reported the same way rather than replaced.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -73,10 +74,17 @@ impl MachineIdentity for KeyFileIdentity {
 /// Generates a key into `file`, which this call just created.
 fn create(path: &Path, mut file: std::fs::File) -> Result<IrohMachineKey, IdentityError> {
     let key = SecretKey::generate();
-    let io = |e: std::io::Error| IdentityError::Io(format!("{}: {e}", path.display()));
-    file.write_all(&key.to_bytes()).map_err(io)?;
     // Once, on the first run: this file is the machine, so it must survive a power cut too.
-    file.sync_all().map_err(io)?;
+    let written = file
+        .write_all(&key.to_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(e) = written {
+        // This call created the file, so it removes it: a short one left behind (the disk was full) would be refused
+        // as the wrong size on every later start, while a missing one is simply made again.
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(IdentityError::Io(format!("{}: {e}", path.display())));
+    }
     Ok(IrohMachineKey(key))
 }
 
@@ -230,6 +238,47 @@ mod tests {
         let result = identity.load_or_create().map(|k| k.machine_id());
         assert_eq!(result, Err(IdentityError::WrongType));
         assert!(fs::symlink_metadata(identity.path()).unwrap().is_symlink());
+    }
+
+    /// Set by `a_key_that_cannot_be_written_leaves_no_file` for the child it runs with no room to write files.
+    const NO_ROOM: &str = "SHEPHERD_TEST_NO_ROOM_FOR_FILES";
+
+    /// Only meaningful in the child of the test below; passes trivially anywhere else.
+    #[test]
+    fn with_no_room_to_write_a_new_key_is_an_io_error_and_no_file_is_left() {
+        if std::env::var_os(NO_ROOM).is_none() {
+            return;
+        }
+        let mut f = KeyFileFixture::new();
+        let identity = f.empty();
+        for _ in 0..2 {
+            let result = identity.load_or_create().map(|k| k.machine_id());
+            // Not `WrongSize`: a short file left by the first try would be refused that way forever.
+            assert!(matches!(result, Err(IdentityError::Io(_))), "{result:?}");
+            assert!(!identity.path().exists(), "a short key file was left");
+        }
+    }
+
+    /// The disk filling up while a new key is written (ENOSPC), stood in for by a file size limit of 0 (`ulimit -f 0`,
+    /// with SIGXFSZ ignored so the write fails with EFBIG instead of killing the process), in a child process: the
+    /// limit is process-wide.
+    #[test]
+    fn a_key_that_cannot_be_written_leaves_no_file() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' XFSZ && ulimit -f 0 && exec \"$0\" --exact --test-threads=1 \"$1\"")
+            .arg(&exe)
+            .arg("identity::tests::with_no_room_to_write_a_new_key_is_an_io_error_and_no_file_is_left")
+            .env(NO_ROOM, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

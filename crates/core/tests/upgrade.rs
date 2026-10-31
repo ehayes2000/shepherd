@@ -30,6 +30,7 @@ fn check_output(versions: &[u32]) -> Vec<u8> {
         },
         handoff_versions: versions.to_vec(),
         config_error: None,
+        identity_error: None,
     };
     let mut line = serde_json::to_vec(&check).unwrap_or_else(|e| panic!("{e}"));
     line.push(b'\n');
@@ -121,6 +122,7 @@ fn an_installed_build_that_cannot_read_the_config_says_fix_your_config() {
         },
         handoff_versions: vec![HANDOFF_VERSION],
         config_error: Some("config.toml: unknown field `agnet`".into()),
+        identity_error: None,
     };
     let facts = preflighted(Preflight::Exited {
         code: 0,
@@ -129,6 +131,23 @@ fn an_installed_build_that_cannot_read_the_config_says_fix_your_config() {
     let reason = unavailable(decide(&facts));
     assert!(reason.contains("fix your config"), "{reason}");
     assert!(reason.contains("agnet"), "{reason}");
+}
+
+#[test]
+fn an_installed_build_that_cannot_use_the_machine_key_says_fix_the_key() {
+    let build = BuildId {
+        version: "0.1.0".into(),
+        digest: digest(2),
+    };
+    let check = HandoffCheck::of(build, None)
+        .with_identity_error(Some("the machine key has mode 644".into()));
+    let facts = preflighted(Preflight::Exited {
+        code: 0,
+        stdout: serde_json::to_vec(&check).unwrap_or_else(|e| panic!("{e}")),
+    });
+    let reason = unavailable(decide(&facts));
+    assert!(reason.contains("fix the machine key"), "{reason}");
+    assert!(reason.contains("mode 644"), "{reason}");
 }
 
 #[test]

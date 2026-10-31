@@ -549,6 +549,78 @@ fn an_upgrade_with_a_broken_config_is_unavailable_and_the_sessions_keep_running(
     a.read_until(&mut seen, |s| text(&s.output).contains("still-42"));
 }
 
+/// T29 review: a machine key the new image couldn't use killed every session. The preflight checks it, so the swap is
+/// refused with the reason and the shell keeps running; the key is left as it is.
+#[test]
+fn an_upgrade_with_an_unusable_machine_key_is_unavailable_and_the_sessions_keep_running() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut running, root) = start_host();
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    let bytes = fs::read(&key).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| answered(s, Method::HostUpgrade).is_some());
+    let answer: UpgradeAnswer =
+        serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
+    match answer {
+        UpgradeAnswer::Unavailable { reason } => {
+            assert!(reason.contains("fix the machine key"), "{reason}");
+            assert!(reason.contains("644"), "{reason}");
+        }
+        other => panic!("expected unavailable, got {other:?}"),
+    }
+    assert_eq!(running.host.try_wait().unwrap(), None, "the host exited");
+    let shell = running.shell.unwrap();
+    assert!(alive(shell), "the shell {shell} died");
+    a.input(&session, b"echo still-$((40+2))\n");
+    a.read_until(&mut seen, |s| text(&s.output).contains("still-42"));
+    let meta = fs::metadata(&key).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o644,
+        "the key was chmodded"
+    );
+    assert_eq!(fs::read(&key).unwrap(), bytes, "the key was replaced");
+}
+
+/// A host older than machine identities has no key: the preflight makes it, so the swap goes ahead, the shell keeps
+/// running, and the new image runs as the machine that key names. (Simulated by removing the key a T29 host made.)
+#[test]
+fn an_upgrade_from_a_host_without_a_machine_key_makes_it_and_the_sessions_keep_running() {
+    use shepherd_adapters::KeyFileIdentity;
+    use shepherd_core::ports::{MachineIdentity, MachineKey};
+    let (mut running, root) = start_host();
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let (mut a, mut seen, session) = shell_session(&socket, &mut running);
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    fs::remove_file(&key).unwrap();
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| s.closed);
+    let answer: UpgradeAnswer =
+        serde_json::from_value(answered(&seen, Method::HostUpgrade).unwrap().clone()).unwrap();
+    assert_eq!(answer, UpgradeAnswer::Accepted);
+    let made = KeyFileIdentity::new(&root)
+        .load_or_create()
+        .unwrap()
+        .machine_id();
+
+    let mut b = Client::connect(&socket);
+    let mut after = Seen::default();
+    b.input(&session, b"echo after-$((40+2))\n");
+    b.request(ClientRequest::Subscribe(Subscribe::default()));
+    b.read_until(&mut after, |s| text(&s.output).contains("after-42"));
+    assert_eq!(
+        answered(&after, Method::Hello).unwrap()["machine"],
+        made.as_str()
+    );
+    let shell = running.shell.unwrap();
+    assert!(alive(shell), "the shell {shell} died");
+}
+
 /// The swap execs the path the host started from, even after a new build was renamed over it: `current_exe()` would
 /// then name a deleted file on Linux.
 #[test]

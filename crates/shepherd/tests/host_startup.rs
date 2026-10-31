@@ -186,6 +186,40 @@ fn a_machine_key_that_cannot_be_used_stops_the_host_and_is_left_alone() {
     assert_eq!(fs::read_to_string(&key).unwrap(), "short");
 }
 
+/// A key that broke between the preflight and the exec: the new image keeps the id the old one carried and warns,
+/// instead of exiting and taking the adopted sessions with it.
+#[test]
+fn an_adopting_image_falls_back_to_the_carried_machine_id_with_a_warning() {
+    use shepherd_core::ids::MachineId;
+    let tmp = tempdir();
+    let root = tmp.path().join("shepherd");
+    host::prepare_root(&root).unwrap();
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    write_private(&key, "short");
+    let carried = MachineId::new("ab".repeat(32));
+
+    let (machine, warning) =
+        host::adopted_machine(host::check_machine_key(&root), Some(carried.clone())).unwrap();
+    assert_eq!(machine, carried);
+    let warning = warning.expect("a warning");
+    assert!(warning.contains("machine key"), "{warning}");
+    assert!(warning.contains("32-byte key"), "{warning}");
+
+    // With nothing carried (a handoff from a build older than machine identities) the takeover stops.
+    let Err(err) = host::adopted_machine(host::check_machine_key(&root), None) else {
+        panic!("accepted with no key and nothing carried");
+    };
+    assert!(matches!(err, HostStartError::Identity { .. }), "{err:?}");
+    assert_eq!(fs::read_to_string(&key).unwrap(), "short");
+
+    // A key that reads is used, whatever was carried.
+    fs::remove_file(&key).unwrap();
+    let made = host::check_machine_key(&root).unwrap();
+    let (machine, warning) =
+        host::adopted_machine(host::check_machine_key(&root), Some(carried)).unwrap();
+    assert_eq!((machine, warning), (made, None));
+}
+
 #[test]
 fn a_corrupt_log_names_the_file_and_what_to_do() {
     let tmp = tempdir();
