@@ -180,9 +180,12 @@ pub const MAX_TUNNEL_TICK: Duration = MAX_CATCH_UP_TICK;
 /// before a `/clear` replaced its transcript path) and the current one's.
 pub const MAX_WAITING_TURN_ENDS: usize = 2;
 
-/// Each session's turn ends' captures (with their agent's home) whose worker call hasn't started: present while that
-/// call waits, which takes them all when it starts.
-type WaitingTurnEnds = Arc<Mutex<HashMap<SessionId, Vec<(CaptureJob, Option<PathBuf>)>>>>;
+/// Each session's turn ends' captures whose worker call hasn't started, each with its agent's home and the time it was
+/// queued (its hook's): present while that call waits, which takes them all when it starts.
+type WaitingTurnEnds = Arc<Mutex<HashMap<SessionId, Vec<WaitingCapture>>>>;
+
+/// A turn end's capture waiting for the worker: the job, its agent's home, and when it was queued.
+type WaitingCapture = (CaptureJob, Option<PathBuf>, jiff::Timestamp);
 
 /// What a capture on the archive's worker came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1634,6 +1637,7 @@ impl<
         then: AfterCapture,
         follow_up: &mut VecDeque<HostEvent>,
     ) {
+        let at = self.env.now().instant();
         // Each agent's home as its session was launched: its profile's env, as the config says now.
         let mut jobs: Vec<(CaptureJob, Option<PathBuf>)> = captures
             .into_iter()
@@ -1657,14 +1661,14 @@ impl<
                 };
                 if queued
                     .iter()
-                    .any(|(q, _)| q.agent_session_id == job.agent_session_id)
+                    .any(|(q, _, _)| q.agent_session_id == job.agent_session_id)
                 {
                     tracing::debug!(%session, "a capture of this agent session is already waiting");
                     return;
                 }
-                queued.push((job, home));
+                queued.push((job, home, at));
                 if queued.len() > MAX_WAITING_TURN_ENDS {
-                    let (dropped, _) = queued.remove(0);
+                    let (dropped, _, _) = queued.remove(0);
                     tracing::warn!(
                         %session,
                         agent_session = %dropped.agent_session_id,
@@ -1673,9 +1677,12 @@ impl<
                 }
                 return;
             }
-            waiting.insert(session.clone(), std::mem::take(&mut jobs));
+            let queued = std::mem::take(&mut jobs)
+                .into_iter()
+                .map(|(job, home)| (job, home, at))
+                .collect();
+            waiting.insert(session.clone(), queued);
         }
-        let at = self.env.now().instant();
         let this = self.machine.clone();
         let worktrees = self.worktrees.shared();
         let waiting = self.waiting_turn_ends.clone();
@@ -1697,13 +1704,13 @@ impl<
                 Some(session) => {
                     let jobs = lock(&waiting).remove(session).unwrap_or_default();
                     let mut result = Ok(());
-                    for (job, home) in &jobs {
+                    for (job, home, at) in &jobs {
                         let one = [(job, home)];
                         let r = capture_all(
                             archive,
                             &*worktrees,
                             one,
-                            at,
+                            *at,
                             &this,
                             removing,
                             &mut outside_repo,

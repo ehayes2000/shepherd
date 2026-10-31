@@ -320,6 +320,46 @@ fn a_new_agent_sessions_turn_end_is_not_coalesced_with_the_old_ones() {
     // The `/clear`'s capture of the old transcript waits behind the running one; then the new agent session's turn
     // ends.
     s.send_clear_to(NEW, b"second conversation\n");
+    // A minute later: each waiting capture is stamped with when its own hook came.
+    s.h.clock().advance(Duration::from_secs(60));
+    s.send_hook(json!({ "hook_event_name": "Stop", "session_id": NEW }));
+    s.h.poll();
+    hold.release();
+    s.h.step();
+    let snapshots = s.archive.snapshots();
+    let paths: Vec<PathBuf> = snapshots
+        .iter()
+        .map(|s| s.request.transcript_path.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        [transcript(), transcript(), transcript_of(CLAUDE_HOME, NEW)]
+    );
+    let apart = snapshots[2]
+        .request
+        .at
+        .duration_since(snapshots[1].request.at);
+    assert!(apart >= jiff::SignedDuration::from_secs(60), "{apart:?}");
+}
+
+/// The usual waiting list is the old transcript's capture (from a `/clear`) and the new one's: the old one failing
+/// doesn't cost the new conversation its snapshot.
+#[test]
+fn a_waiting_capture_that_fails_doesnt_stop_the_next() {
+    const NEW: &str = "99887766-5544-4332-8110-ffeeddccbbaa";
+    let mut s = Setup::new();
+    let hold = s.archive.hold_next();
+    let stop = s.stop();
+    s.send_hook(stop);
+    s.wait_held(&hold);
+    // The old transcript's file is now another agent session's: the archive refuses every capture of it.
+    s.archive.write_transcript(
+        transcript(),
+        AgentKind::ClaudeCode,
+        "11111111-2222-4333-8444-555555555555",
+        b"{}\n",
+    );
+    s.send_clear_to(NEW, b"second conversation\n");
     s.send_hook(json!({ "hook_event_name": "Stop", "session_id": NEW }));
     s.h.poll();
     hold.release();
@@ -330,10 +370,7 @@ fn a_new_agent_sessions_turn_end_is_not_coalesced_with_the_old_ones() {
         .iter()
         .map(|s| s.request.transcript_path.clone())
         .collect();
-    assert_eq!(
-        paths,
-        [transcript(), transcript(), transcript_of(CLAUDE_HOME, NEW)]
-    );
+    assert_eq!(paths, [transcript_of(CLAUDE_HOME, NEW)]);
 }
 
 /// A profile that gives Claude Code a config dir of its own: its transcripts are there, not under the host's.
