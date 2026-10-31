@@ -307,6 +307,39 @@ fn an_agent_that_says_it_exited_is_exited_though_its_process_runs() {
 }
 
 #[test]
+fn a_fresh_agent_that_reported_its_start_is_idle_and_what_it_was_told_is_known() {
+    let mut c = settled_with(&[]);
+    c.host().new_session_with("s1", claude_session_spec());
+    c.sync();
+    let status = |c: &ClientDriver| {
+        let client = c.client();
+        SessionStatus::in_client(client, &client.sessions()[0])
+    };
+    assert_eq!(status(&c), SessionStatus::Running, "not started yet");
+    c.host().agent_started("s1", "claude-code", Some("abc"));
+    c.sync();
+    assert_eq!(status(&c), SessionStatus::Idle);
+    agent_frame(
+        &mut c,
+        "s1",
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/prompted",
+                "params": { "text": "fix the bug", "by": "cli" } }),
+    );
+    assert_eq!(status(&c), SessionStatus::Running);
+    let told = c.client().state(&sid("s1")).and_then(|s| s.told());
+    assert_eq!(told.map(|t| t.text.as_str()), Some("fix the bug"));
+    // A subagent asking the user a question makes the session want the user.
+    agent_frame(
+        &mut c,
+        "s1",
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/subagent/blocked",
+                "params": { "id": "a1", "kind": "question", "text": "Which branch?",
+                            "agent_type": "Explore" } }),
+    );
+    assert_eq!(status(&c), SessionStatus::WantsUser);
+}
+
+#[test]
 fn a_session_that_failed_to_start_is_exited_with_the_reason() {
     let mut c = settled_with(&[]);
     c.host().select_workspace("/src/app");

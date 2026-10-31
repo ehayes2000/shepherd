@@ -27,7 +27,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::archive::ShepherdArchive;
+use crate::archive::{ShepherdArchive, ShepherdTranscripts};
 use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
@@ -63,6 +63,7 @@ pub type RealHost = HostRuntime<
     RealEnv,
     IrohPeers,
     ShepherdArchive,
+    ShepherdTranscripts,
 >;
 
 /// The real host's links: its socket, and its link to other machines.
@@ -235,7 +236,10 @@ fn open_inner(
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
-    let archive = ShepherdArchive::new(root.join(ARCHIVE_DIR));
+    let archive = (
+        ShepherdArchive::new(root.join(ARCHIVE_DIR)),
+        ShepherdTranscripts,
+    );
     let peers = peers(root, Some(&key), &tx)?;
     let link = HostLinks::new(local, peers.link(RealLinks::peers_sink(tx.link_sink())));
     HostRuntime::start(
@@ -335,7 +339,10 @@ fn open_adopted_inner(
         worktrees,
         commands,
         GhForge::new(),
-        ShepherdArchive::new(root.join(ARCHIVE_DIR)),
+        (
+            ShepherdArchive::new(root.join(ARCHIVE_DIR)),
+            ShepherdTranscripts,
+        ),
         link,
         peers,
         log,

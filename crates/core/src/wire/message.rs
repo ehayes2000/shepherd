@@ -29,7 +29,7 @@ use super::WireError;
 use super::base64::serde_bytes;
 use super::build::{BuildId, ExeDigest};
 use super::codec::frame;
-use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
+use crate::acpp::{Envelope, PromptBy, RequestId, Seq, Timestamp};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Layout, LayoutOp};
@@ -63,10 +63,12 @@ pub enum Method {
     Tunnel,
     UiGet,
     UiApply,
+    SessionPrompt,
+    SessionReply,
 }
 
 impl Method {
-    pub const ALL: [Method; 21] = [
+    pub const ALL: [Method; 23] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -88,6 +90,8 @@ impl Method {
         Self::Tunnel,
         Self::UiGet,
         Self::UiApply,
+        Self::SessionPrompt,
+        Self::SessionReply,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -113,6 +117,8 @@ impl Method {
             Self::Tunnel => "_shepherd/tunnel",
             Self::UiGet => "_shepherd/ui/get",
             Self::UiApply => "_shepherd/ui/apply",
+            Self::SessionPrompt => "_shepherd/session/prompt",
+            Self::SessionReply => "_shepherd/session/reply",
         }
     }
 
@@ -151,6 +157,8 @@ pub enum ClientRequest {
     Tunnel(Tunnel),
     UiGet(UiGet),
     UiApply(UiApply),
+    SessionPrompt(SessionPrompt),
+    SessionReply(SessionReply),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -491,6 +499,47 @@ pub struct UiApply {
     pub op: LayoutOp,
 }
 
+/// `_shepherd/session/prompt`: type `text` into the session's agent as one prompt and submit it (decision 0022). The
+/// host types it, so every client sees it in the session's screen, and records it as `_shepherd/session/prompted`.
+/// Answered with an ack once it is typed; refused, typing nothing, with [`WireError::SessionBusy`] while the agent
+/// isn't at its prompt (in a turn, or waiting on the user), or with [`WireError::InvalidParams`] for a session that runs
+/// no agent or isn't running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPrompt {
+    pub session: SessionId,
+    pub text: String,
+    /// Who asked. A client that doesn't say is recorded as `client`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<PromptBy>,
+}
+
+/// `_shepherd/session/reply`: the agent's last reply, read from its transcript. Answered with [`SessionReplyOk`], or
+/// [`WireError::InvalidParams`] for a session that runs no agent or whose transcript can't be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReply {
+    pub session: SessionId,
+    /// Only a reply the agent wrote at or after this counts: the `ts` of the `session/prompted` that started the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<jiff::Timestamp>,
+}
+
+/// The host's answer to `_shepherd/session/reply`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReplyOk {
+    /// `None`: the agent has written no such reply (yet), or its hooks haven't named its transcript.
+    #[serde(default)]
+    pub reply: Option<ReplyInfo>,
+}
+
+/// An agent's reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyInfo {
+    pub text: String,
+    /// When the agent wrote it, if its transcript says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<jiff::Timestamp>,
+}
+
 /// A trusted machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -601,6 +650,8 @@ impl ClientRequest {
             Self::Tunnel(_) => Method::Tunnel,
             Self::UiGet(_) => Method::UiGet,
             Self::UiApply(_) => Method::UiApply,
+            Self::SessionPrompt(_) => Method::SessionPrompt,
+            Self::SessionReply(_) => Method::SessionReply,
         }
     }
 
@@ -627,6 +678,8 @@ impl ClientRequest {
             Self::Tunnel(p) => json(p),
             Self::UiGet(p) => json(p),
             Self::UiApply(p) => json(p),
+            Self::SessionPrompt(p) => json(p),
+            Self::SessionReply(p) => json(p),
         }
     }
 
@@ -655,6 +708,8 @@ impl ClientRequest {
             Method::Tunnel => Self::Tunnel(invalid_params(params)?),
             Method::UiGet => Self::UiGet(invalid_params(params)?),
             Method::UiApply => Self::UiApply(invalid_params(params)?),
+            Method::SessionPrompt => Self::SessionPrompt(invalid_params(params)?),
+            Method::SessionReply => Self::SessionReply(invalid_params(params)?),
         })
     }
 }
@@ -807,6 +862,7 @@ pub enum HostResult {
     PeerRemove(PeerInfo),
     /// The layout, for `_shepherd/ui/get` and `_shepherd/ui/apply`.
     Layout(Layout),
+    SessionReply(SessionReplyOk),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -827,6 +883,7 @@ impl HostResult {
             Self::PeerList(r) => json(r),
             Self::PeerRemove(r) => json(r),
             Self::Layout(r) => json(r),
+            Self::SessionReply(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -846,6 +903,7 @@ impl HostResult {
             Method::PeerList => Self::PeerList(serde_json::from_value(result)?),
             Method::PeerRemove => Self::PeerRemove(serde_json::from_value(result)?),
             Method::UiGet | Method::UiApply => Self::Layout(serde_json::from_value(result)?),
+            Method::SessionReply => Self::SessionReply(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

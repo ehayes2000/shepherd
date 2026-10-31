@@ -268,8 +268,10 @@ impl FakeHost {
             )),
             ClientRequest::UiGet(_) => Ok(HostResult::Layout(self.driver.host().layout())),
             ClientRequest::UiApply(apply) => reply_of(self.driver.ui_apply(apply.op)),
-            // The client TUI never pairs or tunnels yet: the scripted host doesn't either.
+            // The client TUI never pairs, tunnels or prompts agents: the scripted host doesn't either.
             other @ (ClientRequest::PairStart(_)
+            | ClientRequest::SessionPrompt(_)
+            | ClientRequest::SessionReply(_)
             | ClientRequest::PairWait(_)
             | ClientRequest::PairJoin(_)
             | ClientRequest::PeerList(_)

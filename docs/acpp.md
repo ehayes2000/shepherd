@@ -76,6 +76,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/session/closed`    | `{ worktree_removed: bool, worktree_kept? }` (`worktree_kept`: why closing kept a worktree it tried to remove) |
 | `_shepherd/session/failed`    | `{ reason }` (it never got a PTY, e.g. its worktree couldn't be made) |
 | `_shepherd/session/pr`        | `{ pr? }` with `pr` = `{ number, state, checks }` (the branch's pull request changed; absent: none, or none can be found out. `state`: `open`, `closed`, `merged`; `checks`: `none`, `pending`, `passing`, `failing`; unknown values are kept) |
+| `_shepherd/session/prompted`  | `{ text, by }` (the host typed `text` into the agent as one prompt, `_shepherd/session/prompt`; it starts a turn. `by`: `cli`, `client`, or `mcp:<session>`; unknown values are kept. `text` is kept whole) |
 | `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command, transcript_path? }` (source `shepherd`: a resume respawned the agent; `transcript_path`: the hook payload's, where the agent writes that agent session's transcript) |
 | `_shepherd/agent/idle`        | `{ inferred? }` (agent is at its prompt with nothing to do; `inferred`: no agent signal said so and the host inferred it, `"quiet"` or `"quiet-after-permission"`) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |

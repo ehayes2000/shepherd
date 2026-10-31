@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::Frame;
-use crate::ids::MachineId;
+use crate::ids::{MachineId, SessionId};
 use crate::layout::Layout;
 
 /// One frame from the initial `_shepherd/*` table, by method.
@@ -19,6 +19,7 @@ pub enum ShepherdFrame {
     SessionClosed(SessionClosed),
     SessionFailed(SessionFailed),
     SessionPr(SessionPr),
+    SessionPrompted(SessionPrompted),
     AgentStarted(AgentStarted),
     AgentIdle(AgentIdle),
     AgentExited(AgentExited),
@@ -45,6 +46,7 @@ impl ShepherdFrame {
             Self::SessionClosed(_) => "_shepherd/session/closed",
             Self::SessionFailed(_) => "_shepherd/session/failed",
             Self::SessionPr(_) => "_shepherd/session/pr",
+            Self::SessionPrompted(_) => "_shepherd/session/prompted",
             Self::AgentStarted(_) => "_shepherd/agent/started",
             Self::AgentIdle(_) => "_shepherd/agent/idle",
             Self::AgentExited(_) => "_shepherd/agent/exited",
@@ -73,6 +75,7 @@ impl ShepherdFrame {
             Self::SessionClosed(p) => to_params(p),
             Self::SessionFailed(p) => to_params(p),
             Self::SessionPr(p) => to_params(p),
+            Self::SessionPrompted(p) => to_params(p),
             Self::AgentStarted(p) => to_params(p),
             Self::AgentIdle(p) => to_params(p),
             Self::AgentExited(p) => to_params(p),
@@ -105,6 +108,7 @@ impl ShepherdFrame {
             "_shepherd/session/closed" => Self::SessionClosed(p(params)?),
             "_shepherd/session/failed" => Self::SessionFailed(p(params)?),
             "_shepherd/session/pr" => Self::SessionPr(p(params)?),
+            "_shepherd/session/prompted" => Self::SessionPrompted(p(params)?),
             "_shepherd/agent/started" => Self::AgentStarted(p(params)?),
             "_shepherd/agent/idle" => Self::AgentIdle(p(params)?),
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
@@ -226,6 +230,58 @@ pub enum PrChecks {
     Failing,
     #[serde(untagged)]
     Other(String),
+}
+
+/// The host typed a prompt into the session's agent (`_shepherd/session/prompt`, decision 0022), so the UI can show the
+/// last thing the agent was told and by whom. `text` is kept whole, however long; it is shortened only when drawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPrompted {
+    pub text: String,
+    pub by: PromptBy,
+}
+
+/// Who had the host prompt an agent: `cli`, `client` (the TUI, or any client that didn't say), or `mcp:<session>` (an
+/// agent running in that session, through shepherd's MCP server). Open: a value this build doesn't know is kept as
+/// [`PromptBy::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum PromptBy {
+    Cli,
+    Client,
+    Mcp(SessionId),
+    Other(String),
+}
+
+const MCP_PREFIX: &str = "mcp:";
+
+impl From<String> for PromptBy {
+    fn from(text: String) -> Self {
+        match text.as_str() {
+            "cli" => Self::Cli,
+            "client" => Self::Client,
+            _ => match text.strip_prefix(MCP_PREFIX) {
+                Some(session) if !session.is_empty() => Self::Mcp(SessionId::new(session)),
+                _ => Self::Other(text),
+            },
+        }
+    }
+}
+
+impl From<PromptBy> for String {
+    fn from(by: PromptBy) -> Self {
+        match by {
+            PromptBy::Cli => "cli".to_owned(),
+            PromptBy::Client => "client".to_owned(),
+            PromptBy::Mcp(session) => format!("{MCP_PREFIX}{session}"),
+            PromptBy::Other(text) => text,
+        }
+    }
+}
+
+impl std::fmt::Display for PromptBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&String::from(self.clone()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,6 +11,7 @@ pub mod launcher;
 pub mod link;
 pub mod peers;
 pub mod pty;
+pub mod transcripts;
 pub mod worktrees;
 
 pub use archive::{Archive, ArchiveError, ArchivedSession, CaptureReason, CaptureRequest};
@@ -34,6 +35,7 @@ pub use pty::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize,
     SpawnSpec,
 };
+pub use transcripts::{Reply, ReplyRequest, TranscriptError, Transcripts, TurnMarker};
 pub use worktrees::{
     BadHash, BaseSpec, BaseUsed, BranchName, CommitHash, Created, Loss, PatchId, RepoRef, RepoRoot,
     Worktree, WorktreeError, WorktreeName, WorktreePath, WorktreeStatus, Worktrees,

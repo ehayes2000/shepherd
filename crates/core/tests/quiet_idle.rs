@@ -208,6 +208,22 @@ fn a_working_session_whose_pty_stays_quiet_goes_idle_inferred_quiet() {
 }
 
 #[test]
+fn a_prompt_the_host_typed_that_no_agent_signal_follows_goes_idle_after_the_quiet_period() {
+    let mut d = Driver::claude();
+    d.append(
+        1000,
+        shepherd(
+            "_shepherd/session/prompted",
+            json!({ "text": "go", "by": "cli" }),
+        ),
+    );
+    assert_eq!(d.state().activity(), &Activity::Working { tool: None });
+    assert_eq!(d.tick(3999), vec![]);
+    assert_eq!(d.tick(4000), vec![IdleInference::Quiet]);
+    assert!(d.state().at_prompt());
+}
+
+#[test]
 fn output_resets_the_quiet_timer() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));

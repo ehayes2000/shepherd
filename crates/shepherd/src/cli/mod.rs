@@ -7,20 +7,22 @@
 //! sessions ([`settle`]), asks what it needs ([`request`]), and names sessions the one way every command does
 //! ([`target`]). Human output is display-safe; errors go to stderr.
 
+pub mod prompt;
 pub mod sessions;
 
+use std::fmt;
 use std::io::Write;
 use std::time::Duration;
 
 use serde::Serialize;
 use shepherd_core::client::automation::Target;
-use shepherd_core::client::{AskId, Client, ClientSession};
+use shepherd_core::client::{AskError, AskId, Client, ClientSession};
 use shepherd_core::display::display_safe;
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{HostLauncher, Link, LinkEventSink};
 use shepherd_core::wire::{ClientRequest, HostResult};
 
-use crate::client::{ClientRuntime, SocketRuntime, socket_runtime};
+use crate::client::{ClientError, ClientRuntime, SocketRuntime, socket_runtime};
 
 /// How long reaching the hosts may take: launching the local one, and each peer's tunnel and catch-up.
 pub const SETTLE_LIMIT: Duration = Duration::from_secs(60);
@@ -32,6 +34,75 @@ pub const ANSWER_LIMIT: Duration = Duration::from_secs(60);
 /// The most grapheme clusters of one field printed.
 const SHOWN_MAX: usize = 512;
 
+/// The exit status of a command that gave up waiting (`--timeout`), as `timeout(1)` exits.
+pub const TIMED_OUT_EXIT: u8 = 124;
+
+/// Why [`Drive::wait`] stopped before its condition held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitError {
+    /// Its limit passed first.
+    TimedOut,
+    /// The client gave up, saying why.
+    Failed(String),
+}
+
+impl fmt::Display for WaitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut => f.write_str("the shepherd host didn't answer in time"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<WaitError> for String {
+    fn from(e: WaitError) -> Self {
+        e.to_string()
+    }
+}
+
+/// Why a command failed: its exit status says which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliError {
+    /// Exit status 1.
+    Failed(String),
+    /// It gave up waiting at its `--timeout`: exit status [`TIMED_OUT_EXIT`].
+    TimedOut(String),
+}
+
+impl CliError {
+    pub fn why(&self) -> &str {
+        match self {
+            Self::Failed(why) | Self::TimedOut(why) => why,
+        }
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Failed(_) => 1,
+            Self::TimedOut(_) => TIMED_OUT_EXIT,
+        }
+    }
+}
+
+impl From<String> for CliError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl From<&str> for CliError {
+    fn from(why: &str) -> Self {
+        Self::Failed(why.to_owned())
+    }
+}
+
+impl From<WaitError> for CliError {
+    fn from(e: WaitError) -> Self {
+        Self::Failed(e.to_string())
+    }
+}
+
 /// A running client, as a command drives it.
 pub trait Drive {
     fn client(&self) -> &Client;
@@ -39,13 +110,12 @@ pub trait Drive {
     /// Asks `machine`'s host (this machine's for `None`) `request`. Read the answer with [`Client::answer`].
     fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId;
 
-    /// Runs the client until `done` holds of it. Fails saying why if that takes longer than `limit`, or the client
-    /// gives up.
+    /// Runs the client until `done` holds of it. Fails if that takes longer than `limit`, or the client gives up.
     fn wait(
         &mut self,
         done: &mut dyn FnMut(&Client) -> bool,
         limit: Duration,
-    ) -> Result<(), String>;
+    ) -> Result<(), WaitError>;
 }
 
 impl<L, C, H> Drive for ClientRuntime<L, C, H>
@@ -68,23 +138,39 @@ where
         &mut self,
         done: &mut dyn FnMut(&Client) -> bool,
         limit: Duration,
-    ) -> Result<(), String> {
-        self.run_until(done, limit).map_err(|e| e.to_string())
+    ) -> Result<(), WaitError> {
+        self.run_until(done, limit).map_err(|e| match e {
+            ClientError::TimedOut => WaitError::TimedOut,
+            other => WaitError::Failed(other.to_string()),
+        })
     }
 }
 
 /// A started client of the local host at `~/.shepherd/host.sock`. Its hello names no directory, so the host never
 /// selects a workspace because of where a command ran.
 pub fn connect() -> Result<SocketRuntime, String> {
-    let mut runtime = socket_runtime(&crate::peers::socket()?).map_err(|e| e.to_string())?;
+    let runtime = socket_runtime(&crate::peers::socket()?).map_err(|e| e.to_string())?;
+    Ok(started(runtime))
+}
+
+/// `runtime`, set up as every command's client and started: a peer that doesn't send its sessions within
+/// [`PEER_CATCH_UP_LIMIT`] is left out. [`connect`] uses it, and so do the scenario tests.
+pub fn started<L, C, H>(mut runtime: ClientRuntime<L, C, H>) -> ClientRuntime<L, C, H>
+where
+    L: Link,
+    C: FnMut(
+        std::sync::Arc<dyn LinkEventSink>,
+    ) -> Result<(L, shepherd_core::ports::ConnId), String>,
+    H: HostLauncher,
+{
     runtime.set_catch_up_limit(PEER_CATCH_UP_LIMIT);
     runtime.start();
-    Ok(runtime)
+    runtime
 }
 
 /// Waits until every host the client can reach has sent all its sessions ([`Client::settled`]).
 pub fn settle(drive: &mut impl Drive) -> Result<(), String> {
-    drive.wait(&mut Client::settled, SETTLE_LIMIT)
+    Ok(drive.wait(&mut Client::settled, SETTLE_LIMIT)?)
 }
 
 /// Asks `machine`'s host (this machine's for `None`) `request` and waits for its answer: the host's refusal, or why
@@ -94,13 +180,23 @@ pub fn request(
     machine: Option<MachineId>,
     request: ClientRequest,
 ) -> Result<HostResult, String> {
+    ask_host(drive, machine, request)?.map_err(|e| e.to_string())
+}
+
+/// Asks `machine`'s host (this machine's for `None`) `request` and waits for its answer, which is the host's result or
+/// why it refused (or couldn't be asked). Fails only if no answer comes.
+pub fn ask_host(
+    drive: &mut impl Drive,
+    machine: Option<MachineId>,
+    request: ClientRequest,
+) -> Result<Result<HostResult, AskError>, String> {
     let ask = drive.ask(machine, request);
     drive.wait(&mut |c| c.answer(ask).is_some(), ANSWER_LIMIT)?;
-    match drive.client().answer(ask) {
-        Some(Ok(result)) => Ok(result.clone()),
-        Some(Err(e)) => Err(e.to_string()),
-        None => Err("the shepherd host didn't answer".to_owned()),
-    }
+    drive
+        .client()
+        .answer(ask)
+        .cloned()
+        .ok_or_else(|| "the shepherd host didn't answer".to_owned())
 }
 
 /// The session `text` names, by id or by unique name ([`Target`]), on any machine the client reaches. Call once

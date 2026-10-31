@@ -5,29 +5,34 @@
 
 mod support;
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use shepherd::cli::prompt::Prompt;
 use shepherd::cli::sessions::{New, new, sessions};
-use shepherd::cli::{Drive, target};
+use shepherd::cli::{CliError, Drive, WaitError, target};
 use shepherd::client::{ClientError, ClientRuntime, Connector};
-use shepherd_core::acpp::Timestamp;
 use shepherd_core::acpp::{
-    Dir, Envelope, FrameDraft, PeerTrusted, ShepherdFrame, Source, SourceKind,
+    Dir, Envelope, Frame, FrameDraft, PeerTrusted, Seq, ShepherdFrame, Source, SourceKind,
+    Timestamp,
 };
+use shepherd_core::client::automation::SessionStatus;
 use shepherd_core::client::{AskId, Client, MachineStatus};
+use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::ports::{Link, LinkEvent, LinkEventSink, LogId};
+use shepherd_core::ports::{EventLog, Link, LinkEvent, LinkEventSink, LogId, Reply};
 use shepherd_core::wire::{
-    ClientMessage, ClientRequest, Hello, HostResponse, PROTOCOL_VERSION, SessionRename, WireError,
-    decode_client_message, encode_response,
+    ClientMessage, ClientRequest, CloseWorktree, Hello, HookFrame, HostResponse, PROTOCOL_VERSION,
+    SessionClose, SessionPrompt, SessionRename, WireError, decode_client_message, encode_response,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
+use shepherd_testkit::fakes::pty::{ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 use support::*;
 
@@ -35,6 +40,8 @@ const KEY_A: [u8; 32] = [0xaa; 32];
 const KEY_B: [u8; 32] = [0xbb; 32];
 /// A liveness bound, never a measurement.
 const LIVENESS: Duration = Duration::from_secs(60);
+/// The command of the built-in `claude` profile, which runs the fake agent on A.
+const CLAUDE: &str = "claude";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -58,8 +65,98 @@ fn trusting(peer: &MachineId, name: &str) -> Vec<Envelope> {
 
 type Runtime = ClientRuntime<FakeLink, Connector<FakeLink>, FakeHostLauncher>;
 
-/// Machine A's host trusting B ("laptop"), in workspace `app` (a repo the fake worktrees know); B's host, letting A
-/// in unless told not to; and a command-line client on A's host.
+/// How the fake agent answers a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    /// Submits it, writes `Done: <prompt>` to its transcript and ends its turn.
+    Reply,
+    /// Submits it, then asks permission to use this tool.
+    Ask(&'static str),
+    /// Submits it and works on it forever.
+    Silent,
+    /// Submits it, works for a while (this many rounds of the world in which something else happened), then replies.
+    Slow(u32),
+    /// Submits it and ends its turn without writing anything.
+    Quiet,
+    /// Submits it, then the session is closed (by someone else) before the turn ends.
+    Closed,
+    /// Submits it, then the agent exits before the turn ends.
+    Exits,
+}
+
+/// What the fake agent saw: a session's `claude` started, or was typed into.
+enum Seen {
+    Started(String),
+    Typed(String, Vec<u8>),
+}
+
+/// A fake Claude Code, run as the `claude` profile's command on A. It sees what its PTY is typed; the world answers as
+/// Claude Code would through its hooks ([`World::react`]), on a hook conn of its own, and writes its replies to A's fake
+/// transcripts.
+#[derive(Clone, Default)]
+struct FakeAgent {
+    seen: Arc<Mutex<Vec<Seen>>>,
+    /// Where each session's shell was started, by session.
+    shells: Arc<Mutex<Vec<(String, PathBuf)>>>,
+}
+
+/// The session a fake program runs in.
+fn session_of(p: &ScriptedProcess<'_>) -> String {
+    p.spec()
+        .env
+        .iter()
+        .find(|(k, _)| k == shepherd::hook::SESSION_VAR)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+impl FakeAgent {
+    /// A shell that echoes, as the harness's does, and notes where it was started.
+    fn shell(&self) -> Program {
+        let shells = self.shells.clone();
+        let echo = echo_shell();
+        Arc::new(move |input, p| {
+            if let ProgramInput::Start = input {
+                lock(&shells).push((session_of(p), p.spec().cwd.clone()));
+            }
+            echo(input, p);
+        })
+    }
+
+    /// Where session `session`'s shell was started.
+    fn shell_cwd(&self, session: &SessionId) -> Option<PathBuf> {
+        lock(&self.shells)
+            .iter()
+            .find(|(s, _)| s == session.as_str())
+            .map(|(_, cwd)| cwd.clone())
+    }
+
+    fn program(&self) -> Program {
+        let seen = self.seen.clone();
+        Arc::new(move |input, p| {
+            let session = session_of(p);
+            match input {
+                ProgramInput::Start => lock(&seen).push(Seen::Started(session)),
+                ProgramInput::Stdin(bytes) => {
+                    lock(&seen).push(Seen::Typed(session, bytes.to_vec()))
+                }
+                ProgramInput::Resized => {}
+            }
+        })
+    }
+
+    fn take(&self) -> Vec<Seen> {
+        std::mem::take(&mut *lock(&self.seen))
+    }
+}
+
+/// The transcript the fake agent of session `session` writes.
+fn transcript_of(session: &str) -> PathBuf {
+    PathBuf::from(CLAUDE_HOME).join(format!("projects/-app/agent-{session}.jsonl"))
+}
+
+/// Machine A's host trusting B ("laptop"), in workspace `app` (a repo the fake worktrees know), running a fake agent as
+/// its `claude`; B's host, letting A in unless told not to; and a command-line client on A's host.
 struct World {
     _tmp: tempfile::TempDir,
     a: HostHarness,
@@ -67,6 +164,19 @@ struct World {
     client: Runtime,
     /// B's host is running: a stopped one isn't stepped.
     b_running: bool,
+    /// What the client's clock says.
+    now: Arc<Mutex<jiff::Timestamp>>,
+    agent: FakeAgent,
+    /// The fake agent's hook conn to A.
+    hooks: FakeClient,
+    /// How the fake agent answers each next prompt; [`Answer::Reply`] once these run out.
+    answers: VecDeque<Answer>,
+    /// What each session's agent has been typed and not yet submitted.
+    typing: BTreeMap<String, Vec<u8>>,
+    /// A slow answer under way: its session, its prompt, and the rounds left.
+    working: Option<(String, String, u32)>,
+    /// Every prompt the fake agent was submitted, as its input box got it.
+    submitted: Vec<String>,
 }
 
 impl World {
@@ -86,12 +196,15 @@ impl World {
         let env = TestEnv::new();
         let (a_id, b_id) = (machine_with(KEY_A), machine_with(KEY_B));
         let a_log = FakeEventLog::new().with_envelopes(LogId::Host, trusting(&b_id, "laptop"));
+        let agent = FakeAgent::default();
         let mut a = HostHarness::builder()
             .machines(machines.clone())
             .machine_key(KEY_A)
             .env(env.clone())
             .log(a_log)
             .worktrees(worktrees)
+            .program(CLAUDE, agent.program())
+            .program(SHELL, agent.shell())
             .start();
         let b = HostHarness::builder()
             .machines(machines.clone())
@@ -105,25 +218,192 @@ impl World {
         let now = Arc::new(Mutex::new(
             "2026-10-29T12:00:00Z".parse::<jiff::Timestamp>().unwrap(),
         ));
-        let clock = move || Timestamp::parse(lock(&now).to_string()).unwrap();
+        let read = now.clone();
+        let clock = move || Timestamp::parse(lock(&read).to_string()).unwrap();
         let net = a.network().clone();
         let connect: Connector<FakeLink> = Box::new(move |sink: Arc<dyn LinkEventSink>| {
             net.connect(sink).map_err(|e| e.to_string())
         });
-        let mut client = ClientRuntime::new(
+        // Set up as `shepherd`'s own commands set up theirs.
+        let client = shepherd::cli::started(ClientRuntime::new(
             MachineId::new("m_cli"),
             connect,
             FakeHostLauncher::new(),
             clock,
-        );
-        client.start();
+        ));
+        let hooks = a.connect();
         Self {
             _tmp: tmp,
             a,
             b,
             client,
             b_running: true,
+            now,
+            agent,
+            hooks,
+            answers: VecDeque::new(),
+            typing: BTreeMap::new(),
+            working: None,
+            submitted: Vec::new(),
         }
+    }
+
+    /// Sends a Claude Code hook payload from session `session`'s agent, as `shepherd hook` would.
+    fn hook(&mut self, session: &str, payload: Value) {
+        self.hooks
+            .request(ClientRequest::HookFrame(Box::new(HookFrame {
+                session: SessionId::new(session),
+                agent: AgentKind::ClaudeCode,
+                payload,
+            })));
+    }
+
+    /// The fake agent's reply to `prompt`: written to its transcript, then its turn ends.
+    fn finish(&mut self, session: &str, prompt: &str) {
+        // Written just after the prompt was recorded, as an agent's clock would have it.
+        let at = self
+            .prompted_at(session)
+            .checked_add(jiff::SignedDuration::from_millis(1))
+            .unwrap();
+        let reply = Reply {
+            text: format!("Done: {prompt}"),
+            at: Some(at),
+        };
+        self.a
+            .transcripts()
+            .add_reply(transcript_of(session), AgentKind::ClaudeCode, reply);
+        self.hook(session, json!({ "hook_event_name": "Stop" }));
+    }
+
+    /// When A recorded the last prompt it typed into session `session`.
+    fn prompted_at(&self, session: &str) -> jiff::Timestamp {
+        self.a
+            .log()
+            .read(LogId::Session(SessionId::new(session)), Seq::ZERO)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| {
+                matches!(e.frame(), Frame::Shepherd(m)
+                    if matches!(m.body(), ShepherdFrame::SessionPrompted(_)))
+            })
+            .map(|e| e.ts().instant())
+            .expect("a prompt was recorded")
+    }
+
+    /// What the fake agent does about what it saw since the last time: reports its start, and answers each prompt
+    /// submitted to it (a whole bracketed paste, then Enter). Returns whether it did anything.
+    fn react(&mut self) -> bool {
+        let mut acted = false;
+        if let Some((session, prompt, left)) = self.working.take() {
+            acted = true;
+            match left {
+                0 => self.finish(&session, &prompt),
+                _ => self.working = Some((session, prompt, left - 1)),
+            }
+        }
+        for seen in self.agent.take() {
+            acted = true;
+            match seen {
+                Seen::Started(session) => {
+                    let payload = json!({
+                        "hook_event_name": "SessionStart",
+                        "source": "startup",
+                        "session_id": format!("agent-{session}"),
+                        "transcript_path": transcript_of(&session),
+                    });
+                    self.hook(&session, payload);
+                }
+                Seen::Typed(session, bytes) => {
+                    let typed = self.typing.entry(session.clone()).or_default();
+                    typed.extend_from_slice(&bytes);
+                    let Some(end) = typed.windows(7).position(|w| w == b"\x1b[201~\r") else {
+                        continue;
+                    };
+                    let whole = typed.drain(..end + 7).collect::<Vec<u8>>();
+                    let prompt = String::from_utf8(whole[6..whole.len() - 7].to_vec()).unwrap();
+                    assert!(whole.starts_with(b"\x1b[200~"), "{whole:?}");
+                    self.submitted.push(prompt.clone());
+                    self.hook(
+                        &session,
+                        json!({ "hook_event_name": "UserPromptSubmit", "prompt": prompt }),
+                    );
+                    match self.answers.pop_front().unwrap_or(Answer::Reply) {
+                        Answer::Reply => self.finish(&session, &prompt),
+                        Answer::Ask(tool) => self.hook(
+                            &session,
+                            json!({ "hook_event_name": "PermissionRequest", "tool_name": tool }),
+                        ),
+                        Answer::Silent => {}
+                        Answer::Slow(rounds) => self.working = Some((session, prompt, rounds)),
+                        Answer::Quiet => {
+                            self.hook(&session, json!({ "hook_event_name": "Stop" }));
+                        }
+                        Answer::Closed => {
+                            self.hooks
+                                .request(ClientRequest::SessionClose(SessionClose {
+                                    session: SessionId::new(&session),
+                                    worktree: CloseWorktree::Keep,
+                                }));
+                        }
+                        Answer::Exits => self.hook(
+                            &session,
+                            json!({ "hook_event_name": "SessionEnd", "reason": "other" }),
+                        ),
+                    }
+                }
+            }
+        }
+        acted
+    }
+
+    /// Makes a session of the fake agent with `shepherd new`, and waits for it to be at its prompt. Returns its id.
+    fn agent_session(&mut self, name: &str) -> String {
+        let made = self
+            .new_json(New {
+                profile: Some("claude".into()),
+                cwd: Some("app".into()),
+                name: Some(name.into()),
+                ..New::default()
+            })
+            .unwrap();
+        let id = made["session"]["id"].as_str().unwrap().to_owned();
+        let session = SessionId::new(&id);
+        self.wait(
+            &mut |c| {
+                c.sessions()
+                    .iter()
+                    .find(|s| s.id == session)
+                    .is_some_and(|s| SessionStatus::in_client(c, s) == SessionStatus::Idle)
+            },
+            LIVENESS,
+        )
+        .unwrap();
+        id
+    }
+
+    /// What `shepherd prompt --json` prints, or why it failed.
+    fn prompt_json(&mut self, prompt: Prompt) -> Result<Value, CliError> {
+        let mut out = Vec::new();
+        shepherd::cli::prompt::prompt(self, &prompt, true, &mut out)?;
+        Ok(serde_json::from_slice(&out).unwrap())
+    }
+
+    /// The `session/prompted` entries in A's logs: what was typed, and by whom.
+    fn prompted(&self) -> Vec<(String, String)> {
+        let log = self.a.log();
+        log.logs()
+            .unwrap()
+            .into_iter()
+            .flat_map(|id| log.read(id, Seq::ZERO).unwrap())
+            .filter_map(|e| match e.frame() {
+                Frame::Shepherd(m) => match m.body() {
+                    ShepherdFrame::SessionPrompted(p) => Some((p.text.clone(), p.by.to_string())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     fn here(&self) -> PathBuf {
@@ -155,8 +435,13 @@ impl Drive for World {
         self.client.ask(machine, request)
     }
 
-    /// Runs both hosts and the client until `done`; fails once none of them has anything left to do.
-    fn wait(&mut self, done: &mut dyn FnMut(&Client) -> bool, _: Duration) -> Result<(), String> {
+    /// Runs both hosts, the fake agent and the client until `done`. Once none of them has anything left to do, nothing
+    /// ever will: whatever the limit, it passes ([`WaitError::TimedOut`]).
+    fn wait(
+        &mut self,
+        done: &mut dyn FnMut(&Client) -> bool,
+        _: Duration,
+    ) -> Result<(), WaitError> {
         let mut quiet = 0;
         while quiet < 3 {
             if done(self.client.client()) {
@@ -166,12 +451,13 @@ impl Drive for World {
             if self.b_running {
                 self.b.step();
             }
-            quiet = match self.client.pump() {
-                0 => quiet + 1,
+            let acted = self.react();
+            quiet = match (self.client.pump(), acted) {
+                (0, false) => quiet + 1,
                 _ => 0,
             };
         }
-        Err("nothing more happened".to_owned())
+        Err(WaitError::TimedOut)
     }
 }
 
@@ -429,4 +715,322 @@ fn a_command_waiting_on_a_host_speaking_another_protocol_stops_at_once_saying_so
         matches!(&err, ClientError::Fatal(why) if why.contains("another protocol version")),
         "{err:?}"
     );
+}
+
+#[test]
+fn a_peer_that_does_not_send_its_sessions_in_time_is_left_out_by_the_commands_client() {
+    let mut w = World::new();
+    session_on(&mut w.b, "theirs");
+    // Step until the client has B's hello answer, then stop B before it sends its sessions.
+    let mut rounds = 0;
+    let laptop = |w: &World| {
+        w.client
+            .client()
+            .machines()
+            .get(1)
+            .map(|m| m.status.clone())
+    };
+    while laptop(&w) != Some(MachineStatus::Connected) {
+        w.a.step();
+        w.b.step();
+        w.client.pump();
+        rounds += 1;
+        assert!(rounds < 100, "B never answered the hello");
+    }
+    assert!(!w.client.client().settled(), "B hasn't sent its sessions");
+    w.b_running = false;
+    // Past the commands' catch-up limit, B is given up on and the command goes on without it.
+    *lock(&w.now) += shepherd::cli::PEER_CATCH_UP_LIMIT + jiff::SignedDuration::from_secs(1);
+    w.client.tick();
+    let listed = w.sessions_json();
+    assert_eq!(listed["machines"][1]["status"], "unreachable", "{listed}");
+    assert!(field(&listed, "id").is_empty(), "{listed}");
+}
+
+#[test]
+fn new_on_this_machine_by_name_takes_a_relative_cwd_from_where_the_command_runs() {
+    let mut w = World::new();
+    let dir = w.here().join("app");
+    let made = w
+        .new_json(New {
+            machine: Some("testbox".into()),
+            cwd: Some("app".into()),
+            ..New::default()
+        })
+        .unwrap();
+    let id = SessionId::new(made["session"]["id"].as_str().unwrap());
+    // Run there, and so given no worktree.
+    assert_eq!(made["session"]["worktree"], Value::Null, "{made}");
+    let session = w.a.host().sessions().into_iter().find(|s| s.id == id);
+    assert!(session.is_some(), "made on this machine");
+    let spawned = w.agent.shell_cwd(&id);
+    assert_eq!(
+        spawned.map(|p| std::fs::canonicalize(p).unwrap()),
+        Some(std::fs::canonicalize(dir).unwrap())
+    );
+}
+
+// ---------- prompt, reply, wait (T47) ----------
+
+/// A prompt of `text` to `session`, bounded (for liveness) wherever it waits.
+fn prompt_of(session: &str, text: &str) -> Prompt {
+    Prompt {
+        session: session.to_owned(),
+        text: text.to_owned(),
+        timeout: Some(LIVENESS),
+        ..Prompt::default()
+    }
+}
+
+/// What `shepherd reply --json` prints.
+fn reply_json(w: &mut World, session: &str) -> Value {
+    let mut out = Vec::new();
+    shepherd::cli::prompt::reply(w, session, true, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// What `shepherd wait --json` prints, or why it failed.
+fn wait_json(w: &mut World, session: &str, timeout: Duration) -> Result<Value, CliError> {
+    let mut out = Vec::new();
+    shepherd::cli::prompt::wait(w, session, Some(timeout), true, &mut out)?;
+    Ok(serde_json::from_slice(&out).unwrap())
+}
+
+#[test]
+fn a_prompt_waited_for_comes_back_with_the_agents_reply() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "fix the bug\nand say so")
+        })
+        .unwrap();
+    assert_eq!(
+        answer,
+        json!({ "session": id, "status": "idle", "reply": "Done: fix the bug\nand say so",
+                "asked": null })
+    );
+    // Typed as one paste, then submitted; recorded with who asked.
+    assert_eq!(w.submitted, ["fix the bug\nand say so"]);
+    assert_eq!(
+        w.prompted(),
+        [("fix the bug\nand say so".to_owned(), "cli".to_owned())]
+    );
+    // The reply was read from the transcript the hooks named, from when the prompt was recorded on.
+    let asked = w.a.transcripts().asked();
+    let read = asked.last().unwrap();
+    assert_eq!(read.transcript_path, transcript_of(&id));
+    assert_eq!(read.agent_home, PathBuf::from(CLAUDE_HOME));
+    assert_eq!(
+        read.since.map(|m| m.at),
+        Some(w.prompted_at(&id)),
+        "the turn's own start"
+    );
+
+    // And `shepherd reply` prints it again, without prompting.
+    let mut out = Vec::new();
+    shepherd::cli::prompt::reply(&mut w, "worker", false, &mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "Done: fix the bug\nand say so\n"
+    );
+    assert_eq!(
+        reply_json(&mut w, "worker"),
+        json!({ "session": id, "status": "idle", "reply": "Done: fix the bug\nand say so",
+                "asked": null })
+    );
+    assert_eq!(w.submitted.len(), 1);
+}
+
+#[test]
+fn a_turn_that_ends_without_a_reply_does_not_answer_with_the_turn_before() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    let first = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "one")
+        })
+        .unwrap();
+    assert_eq!(first["reply"], "Done: one", "{first}");
+    w.answers.push_back(Answer::Quiet);
+    let second = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "two")
+        })
+        .unwrap();
+    assert_eq!(
+        second,
+        json!({ "session": id, "status": "idle", "reply": null, "asked": null })
+    );
+    // Without a turn, `reply` is the last one the agent wrote.
+    assert_eq!(reply_json(&mut w, "worker")["reply"], "Done: one");
+}
+
+#[test]
+fn a_second_prompt_while_the_agent_works_is_refused_as_busy_and_never_typed() {
+    let mut w = World::new();
+    w.agent_session("worker");
+    w.answers.push_back(Answer::Silent);
+    w.prompt_json(prompt_of("worker", "one")).unwrap();
+    let err = w.prompt_json(prompt_of("worker", "two")).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("busy (running)")),
+        "{err:?}"
+    );
+    assert_eq!(w.submitted, ["one"]);
+    assert_eq!(w.prompted().len(), 1);
+}
+
+#[test]
+fn a_queued_prompt_waits_for_the_turn_before_it() {
+    let mut w = World::new();
+    w.agent_session("worker");
+    w.answers.push_back(Answer::Slow(5));
+    w.prompt_json(prompt_of("worker", "first")).unwrap();
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            queue: true,
+            ..prompt_of("worker", "second")
+        })
+        .unwrap();
+    assert_eq!(answer["reply"], "Done: second", "{answer}");
+    assert_eq!(w.submitted, ["first", "second"]);
+}
+
+#[test]
+fn a_queued_prompt_that_loses_the_race_waits_for_the_winners_turn_and_answers_with_its_own() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    // Another client's prompt reaches the host first, before this client hears of it: the agent looks idle here.
+    let mut rival = w.a.connect();
+    rival.request(ClientRequest::SessionPrompt(SessionPrompt {
+        session: SessionId::new(&id),
+        text: "theirs".into(),
+        by: None,
+    }));
+    w.answers.push_back(Answer::Slow(3));
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            queue: true,
+            ..prompt_of("worker", "mine")
+        })
+        .unwrap();
+    assert_eq!(answer["reply"], "Done: mine", "{answer}");
+    assert_eq!(w.submitted, ["theirs", "mine"]);
+    assert_eq!(
+        w.prompted(),
+        [
+            ("theirs".to_owned(), "client".to_owned()),
+            ("mine".to_owned(), "cli".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn an_agent_that_asks_the_user_returns_at_once_saying_what_it_asked() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    w.answers.push_back(Answer::Ask("Bash"));
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "delete the logs")
+        })
+        .unwrap();
+    assert_eq!(
+        answer,
+        json!({ "session": id, "status": "wants-user", "reply": null, "asked": "Bash" })
+    );
+
+    // `shepherd wait` says the same at once.
+    let mut out = Vec::new();
+    shepherd::cli::prompt::wait(&mut w, "worker", Some(LIVENESS), false, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "wants-user: Bash\n");
+    assert_eq!(
+        wait_json(&mut w, "worker", LIVENESS).unwrap(),
+        json!({ "session": id, "status": "wants-user", "reply": null, "asked": "Bash" })
+    );
+}
+
+#[test]
+fn a_session_closed_while_its_turn_is_waited_for_ends_the_wait_as_exited() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    w.answers.push_back(Answer::Closed);
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "go")
+        })
+        .unwrap();
+    assert_eq!(
+        answer,
+        json!({ "session": id, "status": "exited", "reply": null, "asked": null })
+    );
+}
+
+#[test]
+fn an_agent_that_exits_during_its_turn_ends_the_wait_as_exited() {
+    let mut w = World::new();
+    let id = w.agent_session("worker");
+    w.answers.push_back(Answer::Exits);
+    let answer = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "go")
+        })
+        .unwrap();
+    assert_eq!(
+        answer,
+        json!({ "session": id, "status": "exited", "reply": null, "asked": null })
+    );
+}
+
+#[test]
+fn a_wait_that_runs_out_says_it_timed_out_and_the_prompt_stays() {
+    let mut w = World::new();
+    w.agent_session("worker");
+    w.answers.push_back(Answer::Silent);
+    let err = w
+        .prompt_json(Prompt {
+            wait: true,
+            timeout: Some(Duration::from_secs(1)),
+            ..prompt_of("worker", "think forever")
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&err, CliError::TimedOut(why) if why.contains("the prompt was sent and stays")),
+        "{err:?}"
+    );
+    assert_eq!(err.exit_code(), shepherd::cli::TIMED_OUT_EXIT);
+    assert_eq!(w.submitted, ["think forever"]);
+    // Still working on it: nothing was withdrawn, and a queued prompt times out waiting its turn.
+    let err = w
+        .prompt_json(Prompt {
+            queue: true,
+            timeout: Some(Duration::from_secs(1)),
+            ..prompt_of("worker", "next")
+        })
+        .unwrap_err();
+    assert!(matches!(err, CliError::TimedOut(_)), "{err:?}");
+    let err = wait_json(&mut w, "worker", Duration::from_secs(1)).unwrap_err();
+    assert!(matches!(err, CliError::TimedOut(_)), "{err:?}");
+    assert_eq!(w.submitted, ["think forever"]);
+}
+
+#[test]
+fn a_session_with_no_agent_is_never_prompted() {
+    let mut w = World::new();
+    session_on(&mut w.a, "plain");
+    let err = w.prompt_json(prompt_of("plain", "ls")).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("runs no agent")),
+        "{err:?}"
+    );
+    assert!(w.prompted().is_empty());
 }

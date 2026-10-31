@@ -514,7 +514,10 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
             worktrees,
             commands.clone(),
             FakeForge::new(),
-            shepherd_testkit::fakes::archive::FakeArchive::new(),
+            (
+                shepherd_testkit::fakes::archive::FakeArchive::new(),
+                shepherd_testkit::fakes::transcripts::FakeTranscripts::new(),
+            ),
             link,
             shepherd_testkit::fakes::peers::FakePeerNet::new()
                 .peers(support::machine(), tx.peers_sink()),

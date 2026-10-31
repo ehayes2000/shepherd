@@ -34,6 +34,20 @@ impl SessionStatus {
         }
     }
 
+    /// What `session`, listed by `client`, is doing: as [`SessionStatus::of`], except that an agent with a subagent
+    /// waiting on the user wants the user too, and an agent which reported its start and hasn't had a turn yet is at
+    /// its prompt, so idle ([`crate::session::SessionState::at_prompt`]).
+    pub fn in_client(client: &Client, session: &ClientSession) -> Self {
+        let status = Self::of(session);
+        let state = client.state(&session.id);
+        match status {
+            Self::Exited => Self::Exited,
+            _ if state.is_some_and(|s| s.wants_user()) => Self::WantsUser,
+            Self::Running if state.is_some_and(|s| s.at_prompt()) => Self::Idle,
+            other => other,
+        }
+    }
+
     /// How `docs/cli.md` spells it.
     pub fn as_str(self) -> &'static str {
         match self {

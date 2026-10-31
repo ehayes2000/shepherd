@@ -7,12 +7,12 @@ use crate::acpp::acp::{
     ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use crate::acpp::{
-    BlockKind, Correlated, Dir, Envelope, Frame, PendingRequests, RequestId, Response, Seq,
-    ShepherdFrame, SubagentBlocked, SubagentStarted,
+    BlockKind, Correlated, Dir, Envelope, Frame, PendingRequests, PromptBy, RequestId, Response,
+    Seq, ShepherdFrame, SourceKind, SubagentBlocked, SubagentStarted, Timestamp,
 };
 
 /// What the agent in a session is doing, as far as its log tells.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activity {
     /// The session exists but the agent hasn't started a turn or gone idle yet. The state before any frame.
     Starting,
@@ -38,7 +38,7 @@ pub enum Activity {
 }
 
 /// A tool call an agent is running.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSummary {
     pub id: String,
     pub title: String,
@@ -57,7 +57,7 @@ impl ToolSummary {
 
 /// A subagent of the session's agent, from the `_shepherd/subagent/*` frames. Its text is the agent's, raw: display
 /// it only through `display_safe`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subagent {
     id: String,
     agent_type: String,
@@ -95,7 +95,7 @@ impl Subagent {
 }
 
 /// Where a subagent is.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubagentStatus {
     Working,
     /// Waiting on the user, who answers in the parent session's TUI.
@@ -109,25 +109,35 @@ pub enum SubagentStatus {
 
 /// A request still waiting for its response: its direction and id, to forget it in `pending` once its outcome
 /// is inferred.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Request {
     dir: Dir,
     id: RequestId,
 }
 
 /// The permission request behind [`Activity::NeedsPermission`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Permission {
     request: Request,
     /// The in-flight tool it names, if it named one when it arrived.
     waits_on: Option<String>,
 }
 
+/// The last prompt the host typed into a session's agent (`_shepherd/session/prompted`), and who asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Told {
+    pub text: String,
+    pub by: PromptBy,
+    /// Its entry's seq and `ts`: what came after it is the agent's answer.
+    pub seq: Seq,
+    pub at: Timestamp,
+}
+
 /// One session's state, folded from its log.
 ///
 /// Only a prompt request starts a turn: `tool_call` and `tool_call_update` frames that arrive while the session is
 /// `Starting` or `Idle` are ignored, because a `Working` with no idle ever coming is worse than a missed one.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionState {
     activity: Activity,
     /// Tool calls in flight in this turn, oldest first.
@@ -142,6 +152,10 @@ pub struct SessionState {
     last_prompt: Option<String>,
     /// The agent's subagents since its turn began, in the order they started.
     subagents: Vec<Subagent>,
+    /// The agent reported its own start (an `agent/started` from its hooks, not the host's on resume), so a fresh
+    /// agent that hasn't had a turn yet is at its prompt.
+    reported: bool,
+    told: Option<Told>,
 }
 
 impl Default for SessionState {
@@ -156,6 +170,8 @@ impl Default for SessionState {
             turns: 0,
             last_prompt: None,
             subagents: Vec::new(),
+            reported: false,
+            told: None,
         }
     }
 }
@@ -165,7 +181,7 @@ impl SessionState {
     pub fn apply(&mut self, env: &Envelope) {
         let frame = env.frame();
         match frame {
-            Frame::Shepherd(m) => self.apply_shepherd(env.seq(), m.body()),
+            Frame::Shepherd(m) => self.apply_shepherd(env, m.body()),
             _ if matches!(self.activity, Activity::Exited { .. }) => {}
             Frame::Acp(m) => {
                 let request = m.id().map(|id| Request {
@@ -233,6 +249,43 @@ impl SessionState {
             .any(|s| matches!(s.status, SubagentStatus::Blocked { .. }))
     }
 
+    /// Whether the agent is at its prompt, ready to be typed into: idle, or started (as its hooks reported) and not
+    /// yet in a turn, and no subagent of its is waiting on the user (whose dialog would take the keys).
+    pub fn at_prompt(&self) -> bool {
+        let ready = match self.activity {
+            Activity::Idle => true,
+            Activity::Starting => self.reported,
+            _ => false,
+        };
+        ready && !self.subagent_blocked()
+    }
+
+    /// Whether the agent waits on the user: it asked permission or a question, or a subagent of its did.
+    pub fn wants_user(&self) -> bool {
+        matches!(
+            self.activity,
+            Activity::NeedsPermission { .. } | Activity::NeedsInput
+        ) || self.subagent_blocked()
+    }
+
+    /// What the agent asked the user, if it waits on them and said: the permission's title, else the first blocked
+    /// subagent's text. Raw: display it only through `display_safe`. A question the agent asks itself
+    /// ([`Activity::NeedsInput`]) has no text yet.
+    pub fn asked(&self) -> Option<&str> {
+        match &self.activity {
+            Activity::NeedsPermission { title } => Some(title),
+            _ => self.subagents.iter().find_map(|s| match &s.status {
+                SubagentStatus::Blocked { text, .. } => Some(text.as_str()),
+                _ => None,
+            }),
+        }
+    }
+
+    /// The last prompt the host typed into the agent, if any.
+    pub fn told(&self) -> Option<&Told> {
+        self.told.as_ref()
+    }
+
     /// How many prompts the user has sent. Continuation prompts (`_meta.shepherd.continuation: true`, e.g. a turn
     /// a Claude Code Stop hook kept going) open a turn for activity but aren't counted.
     pub fn turns(&self) -> u32 {
@@ -245,13 +298,17 @@ impl SessionState {
         self.last_prompt.as_deref()
     }
 
-    fn apply_shepherd(&mut self, seq: Seq, frame: &ShepherdFrame) {
+    fn apply_shepherd(&mut self, env: &Envelope, frame: &ShepherdFrame) {
+        let seq = env.seq();
         match frame {
             ShepherdFrame::AgentStarted(_) => {
-                // A new agent process: nothing in flight from the old one still stands.
+                // A new agent process: nothing in flight from the old one still stands. The host's own (a resume)
+                // comes before the agent runs; the agent's hooks say when it has started.
                 *self = Self {
                     turns: self.turns,
                     last_prompt: self.last_prompt.take(),
+                    told: self.told.take(),
+                    reported: env.source().kind != SourceKind::Shepherd,
                     ..Self::default()
                 };
             }
@@ -263,8 +320,22 @@ impl SessionState {
                     activity: Activity::Exited { code: e.code },
                     turns: self.turns,
                     last_prompt: self.last_prompt.take(),
+                    told: self.told.take(),
                     ..Self::default()
                 };
+            }
+            ShepherdFrame::SessionPrompted(prompted) => {
+                self.told = Some(Told {
+                    text: prompted.text.clone(),
+                    by: prompted.by.clone(),
+                    seq,
+                    at: env.ts().clone(),
+                });
+                // The host typed it in: the turn has started, though the agent's own prompt signal comes later.
+                if !matches!(self.activity, Activity::Exited { .. }) {
+                    self.end_turn();
+                    self.work();
+                }
             }
             _ if matches!(self.activity, Activity::Exited { .. }) => {}
             ShepherdFrame::SubagentStarted(s) => self.subagent_started(s),
