@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 | Archive crate and blob store | review | task/t38-archive-blobs @ 5c3d534 (on f1a6eba) | 2 | put heals; inflation counted; 256 MiB cap; umask test |
+| T38 | Archive crate and blob store | fixing | task/t38-archive-blobs @ 5c3d534 | 2 | Blocking: reservation clamp untested (forged frame header aborts without it) |
 | T39 | Archive index | todo |  |  |  |
 | T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
