@@ -14,9 +14,10 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
-| T31b | Merged sidebar across machines | building | task/t31b-merged-sidebar |  |  |
+| T31b | Merged sidebar across machines | merging | task/t31b-merged-sidebar @ cd3c0e2 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
 | T32 | Create sessions on any machine | todo |  |  |  |
 | F52 | Peer conn hardening after the tunnel | todo |  |  |  |
+| F53 | iroh link contract flakes under load | todo |  |  |  |
 
 ## Specs
 
@@ -183,5 +184,19 @@ acceptance:
   not a hang; or the limit is raised with a stated bound.
 - Lines already handed to the loop before a pause are held by the tunnel unbounded in principle (decision 0021): count them
   and close the tunnel with a clear reason past a stated cap, test with the fake.
+- From T31b's review: `Client::alerts` (core client.rs ~1786) no longer checks a session's home host; with a shadowed
+  duplicate id a peer's session could ring with the local bell. Restore the `homes.get(&s.id) == Some(at)` filter with a test.
 scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
+
+### F53: iroh link contract flakes under load
+depends: T31a
+touches: adapters::iroh_link, testkit::contracts::link
+goal: The T42 builder's 24-copy load round of the adapters lib failed 6/24, all in link contracts:
+5x `iroh_link::...::line_over_the_limit_is_a_protocol_error` (host saw no `Disconnected` within 10s, also seen in T31a's
+round-2 review) and 1x `link::...::closed_conn_is_flushed_once_its_peer_has_read_everything` (see F50's flush finding).
+acceptance:
+- Reproduce with `scripts/load-round.sh` on the adapters lib filtered to `iroh_link`, find the cause, regression test first
+  (fix-bug). A liveness bound that is too tight for a loaded machine is a valid cause only with evidence of progress.
+- 0 failures in a 24-copy round of the adapters lib.
+scope: crates/adapters, crates/testkit
 

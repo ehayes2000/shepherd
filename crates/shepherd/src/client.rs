@@ -12,6 +12,10 @@
 //! clock ([`Screen::sync_hold`]), so without this a session that never ends its update would keep showing the frame
 //! from before it. [`TerminalView`] passes the selected session's cursor shape and blink to the real terminal.
 //!
+//! Each trusted peer gets a conn of its own, opened with the same connector as the local host's (T31b): the client's
+//! core makes it a tunnel to that machine's host with its first request. Every conn's events are tagged with the
+//! machine it is for and the connect that opened it, so a closed conn's late events are told apart.
+//!
 //! [`run`] is `shepherd` itself: the real terminal (see [`crate::terminal`]) and the local host's socket.
 
 use std::collections::{HashMap, VecDeque};
@@ -31,7 +35,7 @@ use shepherd_tui::{Pointer, Screens, from_legacy_terminal, map_event};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
-use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
+use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent, PeerEvent};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEvent, LinkEventSink, TerminateError};
 use shepherd_core::wire::{
@@ -78,8 +82,9 @@ impl std::error::Error for ClientError {}
 
 /// What the runtime's channel carries.
 enum Input {
-    /// An event from the link opened by connect number `generation`.
+    /// An event from the link opened by connect number `generation`: the local host's, or for `peer`'s tunnel.
     Link {
+        peer: Option<MachineId>,
         generation: u64,
         event: LinkEvent,
     },
@@ -94,17 +99,31 @@ enum Input {
     Shutdown,
 }
 
-/// Forwards one link's events, tagged with its generation, so events from an earlier link are told apart.
+/// Forwards one link's events, tagged with whom it is for and its generation, so events from an earlier link are told
+/// apart.
 struct Sink {
+    peer: Option<MachineId>,
     generation: u64,
     tx: Sender<Input>,
 }
 
 impl LinkEventSink for Sink {
     fn send(&self, event: LinkEvent) {
-        let generation = self.generation;
-        let _ = self.tx.send(Input::Link { generation, event });
+        let (peer, generation) = (self.peer.clone(), self.generation);
+        let _ = self.tx.send(Input::Link {
+            peer,
+            generation,
+            event,
+        });
     }
+}
+
+/// The conn to a peer's host, through a tunnel on the local host.
+struct PeerConn<L> {
+    /// The connect that opened it.
+    generation: u64,
+    link: L,
+    conn: ConnId,
 }
 
 /// Pushes user intents into a running client, from any thread.
@@ -234,7 +253,12 @@ pub struct ClientRuntime<L, C, H> {
     launcher: H,
     clock: Box<dyn FnMut() -> Timestamp + Send>,
     link: Option<(L, ConnId)>,
+    /// The connect that opened the local host's link.
     generation: u64,
+    /// The last connect number given out, to the local host's link or a peer's.
+    connects: u64,
+    /// The open conn of each peer.
+    peers: HashMap<MachineId, PeerConn<L>>,
     tx: Sender<Input>,
     rx: Receiver<Input>,
     screens: Screens,
@@ -276,6 +300,8 @@ where
             clock: Box::new(clock),
             link: None,
             generation: 0,
+            connects: 0,
+            peers: HashMap::new(),
             tx,
             rx,
             screens: Screens::new(),
@@ -339,10 +365,12 @@ where
         let released = self.expire_syncs(at.instant());
         let connection = self.client.connection().clone();
         let notice = self.client.notice().map(str::to_owned);
+        let machines = self.client.machines();
         self.handle(ClientEvent::Tick { at });
         released
             || *self.client.connection() != connection
             || self.client.notice() != notice.as_deref()
+            || self.client.machines() != machines
     }
 
     /// Ends every synchronized update whose deadline is at or before `now`. Returns whether there was one.
@@ -530,12 +558,34 @@ where
                 self.user(Intent::Quit);
             }
             Input::Shutdown => self.user(Intent::Quit),
+            Input::Link {
+                peer: Some(machine),
+                generation,
+                event,
+            } => {
+                if self.peers.get(&machine).map(|p| p.generation) != Some(generation) {
+                    return;
+                }
+                match event {
+                    LinkEvent::Line { line, .. } => {
+                        if let Ok(message) = decode_host_message(&line) {
+                            self.host_message(Some(machine), message);
+                        }
+                    }
+                    LinkEvent::Disconnected { .. } => {
+                        self.peers.remove(&machine);
+                        let event = PeerEvent::Disconnected;
+                        self.handle(ClientEvent::Peer { machine, event });
+                    }
+                    LinkEvent::Connected { .. } => {}
+                }
+            }
             Input::Link { generation, .. } if generation != self.generation => {}
             Input::Link { event, .. } => match event {
                 LinkEvent::Line { line, .. } => {
                     // A line this version can't read (e.g. an unknown notification) is skipped.
                     if let Ok(message) = decode_host_message(&line) {
-                        self.host_message(message);
+                        self.host_message(None, message);
                     }
                 }
                 LinkEvent::Disconnected { .. } => {
@@ -547,8 +597,13 @@ where
         }
     }
 
-    fn host_message(&mut self, message: HostMessage) {
+    /// A message from the local host, or from `peer`'s.
+    fn host_message(&mut self, peer: Option<MachineId>, message: HostMessage) {
         if let HostMessage::Notification(HostNotification::PtyOutput(out)) = &message {
+            // Only the session's own host draws its terminal.
+            if !self.client.is_home(peer.as_ref(), &out.session) {
+                return;
+            }
             let (cols, rows) = self
                 .client
                 .size()
@@ -569,7 +624,13 @@ where
             message,
             HostMessage::Notification(HostNotification::LogEntry(_))
         );
-        self.handle(ClientEvent::Host(message));
+        self.handle(match peer {
+            None => ClientEvent::Host(message),
+            Some(machine) => ClientEvent::Peer {
+                machine,
+                event: PeerEvent::Host(message),
+            },
+        });
         if log_entry {
             let sessions = self.client.sessions();
             self.screens
@@ -623,9 +684,57 @@ where
                     error: e.to_string(),
                 }),
             },
-            ClientCommand::Connect => {
-                self.generation += 1;
+            ClientCommand::SendPeer { machine, message } => {
+                let line = match &message {
+                    ClientMessage::Request(r) => encode_request(r),
+                    ClientMessage::Notification(n) => encode_client_notification(n),
+                };
+                let line = line.strip_suffix(b"\n").unwrap_or(&line);
+                let peer = self.peers.get_mut(&machine)?;
+                if peer.link.send(peer.conn, line).is_err() && peer.link.close(peer.conn).is_err() {
+                    // The link already forgot the conn; its `Disconnected` won't come.
+                    self.peers.remove(&machine);
+                    let event = PeerEvent::Disconnected;
+                    return Some(ClientEvent::Peer { machine, event });
+                }
+                None
+            }
+            ClientCommand::ConnectPeer(machine) => {
+                self.connects += 1;
+                let generation = self.connects;
                 let sink = Arc::new(Sink {
+                    peer: Some(machine.clone()),
+                    generation,
+                    tx: self.tx.clone(),
+                });
+                let at = (self.clock)();
+                let event = match (self.connect)(sink) {
+                    Ok((link, conn)) => {
+                        let peer = PeerConn {
+                            generation,
+                            link,
+                            conn,
+                        };
+                        if let Some(mut old) = self.peers.insert(machine.clone(), peer) {
+                            let _ = old.link.close(old.conn);
+                        }
+                        PeerEvent::Connected { at }
+                    }
+                    Err(error) => PeerEvent::ConnectFailed { at, error },
+                };
+                Some(ClientEvent::Peer { machine, event })
+            }
+            ClientCommand::DisconnectPeer(machine) => {
+                if let Some(mut peer) = self.peers.remove(&machine) {
+                    let _ = peer.link.close(peer.conn);
+                }
+                None
+            }
+            ClientCommand::Connect => {
+                self.connects += 1;
+                self.generation = self.connects;
+                let sink = Arc::new(Sink {
+                    peer: None,
                     generation: self.generation,
                     tx: self.tx.clone(),
                 });
@@ -650,6 +759,9 @@ where
                 self.done = true;
                 if let Some((mut link, conn)) = self.link.take() {
                     let _ = link.close(conn);
+                }
+                for (_, mut peer) in self.peers.drain() {
+                    let _ = peer.link.close(peer.conn);
                 }
                 None
             }

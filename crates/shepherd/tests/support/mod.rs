@@ -280,6 +280,13 @@ impl HarnessBuilder {
         self
     }
 
+    /// Uses `env` (a handle on shared counters and clock) instead of an env of its own, e.g. so two harnesses make
+    /// session ids unique across both, as real hosts' ULIDs are.
+    pub fn env(mut self, env: TestEnv) -> Self {
+        self.env = env;
+        self
+    }
+
     /// Runs as the machine with `key` instead of [`MACHINE_KEY`].
     pub fn machine_key(mut self, key: [u8; 32]) -> Self {
         self.key = key;
@@ -386,6 +393,7 @@ impl HarnessBuilder {
             forge,
             env,
             settings,
+            stopped: None,
             _dir: dir,
         };
         harness.step();
@@ -532,6 +540,8 @@ pub struct HostHarness {
     forge: FakeForge,
     env: TestEnv,
     settings: RuntimeSettings,
+    /// The log of a host [`HostHarness::stop`]ped, for [`HostHarness::restart`].
+    stopped: Option<FakeEventLog>,
     /// Holds the run root; removed with the harness.
     _dir: tempfile::TempDir,
 }
@@ -695,8 +705,13 @@ impl HostHarness {
     /// Stops this host (dropping its link, so clients see it go) and starts a new one on the same log, as if the
     /// process restarted. PTYs don't survive: the fake PTY is dropped with the old runtime.
     pub fn restart(&mut self) {
-        let old = self.runtime.take().expect("runtime");
-        let log = old.into_log();
+        let log = match self.runtime.take() {
+            Some(old) => old.into_log(),
+            None => self
+                .stopped
+                .take()
+                .expect("a runtime, or a stopped one's log"),
+        };
         let runtime = build_runtime(
             &self.net,
             &self.programs,
@@ -712,6 +727,13 @@ impl HostHarness {
         );
         self.runtime = Some(runtime);
         self.step();
+    }
+
+    /// Stops this host (dropping its link, so clients see it go), keeping its log: [`HostHarness::restart`] starts
+    /// it again. Nothing can reach it meanwhile.
+    pub fn stop(&mut self) {
+        let old = self.runtime.take().expect("runtime");
+        self.stopped = Some(old.into_log());
     }
 
     /// [`HostHarness::restart`], with the config changed to `config`, as if the user edited it meanwhile.

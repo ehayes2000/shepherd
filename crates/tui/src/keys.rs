@@ -233,6 +233,7 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         }
         Target::Session(id) => vec![Intent::SelectSession(id), Intent::SetFocus(Focus::Terminal)],
         Target::CloseSession(id) => vec![Intent::BeginCloseSession(id)],
+        Target::Machine(machine) => vec![Intent::SelectMachine(machine)],
         Target::Terminal => vec![Intent::SetFocus(Focus::Terminal)],
         Target::Detach => vec![Intent::Quit],
         Target::Help => vec![Intent::ShowHelp],

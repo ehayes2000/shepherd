@@ -49,6 +49,19 @@
 //! up. A dropped link leaves the removal under way's outcome unknown (the host most likely finishes it) and unqueues
 //! the rest.
 //!
+//! Machines (T31b): once caught up with its own host, the client asks it for the machines it trusts
+//! (`_shepherd/peer/list`) and opens a conn per peer ([`ClientCommand::ConnectPeer`]) whose first request makes it a
+//! tunnel to that machine's host (`_shepherd/tunnel`, decision 0019); from then on it speaks to that host as to its
+//! own: hello (without this machine's cwd, which means nothing there), then a subscribe. Each host has its own requests,
+//! fold and seqs ([`ClientEvent::Peer`]). Sessions are listed grouped by the host they came from, this machine's
+//! first, then the peers by name, each newest first ([`Client::sidebar`] adds a header per machine while there are
+//! peers). A session id two hosts both claim is listed once, as the first group's. Input, resizes, renames, closes,
+//! resumes and the close check go to the session's own host, and a new session to the selected session's. A peer that
+//! drops keeps its last-known sessions (shown dimmed, [`Client::offline`]) and is dialled again at once; a failed
+//! attempt waits [`PEER_RETRY`], doubling up to [`PEER_RETRY_MAX`], counted from the first tick after it failed. A
+//! reconnect subscribes from the last entry folded of each of its logs: no gap, no repeat. Workspaces, the finder's
+//! orphans, cleanup and host updates stay this machine's host's.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
@@ -66,7 +79,7 @@ use std::path::{Path, PathBuf};
 use jiff::SignedDuration;
 
 use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp};
-use crate::host::{Host, HostSession, ResumeUnavailable};
+use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
@@ -74,9 +87,10 @@ use crate::session::{Activity, SessionState};
 use crate::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HelloOk,
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
-    ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew, SessionRename,
-    SessionResize, SessionResume, Subscribe, SubscribeFrom, UpgradeAnswer, ViewSize, WireError,
-    WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeList, WorktreeRemove,
+    PeerInfo, PeerList, ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew,
+    SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, Tunnel, UpgradeAnswer,
+    ViewSize, WireError, WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeList,
+    WorktreeRemove,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -93,6 +107,10 @@ pub const UPGRADE_RETRY: SignedDuration = SignedDuration::from_secs(1);
 pub const UPGRADE_DEADLINE: SignedDuration = SignedDuration::from_secs(60);
 /// What a host older than machine names (T29) calls its machine: it is always this one.
 pub const UNNAMED_HOST: &str = "local";
+/// How long after a failed attempt a peer's host is tried again; it doubles with each failure in a row.
+pub const PEER_RETRY: SignedDuration = SignedDuration::from_secs(1);
+/// The longest wait between attempts to reach a peer's host.
+pub const PEER_RETRY_MAX: SignedDuration = SignedDuration::from_secs(30);
 
 /// Something that happened, for the client to decide on.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +133,24 @@ pub enum ClientEvent {
     Host(HostMessage),
     /// Something the user wants, already mapped from keys by the TUI.
     User(Intent),
+    /// Something on the conn to peer `machine`'s host (a [`ClientCommand::ConnectPeer`]).
+    Peer {
+        machine: MachineId,
+        event: PeerEvent,
+    },
+}
+
+/// What happened on the conn to a peer's host.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PeerEvent {
+    /// The [`ClientCommand::ConnectPeer`] opened a conn to the local host at `at`.
+    Connected { at: Timestamp },
+    /// The [`ClientCommand::ConnectPeer`] failed at `at`.
+    ConnectFailed { at: Timestamp, error: String },
+    /// The conn is gone.
+    Disconnected,
+    /// A message on it: the tunnel's answer from the local host, then the peer's host's.
+    Host(HostMessage),
 }
 
 /// What the user wants, independent of which keys say it.
@@ -132,6 +168,9 @@ pub enum Intent {
     WindowFocus(bool),
     /// Select this session (a click on its row). A session that isn't listed is ignored.
     SelectSession(SessionId),
+    /// A click on a machine's header in the sidebar: a peer waiting to be tried again is tried at once; otherwise its
+    /// newest session is selected.
+    SelectMachine(MachineId),
     /// Scroll the session list by this many rows: down for positive, up for negative. The selection stays put, even
     /// out of view.
     ScrollSidebar(i32),
@@ -245,6 +284,16 @@ pub enum ClientCommand {
     TerminateHost,
     /// Tell the user `session` wants them: the terminal bell and an OSC 9 notification saying `message`.
     Alert { session: SessionId, message: String },
+    /// Open a new conn to the local host for peer `machine`'s tunnel. Feed [`PeerEvent::Connected`] or
+    /// [`PeerEvent::ConnectFailed`], then its lines and its drop.
+    ConnectPeer(MachineId),
+    /// Encode and send this message on peer `machine`'s conn.
+    SendPeer {
+        machine: MachineId,
+        message: ClientMessage,
+    },
+    /// Close peer `machine`'s conn, if it is open. Its drop needn't be fed.
+    DisconnectPeer(MachineId),
     /// Stop the client.
     Quit,
 }
@@ -414,6 +463,37 @@ pub struct ClientSession {
     pub pr: Option<Pr>,
 }
 
+/// A machine in the sidebar: this one, or a trusted peer ([`Client::machines`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineGroup {
+    pub id: MachineId,
+    /// What it is called: its host's name for itself (this machine), or what this machine's host calls it (a peer).
+    pub name: String,
+    /// It is this machine.
+    pub local: bool,
+    pub status: MachineStatus,
+}
+
+/// How the client is doing with a machine's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineStatus {
+    Connected,
+    /// Being reached.
+    Connecting,
+    /// Can't be reached now, and why, if known. It is tried again.
+    Offline(Option<String>),
+    /// Its host speaks another protocol version.
+    Incompatible,
+}
+
+/// One entry of the sidebar's list, top to bottom ([`Client::sidebar`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SidebarEntry<'a> {
+    /// A machine's header, above its sessions. Only while there are peers.
+    Machine(MachineGroup),
+    Session(&'a ClientSession),
+}
+
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
 /// in order.
 #[derive(Debug, Clone)]
@@ -433,15 +513,15 @@ pub struct Client {
     /// The host was launched during the current outage. Only a completed hello ends the outage.
     launched: bool,
     next_request: u64,
-    pending: HashMap<RequestId, Method>,
-    /// The session registry, folded from the log entries the host sends.
-    registry: Host,
-    states: BTreeMap<SessionId, SessionState>,
-    /// The last seq folded of each log: the host log (`None`) and each session log.
-    seqs: BTreeMap<Option<SessionId>, Seq>,
+    /// What this machine's host says.
+    local: Feed,
+    /// The trusted peers this machine's host reported, and what each one's host says.
+    peers: BTreeMap<MachineId, Peer>,
     /// The last seq of each session's log the user has seen it at.
     seen: BTreeMap<SessionId, Seq>,
     sessions: Vec<ClientSession>,
+    /// Which host each listed session came from.
+    homes: HashMap<SessionId, At>,
     selected: Option<SessionId>,
     /// The user picked the selected session (or created it). Until then the selection follows the top of the list,
     /// so the newest session is selected once the initial replay, which arrives one entry at a time, is done.
@@ -471,20 +551,137 @@ pub struct Client {
     /// The orphan worktrees, while the finder is open, and the request asking for them while it is unanswered.
     orphans: Option<Orphans>,
     orphans_request: Option<RequestId>,
-    /// The machine of the connected host, from its hello answer.
-    host_machine: Option<MachineId>,
-    /// What the connected host's machine is called, from its hello answer. `None` from a host older than names.
-    host_name: Option<String>,
     notice: Option<Notice>,
+    /// The cleanup view's rows and removals.
+    cleanup: Cleanup,
+    /// The latest tick's time: what stale sessions are measured against.
+    now: Option<jiff::Timestamp>,
+}
+
+/// What one host's hello and log say, and the requests asked of it that it hasn't answered.
+#[derive(Debug, Clone, Default)]
+struct Feed {
+    pending: HashMap<RequestId, Method>,
+    /// The session registry, folded from the log entries the host sends.
+    registry: Host,
+    states: BTreeMap<SessionId, SessionState>,
+    /// The last seq folded of each log: the host log (`None`) and each session log.
+    seqs: BTreeMap<Option<SessionId>, Seq>,
+    /// The host's machine, from its hello answer.
+    machine: Option<MachineId>,
+    /// What the host's machine is called, from its hello answer. `None` from a host older than names.
+    name: Option<String>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
     default_profile: Option<String>,
     /// Alert when a session newly wants the user, from the host's hello answer.
     bell: bool,
-    /// The cleanup view's rows and removals.
-    cleanup: Cleanup,
-    /// The latest tick's time: what stale sessions are measured against.
-    now: Option<jiff::Timestamp>,
+}
+
+impl Feed {
+    /// The subscribe is answered once the catch-up is sent: until then the entries are history, not news.
+    fn catching_up(&self) -> bool {
+        self.pending.values().any(|m| *m == Method::Subscribe)
+    }
+
+    /// Where each log resumes after a reconnect: the last entry folded of each.
+    fn subscribe_from(&self) -> SubscribeFrom {
+        let mut from = SubscribeFrom::default();
+        for (log, seq) in &self.seqs {
+            match log {
+                None => from.host = Some(*seq),
+                Some(session) => {
+                    from.sessions.insert(session.clone(), *seq);
+                }
+            }
+        }
+        from
+    }
+
+    /// Keeps the host's profiles, `default` moved to the front.
+    fn set_profiles(&mut self, mut profiles: Vec<ProfileInfo>, default: Option<String>) {
+        if let Some(i) = profiles
+            .iter()
+            .position(|p| Some(&p.name) == default.as_ref())
+        {
+            let first = profiles.remove(i);
+            profiles.insert(0, first);
+        }
+        self.profiles = profiles;
+        self.default_profile = default;
+    }
+}
+
+/// Which host: this machine's, or a peer's through a tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum At {
+    Local,
+    Peer(MachineId),
+}
+
+/// A trusted peer, and the client's conn to its host.
+#[derive(Debug, Clone)]
+struct Peer {
+    /// What this machine's host calls it.
+    name: String,
+    feed: Feed,
+    link: PeerLink,
+    /// Attempts that failed in a row: the wait before the next doubles with each.
+    failures: u32,
+    /// Why the last attempt failed.
+    why: Option<String>,
+    /// Its host answered the hello with another protocol version.
+    incompatible: bool,
+}
+
+impl Peer {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            feed: Feed::default(),
+            link: PeerLink::Connecting,
+            failures: 0,
+            why: None,
+            incompatible: false,
+        }
+    }
+
+    fn status(&self) -> MachineStatus {
+        match self.link {
+            PeerLink::Ready => MachineStatus::Connected,
+            PeerLink::Waiting { .. } if self.incompatible => MachineStatus::Incompatible,
+            PeerLink::Waiting { .. } => MachineStatus::Offline(self.why.clone()),
+            PeerLink::Connecting | PeerLink::Opening { .. } => MachineStatus::Connecting,
+        }
+    }
+
+    /// How long to wait after the latest failure: [`PEER_RETRY`], doubled for each failure before it, up to
+    /// [`PEER_RETRY_MAX`].
+    fn backoff(&self) -> SignedDuration {
+        let doublings = self.failures.saturating_sub(1).min(16);
+        let wait = PEER_RETRY
+            .checked_mul(1 << doublings)
+            .unwrap_or(PEER_RETRY_MAX);
+        wait.min(PEER_RETRY_MAX)
+    }
+}
+
+/// Where the client is with a peer's host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerLink {
+    /// A conn to the local host is being opened.
+    Connecting,
+    /// The conn opened at `since`: the tunnel is asked for, or (once `tunnelled`) the hello. It fails if no answer
+    /// comes by [`HELLO_TIMEOUT`] after `since`.
+    Opening {
+        since: jiff::Timestamp,
+        tunnelled: bool,
+    },
+    Ready,
+    /// The last attempt failed: the next is made at `until`, which is set at the first tick after the failure.
+    Waiting {
+        until: Option<jiff::Timestamp>,
+    },
 }
 
 /// Asking a stale host to update itself in place.
@@ -527,12 +724,11 @@ impl Client {
             connection: Connection::Idle,
             launched: false,
             next_request: 0,
-            pending: HashMap::new(),
-            registry: Host::new(),
-            states: BTreeMap::new(),
-            seqs: BTreeMap::new(),
+            local: Feed::default(),
+            peers: BTreeMap::new(),
             seen: BTreeMap::new(),
             sessions: Vec::new(),
+            homes: HashMap::new(),
             selected: None,
             chosen: false,
             select_when_listed: None,
@@ -549,12 +745,7 @@ impl Client {
             finder_scroll: 0,
             orphans: None,
             orphans_request: None,
-            host_machine: None,
-            host_name: None,
             notice: None,
-            profiles: Vec::new(),
-            default_profile: None,
-            bell: false,
             cleanup: Cleanup::default(),
             now: None,
         }
@@ -578,17 +769,90 @@ impl Client {
 
     /// The host's workspace, once its log says.
     pub fn workspace(&self) -> Option<&Path> {
-        self.registry.workspace()
+        self.local.registry.workspace()
     }
 
     /// Every workspace the host has used, the current one first, see [`Host::workspaces`].
     pub fn workspaces(&self) -> &[PathBuf] {
-        self.registry.workspaces()
+        self.local.registry.workspaces()
     }
 
-    /// Open sessions, newest first.
+    /// Open sessions, grouped by machine (this one first, then the peers by name), each group newest first.
     pub fn sessions(&self) -> &[ClientSession] {
         &self.sessions
+    }
+
+    /// The machines, in the sidebar's order: this one, then each trusted peer its host reported, by name.
+    pub fn machines(&self) -> Vec<MachineGroup> {
+        let id = self
+            .local
+            .machine
+            .clone()
+            .unwrap_or_else(|| self.machine.clone());
+        let status = match &self.connection {
+            Connection::Ready => MachineStatus::Connected,
+            Connection::Incompatible => MachineStatus::Incompatible,
+            Connection::Failed(why) => MachineStatus::Offline(Some(why.clone())),
+            _ => MachineStatus::Connecting,
+        };
+        let mut machines = vec![MachineGroup {
+            name: self.machine_label(&id).to_owned(),
+            id,
+            local: true,
+            status,
+        }];
+        machines.extend(
+            self.peer_order()
+                .into_iter()
+                .map(|(id, peer)| MachineGroup {
+                    id: id.clone(),
+                    name: peer.name.clone(),
+                    local: false,
+                    status: peer.status(),
+                }),
+        );
+        machines
+    }
+
+    /// The sidebar's list, top to bottom: each machine's header followed by its sessions, newest first, while there
+    /// are peers; just the sessions otherwise.
+    pub fn sidebar(&self) -> Vec<SidebarEntry<'_>> {
+        if self.peers.is_empty() {
+            return self.sessions.iter().map(SidebarEntry::Session).collect();
+        }
+        let mut entries = Vec::with_capacity(self.sessions.len() + self.peers.len() + 1);
+        for (group, at) in self.machines().into_iter().zip(self.host_order()) {
+            entries.push(SidebarEntry::Machine(group));
+            entries.extend(
+                self.sessions
+                    .iter()
+                    .filter(|s| self.homes.get(&s.id) == Some(&at))
+                    .map(SidebarEntry::Session),
+            );
+        }
+        entries
+    }
+
+    /// Whether the host of `peer` (this machine's for `None`) is where `session` lives, so what it says of the session
+    /// (its terminal output) is to be believed. A session not listed is this machine's host's.
+    pub fn is_home(&self, peer: Option<&MachineId>, session: &SessionId) -> bool {
+        let at = match peer {
+            None => At::Local,
+            Some(machine) => At::Peer(machine.clone()),
+        };
+        self.home(session) == at
+    }
+
+    /// Whether listed session `session` is on a peer the client can't reach now: what is shown of it is the last that
+    /// was known.
+    pub fn offline(&self, session: &SessionId) -> bool {
+        match self.homes.get(session) {
+            Some(At::Peer(machine)) => self
+                .peers
+                .get(machine)
+                .is_some_and(|p| p.link != PeerLink::Ready),
+            _ => false,
+        }
     }
 
     pub fn selected(&self) -> Option<&SessionId> {
@@ -665,7 +929,7 @@ impl Client {
         finder::results(
             query,
             &self.sessions,
-            self.host_machine.as_ref(),
+            self.local.machine.as_ref(),
             self.orphans.as_ref(),
         )
     }
@@ -701,22 +965,25 @@ impl Client {
 
     /// The machine of the connected host, once it has answered the hello.
     pub fn host_machine(&self) -> Option<&MachineId> {
-        self.host_machine.as_ref()
+        self.local.machine.as_ref()
     }
 
     /// What the connected host's machine is called, once it has answered the hello. `None` from a host older than
     /// machine names.
     pub fn host_name(&self) -> Option<&str> {
-        self.host_name.as_deref()
+        self.local.name.as_deref()
     }
 
     /// What to call `machine` (a [`ClientSession::machine`]): the connected host's name for its machine (or
-    /// [`UNNAMED_HOST`] from a host older than machine names), else the id itself.
+    /// [`UNNAMED_HOST`] from a host older than machine names), what that host calls a trusted peer, else the id itself.
     pub fn machine_label<'a>(&'a self, machine: &'a MachineId) -> &'a str {
-        match (&self.host_machine, &self.host_name) {
+        match (&self.local.machine, &self.local.name) {
             (Some(host), Some(name)) if host == machine => name,
             (Some(host), None) if host == machine => UNNAMED_HOST,
-            _ => machine.as_str(),
+            _ => match self.peers.get(machine) {
+                Some(peer) => &peer.name,
+                None => machine.as_str(),
+            },
         }
     }
 
@@ -725,20 +992,21 @@ impl Client {
         self.size
     }
 
-    /// The agent profiles the host offers for new sessions, the default first. Empty until the host has said, or from
-    /// a host older than profiles.
+    /// The agent profiles offered for new sessions by the host they start on (the selected session's), the default
+    /// first. Empty until that host has said, or from a host older than profiles.
     pub fn profiles(&self) -> &[ProfileInfo] {
-        &self.profiles
+        &self.new_session_feed().profiles
     }
 
-    /// The profile a session runs when none is picked, once the host has said.
+    /// The profile a session runs when none is picked, once the host new sessions start on has said.
     pub fn default_profile(&self) -> Option<&str> {
-        self.default_profile.as_deref()
+        self.new_session_feed().default_profile.as_deref()
     }
 
-    /// Whether a session that newly wants the user gives a [`ClientCommand::Alert`] (the host's `[notify] bell`).
+    /// Whether a session on this machine that newly wants the user gives a [`ClientCommand::Alert`] (the host's
+    /// `[notify] bell`; each peer's host says for its own sessions).
     pub fn bell(&self) -> bool {
-        self.bell
+        self.local.bell
     }
 
     /// The latest thing the host refused, for the user.
@@ -749,8 +1017,12 @@ impl Client {
     /// How many sessions restarting the host stops: those whose process hasn't exited. `None` until the client knows,
     /// which is once it has caught up with the host's log.
     pub fn sessions_to_stop(&self) -> Option<usize> {
-        (self.connection == Connection::Ready && !self.catching_up())
-            .then(|| self.sessions.iter().filter(|s| !s.exited).count())
+        (self.connection == Connection::Ready && !self.local.catching_up()).then(|| {
+            self.sessions
+                .iter()
+                .filter(|s| !s.exited && self.homes.get(&s.id) == Some(&At::Local))
+                .count()
+        })
     }
 
     /// Why the connected host should be restarted, while it should: an older host, one speaking another protocol
@@ -793,19 +1065,267 @@ impl Client {
                 self.now = Some(at.instant());
                 self.age_notice(at.instant());
                 let mut commands = self.tick_upgrade(at.instant());
-                commands.extend(self.tick(at));
+                commands.extend(self.tick(at.clone()));
+                commands.extend(self.tick_peers(at.instant()));
                 commands
             }
-            ClientEvent::Host(HostMessage::Response(response)) => self.response(response),
-            ClientEvent::Host(HostMessage::Notification(HostNotification::LogEntry(entry))) => {
-                self.log_entry(&entry.envelope)
+            ClientEvent::Host(message) => self.host_message(At::Local, message),
+            ClientEvent::User(intent) => self.intent(intent),
+            ClientEvent::Peer { machine, event } => self.peer_event(machine, event),
+        }
+    }
+
+    /// A message from the host `at`.
+    fn host_message(&mut self, at: At, message: HostMessage) -> Vec<ClientCommand> {
+        match message {
+            HostMessage::Response(response) => self.response(at, response),
+            HostMessage::Notification(HostNotification::LogEntry(entry)) => {
+                self.log_entry(&at, &entry.envelope)
             }
             // PTY output feeds the runtime's screens. It changes nothing here.
-            ClientEvent::Host(HostMessage::Notification(HostNotification::PtyOutput(_))) => {
+            HostMessage::Notification(HostNotification::PtyOutput(_)) => Vec::new(),
+        }
+    }
+
+    // ---------- peers ----------
+
+    /// The peers in the sidebar's order: by name, then id.
+    fn peer_order(&self) -> Vec<(&MachineId, &Peer)> {
+        let mut peers: Vec<_> = self.peers.iter().collect();
+        peers.sort_by(|(a_id, a), (b_id, b)| (&a.name, a_id).cmp(&(&b.name, b_id)));
+        peers
+    }
+
+    /// Every host, in the sidebar's order: this machine's, then the peers'.
+    fn host_order(&self) -> Vec<At> {
+        let mut order = vec![At::Local];
+        order.extend(
+            self.peer_order()
+                .into_iter()
+                .map(|(id, _)| At::Peer(id.clone())),
+        );
+        order
+    }
+
+    fn feed(&self, at: &At) -> Option<&Feed> {
+        match at {
+            At::Local => Some(&self.local),
+            At::Peer(machine) => self.peers.get(machine).map(|p| &p.feed),
+        }
+    }
+
+    fn feed_mut(&mut self, at: &At) -> Option<&mut Feed> {
+        match at {
+            At::Local => Some(&mut self.local),
+            At::Peer(machine) => self.peers.get_mut(machine).map(|p| &mut p.feed),
+        }
+    }
+
+    /// Whether host `at` can be asked anything now.
+    fn ready(&self, at: &At) -> bool {
+        match at {
+            At::Local => self.connection == Connection::Ready,
+            At::Peer(machine) => self
+                .peers
+                .get(machine)
+                .is_some_and(|p| p.link == PeerLink::Ready),
+        }
+    }
+
+    /// The host listed session `session` came from: this machine's for one that isn't listed.
+    fn home(&self, session: &SessionId) -> At {
+        self.homes.get(session).cloned().unwrap_or(At::Local)
+    }
+
+    /// The host new sessions start on: the selected session's.
+    fn new_session_host(&self) -> At {
+        self.selected
+            .as_ref()
+            .map_or(At::Local, |session| self.home(session))
+    }
+
+    fn new_session_feed(&self) -> &Feed {
+        self.feed(&self.new_session_host()).unwrap_or(&self.local)
+    }
+
+    /// This machine's host listed the peers it trusts: drops those it no longer lists (and their sessions), and dials
+    /// new ones.
+    fn peers_listed(&mut self, listed: Vec<PeerInfo>) -> Vec<ClientCommand> {
+        let mut commands = Vec::new();
+        let gone: Vec<MachineId> = self
+            .peers
+            .keys()
+            .filter(|id| !listed.iter().any(|p| &p.id == *id))
+            .cloned()
+            .collect();
+        for machine in gone {
+            self.peers.remove(&machine);
+            commands.push(ClientCommand::DisconnectPeer(machine));
+        }
+        for info in listed {
+            match self.peers.get_mut(&info.id) {
+                Some(peer) => peer.name = info.name,
+                None => {
+                    self.peers.insert(info.id.clone(), Peer::new(info.name));
+                    commands.push(ClientCommand::ConnectPeer(info.id));
+                }
+            }
+        }
+        commands.extend(self.refresh());
+        commands
+    }
+
+    fn peer_event(&mut self, machine: MachineId, event: PeerEvent) -> Vec<ClientCommand> {
+        let Some(peer) = self.peers.get_mut(&machine) else {
+            return Vec::new();
+        };
+        match event {
+            PeerEvent::Connected { at } => {
+                if peer.link != PeerLink::Connecting {
+                    return Vec::new();
+                }
+                peer.link = PeerLink::Opening {
+                    since: at.instant(),
+                    tunnelled: false,
+                };
+                let tunnel = ClientRequest::Tunnel(Tunnel {
+                    machine: machine.clone(),
+                });
+                vec![self.request_to(&At::Peer(machine), tunnel).1]
+            }
+            PeerEvent::ConnectFailed { at, error } => {
+                if peer.link != PeerLink::Connecting {
+                    return Vec::new();
+                }
+                peer.failures += 1;
+                peer.why = Some(error);
+                let until = at.instant().checked_add(peer.backoff()).ok();
+                peer.link = PeerLink::Waiting { until };
                 Vec::new()
             }
-            ClientEvent::User(intent) => self.intent(intent),
+            PeerEvent::Disconnected => match peer.link {
+                // Dialled again at once: it was there a moment ago.
+                PeerLink::Ready => {
+                    peer.feed.pending.clear();
+                    peer.link = PeerLink::Connecting;
+                    let mut commands = vec![ClientCommand::ConnectPeer(machine)];
+                    commands.extend(self.refresh());
+                    commands
+                }
+                PeerLink::Opening { .. } => {
+                    self.peer_failed(&machine, "the connection closed".to_owned(), false)
+                }
+                PeerLink::Connecting | PeerLink::Waiting { .. } => Vec::new(),
+            },
+            PeerEvent::Host(message) => {
+                // Its log is only sent once it has said hello; nothing else can be its host's.
+                if let HostMessage::Notification(HostNotification::LogEntry(_)) = &message
+                    && peer.link != PeerLink::Ready
+                {
+                    return Vec::new();
+                }
+                self.host_message(At::Peer(machine), message)
+            }
         }
+    }
+
+    /// The attempt to reach peer `machine` failed, for `why`: its conn is closed (if `close`), and it is tried again
+    /// after its backoff.
+    fn peer_failed(&mut self, machine: &MachineId, why: String, close: bool) -> Vec<ClientCommand> {
+        let Some(peer) = self.peers.get_mut(machine) else {
+            return Vec::new();
+        };
+        peer.failures += 1;
+        peer.why = Some(why);
+        peer.feed.pending.clear();
+        peer.link = PeerLink::Waiting { until: None };
+        let mut commands = Vec::new();
+        if close {
+            commands.push(ClientCommand::DisconnectPeer(machine.clone()));
+        }
+        commands.extend(self.refresh());
+        commands
+    }
+
+    /// Time passes: a peer waiting to be tried again is, once due, and one that doesn't answer is given up on.
+    fn tick_peers(&mut self, now: jiff::Timestamp) -> Vec<ClientCommand> {
+        let mut commands = Vec::new();
+        let machines: Vec<MachineId> = self.peers.keys().cloned().collect();
+        for machine in machines {
+            let Some(peer) = self.peers.get_mut(&machine) else {
+                continue;
+            };
+            match peer.link {
+                PeerLink::Waiting { until: None } => {
+                    let until = now.checked_add(peer.backoff()).unwrap_or(now);
+                    peer.link = PeerLink::Waiting { until: Some(until) };
+                }
+                PeerLink::Waiting { until: Some(until) } if now >= until => {
+                    peer.link = PeerLink::Connecting;
+                    commands.push(ClientCommand::ConnectPeer(machine));
+                }
+                PeerLink::Opening { since, .. }
+                    if now >= since.checked_add(HELLO_TIMEOUT).unwrap_or(since) =>
+                {
+                    let why = "the machine didn't answer".to_owned();
+                    commands.extend(self.peer_failed(&machine, why, true));
+                }
+                _ => {}
+            }
+        }
+        commands
+    }
+
+    /// Peer `machine`'s tunnel is open: say hello to its host.
+    fn tunnel_open(&mut self, machine: &MachineId) -> Vec<ClientCommand> {
+        let Some(peer) = self.peers.get_mut(machine) else {
+            return Vec::new();
+        };
+        let PeerLink::Opening { since, .. } = peer.link else {
+            return Vec::new();
+        };
+        peer.link = PeerLink::Opening {
+            since,
+            tunnelled: true,
+        };
+        // This machine's cwd means nothing on that one.
+        let hello = Hello {
+            version: PROTOCOL_VERSION,
+            machine: self.machine.clone(),
+            cwd: None,
+            build: self.build.clone(),
+        };
+        let at = At::Peer(machine.clone());
+        vec![self.request_to(&at, ClientRequest::Hello(hello)).1]
+    }
+
+    /// Peer `machine`'s host answered the hello: subscribe from where its logs were left.
+    fn peer_hello(&mut self, machine: &MachineId, ok: HelloOk) -> Vec<ClientCommand> {
+        // The tunnel reaches the machine asked for: a host answering as another one is not to be believed.
+        if &ok.machine != machine {
+            let why = format!("it answered as another machine ({})", ok.machine);
+            return self.peer_failed(machine, why, true);
+        }
+        let Some(peer) = self.peers.get_mut(machine) else {
+            return Vec::new();
+        };
+        peer.link = PeerLink::Ready;
+        peer.failures = 0;
+        peer.why = None;
+        peer.incompatible = false;
+        peer.feed.machine = Some(ok.machine);
+        peer.feed.name = ok.name;
+        peer.feed.set_profiles(ok.profiles, ok.default_profile);
+        peer.feed.bell = ok.notify.bell;
+        let from = peer.feed.subscribe_from();
+        let at = At::Peer(machine.clone());
+        let subscribe = ClientRequest::Subscribe(Subscribe { from });
+        let mut commands = vec![self.request_to(&at, subscribe).1];
+        commands.extend(self.refresh());
+        if self.selected.as_ref().map(|s| self.home(s)) == Some(at) {
+            commands.extend(self.resize_selected());
+        }
+        commands
     }
 
     // ---------- connection ----------
@@ -862,7 +1382,7 @@ impl Client {
         at: jiff::Timestamp,
         error: &str,
     ) -> Vec<ClientCommand> {
-        self.pending.clear();
+        self.local.pending.clear();
         if attempt >= MAX_CONNECT_ATTEMPTS {
             return self.fail(format!(
                 "could not connect to the shepherd host after {attempt} attempts: {error}. \
@@ -889,7 +1409,7 @@ impl Client {
             }
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
-                self.pending.clear();
+                self.local.pending.clear();
                 // Only an accepted update outlives its link: the drop is the host re-executing.
                 let dropped = self.upgrade.take_if(|u| u.phase != UpgradePhase::Accepted);
                 if dropped.is_some() {
@@ -914,30 +1434,41 @@ impl Client {
         vec![ClientCommand::Quit]
     }
 
-    /// A request with a fresh id, remembered so its answer can be typed.
+    /// A request to this machine's host with a fresh id, remembered so its answer can be typed.
     fn request(&mut self, body: ClientRequest) -> ClientCommand {
         self.request_with_id(body).1
     }
 
     /// [`Client::request`], with the id it was given.
     fn request_with_id(&mut self, body: ClientRequest) -> (RequestId, ClientCommand) {
+        self.request_to(&At::Local, body)
+    }
+
+    /// A request to host `at` with a fresh id (unique across hosts), remembered so its answer can be typed.
+    fn request_to(&mut self, at: &At, body: ClientRequest) -> (RequestId, ClientCommand) {
         self.next_request += 1;
         let id = RequestId::Number(self.next_request.into());
-        self.pending.insert(id.clone(), body.method());
+        if let Some(feed) = self.feed_mut(at) {
+            feed.pending.insert(id.clone(), body.method());
+        }
         let request = Request {
             id: id.clone(),
             body,
         };
-        (id, ClientCommand::Send(ClientMessage::Request(request)))
+        (id, send_to(at, ClientMessage::Request(request)))
     }
 
-    fn notify(&self, note: ClientNotification) -> Option<ClientCommand> {
-        (self.connection == Connection::Ready)
-            .then_some(ClientCommand::Send(ClientMessage::Notification(note)))
+    /// A notification for host `at`, if it can be sent now.
+    fn notify_to(&self, at: &At, note: ClientNotification) -> Option<ClientCommand> {
+        self.ready(at)
+            .then(|| send_to(at, ClientMessage::Notification(note)))
     }
 
-    fn response(&mut self, response: RawResponse) -> Vec<ClientCommand> {
-        let Some(method) = self.pending.remove(&response.id) else {
+    fn response(&mut self, at: At, response: RawResponse) -> Vec<ClientCommand> {
+        let Some(method) = self
+            .feed_mut(&at)
+            .and_then(|feed| feed.pending.remove(&response.id))
+        else {
             return Vec::new();
         };
         let id = response.id.clone();
@@ -945,8 +1476,27 @@ impl Client {
             Ok(typed) => typed.result,
             Err(e) => Err(WireError::Internal(e.to_string())),
         };
-        // A host that doesn't know a request is older than this client: restarting it is offered.
-        if let Err(WireError::MethodNotFound(_)) = &result {
+        if let At::Peer(machine) = &at {
+            match (method, result) {
+                (Method::Tunnel, Ok(_)) => return self.tunnel_open(machine),
+                (Method::Tunnel, Err(e)) => return self.peer_failed(machine, refusal(e), true),
+                (Method::Hello, Ok(HostResult::Hello(ok))) => return self.peer_hello(machine, ok),
+                (Method::Hello, Err(WireError::VersionMismatch { .. })) => {
+                    if let Some(peer) = self.peers.get_mut(machine) {
+                        peer.incompatible = true;
+                    }
+                    let why = "it speaks another protocol version".to_owned();
+                    return self.peer_failed(machine, why, true);
+                }
+                (Method::Hello, Err(e)) => return self.peer_failed(machine, refusal(e), true),
+                (method, result) => return self.answered(method, &id, result),
+            }
+        }
+        // A host that doesn't know a request is older than this client: restarting it is offered. Except for the peer
+        // list, which only means it has no peers.
+        if let Err(WireError::MethodNotFound(_)) = &result
+            && method != Method::PeerList
+        {
             self.restart_offer.get_or_insert(HostOutdated::Older);
         }
         if self.cleanup_asked(&id) {
@@ -959,14 +1509,14 @@ impl Client {
                     self.set_notice(warning.clone());
                 }
                 self.host_warning = ok.warning;
-                self.host_machine = Some(ok.machine.clone());
-                self.host_name = ok.name.clone();
-                self.set_profiles(ok.profiles, ok.default_profile);
-                self.bell = ok.notify.bell;
+                self.local.machine = Some(ok.machine.clone());
+                self.local.name = ok.name.clone();
+                self.local.set_profiles(ok.profiles, ok.default_profile);
+                self.local.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
                 self.launched = false;
                 let subscribe = Subscribe {
-                    from: self.subscribe_from(),
+                    from: self.local.subscribe_from(),
                 };
                 let mut commands = vec![self.request(ClientRequest::Subscribe(subscribe))];
                 commands.extend(update);
@@ -977,6 +1527,12 @@ impl Client {
                 self.upgrade_answered(result);
                 Vec::new()
             }
+            // Caught up: now the peers can be reached.
+            (Method::Subscribe, Ok(_)) => vec![self.request(ClientRequest::PeerList(PeerList {}))],
+            (Method::PeerList, Ok(HostResult::PeerList(ok))) => self.peers_listed(ok.peers),
+            // A host older than peers has none; a host that can't list them now keeps those already known.
+            (Method::PeerList, Err(WireError::MethodNotFound(_))) => self.peers_listed(Vec::new()),
+            (Method::PeerList, _) => Vec::new(),
             // The hello ended the outage: the host is there, it just can't be used until it is restarted.
             (Method::Hello, Err(WireError::VersionMismatch { .. })) => {
                 self.connection = Connection::Incompatible;
@@ -998,8 +1554,20 @@ impl Client {
                 }
                 Vec::new()
             }
+            (method, result) => self.answered(method, &id, result),
+        }
+    }
+
+    /// An answer any host may give, to request `id`.
+    fn answered(
+        &mut self,
+        method: Method,
+        id: &RequestId,
+        result: Result<HostResult, WireError>,
+    ) -> Vec<ClientCommand> {
+        match (method, result) {
             (Method::WorktreeStatus, result) => {
-                let asked = self.status_request.take_if(|(asked, _)| *asked == id);
+                let asked = self.status_request.take_if(|(asked, _)| asked == id);
                 let open = match (&self.popup, asked) {
                     (Some(Popup::ConfirmClose { session }), Some((_, asked))) => *session == asked,
                     _ => false,
@@ -1018,7 +1586,7 @@ impl Client {
                 Vec::new()
             }
             (Method::WorktreeList, result) => {
-                if self.orphans_request.take_if(|asked| *asked == id).is_some() {
+                if self.orphans_request.take_if(|asked| asked == id).is_some() {
                     self.orphans = Some(match result {
                         Ok(HostResult::WorktreeList(ok)) => Orphans::Listed(
                             ok.worktrees
@@ -1161,46 +1729,25 @@ impl Client {
             .take_if(|p| matches!(p, Popup::RestartHost { .. }));
     }
 
-    /// Keeps the host's profiles, `default` moved to the front.
-    fn set_profiles(&mut self, mut profiles: Vec<ProfileInfo>, default: Option<String>) {
-        if let Some(i) = profiles
-            .iter()
-            .position(|p| Some(&p.name) == default.as_ref())
-        {
-            let first = profiles.remove(i);
-            profiles.insert(0, first);
-        }
-        self.profiles = profiles;
-        self.default_profile = default;
-    }
-
-    /// Where each log resumes after a reconnect: the last entry folded of each.
-    fn subscribe_from(&self) -> SubscribeFrom {
-        let mut from = SubscribeFrom::default();
-        for (log, seq) in &self.seqs {
-            match log {
-                None => from.host = Some(*seq),
-                Some(session) => {
-                    from.sessions.insert(session.clone(), *seq);
-                }
-            }
-        }
-        from
-    }
-
     // ---------- the session list ----------
 
-    fn log_entry(&mut self, env: &Envelope) -> Vec<ClientCommand> {
+    /// A log entry from host `at`. One already folded (its seq is at or before the last of its log from that host) is
+    /// dropped.
+    fn log_entry(&mut self, at: &At, env: &Envelope) -> Vec<ClientCommand> {
+        let Some(feed) = self.feed_mut(at) else {
+            return Vec::new();
+        };
         let log = env.session().cloned();
-        if self.seqs.get(&log).is_some_and(|&last| env.seq() <= last) {
+        if feed.seqs.get(&log).is_some_and(|&last| env.seq() <= last) {
             return Vec::new();
         }
-        self.seqs.insert(log, env.seq());
-        self.notice_kept_worktree(env);
-        self.registry.apply(env);
+        feed.seqs.insert(log, env.seq());
+        let live = !feed.catching_up();
+        feed.registry.apply(env);
         if let Some(id) = env.session() {
-            self.states.entry(id.clone()).or_default().apply(env);
+            feed.states.entry(id.clone()).or_default().apply(env);
         }
+        self.notice_kept_worktree(env, live);
         let wanted: Vec<SessionId> = self
             .sessions
             .iter()
@@ -1208,20 +1755,22 @@ impl Client {
             .map(|s| s.id.clone())
             .collect();
         let mut commands = self.refresh();
-        commands.extend(self.alerts(&wanted));
-        commands.extend(self.cleanup_closed(env));
+        commands.extend(self.alerts(at, &wanted));
+        if *at == At::Local {
+            commands.extend(self.cleanup_closed(env));
+        }
         commands
     }
 
-    /// A notice saying why the host kept the worktree of a session it closed, for a live `session/closed` that says.
-    fn notice_kept_worktree(&mut self, env: &Envelope) {
+    /// A notice saying why the host kept the worktree of a session it closed, for a `live` `session/closed` that says.
+    fn notice_kept_worktree(&mut self, env: &Envelope, live: bool) {
         let (Some(id), Frame::Shepherd(message)) = (env.session(), env.frame()) else {
             return;
         };
         let ShepherdFrame::SessionClosed(closed) = message.body() else {
             return;
         };
-        let (Some(why), false) = (&closed.worktree_kept, self.catching_up()) else {
+        let (Some(why), true) = (&closed.worktree_kept, live) else {
             return;
         };
         let name = self
@@ -1232,14 +1781,13 @@ impl Client {
         self.set_notice(format!("kept the worktree of {name}: {why}"));
     }
 
-    /// The subscribe is answered once the catch-up is sent: until then the entries are history, not news.
-    fn catching_up(&self) -> bool {
-        self.pending.values().any(|m| *m == Method::Subscribe)
-    }
-
-    /// An alert for each session that wants the user and wasn't in `wanted`, if the bell is on and the client is live.
-    fn alerts(&self, wanted: &[SessionId]) -> Vec<ClientCommand> {
-        if !self.bell || self.catching_up() {
+    /// An alert for each session that wants the user and wasn't in `wanted`, after an entry from host `at`, if that
+    /// host's bell is on and it is live. Only that host's sessions can have changed.
+    fn alerts(&self, at: &At, wanted: &[SessionId]) -> Vec<ClientCommand> {
+        let Some(feed) = self.feed(at) else {
+            return Vec::new();
+        };
+        if !feed.bell || feed.catching_up() {
             return Vec::new();
         }
         self.sessions
@@ -1255,10 +1803,9 @@ impl Client {
     /// Rebuilds the list from the folds, keeps the selection valid, and selects a session the user created.
     fn refresh(&mut self) -> Vec<ClientCommand> {
         let old_index = self.selected_index();
-        let open = self.registry.sessions();
-        self.states.retain(|id, _| open.iter().any(|s| &s.id == id));
-        self.seen.retain(|id, _| self.states.contains_key(id));
-        self.rebuild(open);
+        self.rebuild();
+        let homes = &self.homes;
+        self.seen.retain(|id, _| homes.contains_key(id));
         // A popup about a session that's gone has nothing left to act on.
         if let Some(
             Popup::Rename { session, .. }
@@ -1297,16 +1844,26 @@ impl Client {
         }
     }
 
-    fn rebuild(&mut self, open: Vec<HostSession>) {
+    /// Lists every host's open sessions, host by host in the sidebar's order, each newest first. A session id an
+    /// earlier host listed is skipped.
+    fn rebuild(&mut self) {
         let starting = SessionState::default();
-        let current = self.registry.workspace();
-        self.sessions = open
-            .into_iter()
-            .map(|s| {
-                let state = self.states.get(&s.id).unwrap_or(&starting);
+        let mut sessions = Vec::new();
+        let mut homes = HashMap::new();
+        for at in self.host_order() {
+            let Some(feed) = self.feed(&at) else {
+                continue;
+            };
+            let current = feed.registry.workspace();
+            for s in feed.registry.sessions() {
+                if homes.contains_key(&s.id) {
+                    continue;
+                }
+                homes.insert(s.id.clone(), at.clone());
+                let state = feed.states.get(&s.id).unwrap_or(&starting);
                 let last_seen = self.seen.get(&s.id).copied().unwrap_or(Seq::ZERO);
-                ClientSession {
-                    machine: match &self.host_machine {
+                sessions.push(ClientSession {
+                    machine: match &feed.machine {
                         Some(host) => s.machine.read_by(host),
                         None => s.machine,
                     },
@@ -1329,9 +1886,18 @@ impl Client {
                     branch: s.branch,
                     removing_worktree: s.removing_worktree,
                     pr: s.pr,
-                }
-            })
-            .collect();
+                });
+            }
+        }
+        let hosts = self.host_order();
+        for at in hosts {
+            if let Some(feed) = self.feed_mut(&at) {
+                let open = feed.registry.sessions();
+                feed.states.retain(|id, _| open.iter().any(|s| &s.id == id));
+            }
+        }
+        self.sessions = sessions;
+        self.homes = homes;
     }
 
     fn listed(&self, id: &SessionId) -> bool {
@@ -1345,6 +1911,22 @@ impl Client {
     fn selected_index(&self) -> Option<usize> {
         let id = self.selected.as_ref()?;
         self.sessions.iter().position(|s| &s.id == id)
+    }
+
+    /// Where the selected session is in the sidebar's list, headers counted.
+    fn selected_entry(&self) -> Option<usize> {
+        let id = self.selected.as_ref()?;
+        self.sidebar()
+            .iter()
+            .position(|e| matches!(e, SidebarEntry::Session(s) if &s.id == id))
+    }
+
+    /// How many entries the sidebar lists: the sessions, and a header per machine while there are peers.
+    fn sidebar_len(&self) -> usize {
+        match self.peers.len() {
+            0 => self.sessions.len(),
+            peers => self.sessions.len() + peers + 1,
+        }
     }
 
     /// Selects `id`, which is listed (or `None`). If the selection changed, scrolls it into view and resizes it to
@@ -1367,11 +1949,19 @@ impl Client {
         let Some(id) = self.selected.clone().filter(|_| self.window_focused) else {
             return;
         };
-        if let Some(&seq) = self.seqs.get(&Some(id.clone())) {
+        let home = self.home(&id);
+        let Some(feed) = self.feed(&home) else {
+            return;
+        };
+        let latest = feed.seqs.get(&Some(id.clone())).copied();
+        if let Some(seq) = latest {
             self.seen.insert(id.clone(), seq);
         }
         let last_seen = self.seen.get(&id).copied().unwrap_or(Seq::ZERO);
-        let attention = self.states.get(&id).is_some_and(|s| s.attention(last_seen));
+        let attention = self
+            .feed(&home)
+            .and_then(|feed| feed.states.get(&id))
+            .is_some_and(|s| s.attention(last_seen));
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
             s.attention = attention;
         }
@@ -1379,8 +1969,7 @@ impl Client {
 
     /// The furthest the sidebar scrolls: the last rows fill it.
     fn max_scroll(&self) -> usize {
-        self.sessions
-            .len()
+        self.sidebar_len()
             .saturating_sub(self.sidebar_rows.unwrap_or(1))
     }
 
@@ -1390,7 +1979,7 @@ impl Client {
 
     /// Scrolls the least that shows the selected session, if the sidebar's height is known.
     fn scroll_to_selected(&mut self) {
-        let (Some(index), Some(rows)) = (self.selected_index(), self.sidebar_rows) else {
+        let (Some(index), Some(rows)) = (self.selected_entry(), self.sidebar_rows) else {
             return;
         };
         if rows == 0 {
@@ -1421,13 +2010,18 @@ impl Client {
         self.select(id)
     }
 
+    /// Resizes the selected session on its host to the view.
     fn resize_selected(&self) -> Option<ClientCommand> {
         let (session, size) = (self.selected.clone()?, self.size?);
-        self.notify(ClientNotification::SessionResize(SessionResize {
-            session,
-            cols: size.cols,
-            rows: size.rows,
-        }))
+        let home = self.home(&session);
+        self.notify_to(
+            &home,
+            ClientNotification::SessionResize(SessionResize {
+                session,
+                cols: size.cols,
+                rows: size.rows,
+            }),
+        )
     }
 
     // ---------- notices ----------
@@ -1468,12 +2062,13 @@ impl Client {
                 if self.focus != Focus::Terminal || self.popup.is_some() {
                     return Vec::new();
                 }
+                let home = self.home(&session);
                 let note = ClientNotification::SessionInput(SessionInput {
                     session,
                     data,
                     kind,
                 });
-                self.notify(note).into_iter().collect()
+                self.notify_to(&home, note).into_iter().collect()
             }
             Intent::Resize(size) => {
                 self.size = Some(size);
@@ -1495,6 +2090,7 @@ impl Client {
                 self.chosen = true;
                 self.select(Some(id))
             }
+            Intent::SelectMachine(machine) => self.select_machine(&machine),
             Intent::ScrollSidebar(rows) => {
                 self.scroll_by(rows);
                 Vec::new()
@@ -1506,7 +2102,7 @@ impl Client {
             }
             Intent::ScrollPicker { by, shown } => {
                 if self.popup == Some(Popup::PickProfile) {
-                    let max = self.profiles.len().saturating_sub(shown);
+                    let max = self.profiles().len().saturating_sub(shown);
                     self.picker_scroll = scrolled(self.picker_scroll.min(max), by, max);
                 }
                 Vec::new()
@@ -1535,7 +2131,7 @@ impl Client {
             }
             Intent::FinderChoose(item) => self.finder_choose(item),
             Intent::NewSession => self.new_session(None),
-            Intent::BeginNewSession => match &self.profiles[..] {
+            Intent::BeginNewSession => match self.profiles() {
                 [] => self.new_session(None),
                 [only] => {
                     let name = only.name.clone();
@@ -1622,10 +2218,9 @@ impl Client {
             }
             Intent::Confirm => match self.popup.take() {
                 Some(Popup::Rename { session, name }) => {
-                    self.user_request(ClientRequest::SessionRename(SessionRename {
-                        session,
-                        name,
-                    }))
+                    let home = self.home(&session);
+                    let rename = ClientRequest::SessionRename(SessionRename { session, name });
+                    self.user_request_to(&home, rename)
                 }
                 Some(Popup::ConfirmClose { session }) => {
                     let worktree = match self.close_check.take() {
@@ -1912,9 +2507,10 @@ impl Client {
     }
 
     /// Whether `s` might be stale: it has a worktree in the current workspace and isn't closing, and its PTY exited at
-    /// least `days` days before the latest tick. Whether its branch is merged is asked of the host.
+    /// least `days` days before the latest tick. Whether its branch is merged is asked of the host. Only this machine's
+    /// host's sessions can be: a peer's session isn't in its registry.
     fn stale(&self, s: &ClientSession, days: u32) -> bool {
-        let (Some(now), Some(exited)) = (self.now, self.registry.exited_at(&s.id)) else {
+        let (Some(now), Some(exited)) = (self.now, self.local.registry.exited_at(&s.id)) else {
             return false;
         };
         let wait = SignedDuration::from_hours(i64::from(days).saturating_mul(24));
@@ -1928,7 +2524,7 @@ impl Client {
             && !s.creating_worktree
             && s.worktree.is_some()
             && s.workspace.is_some()
-            && s.workspace.as_deref() == self.registry.workspace()
+            && s.workspace.as_deref() == self.local.registry.workspace()
     }
 
     /// A stale session's status: its row stays only if its branch is merged.
@@ -2090,12 +2686,16 @@ impl Client {
         });
         self.close_check = None;
         self.status_request = None;
-        if !has_worktree || self.connection != Connection::Ready {
+        let home = self.home(&session);
+        if !has_worktree || !self.ready(&home) {
             return Vec::new();
         }
-        let (id, ask) = self.request_with_id(ClientRequest::WorktreeStatus(WorktreeCheck {
-            session: session.clone(),
-        }));
+        let (id, ask) = self.request_to(
+            &home,
+            ClientRequest::WorktreeStatus(WorktreeCheck {
+                session: session.clone(),
+            }),
+        );
         self.status_request = Some((id, session));
         self.close_check = Some(CloseCheck::Checking);
         vec![ask]
@@ -2105,10 +2705,9 @@ impl Client {
     fn close(&mut self, session: SessionId, worktree: CloseWorktree) -> Vec<ClientCommand> {
         self.close_check = None;
         self.status_request = None;
-        self.user_request(ClientRequest::SessionClose(SessionClose {
-            session,
-            worktree,
-        }))
+        let home = self.home(&session);
+        let close = ClientRequest::SessionClose(SessionClose { session, worktree });
+        self.user_request_to(&home, close)
     }
 
     /// Asks the host to resume exited `session`, then selects it and sizes it to the view: its new PTY starts at the
@@ -2126,9 +2725,11 @@ impl Client {
                 return Vec::new();
             }
         }
-        let mut commands = self.user_request(ClientRequest::SessionResume(SessionResume {
+        let home = self.home(&session);
+        let resume = ClientRequest::SessionResume(SessionResume {
             session: session.clone(),
-        }));
+        });
+        let mut commands = self.user_request_to(&home, resume);
         if commands.is_empty() {
             return commands;
         }
@@ -2140,13 +2741,42 @@ impl Client {
         commands
     }
 
-    /// Starts a session running `profile`, or the host's default.
+    /// Starts a session running `profile`, or the host's default, on the selected session's host.
     fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
-        self.user_request(ClientRequest::SessionNew(SessionNew {
+        let host = self.new_session_host();
+        let new = ClientRequest::SessionNew(SessionNew {
             profile,
             size: self.view_size(),
             ..SessionNew::default()
-        }))
+        });
+        self.user_request_to(&host, new)
+    }
+
+    /// A click on `machine`'s header: a peer waiting to be tried again is tried now; otherwise its newest session is
+    /// selected.
+    fn select_machine(&mut self, machine: &MachineId) -> Vec<ClientCommand> {
+        if let Some(peer) = self.peers.get_mut(machine)
+            && matches!(peer.link, PeerLink::Waiting { .. })
+        {
+            peer.link = PeerLink::Connecting;
+            return vec![ClientCommand::ConnectPeer(machine.clone())];
+        }
+        let at = match self.peers.contains_key(machine) {
+            true => At::Peer(machine.clone()),
+            false => At::Local,
+        };
+        let newest = self
+            .sessions
+            .iter()
+            .find(|s| self.homes.get(&s.id) == Some(&at))
+            .map(|s| s.id.clone());
+        match newest {
+            Some(id) => {
+                self.chosen = true;
+                self.select(Some(id))
+            }
+            None => Vec::new(),
+        }
     }
 
     /// The terminal view's size, for a new session's PTY to spawn at.
@@ -2162,13 +2792,33 @@ impl Client {
         self.user_request(ClientRequest::WorkspaceSelect(WorkspaceSelect { path }))
     }
 
-    /// A request the user asked for. Dropped, with a notice, while not connected.
+    /// A request the user asked for of this machine's host. Dropped, with a notice, while not connected.
     fn user_request(&mut self, body: ClientRequest) -> Vec<ClientCommand> {
-        if self.connection != Connection::Ready {
-            self.set_notice(NOT_CONNECTED.to_owned());
+        self.user_request_to(&At::Local, body)
+    }
+
+    /// A request the user asked for of host `at`. Dropped, with a notice, while not connected to it.
+    fn user_request_to(&mut self, at: &At, body: ClientRequest) -> Vec<ClientCommand> {
+        if !self.ready(at) {
+            let why = match at {
+                At::Local => NOT_CONNECTED.to_owned(),
+                At::Peer(machine) => format!("not connected to {}", self.machine_label(machine)),
+            };
+            self.set_notice(why);
             return Vec::new();
         }
-        vec![self.request(body)]
+        vec![self.request_to(at, body).1]
+    }
+}
+
+/// A command sending `message` to host `at`.
+fn send_to(at: &At, message: ClientMessage) -> ClientCommand {
+    match at {
+        At::Local => ClientCommand::Send(message),
+        At::Peer(machine) => ClientCommand::SendPeer {
+            machine: machine.clone(),
+            message,
+        },
     }
 }
 

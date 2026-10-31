@@ -33,6 +33,11 @@ Report any side effect that happened anyway.
 Never kill processes by pattern (`pkill -f`, `killall`): test binaries have the same name in every worktree, so a
 pattern kills other agents' work. Kill only pids you started and recorded.
 
+## Rebasing
+Never bypass the pre-commit hook: no `--no-verify`, no `core.hooksPath=/dev/null`, not even for a WIP commit you undo.
+To rebase, first commit your work through the hook (or finish the task's commit), then `git rebase main`. If the rebase
+needs `--continue`, let the hook run; if main moved only docs, say so instead of skipping the gate.
+
 ## Scratch files and load rounds
 Never run `rm` on a glob or a variable path (`rm -f $DIR/*`, `rm -rf $D`): the user's permission check flags it as unsafe.
 - Load rounds: `scripts/load-round.sh [-n COPIES] [-r ROUNDS] BINARY [TEST ARGS...]` writes every run's logs to a fresh

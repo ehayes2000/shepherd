@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::{Client, FinderItem, MenuItem};
-use shepherd_core::ids::SessionId;
+use shepherd_core::client::{Client, FinderItem, MenuItem, SidebarEntry};
+use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{MIN_COLS, MIN_ROWS};
 
@@ -60,6 +60,8 @@ pub enum Target {
     NewSession,
     /// A session's row in the sidebar, either of its lines.
     Session(SessionId),
+    /// A machine's header in the sidebar, either of its lines (while there are peers).
+    Machine(MachineId),
     /// The `×` at the right of a session's row.
     CloseSession(SessionId),
     /// The pane: the selected session's terminal.
@@ -128,9 +130,13 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     if let Some((_, target, _)) = footer.into_iter().find(|(area, ..)| area.contains(at)) {
         return Some(target);
     }
-    let (index, line) =
-        sidebar::visible_rows(client, layout).find(|(_, line)| line.contains(at))?;
-    let id = client.sessions().get(index)?.id.clone();
+    let (entry, line) = sidebar::visible_rows(client, layout)
+        .into_iter()
+        .find(|(_, line)| line.contains(at))?;
+    let id = match entry {
+        SidebarEntry::Session(session) => session.id.clone(),
+        SidebarEntry::Machine(group) => return Some(Target::Machine(group.id)),
+    };
     if sidebar::close_button(layout, line).contains(at) {
         return Some(Target::CloseSession(id));
     }
