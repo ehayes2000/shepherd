@@ -12,7 +12,11 @@
 //! of one that started with a warning (a post-create hook failed), the warning, in yellow. A second line too long for
 //! the row ends in `…`. The selected session has a highlighted background, and a session that wants the user has a
 //! yellow bar on its left edge.
-//! The newest session is at the top. The list starts at the client's [`Client::sidebar_scroll`], which keeps the
+//! While there are peers (T31b), the list is grouped by machine ([`Client::sidebar`]): each group starts with a
+//! two-line header, `≡` and the machine's name, then how it is doing (`this machine`, `connected`, `connecting…`,
+//! `offline: <why>`). A click on it means that machine ([`Target::Machine`]). A peer that can't be reached now has its
+//! header and its last-known sessions dimmed. Collapsed, a header is just its `≡`.
+//! The newest session is at the top (of each group). The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
 //! for it is drawn across the window's last lines instead), else a reconnecting note or a hint for help with the
@@ -33,7 +37,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Clear, Wrap};
 use shepherd_core::acpp::{PrChecks, PrState};
-use shepherd_core::client::{Client, ClientSession, Connection, Focus};
+use shepherd_core::client::{
+    Client, ClientSession, Connection, Focus, MachineGroup, MachineStatus, SidebarEntry,
+};
 use shepherd_core::display::DisplayText;
 use shepherd_core::session::Activity;
 
@@ -93,6 +99,11 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
         Activity::Unknown => ("·", Color::DarkGray),
     }
 }
+
+/// What marks a machine's header, in the glyph column.
+const MACHINE_MARK: &str = "≡";
+/// What this machine's header says of it while connected.
+const THIS_MACHINE: &str = "this machine";
 
 /// The search field's placeholder, and the collapsed sidebar's.
 const SEARCH: &str = "⌕ Search…";
@@ -276,21 +287,73 @@ pub(crate) fn capacity(layout: &Layout) -> usize {
     usize::from(list.height / ROW_HEIGHT)
 }
 
-/// Each session shown, as its index in the client's list and its two lines, top to bottom, from the client's scroll.
-pub(crate) fn visible_rows(
-    client: &Client,
+/// Each entry shown (a machine's header or a session) and its two lines, top to bottom, from the client's scroll.
+pub(crate) fn visible_rows<'a>(
+    client: &'a Client,
     layout: &Layout,
-) -> impl Iterator<Item = (usize, Rect)> {
+) -> Vec<(SidebarEntry<'a>, Rect)> {
     let list = list(layout);
     let visible = capacity(layout);
-    let len = client.sessions().len();
-    let first = client.sidebar_scroll().min(len.saturating_sub(visible));
-    (first..len.min(first + visible))
+    let entries = client.sidebar();
+    let first = client
+        .sidebar_scroll()
+        .min(entries.len().saturating_sub(visible));
+    entries
+        .into_iter()
+        .skip(first)
+        .take(visible)
         .zip(0u16..)
-        .map(move |(index, slot)| {
+        .map(|(entry, slot)| {
             let y = list.y + slot * ROW_HEIGHT;
-            (index, Rect::new(list.x, y, list.width, ROW_HEIGHT))
+            (entry, Rect::new(list.x, y, list.width, ROW_HEIGHT))
         })
+        .collect()
+}
+
+/// What a machine header's second line says.
+fn machine_status(group: &MachineGroup) -> String {
+    match (&group.status, group.local) {
+        (MachineStatus::Connected, true) => THIS_MACHINE.to_owned(),
+        (MachineStatus::Connected, false) => "connected".to_owned(),
+        (MachineStatus::Connecting, _) => "connecting…".to_owned(),
+        (MachineStatus::Offline(Some(why)), _) => format!("offline: {why}"),
+        (MachineStatus::Offline(None), _) => "offline".to_owned(),
+        (MachineStatus::Incompatible, _) => "another protocol version".to_owned(),
+    }
+}
+
+/// Whether a machine's group is drawn dimmed: a peer that isn't connected, whose sessions are as last known.
+fn dimmed(group: &MachineGroup) -> bool {
+    !group.local && group.status != MachineStatus::Connected
+}
+
+/// Draws a machine's header on its two `line`s: its mark and name, then how it is doing (just the mark when
+/// collapsed).
+fn render_machine(group: &MachineGroup, layout: &Layout, line: Rect, buf: &mut Buffer) {
+    let dim = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
+    let mark = match dimmed(group) {
+        true => dim,
+        false => Style::new().fg(Color::Gray),
+    };
+    draw::set(
+        buf,
+        line.x + 1,
+        line.y,
+        &shown(MACHINE_MARK),
+        usize::MAX,
+        mark,
+    );
+    if layout.collapsed {
+        return;
+    }
+    let width = usize::from(line.width.saturating_sub(3));
+    let name = match dimmed(group) {
+        true => dim.add_modifier(Modifier::BOLD),
+        false => Style::new().add_modifier(Modifier::BOLD),
+    };
+    draw::set_cut(buf, line.x + 3, line.y, &shown(&group.name), width, name);
+    let status = shown(&machine_status(group));
+    draw::set_cut(buf, line.x + 3, line.y + 1, &status, width, dim);
 }
 
 pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
@@ -348,11 +411,15 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
         if selected {
             style = style.add_modifier(Modifier::BOLD);
         }
-        if session.elsewhere {
+        let offline = client.offline(&session.id);
+        if session.elsewhere || offline {
             style = style.fg(Color::Gray).add_modifier(Modifier::DIM);
         }
         let (symbol, color) = glyph(session);
-        let glyph_style = Style::new().fg(color);
+        let mut glyph_style = Style::new().fg(color);
+        if offline {
+            glyph_style = glyph_style.add_modifier(Modifier::DIM);
+        }
         draw::set(
             buf,
             line.x + 1,
@@ -467,9 +534,14 @@ fn rows(
     buf: &mut Buffer,
     mut draw: impl FnMut(&ClientSession, bool, Rect, &mut Buffer),
 ) {
-    let sessions = client.sessions();
-    for (index, line) in visible_rows(client, layout) {
-        let session = &sessions[index];
+    for (entry, line) in visible_rows(client, layout) {
+        let session = match entry {
+            SidebarEntry::Session(session) => session,
+            SidebarEntry::Machine(group) => {
+                render_machine(&group, layout, line, buf);
+                continue;
+            }
+        };
         let is_selected = client.selected() == Some(&session.id);
         if is_selected {
             buf.set_style(line, Style::new().bg(SELECTED_BG));
