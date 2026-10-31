@@ -16,7 +16,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
 | T39 | Archive index | done | 8d11fb1 | 4 | refusing a newer WAL index modified it; untested rollback/newtypes; side-file peek raced with closes |
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
-| T41 | Restore transcripts for a target cwd | review | task/t41-archive-restore @ 418b8da (on da21144) | 0 | built; review deferred (paused). Not rebased. Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
+| T41 | Restore transcripts for a target cwd | review | task/t41-archive-restore @ 418b8da (on da21144) | 0 | reviewing (round 1) |
 | T42 | Archive port and host capture | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |

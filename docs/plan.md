@@ -5,9 +5,6 @@ status and whose `## Specs` section holds its spec. The section between the mark
 `scripts/tasks.py` from those files (the gate checks it's current). Only the PM edits statuses, with
 `scripts/tasks.py set <ID> <status> [--branch ..] [--round ..] [--note ..]`.
 
-**PAUSED (2026-10-31, user's request: machine too slow).** Let in-flight builders (T41, F47, F48) finish; dispatch nothing new,
-run no reviewers or merges until the user resumes. Then: review T41/F47/F48, merge, continue with T31a.
-
 Requests from the user land in `docs/inbox.md` first. Background reading: `manifesto.md`, `docs/architecture.md`,
 `docs/acpp.md`. Task format: the `write-task` skill.
 
@@ -17,8 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | review | task/t41-archive-restore @ 418b8da (on da21144) | 0 | built; review deferred (paused). Not rebased. Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
-| F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | review | task/f47-swap-flush @ 8684af0 | 1 | fixed: flush_closed(within: Duration); pruning test found & fixed a socket-copy leak. Re-review deferred (paused). Builder disclosed a hook-less rebase commit; final tree gated |
+| T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | review | task/t41-archive-restore @ 418b8da (on da21144) | 0 | reviewing (round 1) |
+| F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | review | task/f47-swap-flush @ 8684af0 | 1 | re-reviewing; check the hook-less commit |
+| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | building | task/f48-git-signal-death | 0 | resumed: fix per spec plan |
 
 ## Ready to start
 
@@ -32,7 +30,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
-| F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | todo | F28 |
 
 ## Features
 
