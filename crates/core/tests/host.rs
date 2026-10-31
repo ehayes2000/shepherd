@@ -1013,7 +1013,7 @@ fn run(ops: Vec<Op>) -> HostDriver {
                 while let Pane::Split { a, .. } = pane {
                     pane = a;
                 }
-                let content = Content::Session(sid(&id(i)));
+                let content = Content::session(sid(&id(i)));
                 let op = match op {
                     Op::Show(_) => LayoutOp::Put {
                         pane: pane.id(),
@@ -1038,7 +1038,7 @@ fn run(ops: Vec<Op>) -> HostDriver {
 fn shown_sessions(pane: &Pane) -> Vec<SessionId> {
     match pane {
         Pane::Leaf {
-            content: Content::Session(id),
+            content: Content::Session { machine: None, id },
             ..
         } => vec![id.clone()],
         Pane::Leaf { .. } => Vec::new(),

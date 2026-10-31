@@ -45,13 +45,13 @@ fn ui_get_and_ui_apply_are_requests_with_their_own_methods() {
             pane: PaneId::new(2),
             dir: SplitDir::Vertical,
             ratio: Ratio::from_permille(250),
-            content: Content::Session(SessionId::new("s_1")),
+            content: Content::session(SessionId::new("s_1")),
         },
     }));
     assert_eq!(apply["method"], "_shepherd/ui/apply");
     assert_eq!(
         apply["params"],
-        json!({ "op": { "kind": "split", "pane": 2, "dir": "vertical", "ratio": 250, "content": { "session": "s_1" } } })
+        json!({ "op": { "kind": "split", "pane": 2, "dir": "vertical", "ratio": 250, "content": { "session": { "id": "s_1" } } } })
     );
 }
 

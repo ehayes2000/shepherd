@@ -828,8 +828,9 @@ impl Host {
         self.machine_name.as_deref()
     }
 
-    /// The screen layout: the latest recorded (the default before any), with every pane showing a session that is closed,
-    /// or not known, showing nothing. Computed from the whole fold, so it is the same whichever log is replayed first.
+    /// The screen layout: the latest recorded (the default before any), with every pane showing one of this host's own
+    /// sessions that is closed, or not known, showing nothing (a peer's session is kept: it is the peer's to list).
+    /// Computed from the whole fold, so it is the same whichever log is replayed first.
     pub fn layout(&self) -> Layout {
         self.layout
             .clone()

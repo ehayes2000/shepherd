@@ -26,7 +26,7 @@ fn only_pane(layout: &Layout) -> PaneId {
 fn put(pane: PaneId, session: &str) -> LayoutOp {
     LayoutOp::Put {
         pane,
-        content: Content::Session(sid(session)),
+        content: Content::session(sid(session)),
     }
 }
 
@@ -159,7 +159,7 @@ fn a_closed_sessions_panes_show_nothing() {
         pane: a,
         dir: SplitDir::Horizontal,
         ratio: Default::default(),
-        content: Content::Session(sid("s2")),
+        content: Content::session(sid("s2")),
     };
     apply(&mut driver, split);
     driver.close("s1");
@@ -177,7 +177,9 @@ fn a_closed_sessions_panes_show_nothing() {
             content: Content::Empty
         }
     );
-    assert!(matches!(&**right, Pane::Leaf { content: Content::Session(s), .. } if *s == sid("s2")));
+    assert!(
+        matches!(&**right, Pane::Leaf { content: Content::Session { machine: None, id }, .. } if *id == sid("s2"))
+    );
 }
 
 #[test]
@@ -212,7 +214,7 @@ fn the_layout_folds_the_same_whichever_log_is_replayed_first() {
             pane,
             dir: SplitDir::Vertical,
             ratio: Default::default(),
-            content: Content::Session(sid("s2")),
+            content: Content::session(sid("s2")),
         },
     );
     let mut logs: BTreeMap<Option<SessionId>, VecDeque<Envelope>> = BTreeMap::new();
@@ -258,4 +260,31 @@ fn a_malformed_layout_frame_is_skipped() {
         json!({ "jsonrpc": "2.0", "method": "_shepherd/ui/layout", "params": { "layout": { "pages": [], "current": 1, "next_id": 2 } } }),
     );
     assert_eq!(driver.host().layout(), Layout::default());
+}
+
+#[test]
+fn a_peers_session_can_be_pinned_and_stays_when_this_hosts_sessions_close() {
+    let mut driver = HostDriver::new();
+    driver.new_session("s1");
+    let pane = only_pane(&Layout::default());
+    let theirs = Content::peer_session(shepherd_core::ids::MachineId::new("m_b"), sid("s9"));
+    let commands = apply(
+        &mut driver,
+        LayoutOp::Put {
+            pane,
+            content: theirs.clone(),
+        },
+    );
+    assert!(reply(&commands).is_ok(), "{commands:?}");
+    driver.close("s1");
+    let replayed = replay(driver.log().iter().cloned());
+    for layout in [driver.host().layout(), replayed.layout()] {
+        assert_eq!(
+            layout.current_page().root,
+            Pane::Leaf {
+                id: pane,
+                content: theirs.clone()
+            }
+        );
+    }
 }

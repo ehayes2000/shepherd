@@ -23,7 +23,7 @@ fn first_pane() -> PaneId {
 fn show(session: &SessionId) -> LayoutOp {
     LayoutOp::Put {
         pane: first_pane(),
-        content: Content::Session(session.clone()),
+        content: Content::session(session.clone()),
     }
 }
 

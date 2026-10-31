@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 use serde_json::json;
-use shepherd_core::ids::SessionId;
+use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{
     Content, Layout, LayoutError, LayoutOp, MAX_LEAVES, MAX_NAME, MAX_PAGES, Page, PageId, Pane,
     PaneId, Ratio, SplitDir, Towards, ViewKind,
@@ -89,7 +89,7 @@ fn two_side_by_side() -> (Layout, PaneId, PaneId) {
 // ---------- the default ----------
 
 #[test]
-fn the_default_layout_is_one_page_with_one_empty_pane() {
+fn the_default_layout_is_one_page_with_one_pane_showing_the_windows_selection() {
     let layout = Layout::default();
     assert_eq!(layout.pages().len(), 1);
     assert_eq!(layout.current(), layout.pages()[0].id);
@@ -97,10 +97,113 @@ fn the_default_layout_is_one_page_with_one_empty_pane() {
     assert!(matches!(
         page.root,
         Pane::Leaf {
-            content: Content::Empty,
+            content: Content::Selected,
             ..
         }
     ));
+}
+
+// ---------- the window's selection ----------
+
+#[test]
+fn a_selected_pane_can_be_put_split_and_closed_like_any_other() {
+    let (layout, a, b) = two_side_by_side();
+    // The default pane shows the selection; the new half shows nothing.
+    assert_eq!(
+        leaves(&layout.current_page().root),
+        [(a, Content::Selected), (b, Content::Empty)]
+    );
+    let layout = ok(&layout, put(b, Content::Selected));
+    let layout = ok(&layout, put(a, Content::session(sid("s1"))));
+    assert_eq!(
+        leaves(&layout.current_page().root),
+        [(a, Content::session(sid("s1"))), (b, Content::Selected)]
+    );
+    let closed = ok(&layout, LayoutOp::Close { pane: a });
+    assert_eq!(
+        leaves(&closed.current_page().root),
+        [(b, Content::Selected)]
+    );
+    let page = ok(
+        &layout,
+        LayoutOp::PageNew {
+            name: None,
+            content: Content::Selected,
+        },
+    );
+    assert_eq!(leaves(&page.current_page().root)[0].1, Content::Selected);
+}
+
+#[test]
+fn closing_sessions_leaves_selected_panes_alone() {
+    let layout = Layout::default();
+    assert_eq!(layout.retain_sessions(|_| false), layout);
+}
+
+// ---------- peers' sessions ----------
+
+#[test]
+fn a_peers_session_can_be_shown_without_this_host_listing_it() {
+    let layout = Layout::default();
+    let pane = root_leaf(&layout);
+    let theirs = Content::peer_session(MachineId::new("m_b"), sid("s9"));
+    let shown = layout
+        .apply(&put(pane, theirs.clone()), |_| false)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(leaves(&shown.current_page().root), [(pane, theirs)]);
+}
+
+#[test]
+fn a_peers_session_is_kept_when_this_hosts_sessions_close() {
+    let (layout, a, b) = two_side_by_side();
+    let theirs = Content::peer_session(MachineId::new("m_b"), sid("s1"));
+    let layout = ok(&layout, put(a, theirs.clone()));
+    let layout = ok(&layout, put(b, Content::session(sid("s1"))));
+    let kept = layout.retain_sessions(|_| false);
+    assert_eq!(
+        leaves(&kept.current_page().root),
+        [(a, theirs), (b, Content::Empty)]
+    );
+}
+
+#[test]
+fn a_malformed_session_is_refused() {
+    let layout = Layout::default();
+    let pane = root_leaf(&layout);
+    for bad in [
+        Content::peer_session(MachineId::new("m_b"), sid("No Spaces")),
+        Content::peer_session(MachineId::new("m_b"), sid("")),
+        Content::peer_session(MachineId::new(""), sid("s1")),
+    ] {
+        assert!(
+            matches!(
+                layout.apply(&put(pane, bad.clone()), all_listed),
+                Err(LayoutError::InvalidSession(_))
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn content_on_the_wire() {
+    let cases = [
+        (Content::Empty, json!("empty")),
+        (Content::Selected, json!("selected")),
+        (
+            Content::session(sid("s1")),
+            json!({ "session": { "id": "s1" } }),
+        ),
+        (
+            Content::peer_session(MachineId::new("m_b"), sid("s1")),
+            json!({ "session": { "machine": "m_b", "id": "s1" } }),
+        ),
+        (Content::View(ViewKind::Status), json!({ "view": "status" })),
+    ];
+    for (content, wire) in cases {
+        assert_eq!(serde_json::to_value(&content).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<Content>(wire).unwrap(), content);
+    }
 }
 
 // ---------- pages ----------
@@ -144,12 +247,12 @@ fn a_new_page_can_open_on_a_session_or_a_view() {
         &layout,
         LayoutOp::PageNew {
             name: None,
-            content: Content::Session(sid("s1")),
+            content: Content::session(sid("s1")),
         },
     );
     assert_eq!(
         leaves(&layout.current_page().root)[0].1,
-        Content::Session(sid("s1"))
+        Content::session(sid("s1"))
     );
 }
 
@@ -157,7 +260,7 @@ fn a_new_page_can_open_on_a_session_or_a_view() {
 fn a_new_page_on_a_session_that_is_not_listed_is_refused() {
     let op = LayoutOp::PageNew {
         name: None,
-        content: Content::Session(sid("gone")),
+        content: Content::session(sid("gone")),
     };
     assert_eq!(
         err(&Layout::default(), op),
@@ -257,7 +360,7 @@ fn closing_the_last_page_leaves_one_empty_page() {
     let layout = Layout::default();
     let page = layout.current();
     let pane = root_leaf(&layout);
-    let layout = ok(&layout, put(pane, Content::Session(sid("s1"))));
+    let layout = ok(&layout, put(pane, Content::session(sid("s1"))));
     let closed = ok(&layout, LayoutOp::PageClose { page });
     assert_eq!(closed.pages().len(), 1);
     assert_ne!(closed.current(), page, "a fresh page, with a fresh id");
@@ -297,14 +400,14 @@ fn page_operations_on_an_unknown_page_are_refused() {
 fn splitting_a_pane_keeps_it_as_the_first_half_and_adds_a_new_one() {
     let layout = Layout::default();
     let a = root_leaf(&layout);
-    let layout = ok(&layout, put(a, Content::Session(sid("s1"))));
+    let layout = ok(&layout, put(a, Content::session(sid("s1"))));
     let layout = ok(
         &layout,
         LayoutOp::Split {
             pane: a,
             dir: SplitDir::Vertical,
             ratio: Ratio::from_permille(300),
-            content: Content::Session(sid("s2")),
+            content: Content::session(sid("s2")),
         },
     );
     let Pane::Split {
@@ -323,13 +426,13 @@ fn splitting_a_pane_keeps_it_as_the_first_half_and_adds_a_new_one() {
         **first,
         Pane::Leaf {
             id: a,
-            content: Content::Session(sid("s1"))
+            content: Content::session(sid("s1"))
         }
     );
     let Pane::Leaf { id: b, content } = &**second else {
         panic!("{second:?}");
     };
-    assert_eq!(*content, Content::Session(sid("s2")));
+    assert_eq!(*content, Content::session(sid("s2")));
     assert!(*id != a && *b != a && id != b);
 }
 
@@ -363,7 +466,7 @@ fn splitting_refuses_an_unknown_pane_or_session() {
         pane: root_leaf(&layout),
         dir: SplitDir::Horizontal,
         ratio: Ratio::default(),
-        content: Content::Session(sid("gone")),
+        content: Content::session(sid("gone")),
     };
     assert_eq!(err(&layout, op), LayoutError::UnknownSession(sid("gone")));
 }
@@ -400,13 +503,13 @@ fn panes_on_other_pages_can_be_split_without_selecting_them() {
 #[test]
 fn closing_a_pane_puts_its_sibling_in_its_parents_place() {
     let (layout, a, b) = two_side_by_side();
-    let layout = ok(&layout, put(b, Content::Session(sid("s2"))));
+    let layout = ok(&layout, put(b, Content::session(sid("s2"))));
     let closed = ok(&layout, LayoutOp::Close { pane: a });
     assert_eq!(
         closed.current_page().root,
         Pane::Leaf {
             id: b,
-            content: Content::Session(sid("s2"))
+            content: Content::session(sid("s2"))
         }
     );
 }
@@ -435,14 +538,17 @@ fn closing_a_split_closes_everything_in_it() {
         panic!("{layout:?}");
     };
     let closed = ok(&layout, LayoutOp::Close { pane: right.id() });
-    assert_eq!(leaves(&closed.current_page().root), [(a, Content::Empty)]);
+    assert_eq!(
+        leaves(&closed.current_page().root),
+        [(a, Content::Selected)]
+    );
 }
 
 #[test]
 fn closing_the_last_pane_leaves_one_empty_pane() {
     let layout = Layout::default();
     let pane = root_leaf(&layout);
-    let layout = ok(&layout, put(pane, Content::Session(sid("s1"))));
+    let layout = ok(&layout, put(pane, Content::session(sid("s1"))));
     let closed = ok(&layout, LayoutOp::Close { pane });
     assert_eq!(
         leaves(&closed.current_page().root),
@@ -488,10 +594,10 @@ fn ids_are_never_reused_after_a_close() {
 fn putting_a_session_or_a_view_in_a_pane() {
     let layout = Layout::default();
     let pane = root_leaf(&layout);
-    let layout = ok(&layout, put(pane, Content::Session(sid("s1"))));
+    let layout = ok(&layout, put(pane, Content::session(sid("s1"))));
     assert_eq!(
         leaves(&layout.current_page().root),
-        [(pane, Content::Session(sid("s1")))]
+        [(pane, Content::session(sid("s1")))]
     );
     let layout = ok(&layout, put(pane, Content::View(ViewKind::Machines)));
     assert_eq!(
@@ -508,13 +614,13 @@ fn putting_a_session_or_a_view_in_a_pane() {
 #[test]
 fn one_session_can_show_in_several_panes() {
     let (layout, a, b) = two_side_by_side();
-    let layout = ok(&layout, put(a, Content::Session(sid("s1"))));
-    let layout = ok(&layout, put(b, Content::Session(sid("s1"))));
+    let layout = ok(&layout, put(a, Content::session(sid("s1"))));
+    let layout = ok(&layout, put(b, Content::session(sid("s1"))));
     assert_eq!(
         leaves(&layout.current_page().root),
         [
-            (a, Content::Session(sid("s1"))),
-            (b, Content::Session(sid("s1")))
+            (a, Content::session(sid("s1"))),
+            (b, Content::session(sid("s1")))
         ]
     );
 }
@@ -533,7 +639,7 @@ fn putting_refuses_a_split_an_unknown_pane_or_an_unlisted_session() {
         LayoutError::UnknownPane(nowhere)
     );
     assert_eq!(
-        err(&layout, put(a, Content::Session(sid("gone")))),
+        err(&layout, put(a, Content::session(sid("gone")))),
         LayoutError::UnknownSession(sid("gone"))
     );
 }
@@ -605,19 +711,19 @@ fn setting_a_ratio_refuses_a_leaf_or_an_unknown_pane() {
 #[test]
 fn panes_showing_a_session_no_longer_listed_become_empty_on_every_page() {
     let (layout, a, b) = two_side_by_side();
-    let layout = ok(&layout, put(a, Content::Session(sid("s1"))));
-    let layout = ok(&layout, put(b, Content::Session(sid("s2"))));
+    let layout = ok(&layout, put(a, Content::session(sid("s1"))));
+    let layout = ok(&layout, put(b, Content::session(sid("s2"))));
     let layout = ok(
         &layout,
         LayoutOp::PageNew {
             name: None,
-            content: Content::Session(sid("s1")),
+            content: Content::session(sid("s1")),
         },
     );
     let kept = layout.retain_sessions(|s| s.as_str() == "s2");
     assert_eq!(
         leaves(&kept.pages()[0].root),
-        [(a, Content::Empty), (b, Content::Session(sid("s2")))]
+        [(a, Content::Empty), (b, Content::session(sid("s2")))]
     );
     assert_eq!(leaves(&kept.pages()[1].root)[0].1, Content::Empty);
     assert_eq!(kept.current(), layout.current());
@@ -713,7 +819,7 @@ fn panes_are_found_by_id_on_any_page() {
         layout.pane(a),
         Some(&Pane::Leaf {
             id: a,
-            content: Content::Empty
+            content: Content::Selected
         })
     );
     assert_eq!(layout.pane(PaneId::new(999)), None);
@@ -727,8 +833,13 @@ fn panes_are_found_by_id_on_any_page() {
 
 #[test]
 fn a_layout_reads_back_as_written() {
-    let (layout, [a, ..]) = grid();
-    let layout = ok(&layout, put(a, Content::Session(sid("s1"))));
+    let (layout, [a, b, c, _]) = grid();
+    let layout = ok(&layout, put(a, Content::session(sid("s1"))));
+    let layout = ok(
+        &layout,
+        put(b, Content::peer_session(MachineId::new("m_b"), sid("s2"))),
+    );
+    let layout = ok(&layout, put(c, Content::Selected));
     let layout = ok(&layout, new_page(Some("views")));
     let layout = ok(
         &layout,
@@ -746,7 +857,7 @@ fn the_default_layout_on_the_wire() {
     assert_eq!(
         serde_json::to_value(Layout::default()).unwrap(),
         json!({
-            "pages": [{ "id": 1, "name": "1", "root": { "kind": "leaf", "id": 2, "content": "empty" } }],
+            "pages": [{ "id": 1, "name": "1", "root": { "kind": "leaf", "id": 2, "content": "selected" } }],
             "current": 1,
             "next_id": 3,
         })
@@ -758,10 +869,11 @@ fn ops_on_the_wire() {
     let op: LayoutOp =
         serde_json::from_value(json!({ "kind": "split", "pane": 2, "dir": "horizontal" })).unwrap();
     assert_eq!(op, split(PaneId::new(2), SplitDir::Horizontal));
-    let op: LayoutOp =
-        serde_json::from_value(json!({ "kind": "put", "pane": 2, "content": { "session": "s1" } }))
-            .unwrap();
-    assert_eq!(op, put(PaneId::new(2), Content::Session(sid("s1"))));
+    let op: LayoutOp = serde_json::from_value(
+        json!({ "kind": "put", "pane": 2, "content": { "session": { "id": "s1" } } }),
+    )
+    .unwrap();
+    assert_eq!(op, put(PaneId::new(2), Content::session(sid("s1"))));
     let op: LayoutOp =
         serde_json::from_value(json!({ "kind": "ratio", "pane": 3, "ratio": 2000 })).unwrap();
     assert_eq!(
@@ -814,6 +926,10 @@ fn a_malformed_layout_does_not_read() {
         json!({ "pages": [{ "id": 1, "name": " ", "root": leaf(2) }], "current": 1, "next_id": 3 }),
         json!({ "pages": [{ "id": 1, "name": " p", "root": leaf(2) }], "current": 1, "next_id": 3 }),
         json!({ "pages": [{ "id": 1, "name": "p".repeat(MAX_NAME + 1), "root": leaf(2) }], "current": 1, "next_id": 3 }),
+        // A session that can't be one, this host's or a peer's, or a peer with no name.
+        json!({ "pages": [page(1, json!({ "kind": "leaf", "id": 2, "content": { "session": { "id": "A B" } } }))], "current": 1, "next_id": 3 }),
+        json!({ "pages": [page(1, json!({ "kind": "leaf", "id": 2, "content": { "session": { "machine": "m_b", "id": "" } } }))], "current": 1, "next_id": 3 }),
+        json!({ "pages": [page(1, json!({ "kind": "leaf", "id": 2, "content": { "session": { "machine": "", "id": "s1" } } }))], "current": 1, "next_id": 3 }),
         // Ids past what JSON readers hold exactly.
         json!({ "pages": [page(1, leaf(2))], "current": 1, "next_id": 1u64 << 53 }),
     ];
@@ -870,26 +986,34 @@ enum Step {
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
-        (proptest::option::of(0u8..4), 0u8..8).prop_map(|(n, c)| Step::PageNew(n, c)),
+        (proptest::option::of(0u8..4), 0u8..10).prop_map(|(n, c)| Step::PageNew(n, c)),
         any::<u8>().prop_map(Step::PageSelect),
         (any::<u8>(), 0u8..4).prop_map(|(p, n)| Step::PageRename(p, n)),
         any::<u8>().prop_map(Step::PageClose),
-        (any::<u8>(), any::<bool>(), any::<u16>(), 0u8..8)
+        (any::<u8>(), any::<bool>(), any::<u16>(), 0u8..10)
             .prop_map(|(p, d, r, c)| Step::Split(p, d, r, c)),
         any::<u8>().prop_map(Step::Close),
-        (any::<u8>(), 0u8..8).prop_map(|(p, c)| Step::Put(p, c)),
+        (any::<u8>(), 0u8..10).prop_map(|(p, c)| Step::Put(p, c)),
         (any::<u8>(), any::<u16>()).prop_map(|(p, r)| Step::Ratio(p, r)),
         (0u8..4).prop_map(Step::SessionGone),
         (0u64..64).prop_map(Step::Bogus),
     ]
 }
 
-/// Content index `c`: sessions s0..s3 (listed or not), views, or empty.
+fn peer() -> MachineId {
+    MachineId::new("m_peer")
+}
+
+/// Content index `c`: this host's sessions s0..s3 (listed or not), views, the window's selection, a peer's session, a
+/// malformed one, or empty.
 fn content(c: u8) -> Content {
     match c {
-        0..4 => Content::Session(sid(&format!("s{c}"))),
+        0..4 => Content::session(sid(&format!("s{c}"))),
         4 => Content::View(ViewKind::Status),
         5 => Content::View(ViewKind::Other("x".into())),
+        6 => Content::Selected,
+        7 => Content::peer_session(peer(), sid("p1")),
+        8 => Content::peer_session(peer(), sid("Not A Session")),
         _ => Content::Empty,
     }
 }
@@ -915,8 +1039,15 @@ fn check_invariants(layout: &Layout, listed: &BTreeSet<SessionId>) -> Result<(),
         let page_leaves = leaves(&page.root);
         prop_assert!(page_leaves.len() <= MAX_LEAVES);
         for (_, content) in page_leaves {
-            if let Content::Session(s) = content {
-                prop_assert!(listed.contains(&s), "{s} is not listed");
+            match content {
+                Content::Session { machine: None, id } => {
+                    prop_assert!(listed.contains(&id), "{id} is not listed");
+                }
+                // A peer's session is the peer's to list: it stays whatever this host lists.
+                Content::Session {
+                    machine: Some(m), ..
+                } => prop_assert_eq!(m, peer()),
+                _ => {}
             }
         }
         check_ratios(&page.root)?;
@@ -1000,7 +1131,7 @@ proptest! {
 #[test]
 fn whether_a_session_may_be_shown_is_the_callers_to_say() {
     let layout = Layout::default();
-    let op = put(root_leaf(&layout), Content::Session(sid("anything")));
+    let op = put(root_leaf(&layout), Content::session(sid("anything")));
     assert!(layout.apply(&op, all_listed).is_ok());
     assert_eq!(
         layout.apply(&op, |_| false),

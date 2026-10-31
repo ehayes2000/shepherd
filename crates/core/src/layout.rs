@@ -1,4 +1,5 @@
-//! The screen's arrangement: pages of split panes, each showing a session, a view, or nothing (decision 0022).
+//! The screen's arrangement: pages of split panes, each showing a session (pinned, or whichever the window has selected),
+//! a view, or nothing (decision 0022).
 //!
 //! The host owns one [`Layout`], folded from the `_shepherd/ui/layout` frames in its log, and every window draws it at its
 //! own size. It changes only through a [`LayoutOp`], applied by [`Layout::apply`], a pure function that returns the new
@@ -15,7 +16,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::SessionId;
+use crate::ids::{MachineId, SessionId};
+use crate::ports::event_log::LogId;
 
 /// The most pages a layout holds.
 pub const MAX_PAGES: usize = 32;
@@ -128,8 +130,46 @@ pub enum ViewKind {
 pub enum Content {
     #[default]
     Empty,
-    Session(SessionId),
+    /// Whatever session the window drawing it has selected in its sidebar: resolved by each window, never by the host,
+    /// so selecting a session changes only that window. The default layout's one pane shows this.
+    Selected,
+    /// Session `id`, pinned for every window. `machine` is the host it runs on: `None` for this host's own, else a
+    /// peer's (which this host can't list, so only its own are checked against its sessions).
+    Session {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<MachineId>,
+        id: SessionId,
+    },
     View(ViewKind),
+}
+
+impl Content {
+    /// This host's own session `id`.
+    pub fn session(id: SessionId) -> Self {
+        Self::Session { machine: None, id }
+    }
+
+    /// Session `id` on peer `machine`.
+    pub fn peer_session(machine: MachineId, id: SessionId) -> Self {
+        Self::Session {
+            machine: Some(machine),
+            id,
+        }
+    }
+
+    /// Whether this content can be shown at all: a session's id must be one a log can be stored under, and a peer
+    /// must have an id. Says why not.
+    fn check(&self) -> Result<(), String> {
+        let Self::Session { machine, id } = self else {
+            return Ok(());
+        };
+        if machine.as_ref().is_some_and(|m| m.as_str().is_empty()) {
+            return Err(format!("session {id} names a machine with no id"));
+        }
+        LogId::Session(id.clone())
+            .validate()
+            .map_err(|_| format!("{id:?} can't be a session id"))
+    }
 }
 
 /// A pane: split in two, or showing something.
@@ -185,6 +225,14 @@ impl Pane {
         match self {
             Self::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
             Self::Leaf { .. } => 1,
+        }
+    }
+
+    /// Whether every leaf in this pane shows content that can be shown ([`Content::check`]).
+    fn check_contents(&self) -> Result<(), String> {
+        match self {
+            Self::Leaf { content, .. } => content.check(),
+            Self::Split { a, b, .. } => a.check_contents().and_then(|()| b.check_contents()),
         }
     }
 
@@ -254,6 +302,9 @@ impl TryFrom<RawLayout> for Layout {
             }
             if page.root.leaf_count() > MAX_LEAVES {
                 return bad("too many panes on a page");
+            }
+            if let Err(why) = page.root.check_contents() {
+                return bad(&why);
             }
             ids.push(page.id.get());
             page.root.ids(&mut ids);
@@ -340,6 +391,8 @@ pub enum LayoutError {
     NotASplit(PaneId),
     #[error("no session {0}")]
     UnknownSession(SessionId),
+    #[error("{0}")]
+    InvalidSession(String),
     #[error("a page name can't be blank")]
     EmptyName,
     #[error("a page name can be at most {max} characters")]
@@ -386,7 +439,7 @@ fn check_name(name: &str) -> Result<String, LayoutError> {
 }
 
 impl Default for Layout {
-    /// One page, `1`, with one empty pane.
+    /// One page, `1`, with one pane showing the window's selection: what shepherd showed before layouts.
     fn default() -> Self {
         Self {
             pages: vec![Page {
@@ -394,7 +447,7 @@ impl Default for Layout {
                 name: "1".to_owned(),
                 root: Pane::Leaf {
                     id: PaneId(2),
-                    content: Content::Empty,
+                    content: Content::Selected,
                 },
             }],
             current: PageId(1),
@@ -435,15 +488,21 @@ impl Layout {
             .map(|p| p.id)
     }
 
-    /// This layout with `op` applied, or why not. A session may be shown only if `listed` says it is.
+    /// This layout with `op` applied, or why not. This host's own session may be shown only if `listed` says it is; a
+    /// peer's is that peer's to list.
     pub fn apply(
         &self,
         op: &LayoutOp,
         listed: impl Fn(&SessionId) -> bool,
     ) -> Result<Layout, LayoutError> {
-        let shown = |content: &Content| match content {
-            Content::Session(id) if !listed(id) => Err(LayoutError::UnknownSession(id.clone())),
-            _ => Ok(()),
+        let shown = |content: &Content| {
+            content.check().map_err(LayoutError::InvalidSession)?;
+            match content {
+                Content::Session { machine: None, id } if !listed(id) => {
+                    Err(LayoutError::UnknownSession(id.clone()))
+                }
+                _ => Ok(()),
+            }
         };
         let mut next = self.clone();
         match op {
@@ -545,12 +604,13 @@ impl Layout {
         Ok(next)
     }
 
-    /// This layout with every pane showing a session `listed` says isn't listed (closed) showing nothing instead.
+    /// This layout with every pane showing one of this host's own sessions that `listed` says isn't listed (closed)
+    /// showing nothing instead. Panes showing the selection or a peer's session are left alone.
     pub fn retain_sessions(&self, listed: impl Fn(&SessionId) -> bool) -> Layout {
         fn retain(pane: &mut Pane, listed: &impl Fn(&SessionId) -> bool) {
             match pane {
                 Pane::Leaf { content, .. } => {
-                    if matches!(content, Content::Session(id) if !listed(id)) {
+                    if matches!(content, Content::Session { machine: None, id } if !listed(id)) {
                         *content = Content::Empty;
                     }
                 }
@@ -563,6 +623,29 @@ impl Layout {
         let mut next = self.clone();
         for page in &mut next.pages {
             retain(&mut page.root, &listed);
+        }
+        next
+    }
+
+    /// This layout with every pane showing the window's selection ([`Content::Selected`]) showing `shown` instead: a
+    /// window resolving the layout it draws.
+    pub fn resolve_selected(&self, shown: &Content) -> Layout {
+        fn resolve(pane: &mut Pane, shown: &Content) {
+            match pane {
+                Pane::Leaf { content, .. } => {
+                    if *content == Content::Selected {
+                        *content = shown.clone();
+                    }
+                }
+                Pane::Split { a, b, .. } => {
+                    resolve(a, shown);
+                    resolve(b, shown);
+                }
+            }
+        }
+        let mut next = self.clone();
+        for page in &mut next.pages {
+            resolve(&mut page.root, shown);
         }
         next
     }

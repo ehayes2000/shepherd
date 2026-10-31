@@ -420,7 +420,7 @@ fn the_layout_is_this_machines_hosts_not_a_peers() {
         });
     net.sync("m_b");
     assert_eq!(
-        net.c.client().layout(),
+        net.c.client().host_layout(),
         shepherd_core::layout::Layout::default()
     );
     net.c
@@ -465,6 +465,19 @@ fn with_peer_session_selected() -> Machines {
     net.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
     net.user(Intent::SelectSession(sid("b1")));
     net
+}
+
+#[test]
+fn a_selected_pane_showing_a_peers_session_names_its_machine() {
+    let net = with_peer_session_selected();
+    let layout = net.c.client().layout();
+    let shepherd_core::layout::Pane::Leaf { content, .. } = &layout.current_page().root else {
+        panic!("{layout:?}");
+    };
+    assert_eq!(
+        *content,
+        shepherd_core::layout::Content::peer_session(m("m_b"), sid("b1"))
+    );
 }
 
 #[test]
