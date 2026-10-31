@@ -14,7 +14,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
-| T39 | Archive index | review | task/t39-archive-index @ 2576f9d (on 1231c76) | 3 | peek by side-file state; wal without shm refused; rw via URI; lock-wait test |
+| T39 | Archive index | fixing | task/t39-archive-index @ 2576f9d | 3 | Blocking: side-file check races with closes (racing opens flaky) → close under index.lock |
 | T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
 | T42 | Archive port and host capture | todo |  |  |  |
