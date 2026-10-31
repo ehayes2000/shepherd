@@ -12,7 +12,9 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
 | T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
-| T31 | Remote link and merged sidebar | todo |  |  |  |
+| T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split | | see T31a/T31b |
+| T31a | Tunnel to a peer's host over iroh | todo |  |  |  |
+| T31b | Merged sidebar across machines | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 
 ## Specs
@@ -115,6 +117,45 @@ accepted (decision 0019): the host owns the only iroh endpoint. The client reach
 "the iroh `Link` adapter" lives in the host, and the client keeps its unix link. `Link` gains `peer(conn)` and possibly
 `DisconnectReason::Refused`. Also test catch-up of a multi-MB history over a relay. Measured: relayed keystroke echo is about 26–30 ms
 median, direct is about 0.2–0.5 ms.
+
+### T31a: Tunnel to a peer's host over iroh
+depends: T31, F47
+touches: ports::link, adapters::link (iroh), adapters::peers, shepherd::host::runtime, wire
+goal: A client on this machine can open a conn to a trusted peer's host through its own local host.
+acceptance:
+- A client conn whose first request is `_shepherd/tunnel { machine }` (local conns only, per `Link::peer(conn) == None`)
+  is spliced by the local host to an iroh conn to that trusted peer: lines pass both ways verbatim; the remote host sees an
+  ordinary client conn from a trusted node and runs the normal hello. Untrusted, unknown or unreachable machine → a clear
+  error answer, conn closed.
+- The iroh conn side implements `Link` and passes the T10 contract (run against the fake and the iroh adapter on localhost
+  with relays off). `Link` gains `peer(conn) -> Option<MachineId>` and `DisconnectReason::Refused` (additive; contract
+  cases for both).
+- Flow control: the local host stops reading the iroh stream while the client conn's `queued_bytes` is over a high-water
+  mark (and vice versa), so a slow client back-pressures the remote host; test with a paced client and a large history.
+- Stall detection progress counts drained bytes: `Link` gains a drained-bytes counter, and catch-up stall detection (T11)
+  uses it, so one huge line over a slow link isn't "stalled" while it's moving. Test it with the fake.
+- Reconnect to a peer with backoff when the iroh conn drops (T30 left retry to here); a tunnel whose peer drops is closed
+  with `PeerGone` so the client can reconnect.
+- From the T30 review: `peering.rs` `gone`'s `pending.start.is_some()` condition is untested (start, wait, the waiter's
+  client goes → no StopPairing); fix its comment for the two-client race.
+scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
+notes: (binding) Decision 0019. tokio stays in adapters; the runtime stays single-threaded. No network in gated tests
+(localhost endpoints, relays and discovery off). Multi-MB catch-up over a real relay is a manual step in
+`scripts/e2e-peers.sh`, not the gate.
+
+### T31b: Merged sidebar across machines
+depends: T31a
+touches: core::client, shepherd::client, tui::sidebar
+goal: One sidebar shows every machine's sessions and drives each on its own host.
+acceptance:
+- The client connects to its local host and, through tunnels, to every trusted peer the local host reports (a new
+  additive peers list in the hello or a `_shepherd/peers` request). Sessions are merged, grouped by machine, newest first.
+- Input, resize, rename, close, new session (T32 adds the picker) are routed to the session's own host.
+- An unreachable peer shows as a dimmed machine group with its last-known sessions; reconnects resume subscriptions from
+  the last seen `seq` with no gaps or duplicates (scenario test with two fake hosts over the fake link, dropping one).
+- Snapshot of the grouped sidebar (draw.rs), hit tests on rendered cells, tiny-window test.
+scope: crates/core, crates/tui, crates/shepherd
+notes: (binding) Per-host client state stays pure core (one connection state per machine); no clock in core.
 
 ### T32: Create sessions on any machine
 depends: T31, T22
