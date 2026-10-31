@@ -16,6 +16,10 @@ fault-injection-pause-before-rename = []
 # `PAUSE_BEFORE_OPEN_MARKER` to stdout after checking a transcript's path and before opening it, then waits for a byte
 # (or EOF) on stdin, so a test can swap the file or a directory on its path in between. Inert for any other session.
 fault-injection-pause-before-transcript-open = []
+# Test-only fault injection (decision 0015): a restore of the agent session `PAUSE_BEFORE_PUBLISH_SESSION` writes
+# `PAUSE_BEFORE_PUBLISH_MARKER` to stdout once its temp files are written and before it publishes any of them, then
+# waits for a byte (or EOF) on stdin, so a test can change the target in between. Inert for any other session.
+fault-injection-pause-before-restore-publish = []
 
 [dependencies]
 sha2.workspace = true
@@ -31,6 +35,7 @@ shepherd-archive = { path = ".", features = [
   "fault-injection-crash-before-rename",
   "fault-injection-pause-before-rename",
   "fault-injection-pause-before-transcript-open",
+  "fault-injection-pause-before-restore-publish",
 ] }
 tempfile.workspace = true
 # Tests only: reading the hook payload fixtures.
