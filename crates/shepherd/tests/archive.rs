@@ -120,6 +120,31 @@ mod contract {
     shepherd_testkit::archive_contract!(RealFixture::new());
 }
 
+/// A transcript that is there but can't be read is a failure, never "missing": the worktree it ran in is kept, so the
+/// conversation isn't lost.
+#[test]
+fn a_transcript_that_cannot_be_read_is_failed_not_missing() {
+    use shepherd_core::ports::{Archive, ArchiveError, CaptureRequest};
+    use std::os::unix::fs::PermissionsExt;
+    let f = RealFixture::new();
+    let session = shepherd_testkit::contracts::archive::claude_session();
+    f.port.put_session(&session).unwrap();
+    let path = f.write_transcript(AgentKind::ClaudeCode, &session.agent_session_id, b"{}\n");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = f.port.capture(&CaptureRequest {
+        session: session.id.clone(),
+        at: session.created_at,
+        head: None,
+        reason: CaptureReason::BeforeRemove,
+        commits: Vec::new(),
+        agent_home: f.agent_home(AgentKind::ClaudeCode),
+        transcript_path: path.clone(),
+    });
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(result, Err(ArchiveError::Failed(_))), "{result:?}");
+    assert_eq!(f.snapshots(&session.id), []);
+}
+
 /// The archive is opened on first use: an archive that can't be opened fails each call (and is tried again on the
 /// next), without stopping the host from starting.
 #[test]

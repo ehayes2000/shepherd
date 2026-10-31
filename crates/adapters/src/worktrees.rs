@@ -1166,7 +1166,8 @@ impl Worktrees for GitWorktrees {
     /// `rev-list --reverse --topo-order base..HEAD`, and each commit's `git patch-id --stable` of the patch `git log -p`
     /// prints for it. Every user setting that changes that patch's text, and so its patch-id, is pinned, so a patch-id is
     /// the same on every machine; `diff_config_leaves_patch_ids_alone` shows each pin matters. Pinned: paths quoted the
-    /// default way (`core.quotePath=true`), no color, no textconv, everything diffed as text (beats binary attributes
+    /// default way (`core.quotePath=true`), a root commit's patch shown (`log.showRoot=true`: one in range comes from an
+    /// unrelated history merged in), no color, no textconv, everything diffed as text (beats binary attributes
     /// from the user's attributes file or a repo diff driver's user-level settings), no rename detection, 3 lines of
     /// context and no hunks merged beyond them, the myers algorithm with the indent heuristic, `a/` and `b/` prefixes,
     /// submodules shown short and never hidden. Signatures are never shown: `log.showSignature` adds gpg's output to a
@@ -1174,7 +1175,7 @@ impl Worktrees for GitWorktrees {
     /// change it: external diffs (`git log` runs them only with `--ext-diff`), notes (not printed with an explicit
     /// format), `diff.relative` (git runs at the checkout's top), and anything that changes only context lines or hunk
     /// headers, which `patch-id` ignores. Merges print no patch (`--diff-merges=off`), and neither does a commit that
-    /// changes nothing: both have no patch-id.
+    /// changes nothing: both have no patch-id (the contract's `merges_and_empty_commits_have_no_patch_id`).
     fn commits_since(
         &self,
         path: &WorktreePath,
@@ -1202,6 +1203,8 @@ impl Worktrees for GitWorktrees {
         let log = [
             "-c",
             "core.quotePath=true",
+            "-c",
+            "log.showRoot=true",
             "log",
             "--no-color",
             "--no-textconv",
@@ -1646,6 +1649,11 @@ mod tests {
             self.git(path.as_path(), &["rebase", "--quiet", &onto]);
         }
 
+        fn commit_empty(&self, path: &WorktreePath) {
+            let args = ["commit", "--quiet", "--allow-empty", "-m", "nothing"];
+            self.git(path.as_path(), &args);
+        }
+
         /// A root commit with the same tree as HEAD, merged in (not a fast-forward: the histories are unrelated).
         fn merge_unrelated_root(&self, path: &WorktreePath) -> String {
             let dir = path.as_path();
@@ -2086,9 +2094,22 @@ mod tests {
         let gitlink = format!("160000,{base},sub");
         f.git(wt, &["update-index", "--add", "--cacheinfo", &gitlink]);
         f.git(wt, &["commit", "--quiet", "-m", "gitlink"]);
+        // A root commit (an unrelated history merged in), whose patch `log.showRoot=false` drops.
+        let root = f.merge_unrelated_root(&created.path);
         let plain = f.port.commits_since(&created.path, &base).unwrap();
-        assert_eq!(plain.len(), 11, "{plain:?}");
-        assert!(plain.iter().all(|(_, p)| p.is_some()), "{plain:?}");
+        assert_eq!(plain.len(), 13, "{plain:?}");
+        // Every commit has a patch-id but the merge.
+        let without: Vec<&shepherd_core::ports::CommitHash> = plain
+            .iter()
+            .filter(|(_, p)| p.is_none())
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(without.len(), 1, "{plain:?}");
+        let root = shepherd_core::ports::CommitHash::parse(&root).unwrap();
+        assert!(
+            plain.iter().any(|(c, p)| *c == root && p.is_some()),
+            "{plain:?}"
+        );
 
         // Attributes from the user's own file that make every text file binary.
         let attributes = f.tmp().join("home").join("attributes");
@@ -2107,6 +2128,7 @@ mod tests {
             ("diff.submodule", "log"),
             ("diff.ignoreSubmodules", "all"),
             ("log.showSignature", "true"),
+            ("log.showRoot", "false"),
         ] {
             f.git(&f.app(), &["config", key, value]);
         }

@@ -84,6 +84,7 @@ macro_rules! worktrees_contract {
             commits_since_a_base_the_repo_lacks_is_an_error,
             commits_since_in_a_missing_path_is_not_a_repo,
             root_commit_is_the_same_from_every_checkout_of_the_repo,
+            merges_and_empty_commits_have_no_patch_id,
             root_commit_of_a_history_with_two_roots_is_the_smaller,
             root_commit_of_a_non_repo_is_not_a_repo,
         );
@@ -167,6 +168,8 @@ pub trait WorktreesFixture {
     /// Merges a new root commit (an unrelated history) into the branch checked out at `path`, and returns that root,
     /// as a [`CommitHash`] spells it.
     fn merge_unrelated_root(&self, path: &WorktreePath) -> String;
+    /// Makes a commit that changes nothing (`--allow-empty`) on the branch checked out at `path`.
+    fn commit_empty(&self, path: &WorktreePath);
     /// Deletes the clone's `origin/<default>` ref, leaving `origin/HEAD` pointing at it.
     fn delete_remote_tracking_default(&self);
     /// Deletes the clone's `origin/HEAD`, as if it had been made with `git init` + `git remote add` + `git fetch`.
@@ -929,6 +932,32 @@ pub fn root_commit_is_the_same_from_every_checkout_of_the_repo<F: WorktreesFixtu
             .root_commit(&RepoRef::new(f.repo().as_path().join(SUBDIR))),
         Ok(root)
     );
+}
+
+/// A merge and a commit that changes nothing print no patch, so they have no patch-id; the commits around them do.
+pub fn merges_and_empty_commits_have_no_patch_id<F: WorktreesFixture>(f: &F) {
+    let (path, base) = base_of(f, "work");
+    f.commit(&path);
+    f.commit_empty(&path);
+    let empty = hash(&f.head(path.as_path()));
+    let root = hash(&f.merge_unrelated_root(&path));
+    let merge = hash(&f.head(path.as_path()));
+    let commits = f.port().commits_since(&path, &base).unwrap();
+    let without: Vec<&CommitHash> = commits
+        .iter()
+        .filter(|(_, p)| p.is_none())
+        .map(|(c, _)| c)
+        .collect();
+    let mut expected = vec![&empty, &merge];
+    expected.sort();
+    let mut without = without;
+    without.sort();
+    assert_eq!(without, expected, "{commits:?}");
+    assert!(
+        commits.iter().any(|(c, p)| *c == root && p.is_some()),
+        "the merged-in root has a patch: {commits:?}"
+    );
+    assert_eq!(commits.len(), 4, "{commits:?}");
 }
 
 /// A history with several roots (an unrelated one merged in) is named by the smallest, whichever it is.

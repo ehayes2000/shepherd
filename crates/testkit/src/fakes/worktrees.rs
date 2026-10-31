@@ -62,8 +62,9 @@ struct State {
     /// `parents[c]` are commit `c`'s parents.
     parents: Vec<Vec<Commit>>,
     /// `changes[c]` is the change commit `c` makes, which names its patch-id: its own number, or for a commit a rebase
-    /// made, the change of the commit it was made from.
-    changes: Vec<usize>,
+    /// made, the change of the commit it was made from. `None` for a merge or a commit that changes nothing, which have
+    /// no patch-id.
+    changes: Vec<Option<usize>>,
     repos: Vec<Repo>,
     /// Directories inside checkouts, from [`FakeWorktrees::add_dir`]. A checkout itself always exists.
     dirs: BTreeSet<PathBuf>,
@@ -237,6 +238,20 @@ impl FakeWorktrees {
                 co.head = Head::Detached(c);
             }
         }
+    }
+
+    /// `git commit --allow-empty` on the branch checked out at `path`: a commit that changes nothing.
+    pub fn commit_empty(&self, path: &Path) {
+        let mut s = self.lock();
+        let (r, head) = s
+            .checkout(path)
+            .unwrap_or_else(|| panic!("no checkout at {path:?}"));
+        let Head::Branch(b) = head else {
+            panic!("an empty commit on a detached HEAD")
+        };
+        let tip = s.repos[r].local[&b];
+        let c = s.copy_commit(vec![tip], None);
+        s.repos[r].local.insert(b, c);
     }
 
     /// Marks the checkout at `path` as having (or not having) uncommitted changes.
@@ -428,13 +443,15 @@ impl FakeWorktrees {
 }
 
 impl State {
+    /// A new commit with `parents`, making a change of its own unless it is a merge.
     fn new_commit(&mut self, parents: Vec<Commit>) -> Commit {
         let c = self.parents.len();
-        self.copy_commit(parents, c)
+        let change = (parents.len() < 2).then_some(c);
+        self.copy_commit(parents, change)
     }
 
     /// A new commit with `parents` that makes `change`.
-    fn copy_commit(&mut self, parents: Vec<Commit>, change: usize) -> Commit {
+    fn copy_commit(&mut self, parents: Vec<Commit>, change: Option<usize>) -> Commit {
         self.parents.push(parents);
         self.changes.push(change);
         self.parents.len() - 1
@@ -745,7 +762,7 @@ impl Worktrees for FakeWorktrees {
         Ok(())
     }
 
-    /// Every commit of the fake makes a change, so each has a patch-id.
+    /// A merge, or a commit [`FakeWorktrees::commit_empty`] made, has no patch-id; every other commit has one.
     fn commits_since(
         &self,
         path: &WorktreePath,
@@ -762,7 +779,7 @@ impl Worktrees for FakeWorktrees {
             .ok_or_else(|| WorktreeError::Other(format!("unknown revision {base}")))?;
         Ok(s.since(tip, base)
             .into_iter()
-            .map(|c| (commit_hash(c), Some(patch_id(s.changes[c]))))
+            .map(|c| (commit_hash(c), s.changes[c].map(patch_id)))
             .collect())
     }
 
@@ -898,6 +915,10 @@ mod tests {
 
         fn merge_unrelated_root(&self, path: &WorktreePath) -> String {
             self.fake.merge_unrelated_root(path.as_path())
+        }
+
+        fn commit_empty(&self, path: &WorktreePath) {
+            self.fake.commit_empty(path.as_path());
         }
 
         fn forget_origin_head(&self) {
