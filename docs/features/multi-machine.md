@@ -10,7 +10,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
-| T29 | Machine identity and names | review | task/t29-machine-identity @ 205e0d8 (on 1709ed0) | 1 | PM-accepted: associated Key type; first start records machine/renamed; alias in client. Reviewer judges key failure during hot swap |
+| T29 | Machine identity and names | fixing | task/t29-machine-identity @ 205e0d8 | 1 | Blocking: unusable key accepted the swap and killed sessions → preflight checks/creates the key. Minors: id fallback in handoff, short key file on ENOSPC |
 | T30 | Pairing and trusted peers | todo |  |  |  |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |

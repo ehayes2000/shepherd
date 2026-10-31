@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T39 Archive index | [conversation-archive](features/conversation-archive.md) | building | task/t39-archive-index @ 597d476 | 0 |  |
-| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | review | task/t29-machine-identity @ 205e0d8 (on 1709ed0) | 1 | PM-accepted: associated Key type; first start records machine/renamed; alias in client. Reviewer judges key failure during hot swap |
+| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | fixing | task/t29-machine-identity @ 205e0d8 | 1 | Blocking: unusable key accepted the swap and killed sessions → preflight checks/creates the key. Minors: id fallback in handoff, short key file on ENOSPC |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
