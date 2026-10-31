@@ -12,6 +12,7 @@ ratatui.workspace = true
 [dev-dependencies]
 shepherd-testkit.workspace = true
 insta.workspace = true
+proptest = "1"
 serde_json.workspace = true
 unicode-normalization.workspace = true
 unicode-properties.workspace = true

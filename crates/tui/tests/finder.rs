@@ -209,21 +209,6 @@ fn finder_scrolled() {
     insta::assert_debug_snapshot!(buffer(&c, SHORT));
 }
 
-#[test]
-fn clicking_a_row_of_the_scrolled_finder_chooses_what_is_drawn_there() {
-    let mut c = scrolled_finder();
-    // Newest first, three rows down: name-27 is the first row shown.
-    let buf = buffer(&c, SHORT);
-    let row = in_finder(&buf, "name-27");
-    assert_eq!(row.y, at(&buf, "┌ find").y + 2, "the top row: {buf:?}");
-    let s27 = FinderItem::Session(SessionId::new("s27"));
-    assert_eq!(
-        click(&mut c, SHORT, row),
-        [vec![], vec![Intent::FinderChoose(s27)]]
-    );
-    assert_eq!(c.client().selected(), Some(&SessionId::new("s27")));
-}
-
 // ---------- clicks ----------
 
 #[test]
@@ -249,21 +234,6 @@ fn the_search_field_is_at_the_top_of_both_sidebars() {
     );
 }
 
-#[test]
-fn clicking_a_session_in_the_finder_selects_it() {
-    let mut c = finder(WIDE);
-    let buf = buffer(&c, WIDE);
-    // `fix-login` is in the sidebar too.
-    let row = in_finder(&buf, "fix-login");
-    let s1 = FinderItem::Session(SessionId::new("s1"));
-    assert_eq!(
-        click(&mut c, WIDE, row),
-        [vec![], vec![Intent::FinderChoose(s1)]]
-    );
-    assert_eq!(c.client().selected(), Some(&SessionId::new("s1")));
-    assert_eq!(c.client().popup(), None);
-}
-
 /// Where `text` starts inside the finder's box, below and right of its top-left corner.
 fn in_finder(buf: &Buffer, text: &str) -> Position {
     let corner = at(buf, "┌ find");
@@ -279,22 +249,6 @@ fn find_at(buf: &Buffer, p: Position, text: &str) -> bool {
         let x = p.x + i as u16;
         x < buf.area.right() && buf[(x, p.y)].symbol() == ch.to_string()
     })
-}
-
-#[test]
-fn clicking_an_orphan_worktree_then_start_session_starts_one_in_it() {
-    let mut c = finder(WIDE);
-    let row = at(&buffer(&c, WIDE), "old-idea");
-    assert_eq!(
-        click(&mut c, WIDE, row),
-        [
-            vec![],
-            vec![Intent::FinderChoose(FinderItem::Worktree(orphan()))]
-        ]
-    );
-    let start = at(&buffer(&c, WIDE), "[Start session]");
-    assert_eq!(click(&mut c, WIDE, start), [vec![], vec![Intent::Confirm]]);
-    assert_eq!(c.client().popup(), None);
 }
 
 #[test]

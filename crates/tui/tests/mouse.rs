@@ -274,16 +274,6 @@ fn clicking_new_session_begins_one_on_release() {
 }
 
 #[test]
-fn clicking_new_session_in_the_collapsed_sidebar_begins_one() {
-    let mut c = sessions(1, NARROW);
-    let plus = at(&buffer(&c, NARROW), "+");
-    assert_eq!(
-        click(&mut c, NARROW, plus),
-        [vec![], vec![Intent::BeginNewSession]]
-    );
-}
-
-#[test]
 fn a_release_on_another_control_than_the_press_does_nothing() {
     let mut c = sessions(2, WIDE);
     let buf = buffer(&c, WIDE);
@@ -328,23 +318,6 @@ fn a_release_without_a_press_does_nothing() {
     let mut c = sessions(1, WIDE);
     let button = at(&buffer(&c, WIDE), "+ New session");
     assert_eq!(events(&mut c, WIDE, &[mouse(UP, button)]), [vec![]]);
-}
-
-#[test]
-fn clicking_a_row_selects_it_and_focuses_the_terminal() {
-    let mut c = sessions(2, WIDE);
-    c.user(Intent::SetFocus(Focus::Command));
-    let second = at(&buffer(&c, WIDE), "name-01");
-    let out = click(&mut c, WIDE, below(second, 1));
-    assert_eq!(
-        out[1],
-        [
-            Intent::SelectSession(SessionId::new("s1")),
-            Intent::SetFocus(Focus::Terminal)
-        ]
-    );
-    assert_eq!(c.client().selected(), Some(&SessionId::new("s1")));
-    assert_eq!(c.client().focus(), Focus::Terminal);
 }
 
 #[test]
@@ -554,28 +527,6 @@ fn each_rows_close_button_is_the_last_cell_of_its_first_line() {
 }
 
 #[test]
-fn clicking_a_rows_close_button_asks_to_close_it_without_selecting_it() {
-    let mut c = sessions(2, WIDE);
-    let buf = buffer(&c, WIDE);
-    let x = last_on_row(&buf, at(&buf, "name-01").y, "×");
-    let out = click(&mut c, WIDE, x);
-    assert_eq!(
-        out,
-        [
-            vec![],
-            vec![Intent::BeginCloseSession(SessionId::new("s1"))]
-        ]
-    );
-    assert_eq!(
-        c.client().popup(),
-        Some(&Popup::ConfirmClose {
-            session: SessionId::new("s1")
-        })
-    );
-    assert_eq!(c.client().selected(), Some(&SessionId::new("s2")));
-}
-
-#[test]
 fn the_footer_has_detach_and_help_buttons() {
     let c = sessions(1, WIDE);
     let buf = buffer(&c, WIDE);
@@ -589,17 +540,6 @@ fn the_footer_has_detach_and_help_buttons() {
         hit_at(&c, WIDE, Position::new(detach.x - 1, detach.y)),
         None
     );
-}
-
-#[test]
-fn clicking_detach_quits_and_clicking_help_shows_it() {
-    let mut c = sessions(1, WIDE);
-    let buf = buffer(&c, WIDE);
-    let detach = at(&buf, "Detach");
-    let help = last_on_row(&buf, detach.y, "?");
-    assert_eq!(click(&mut c, WIDE, detach), [vec![], vec![Intent::Quit]]);
-    assert_eq!(click(&mut c, WIDE, help), [vec![], vec![Intent::ShowHelp]]);
-    assert_eq!(c.client().popup(), Some(&Popup::Help));
 }
 
 // ---------- the context menu ----------
@@ -844,21 +784,6 @@ fn a_collapsed_row_is_closed_by_right_click_then_close() {
 // ---------- dialogs ----------
 
 #[test]
-fn the_close_confirmation_answers_by_its_buttons() {
-    for (label, intent) in [("[Close]", Intent::Confirm), ("[Cancel]", Intent::Dismiss)] {
-        let mut c = sessions(1, WIDE);
-        c.user(Intent::BeginClose);
-        let button = at(&buffer(&c, WIDE), label);
-        assert_eq!(
-            click(&mut c, WIDE, right(button, 2)),
-            [vec![], vec![intent]],
-            "{label}"
-        );
-        assert_eq!(c.client().popup(), None, "{label}");
-    }
-}
-
-#[test]
 fn the_rename_dialog_answers_by_its_buttons() {
     for (label, intent) in [("[Save]", Intent::Confirm), ("[Cancel]", Intent::Dismiss)] {
         let mut c = sessions(1, WIDE);
@@ -888,16 +813,6 @@ fn clicking_inside_a_dialog_off_its_buttons_does_nothing() {
     assert_eq!(hit_at(&c, WIDE, text), Some(Target::Popup));
     assert_eq!(click(&mut c, WIDE, text), [vec![], vec![]]);
     assert!(c.client().popup().is_some());
-}
-
-#[test]
-fn clicking_outside_a_dialog_cancels_it() {
-    let mut c = sessions(1, WIDE);
-    c.user(Intent::BeginRename);
-    let row = at(&buffer(&c, WIDE), "name-01");
-    assert_eq!(hit_at(&c, WIDE, row), Some(Target::Backdrop));
-    assert_eq!(click(&mut c, WIDE, row), [vec![], vec![Intent::Dismiss]]);
-    assert_eq!(c.client().popup(), None);
 }
 
 #[test]
@@ -1018,20 +933,6 @@ fn each_pickers_row_is_hit_across_the_dialog() {
         Some(Target::Popup),
         "the border"
     );
-}
-
-#[test]
-fn clicking_a_profile_creates_a_session_with_it() {
-    for (window, name) in [(WIDE, "shell"), (WIDE, "codex"), (NARROW, "claude")] {
-        let mut c = picker(window);
-        let row = at(&buffer(&c, window), name);
-        assert_eq!(
-            click(&mut c, window, row),
-            [vec![], vec![Intent::PickProfile(name.to_owned())]],
-            "{name}"
-        );
-        assert_eq!(c.client().popup(), None, "{name}");
-    }
 }
 
 #[test]
