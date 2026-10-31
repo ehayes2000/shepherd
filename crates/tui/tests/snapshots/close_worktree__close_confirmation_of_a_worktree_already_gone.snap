@@ -4,7 +4,7 @@ expression: "text(&buffer(&confirming(Some(Ok(json!({})))), WIDE))"
 ---
  ⌕ Search…             │
  ⌂ shepherd            │
- + New session         │
+ + New session ⊞ Layout│
  ◌ refactor           ×│
    local · —           │
                        │

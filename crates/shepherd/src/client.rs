@@ -31,7 +31,7 @@ use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::Event;
 use ratatui::crossterm::queue;
 use ratatui::layout::Rect;
-use shepherd_tui::{Pointer, Screens, from_legacy_terminal, map_event};
+use shepherd_tui::{Pointer, Screens, fit_screens, from_legacy_terminal, map_event, screen_size};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
@@ -674,11 +674,8 @@ where
             if !self.client.is_home(peer.as_ref(), &out.session) {
                 return;
             }
-            let (cols, rows) = self
-                .client
-                .session_size(&out.session)
-                .or(self.client.size())
-                .map_or(DEFAULT_SIZE, |s| (s.cols, s.rows));
+            let (cols, rows) =
+                screen_size(&self.client, &out.session).map_or(DEFAULT_SIZE, |s| (s.cols, s.rows));
             let screen = self
                 .screens
                 .entry(out.session.clone())
@@ -722,18 +719,7 @@ where
                 queue.extend(self.execute(command));
             }
         }
-        self.fit_screens();
-    }
-
-    /// Resizes each session's terminal to the size the client last gave it: its pane's (T49).
-    fn fit_screens(&mut self) {
-        for (id, screen) in &mut self.screens {
-            if let Some(size) = self.client.session_size(id)
-                && screen.size() != (size.cols, size.rows)
-            {
-                screen.resize(size.cols, size.rows);
-            }
-        }
+        fit_screens(&self.client, &mut self.screens);
     }
 
     fn execute(&mut self, command: ClientCommand) -> Option<ClientEvent> {

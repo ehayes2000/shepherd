@@ -4,7 +4,7 @@ expression: "text(&buffer(&confirming(status(true, 2, false)), WIDE))"
 ---
  ⌕ Search…             │
  ⌂ shepherd            │
- + New session         │
+ + New session ⊞ Layout│
  ◌ refactor           ×│
    local · —           │
                        │

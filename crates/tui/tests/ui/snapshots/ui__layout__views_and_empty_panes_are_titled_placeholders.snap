@@ -4,7 +4,7 @@ expression: ui.screen()
 ---
  ⌕ Search…             │┌ fix-login · local ──────────── [≡] ┐┌ Status ─────────────────────── [≡] ┐
  ⌂ choose a workspace  ││                                    ││                                    │
- + New session         ││                                    ││                                    │
+ + New session ⊞ Layout││                                    ││                                    │
  ◌ fix-login          ×││                                    ││                                    │
    local · —           ││                                    ││                                    │
                        │└────────────────────────────────────┘│     Status isn't available yet.    │

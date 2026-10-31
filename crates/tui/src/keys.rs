@@ -280,6 +280,10 @@ fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
         Target::MachineRow(machine) => vec![Intent::PickMachine(machine)],
         Target::Pane(pane) => vec![Intent::FocusPane(pane)],
         Target::PaneMenu(pane) => vec![Intent::OpenPaneMenu { pane, at }],
+        Target::LayoutMenu => vec![Intent::OpenPaneMenu {
+            pane: client.focused_pane(),
+            at,
+        }],
         Target::PaneMenuItem(item) => vec![Intent::PaneMenuChoose(item)],
         Target::Page(page) if page == client.host_layout().current() => Vec::new(),
         Target::Page(page) => vec![Intent::ApplyLayout(LayoutOp::PageSelect { page })],

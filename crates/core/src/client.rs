@@ -657,6 +657,9 @@ pub struct Client {
     focused: Option<PaneId>,
     /// The size this window last resized each session to.
     given: BTreeMap<SessionId, PtySize>,
+    /// The focused pane's session and terminal size this window last resized, so a layout change that changes neither
+    /// doesn't take the session back from the window that last focused it (decision 0022).
+    sized: Option<(SessionId, PtySize)>,
     /// The index of the first session the sidebar shows, before clamping to the list (see
     /// [`Client::sidebar_scroll`]).
     scroll: usize,
@@ -870,6 +873,7 @@ impl Client {
             size: None,
             focused: None,
             given: BTreeMap::new(),
+            sized: None,
             scroll: 0,
             sidebar_rows: None,
             picker_scroll: 0,
@@ -2234,13 +2238,20 @@ impl Client {
         commands
     }
 
-    /// The host's layout changed: a pane menu whose pane is gone closes, and the focused pane may have moved or changed
-    /// size.
+    /// The host's layout changed: a pane menu whose pane is gone closes, and the focused pane's session is resized if
+    /// the pane now shows another session or is another size. Otherwise nothing is sent, so a change elsewhere doesn't
+    /// take the session from the window that last focused it.
     fn layout_changed(&mut self) -> Option<ClientCommand> {
         if let Some(Popup::PaneMenu { pane, .. }) = &self.popup
             && !self.is_shown_leaf(*pane)
         {
             self.popup = None;
+        }
+        let now = self
+            .focused_size()
+            .map(|(session, _, size)| (session, size));
+        if now.is_some() && now == self.sized {
+            return None;
         }
         self.resize_focused()
     }
@@ -2512,6 +2523,23 @@ impl Client {
     /// Resizes the focused pane's session on its host to the pane's terminal (decision 0022: a session is sized to the
     /// pane showing it on the window that last focused that pane). Nothing for a pane too small for a terminal.
     fn resize_focused(&mut self) -> Option<ClientCommand> {
+        let (session, home, size) = self.focused_size()?;
+        let command = self.notify_to(
+            &home,
+            ClientNotification::SessionResize(SessionResize {
+                session: session.clone(),
+                cols: size.cols,
+                rows: size.rows,
+            }),
+        )?;
+        self.given.insert(session.clone(), size);
+        self.sized = Some((session, size));
+        Some(command)
+    }
+
+    /// The focused pane's session, its host, and the size of the pane's terminal, if it shows a session and has room
+    /// for one.
+    fn focused_size(&self) -> Option<(SessionId, At, PtySize)> {
         let view = self.size?;
         let layout = self.layout();
         let arranged = panes::arrange(
@@ -2531,16 +2559,7 @@ impl Client {
             cols: terminal.cols,
             rows: terminal.rows,
         };
-        let command = self.notify_to(
-            &home,
-            ClientNotification::SessionResize(SessionResize {
-                session: session.clone(),
-                cols: size.cols,
-                rows: size.rows,
-            }),
-        )?;
-        self.given.insert(session, size);
-        Some(command)
+        Some((session, home, size))
     }
 
     // ---------- notices ----------

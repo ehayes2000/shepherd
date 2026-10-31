@@ -545,3 +545,45 @@ fn an_item_the_menu_does_not_offer_does_nothing() {
     open_menu(&mut c, pane);
     assert_eq!(c.user(Intent::PaneMenuChoose(PaneMenuItem::Close)), []);
 }
+
+#[test]
+fn a_layout_change_that_leaves_the_focused_pane_alone_resizes_nothing() {
+    // Another window may have focused this pane since: only it should size the session now.
+    let mut c = split_client();
+    let page = c.client().host_layout().current();
+    c.host().ui_apply(LayoutOp::PageRename {
+        page,
+        name: "work".into(),
+    });
+    let sent = c.sync();
+    assert_eq!(notifications(&sent), Vec::<&ClientNotification>::new());
+}
+
+#[test]
+fn a_pane_menu_closes_when_the_host_closes_its_pane() {
+    let mut c = split_client();
+    let right = leaves(&c)[1];
+    open_menu(&mut c, right);
+    c.host().ui_apply(LayoutOp::Close { pane: right });
+    c.sync();
+    assert_eq!(c.client().popup(), None);
+    assert_eq!(c.client().pane_menu(), []);
+}
+
+#[test]
+fn a_menu_is_opened_only_on_a_pane_of_the_current_page_that_isnt_split() {
+    let mut c = split_client();
+    let split = root(&c);
+    open_menu(&mut c, split);
+    assert_eq!(c.client().popup(), None, "a split");
+    open_menu(&mut c, PaneId::new(999));
+    assert_eq!(c.client().popup(), None, "no such pane");
+    let left = leaves(&c)[0];
+    c.host().ui_apply(LayoutOp::PageNew {
+        name: None,
+        content: Content::Selected,
+    });
+    c.sync();
+    open_menu(&mut c, left);
+    assert_eq!(c.client().popup(), None, "another page's");
+}

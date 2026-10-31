@@ -4,7 +4,7 @@ expression: ui.screen()
 ---
  ⌕ Search…             │ 1   review  +
  ⌂ choose a workspace  │in docs
- + New session         │
+ + New session ⊞ Layout│
  ◌ docs               ×│
    local · —           │
  ◌ fix-login          ×│

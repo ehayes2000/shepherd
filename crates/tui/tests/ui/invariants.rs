@@ -370,7 +370,7 @@ impl Run {
             let bracketed = word.starts_with('[') && word.ends_with(']') && word.len() > 2;
             // `[Start session]` and the like are two words; the first of them starts the button.
             let opens_button = word.starts_with('[') && !word.contains(']') && word.len() > 1;
-            let sidebar_button = !popup && matches!(word.as_str(), "Detach" | "×");
+            let sidebar_button = !popup && matches!(word.as_str(), "Detach" | "×" | "⊞");
             if !(bracketed || opens_button || sidebar_button) {
                 continue;
             }

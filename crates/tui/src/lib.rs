@@ -41,6 +41,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::Wrap;
 use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
+use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{CursorShape, Screen};
 
 use draw::shown;
@@ -51,6 +52,24 @@ pub use screen::render_screen;
 
 /// Each session's terminal, as the client runtime keeps them.
 pub type Screens = BTreeMap<SessionId, Screen>;
+
+/// The size session `id`'s terminal is made at, on its first output: the size the client last gave the session (its
+/// pane's terminal), else the client's view size, if it knows either.
+pub fn screen_size(client: &Client, id: &SessionId) -> Option<PtySize> {
+    client.session_size(id).or(client.size())
+}
+
+/// Resizes each terminal in `screens` to the size the client last gave its session (its pane's terminal, T49), so it
+/// matches the session's PTY. The client runtime calls this after every event.
+pub fn fit_screens(client: &Client, screens: &mut Screens) {
+    for (id, screen) in screens.iter_mut() {
+        if let Some(size) = client.session_size(id)
+            && screen.size() != (size.cols, size.rows)
+        {
+            screen.resize(size.cols, size.rows);
+        }
+    }
+}
 
 /// Draws the whole window.
 pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {

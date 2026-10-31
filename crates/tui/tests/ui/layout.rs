@@ -2,6 +2,7 @@
 //! dragging a divider, and each pane's menu.
 
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Color;
 use shepherd_core::client::ClientCommand;
 use shepherd_core::client::Intent;
 use shepherd_core::ids::{MachineId, SessionId};
@@ -205,8 +206,8 @@ fn dragging_the_border_between_two_panes_sets_their_split_s_ratio() {
     ui.drag(border, Position::new(border.x + 10, border.y));
     let ops = ui.layout_ops();
     assert!(
-        matches!(ops.last(), Some(LayoutOp::Ratio { pane, .. }) if *pane == root(&ui)),
-        "{ops:?}"
+        matches!(&ops[..], [LayoutOp::Ratio { pane, .. }] if *pane == root(&ui)),
+        "one op per drag: {ops:?}"
     );
     ui.apply_layout_ops();
     assert_eq!(ui.boxed("api").width, left.width + 10, "{}", ui.screen());
@@ -301,4 +302,89 @@ fn new_page_from_the_menu_shows_the_page_bar() {
     // The selection shows on the new page too, a row lower.
     assert_eq!(ui.at("hello").y, 1);
     ui.user(Intent::SelectSession(sid("s1")));
+}
+
+// ---------- the layout button, focus highlight, mouse and cursor in a split pane ----------
+
+/// Turns on SGR mouse reporting in a session's terminal.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+
+#[test]
+fn with_the_session_taking_the_mouse_the_layout_button_still_opens_the_pane_menu() {
+    let mut ui = Ui::with_sessions(&["fix-login"], 80, 10);
+    ui.pty("s1", MOUSE_ON).pty("s1", b"hello");
+    // A right click in the pane is the session's now.
+    ui.right_click("hello");
+    assert_eq!(ui.client().popup(), None);
+    assert!(
+        inputs(&ui)
+            .iter()
+            .any(|(s, b)| s == "s1" && b.starts_with(b"\x1b[<2;"))
+    );
+    ui.click("⊞ Layout");
+    assert!(!ui.client().pane_menu().is_empty(), "{}", ui.screen());
+    ui.click("Split right");
+    ui.apply_layout_ops();
+    assert_eq!(leaves(&ui).len(), 2, "{}", ui.screen());
+}
+
+#[test]
+fn the_collapsed_sidebar_has_the_layout_button_too() {
+    let mut ui = Ui::with_sessions(&["fix-login"], 50, 12);
+    ui.click("⊞");
+    assert!(ui.contains("Split right"), "{}", ui.screen());
+}
+
+#[test]
+fn the_focused_pane_s_border_is_highlighted_and_follows_a_click() {
+    let mut ui = three_way(100, 16);
+    let corner = |ui: &Ui, title: &str| {
+        let inside = ui.boxed(title);
+        ui.buffer()[(inside.x - 1, inside.y - 1)].fg
+    };
+    let (api, fix) = (corner(&ui, "api"), corner(&ui, "fix-login"));
+    assert_ne!(api, fix, "the focused pane stands out");
+    assert_eq!(fix, corner(&ui, "docs"), "the others look alike");
+    let inside = ui.boxed("fix-login");
+    ui.click_in(inside, "in fix-login");
+    assert_eq!(corner(&ui, "fix-login"), api);
+    assert_eq!(corner(&ui, "api"), fix);
+    assert_ne!(api, Color::Reset);
+}
+
+#[test]
+fn a_split_pane_s_session_gets_mouse_events_relative_to_its_terminal() {
+    let mut ui = three_way(100, 16);
+    ui.pty("s1", MOUSE_ON);
+    let inside = ui.boxed("fix-login");
+    // The first click only focuses the pane.
+    ui.click_at(inside.x + 4, inside.y + 2);
+    let before = inputs(&ui).len();
+    ui.click_at(inside.x + 4, inside.y + 2);
+    let sent: Vec<_> = inputs(&ui)[before..].to_vec();
+    assert_eq!(
+        sent,
+        [
+            ("s1".to_owned(), b"\x1b[<0;5;3M".to_vec()),
+            ("s1".to_owned(), b"\x1b[<0;5;3m".to_vec())
+        ]
+    );
+}
+
+#[test]
+fn the_cursor_is_the_focused_split_pane_s_session_s() {
+    let mut ui = three_way(100, 16);
+    let api = ui.boxed("api");
+    assert_eq!(
+        ui.cursor(),
+        Some(Position::new(api.x + 6, api.y)),
+        "after `in api`"
+    );
+    let inside = ui.boxed("fix-login");
+    ui.click_in(inside, "in fix-login");
+    assert_eq!(
+        ui.cursor(),
+        Some(Position::new(inside.x + 12, inside.y)),
+        "after `in fix-login`"
+    );
 }

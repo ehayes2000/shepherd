@@ -79,6 +79,8 @@ pub enum Target {
     Page(PageId),
     /// The page bar's `+`.
     NewPage,
+    /// The sidebar's `⊞ Layout` (`⊞` when collapsed): opens the focused pane's menu.
+    LayoutMenu,
     /// Where two split panes meet: dragged, it sets the split's ratio.
     Divider(Divider),
     /// The sidebar footer's `Detach` button (`⏏` when collapsed).
@@ -143,6 +145,9 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     }
     if sidebar::new_session_button(layout).contains(at) {
         return Some(Target::NewSession);
+    }
+    if sidebar::layout_button(layout).contains(at) {
+        return Some(Target::LayoutMenu);
     }
     let footer = sidebar::footer_buttons(client, layout);
     if let Some((_, target, _)) = footer.into_iter().find(|(area, ..)| area.contains(at)) {

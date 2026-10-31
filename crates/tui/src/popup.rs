@@ -44,11 +44,13 @@ pub const BINDINGS: [(&str, &str); 8] = [
 ];
 
 /// How to use shepherd with the mouse, which the help says first.
-const MOUSE: [&str; 6] = [
+const MOUSE: [&str; 8] = [
     "Click + New session to start a session, a session to",
     "switch to it, and the terminal to type in it.",
     "Right-click a session to rename or close it, or click",
     "its × to close it. Detach leaves the agents running.",
+    "⊞ Layout, [≡] or right-click a pane to split, close,",
+    "or add pages; click a pane to type, drag its border.",
     "Select text with shift-drag (option-drag in iTerm2",
     "and Terminal.app).",
 ];

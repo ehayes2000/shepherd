@@ -5,6 +5,6 @@ expression: ui.screen()
  ⌕│┌ api · lo…  [≡] ┐┌ fix-login…  [≡] ┐
  ⌂││in api          ││    Too small    │
  +││                │└─────────────────┘
-  ││                │┌ docs · lo…  [≡] ┐
+ ⊞││                │┌ docs · lo…  [≡] ┐
  ⏏││                ││    Too small    │
  ?│└────────────────┘└─────────────────┘

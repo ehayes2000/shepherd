@@ -35,7 +35,9 @@ use shepherd_core::wire::{
 };
 use shepherd_term::Screen;
 use shepherd_testkit::builders::{ClientDriver, HostDriver};
-use shepherd_tui::{Pointer, Screens, Target, hit, layout, map_event, render};
+use shepherd_tui::{
+    Pointer, Screens, Target, fit_screens, hit, layout, map_event, render, screen_size,
+};
 
 /// A headless window onto a client. See the module docs.
 pub struct Ui {
@@ -121,15 +123,9 @@ impl Ui {
     }
 
     /// Resizes each session's terminal to the size the client last gave it (its pane's), as the runtime does after
-    /// every event.
+    /// every event, with the same code.
     fn fit_screens(&mut self) {
-        for (id, screen) in &mut self.screens {
-            if let Some(size) = self.driver.client().session_size(id)
-                && screen.size() != (size.cols, size.rows)
-            {
-                screen.resize(size.cols, size.rows);
-            }
-        }
+        fit_screens(self.driver.client(), &mut self.screens);
     }
 
     /// A left click on the first cell of `label`, which must be drawn exactly once.
@@ -232,11 +228,8 @@ impl Ui {
     /// log entry drops the terminals of sessions that are gone.
     pub fn host(&mut self, message: HostMessage) -> &mut Self {
         if let HostMessage::Notification(HostNotification::PtyOutput(out)) = &message {
-            let client = self.client();
-            let (cols, rows) = client
-                .session_size(&out.session)
-                .or(client.size())
-                .map_or((80, 24), |s| (s.cols, s.rows));
+            let (cols, rows) =
+                screen_size(self.client(), &out.session).map_or((80, 24), |s| (s.cols, s.rows));
             let screen = self
                 .screens
                 .entry(out.session.clone())
@@ -380,6 +373,12 @@ impl Ui {
     /// The window's area.
     pub fn window(&self) -> Rect {
         self.buffer().area
+    }
+
+    /// Where the frame's cursor is, while it is shown.
+    pub fn cursor(&self) -> Option<Position> {
+        let backend = self.terminal.backend();
+        backend.cursor_visible().then(|| backend.cursor_position())
     }
 
     /// What is drawn, without styles.
