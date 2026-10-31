@@ -18,6 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | building | task/t42-archive-capture |  |  |
+| T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
 | T43 | `shepherd archive` CLI | todo |  |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
 
@@ -114,14 +115,45 @@ acceptance:
   creates (F37).
 - Sessions without an agent transcript (plain shells) capture nothing and never block removal.
 scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
-- From T40: on `/clear` (a new agent session in the same shepherd session) capture the old transcript before the host
-  replaces its path, then `put_session` with the new agent session id before the next capture (capture checks against the
-  indexed id). Codex rollouts compressed in place after 7 days (`.jsonl.zst`) must be captured too (decompress through the
-  archive's bounded reader, or archive the `.zst` as is with a role/flag) so a long-idle Codex session can still be removed.
 - From T41's review: `RestoreError::Changed`'s doc comment (crates/archive/src/restore.rs ~112) still says "stopped
   resolving to itself"; it now means "is no longer the same directory (device and inode)". Fix the wording.
 notes: (binding) The archive root is `~/.shepherd/archive/` (resolved once at host start). `machine` in rows is T29's
-`MachineId`. Times come from the host's Tick, never a clock in core.
+`MachineId`. Times come from the host's Tick, never a clock in core. `/clear` and Codex `.jsonl.zst` rollouts are T42b.
+Port shape (PM decision; core can't see `shepherd-archive`'s types, so core has its own and the adapter converts):
+```rust
+pub trait Archive {
+    /// Records (or updates) the session that captures belong to. Idempotent.
+    fn put_session(&self, session: &ArchivedSession) -> Result<(), ArchiveError>;
+    /// Snapshots the session's transcripts. Blocking: the host calls it on its worker, never the runtime thread.
+    fn capture(&self, capture: &CaptureRequest) -> Result<(), ArchiveError>;
+}
+pub struct ArchivedSession { pub id: SessionId, pub repo: RepoRoot /* the repo's root commit */, pub machine: MachineId,
+    pub agent: AgentKind, pub agent_session_id: String, pub name: Option<String>, pub branch: Option<BranchName>,
+    pub base: Option<CommitHash>, pub cwd: PathBuf, pub created_at: jiff::Timestamp }
+pub struct CaptureRequest { pub session: SessionId, pub at: jiff::Timestamp, pub head: Option<CommitHash>,
+    pub reason: CaptureReason /* TurnEnd | Close | BeforeRemove | Manual */, pub commits: Vec<(CommitHash, Option<PatchId>)>,
+    pub agent_home: PathBuf, pub transcript_path: PathBuf }
+pub enum ArchiveError { Refused(String) /* capture refused the path or limits */, Failed(String) /* IO, index */ }
+```
+`CommitHash`, `PatchId` and `RepoRoot` are validated hex newtypes in core (not free strings). `Worktrees` gains
+`commits_since(&self, path: &WorktreePath, base: &CommitHash) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError>`
+and `root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError>`, with contract cases. The agent homes (Claude:
+`CLAUDE_CONFIG_DIR` or `~/.claude`; Codex: `CODEX_HOME` or `~/.codex`) are resolved once at host start in the `shepherd`
+crate and passed in; core and the archive crate never read env. Tests never touch the real `~/.shepherd`, `~/.claude` or
+`~/.codex`.
+
+### T42b: Capture across `/clear` and compressed Codex rollouts
+depends: T42
+touches: core::host, shepherd::host (archive adapter), crates/archive (capture)
+goal: A conversation is never lost because the agent started a new session in place or Codex compressed an old rollout.
+acceptance:
+- From T40: on `/clear` (a new agent session in the same shepherd session) the host captures the old transcript before it
+  replaces the path, then `put_session`s with the new agent session id before the next capture (capture checks against the
+  indexed id). Scenario test with a fake agent that switches session ids.
+- Codex rollouts compressed in place after 7 days (`.jsonl.zst`) are captured too (decompress through the archive's bounded
+  reader, or archive the `.zst` as is with a role/flag; say which), so a long-idle Codex session can still be removed.
+  Fixture test with a compressed rollout; a hostile `.zst` that inflates past the cap is refused, nothing archived.
+scope: crates/core, crates/archive, crates/shepherd
 
 ### T43: `shepherd archive` CLI
 depends: T42, T41
