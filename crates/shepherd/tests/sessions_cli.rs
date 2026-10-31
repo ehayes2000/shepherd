@@ -7,7 +7,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -95,6 +95,20 @@ impl Running {
             .stdin(Stdio::null())
             .output()
             .unwrap()
+    }
+
+    /// Runs a command in `dir` that must succeed; its stdout.
+    fn ok_in(&self, dir: &Path, args: &[&str]) -> String {
+        let out = Command::new(SHEPHERD)
+            .args(args)
+            .env("HOME", self.home.path())
+            .env("SHELL", "/bin/sh")
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "shepherd {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
     }
 
     /// Runs a command that must succeed; its stdout.
@@ -296,7 +310,7 @@ fn a_relative_cwd_is_relative_to_where_new_runs() {
     fs::create_dir(running.here.join("sub")).unwrap();
     let made = running.json(&["new", "--cwd", "sub", "--json"]);
     let id = made["session"]["id"].as_str().unwrap();
-    // The host records where a session without a worktree runs in its log.
+    // The host records where a session without a worktree runs in its `session/created`.
     let log = fs::read_to_string(
         running
             .home
@@ -304,11 +318,70 @@ fn a_relative_cwd_is_relative_to_where_new_runs() {
             .join(".shepherd")
             .join("sessions")
             .join(format!("{id}.jsonl")),
+    )
+    .unwrap();
+    let created: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["frame"]["method"] == "_shepherd/session/created")
+        .collect();
+    let [created] = &created[..] else {
+        panic!("one session/created in {log}");
+    };
+    let cwd = created["frame"]["params"]["cwd"].as_str().unwrap();
+    assert_eq!(
+        Path::new(cwd),
+        fs::canonicalize(running.here.join("sub")).unwrap()
     );
-    let expected = fs::canonicalize(running.here.join("sub")).unwrap();
-    let log = log.unwrap_or_default();
-    assert!(
-        log.contains(&format!("\"cwd\":\"{}\"", expected.display())),
-        "{log}"
-    );
+}
+
+/// Runs git in `dir` with nothing from this process's environment but `PATH` and no user or system config (under
+/// the pre-commit hook the environment points git at the repo being committed).
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(k, _)| k == "PATH"))
+        .env("HOME", dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A clone at `<base>/clone` of a local seed repo with one commit: a repo the host would take as a workspace (it has
+/// an origin default branch). Nothing leaves the machine.
+fn clone_in(base: &Path) -> PathBuf {
+    let seed = base.join("seed");
+    fs::create_dir_all(&seed).unwrap();
+    git(&seed, &["init", "-q", "-b", "main"]);
+    git(&seed, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    git(base, &["clone", "-q", "seed", "clone"]);
+    base.join("clone")
+}
+
+#[test]
+fn commands_run_in_a_repo_never_make_the_host_select_it_as_its_workspace() {
+    let running = start_host();
+    let repo = clone_in(running.home.path());
+    running.ok_in(&repo, &["sessions"]);
+    // Made without --cwd from inside the repo: no workspace, so no worktree; it runs in the host's home.
+    let made: Value = serde_json::from_str(&running.ok_in(&repo, &["new", "--json"])).unwrap();
+    let session = &made["session"];
+    assert_eq!(session["workspace"], Value::Null, "{made}");
+    assert_eq!(session["worktree"], Value::Null, "{made}");
+    assert_eq!(session["branch"], Value::Null, "{made}");
+    assert_eq!(session["starting"], false, "{made}");
+    // And a later command still finds none selected.
+    let listed: Value =
+        serde_json::from_str(&running.ok_in(&repo, &["sessions", "--json"])).unwrap();
+    assert_eq!(listed["sessions"][0]["workspace"], Value::Null, "{listed}");
+    let cwd = running.dir("project");
+    let made: Value =
+        serde_json::from_str(&running.ok_in(&repo, &["new", "--cwd", &cwd, "--json"])).unwrap();
+    assert_eq!(made["session"]["workspace"], Value::Null, "{made}");
 }

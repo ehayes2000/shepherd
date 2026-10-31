@@ -331,6 +331,12 @@ where
         self.client = self.client.clone().with_cwd(cwd);
     }
 
+    /// Gives each peer `limit` to send its sessions once reached ([`Client::with_catch_up_limit`]). Call before
+    /// [`ClientRuntime::start`].
+    pub fn set_catch_up_limit(&mut self, limit: jiff::SignedDuration) {
+        self.client = self.client.clone().with_catch_up_limit(limit);
+    }
+
     /// Tells the host, in each hello, that the client runs `build`, and compares the host's with it. Call before
     /// [`ClientRuntime::start`].
     pub fn set_build(&mut self, build: BuildId) {
@@ -453,8 +459,9 @@ where
         let deadline = Instant::now() + limit;
         let mut last_tick = Instant::now();
         loop {
-            if let Some(why) = self.client.fatal() {
-                return Err(ClientError::Fatal(why.to_owned()));
+            // A host speaking another protocol version is no reason to wait: nothing will change until it restarts.
+            if let Some(why) = self.client.unusable() {
+                return Err(ClientError::Fatal(why));
             }
             if done(&self.client) {
                 return Ok(());
@@ -835,8 +842,8 @@ where
 pub type SocketRuntime =
     ClientRuntime<UnixConnectLink, Connector<UnixConnectLink>, ProcessHostLauncher>;
 
-/// A runtime for a client of the local host serving on `socket`, launching `shepherd host` if nothing listens, that
-/// tells the host in its hello that it started in the current directory. Not started yet.
+/// A runtime for a client of the local host serving on `socket`, launching `shepherd host` if nothing listens. Its
+/// hello names no directory, so the host selects no workspace from it (the TUI adds its own). Not started yet.
 pub fn socket_runtime(socket: &Path) -> Result<SocketRuntime, ClientError> {
     let launcher = ProcessHostLauncher::shepherd_host(socket)
         .map_err(|e| ClientError::Fatal(format!("can't find the shepherd executable: {e}")))?;
@@ -846,7 +853,13 @@ pub fn socket_runtime(socket: &Path) -> Result<SocketRuntime, ClientError> {
     let machine = MachineId::new("local");
     let start = Instant::now();
     let clock = monotonic(jiff::Timestamp::now(), move || start.elapsed());
-    let mut runtime = ClientRuntime::new(machine, connect, launcher, clock);
+    Ok(ClientRuntime::new(machine, connect, launcher, clock))
+}
+
+/// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
+/// `shepherd host` if nothing listens. The terminal is restored however this ends.
+pub fn run(socket: &Path) -> Result<(), ClientError> {
+    let mut runtime = socket_runtime(socket)?;
     // A cwd that can't be read or isn't UTF-8 just isn't sent: the host then selects no workspace from it.
     if let Some(cwd) = std::env::current_dir()
         .ok()
@@ -854,13 +867,6 @@ pub fn socket_runtime(socket: &Path) -> Result<SocketRuntime, ClientError> {
     {
         runtime.set_cwd(cwd);
     }
-    Ok(runtime)
-}
-
-/// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
-/// `shepherd host` if nothing listens. The terminal is restored however this ends.
-pub fn run(socket: &Path) -> Result<(), ClientError> {
-    let mut runtime = socket_runtime(socket)?;
     // A client that can't read its own executable compares no builds.
     match std::env::current_exe().and_then(|exe| crate::build::build_id(&exe)) {
         Ok(build) => runtime.set_build(build),

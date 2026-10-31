@@ -4,9 +4,11 @@
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind};
 use shepherd_core::client::automation::{SessionStatus, Target, TargetError, resolve_machine};
-use shepherd_core::client::{AskError, AskId, ClientCommand, ClientEvent, Intent};
+use shepherd_core::client::{AskError, AskId, ClientCommand, ClientEvent, ClientSession, Intent};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::WorktreeError;
+use shepherd_core::session::Activity;
 use shepherd_core::wire::{
     ClientRequest, HostResult, PROTOCOL_VERSION, SessionNew, SessionNewOk, WireError,
 };
@@ -243,6 +245,117 @@ fn status_is_running_idle_wants_user_or_exited() {
     c.host().pty_exited("s1", Some(0));
     c.sync();
     assert_eq!(status(&c), SessionStatus::Exited);
+}
+
+/// A listed session doing `activity`, its process ended if `exited`.
+fn session_doing(activity: Activity, exited: bool) -> ClientSession {
+    let c = settled_with(&["s1"]);
+    ClientSession {
+        activity,
+        exited,
+        ..c.client().sessions()[0].clone()
+    }
+}
+
+#[test]
+fn status_follows_the_documented_table() {
+    let table = [
+        (Activity::Starting, false, SessionStatus::Running),
+        (
+            Activity::Working { tool: None },
+            false,
+            SessionStatus::Running,
+        ),
+        (Activity::Unknown, false, SessionStatus::Running),
+        (Activity::Idle, false, SessionStatus::Idle),
+        (
+            Activity::NeedsPermission { title: "rm".into() },
+            false,
+            SessionStatus::WantsUser,
+        ),
+        (Activity::NeedsInput, false, SessionStatus::WantsUser),
+        // Either one says it ended.
+        (
+            Activity::Exited { code: Some(0) },
+            false,
+            SessionStatus::Exited,
+        ),
+        (Activity::Idle, true, SessionStatus::Exited),
+        (Activity::NeedsInput, true, SessionStatus::Exited),
+    ];
+    for (activity, exited, status) in table {
+        let session = session_doing(activity.clone(), exited);
+        assert_eq!(
+            SessionStatus::of(&session),
+            status,
+            "{activity:?}, exited {exited}"
+        );
+    }
+}
+
+#[test]
+fn an_agent_that_says_it_exited_is_exited_though_its_process_runs() {
+    let mut c = settled_with(&["s1"]);
+    agent_frame(
+        &mut c,
+        "s1",
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/exited", "params": { "code": 0 } }),
+    );
+    let session = &c.client().sessions()[0];
+    assert!(!session.exited, "the host still runs it");
+    assert_eq!(SessionStatus::of(session), SessionStatus::Exited);
+}
+
+#[test]
+fn a_session_that_failed_to_start_is_exited_with_the_reason() {
+    let mut c = settled_with(&[]);
+    c.host().select_workspace("/src/app");
+    c.host().new_session("s1");
+    c.host()
+        .worktree_result("s1", Err(WorktreeError::NoDefaultBranch("/src/app".into())));
+    c.sync();
+    let session = &c.client().sessions()[0];
+    assert_eq!(session.activity, Activity::Starting, "no agent ever ran");
+    assert_eq!(SessionStatus::of(session), SessionStatus::Exited);
+    assert!(
+        session
+            .failed
+            .as_deref()
+            .is_some_and(|why| why.contains("origin default branch")),
+        "{session:?}"
+    );
+}
+
+// ---------- an unusable host ----------
+
+#[test]
+fn a_host_speaking_another_protocol_makes_the_client_unusable_saying_so() {
+    let mut c = ClientDriver::new();
+    c.handle(ClientEvent::Start);
+    let hello = c.handle(ClientEvent::Connected {
+        at: ts("2026-10-29T12:00:00.000Z"),
+    });
+    assert_eq!(c.client().unusable(), None, "connecting");
+    c.answer(
+        &hello,
+        Err(WireError::VersionMismatch {
+            host: PROTOCOL_VERSION + 1,
+            client: PROTOCOL_VERSION,
+        }),
+    );
+    let why = c.client().unusable();
+    assert!(
+        why.as_deref()
+            .is_some_and(|w| w.contains("another protocol version")),
+        "{why:?}"
+    );
+    assert!(!c.client().settled());
+}
+
+#[test]
+fn a_connected_host_leaves_the_client_usable() {
+    let c = settled_with(&[]);
+    assert_eq!(c.client().unusable(), None);
 }
 
 #[test]

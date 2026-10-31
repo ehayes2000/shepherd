@@ -12,15 +12,18 @@ use std::time::Duration;
 use serde_json::Value;
 use shepherd::cli::sessions::{New, new, sessions};
 use shepherd::cli::{Drive, target};
-use shepherd::client::{ClientRuntime, Connector};
+use shepherd::client::{ClientError, ClientRuntime, Connector};
 use shepherd_core::acpp::Timestamp;
 use shepherd_core::acpp::{
     Dir, Envelope, FrameDraft, PeerTrusted, ShepherdFrame, Source, SourceKind,
 };
-use shepherd_core::client::{AskId, Client};
+use shepherd_core::client::{AskId, Client, MachineStatus};
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::ports::{LinkEventSink, LogId};
-use shepherd_core::wire::{ClientRequest, Hello, PROTOCOL_VERSION, SessionRename};
+use shepherd_core::ports::{Link, LinkEvent, LinkEventSink, LogId};
+use shepherd_core::wire::{
+    ClientMessage, ClientRequest, Hello, HostResponse, PROTOCOL_VERSION, SessionRename, WireError,
+    decode_client_message, encode_response,
+};
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::launcher::FakeHostLauncher;
@@ -30,6 +33,8 @@ use support::*;
 
 const KEY_A: [u8; 32] = [0xaa; 32];
 const KEY_B: [u8; 32] = [0xbb; 32];
+/// A liveness bound, never a measurement.
+const LIVENESS: Duration = Duration::from_secs(60);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -60,6 +65,8 @@ struct World {
     a: HostHarness,
     b: HostHarness,
     client: Runtime,
+    /// B's host is running: a stopped one isn't stepped.
+    b_running: bool,
 }
 
 impl World {
@@ -115,6 +122,7 @@ impl World {
             a,
             b,
             client,
+            b_running: true,
         }
     }
 
@@ -155,7 +163,9 @@ impl Drive for World {
                 return Ok(());
             }
             self.a.step();
-            self.b.step();
+            if self.b_running {
+                self.b.step();
+            }
             quiet = match self.client.pump() {
                 0 => quiet + 1,
                 _ => 0,
@@ -323,5 +333,100 @@ fn a_target_names_a_session_on_any_machine_and_an_ambiguous_one_lists_each_machi
             && err.contains("on testbox")
             && err.contains("on laptop"),
         "{err}"
+    );
+}
+
+#[test]
+fn sessions_leaves_out_the_last_known_sessions_of_a_peer_gone_since() {
+    let mut w = World::new();
+    let mine = session_on(&mut w.a, "mine");
+    session_on(&mut w.b, "theirs");
+    assert_eq!(field(&w.sessions_json(), "id").len(), 2);
+
+    w.b.stop();
+    w.b_running = false;
+    // The client hears B is gone; its sessions stay in the sidebar, offline.
+    w.wait(
+        &mut |c| c.machines()[1].status != MachineStatus::Connected,
+        LIVENESS,
+    )
+    .unwrap();
+    assert_eq!(w.client.client().sessions().len(), 2);
+    let listed = w.sessions_json();
+    assert_eq!(field(&listed, "id"), [mine.as_str()]);
+    assert_eq!(listed["machines"][1]["status"], "unreachable", "{listed}");
+}
+
+#[test]
+fn new_on_a_peer_refuses_a_relative_cwd_and_makes_nothing() {
+    let mut w = World::new();
+    let err = w
+        .new_json(New {
+            machine: Some("laptop".into()),
+            cwd: Some("sub".into()),
+            ..New::default()
+        })
+        .unwrap_err();
+    assert!(err.contains("relative"), "{err}");
+    assert!(w.b.host().sessions().is_empty());
+    // An absolute one is the peer's own path, passed as it is.
+    let dir = w.here().join("there");
+    std::fs::create_dir(&dir).unwrap();
+    let made = w.new_json(New {
+        machine: Some("laptop".into()),
+        cwd: Some(dir.to_str().unwrap().to_owned()),
+        ..New::default()
+    });
+    assert!(made.is_ok(), "{made:?}");
+}
+
+/// Forwards a stand-in host's link events to a channel.
+struct ChannelSink(Mutex<std::sync::mpsc::Sender<LinkEvent>>);
+
+impl LinkEventSink for ChannelSink {
+    fn send(&self, event: LinkEvent) {
+        let _ = lock(&self.0).send(event);
+    }
+}
+
+#[test]
+fn a_command_waiting_on_a_host_speaking_another_protocol_stops_at_once_saying_so() {
+    let net = FakeNetwork::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut host = net.listen(Arc::new(ChannelSink(Mutex::new(tx)))).unwrap();
+    let connect: Connector<FakeLink> =
+        Box::new(move |sink: Arc<dyn LinkEventSink>| net.connect(sink).map_err(|e| e.to_string()));
+    let clock = || Timestamp::parse("2026-10-29T12:00:00Z").unwrap();
+    let mut client: Runtime = ClientRuntime::new(
+        MachineId::new("m_cli"),
+        connect,
+        FakeHostLauncher::new(),
+        clock,
+    );
+    client.start();
+    // The stand-in answers the hello as a host of another protocol version.
+    let (conn, hello) = loop {
+        match rx.recv_timeout(LIVENESS).expect("the hello") {
+            LinkEvent::Line { conn, line } => break (conn, line),
+            _ => continue,
+        }
+    };
+    let ClientMessage::Request(hello) = decode_client_message(&hello).unwrap() else {
+        panic!("not a request");
+    };
+    let refusal = encode_response(&HostResponse {
+        id: hello.id,
+        result: Err(WireError::VersionMismatch {
+            host: PROTOCOL_VERSION + 1,
+            client: PROTOCOL_VERSION,
+        }),
+    });
+    host.send(conn, refusal.strip_suffix(b"\n").unwrap_or(&refusal))
+        .unwrap();
+    // A liveness bound only: it must stop on the answer, long before this.
+    let err = client.run_until(Client::settled, LIVENESS).unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Fatal(why) if why.contains("another protocol version")),
+        "{err:?}"
     );
 }

@@ -1795,3 +1795,82 @@ fn a_peer_is_named_by_its_name_unless_two_share_it_and_by_its_id_always() {
         "{shown}"
     );
 }
+
+#[test]
+fn an_ask_of_a_peer_unpaired_before_it_answers_is_answered_as_dropped() {
+    let mut net = Machines::connected(&[("m_b", "laptop"), ("m_c", "tower")]);
+    net.handle(ask_of(1, "m_b", session_new()));
+    net.handle(ask_of(2, "m_c", session_new()));
+    relist(&mut net, &[("m_c", "tower")]);
+    assert!(
+        matches!(
+            net.c.client().answer(AskId(1)),
+            Some(Err(AskError::Dropped { machine })) if machine == "laptop"
+        ),
+        "{:?}",
+        net.c.client().answer(AskId(1))
+    );
+    assert_eq!(net.c.client().answer(AskId(2)), None, "tower's still waits");
+}
+
+/// [`Machines::new`] for a client that gives each peer `limit` to catch up.
+fn with_catch_up_limit(limit: jiff::SignedDuration, peers: &[(&str, &str)]) -> Machines {
+    let client = Client::new(m("m_client")).with_catch_up_limit(limit);
+    let (net, _) = Machines::from_client(
+        ClientDriver::from_client(client),
+        json!({ "notify": { "bell": false } }),
+        peers,
+    );
+    net
+}
+
+#[test]
+fn a_peer_that_does_not_finish_catching_up_in_time_is_given_up_on_as_unreachable() {
+    let limit = jiff::SignedDuration::from_secs(20);
+    let mut net = with_catch_up_limit(limit, &[("m_b", "laptop")]);
+    net.handshake("m_b");
+    net.handle(ClientEvent::Tick {
+        at: at(limit.as_millis() as i64 - 1),
+    });
+    assert!(!net.c.client().settled(), "still in time");
+    let closed = net.handle(ClientEvent::Tick {
+        at: at(limit.as_millis() as i64),
+    });
+    assert!(
+        closed.contains(&ClientCommand::DisconnectPeer(m("m_b"))),
+        "{closed:?}"
+    );
+    assert!(net.c.client().settled());
+    assert!(
+        matches!(
+            &net.c.client().machines()[1].status,
+            MachineStatus::Offline(Some(why)) if why.contains("in time")
+        ),
+        "{:?}",
+        net.c.client().machines()
+    );
+}
+
+#[test]
+fn a_peer_that_caught_up_in_time_is_never_given_up_on() {
+    let limit = jiff::SignedDuration::from_secs(20);
+    let mut net = with_catch_up_limit(limit, &[("m_b", "laptop")]);
+    net.reach("m_b");
+    net.handle(ClientEvent::Tick { at: at(3_600_000) });
+    assert_eq!(
+        net.c.client().machines()[1].status,
+        MachineStatus::Connected
+    );
+}
+
+#[test]
+fn without_a_limit_a_peer_catches_up_however_long_it_takes() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.handshake("m_b");
+    net.handle(ClientEvent::Tick { at: at(3_600_000) });
+    assert_eq!(
+        net.c.client().machines()[1].status,
+        MachineStatus::Connected
+    );
+    assert!(!net.c.client().settled());
+}

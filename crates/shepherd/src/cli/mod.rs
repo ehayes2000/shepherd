@@ -24,6 +24,9 @@ use crate::client::{ClientRuntime, SocketRuntime, socket_runtime};
 
 /// How long reaching the hosts may take: launching the local one, and each peer's tunnel and catch-up.
 pub const SETTLE_LIMIT: Duration = Duration::from_secs(60);
+/// How long a peer has, from when its conn opens, to send all its sessions before it is left out as unreachable:
+/// well within [`SETTLE_LIMIT`], so a slow peer never fails the command.
+pub const PEER_CATCH_UP_LIMIT: jiff::SignedDuration = jiff::SignedDuration::from_secs(20);
 /// How long a host has to answer a request.
 pub const ANSWER_LIMIT: Duration = Duration::from_secs(60);
 /// The most grapheme clusters of one field printed.
@@ -70,9 +73,11 @@ where
     }
 }
 
-/// A started client of the local host at `~/.shepherd/host.sock`.
+/// A started client of the local host at `~/.shepherd/host.sock`. Its hello names no directory, so the host never
+/// selects a workspace because of where a command ran.
 pub fn connect() -> Result<SocketRuntime, String> {
     let mut runtime = socket_runtime(&crate::peers::socket()?).map_err(|e| e.to_string())?;
+    runtime.set_catch_up_limit(PEER_CATCH_UP_LIMIT);
     runtime.start();
     Ok(runtime)
 }

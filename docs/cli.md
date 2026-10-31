@@ -13,7 +13,11 @@ shepherd new [--profile P] [--machine M] [--cwd DIR] [--name N]          [--json
   pretty-printed JSON object on stdout, with the shapes below.
 - Errors go to stderr as `shepherd: <why>`, with exit status 1 and nothing on stdout.
 - A command first waits until this machine's host and every paired machine it can reach have sent their sessions. A
-  machine that can't be reached is left out (and listed as such), never waited for.
+  machine that can't be reached, or hasn't sent all its sessions within 20 seconds of being reached, is left out (and
+  listed as unreachable, with why) rather than waited for; none of its sessions are listed, not even ones it sent
+  before. A host speaking another protocol version than this `shepherd` fails the command at once, saying so.
+- Where a command runs never matters to the host: unlike the TUI, it never makes the host select the repo it runs in as
+  its workspace. Only `new --cwd` passes a directory.
 
 ## Naming sessions and machines
 
@@ -35,7 +39,8 @@ per session: `<id>  <name>  <status>  <agent>  <machine>  <branch>  <#pr>  <work
 Starts a session on `--machine` (this one by default) with `--profile` (the host's default profile by default), and
 prints its id once the host has made it. Without `--cwd` the session gets a managed worktree in that host's current
 workspace (or runs in its home directory when it has none); with `--cwd` it runs in that directory and gets no
-worktree. A relative `--cwd` is relative to the current directory. `--name` names it (and its worktree's branch), and
+worktree. A relative `--cwd` is relative to the current directory; on another machine `--cwd` must be absolute (a
+path on that machine), and a relative one is refused. `--name` names it (and its worktree's branch), and
 the name stays: it is never replaced by one taken from the first prompt.
 
 It fails, making nothing, when the profile is unknown, the machine is unknown or can't be reached, or the directory
@@ -60,7 +65,7 @@ path that isn't UTF-8 is shown lossily).
   "workspace": "/path/to/repo" | null,     // the workspace it was started in
   "worktree": "/path/to/worktree" | null,
   "branch": "api" | null,
-  "pr": { "number": 7, "state": "open" | "closed" | "merged", "checks": "none" | "pending" | "passing" | "failing" } | null,
+  "pr": PR | null,
   "starting": false,                       // its worktree (or its post-create hooks) is still being made
   "failed": "why it couldn't start" | null,
   "created_at": "<time>"
@@ -73,6 +78,18 @@ path that isn't UTF-8 is shown lossily).
 - `idle`: the agent is at its prompt with nothing to do.
 - `wants-user`: the agent is waiting on the user (it asked permission or a question).
 - `exited`: its process ended, or it never started.
+
+### PR
+
+```json
+{
+  "number": 7,
+  "state": "open" | "closed" | "merged" | "other",
+  "checks": "none" | "pending" | "passing" | "failing" | "other"
+}
+```
+
+`other` is a state or checks value the host recorded that this `shepherd` doesn't know (from a newer host).
 
 ### Machine
 

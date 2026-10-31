@@ -636,6 +636,8 @@ pub struct Client {
     now: Option<jiff::Timestamp>,
     /// What callers outside the UI asked ([`ClientEvent::Ask`]), and what came of it.
     asks: BTreeMap<AskId, Ask>,
+    /// How long a peer may take to send its sessions once reached, if it has a limit.
+    catch_up_limit: Option<SignedDuration>,
 }
 
 /// What one host's hello and log say, and the requests asked of it that it hasn't answered.
@@ -712,6 +714,8 @@ struct Peer {
     why: Option<String>,
     /// Its host answered the hello with another protocol version.
     incompatible: bool,
+    /// When the conn now Ready opened: its catch-up is due by [`Client::with_catch_up_limit`] after it.
+    opened: Option<jiff::Timestamp>,
 }
 
 impl Peer {
@@ -723,6 +727,7 @@ impl Peer {
             failures: 0,
             why: None,
             incompatible: false,
+            opened: None,
         }
     }
 
@@ -830,6 +835,7 @@ impl Client {
             cleanup: Cleanup::default(),
             now: None,
             asks: BTreeMap::new(),
+            catch_up_limit: None,
         }
     }
 
@@ -837,6 +843,16 @@ impl Client {
     pub fn with_cwd(self, cwd: impl Into<String>) -> Self {
         Self {
             cwd: Some(cwd.into()),
+            ..self
+        }
+    }
+
+    /// This client, giving each peer `limit` from when its conn opens to send all its sessions: one that hasn't is
+    /// given up on as unreachable (and tried again later), so a script waiting for [`Client::settled`] isn't held up
+    /// by it. Without one (the TUI), a peer catches up however long that takes.
+    pub fn with_catch_up_limit(self, limit: SignedDuration) -> Self {
+        Self {
+            catch_up_limit: Some(limit),
             ..self
         }
     }
@@ -1165,6 +1181,16 @@ impl Client {
         }
     }
 
+    /// Why nothing can be asked of this machine's host now or later without the user's help: the client gave up, or
+    /// the host speaks another protocol version. `None` while connecting or connected.
+    pub fn unusable(&self) -> Option<String> {
+        match &self.connection {
+            Connection::Failed(why) => Some(why.clone()),
+            Connection::Incompatible => Some(INCOMPATIBLE.to_owned()),
+            _ => None,
+        }
+    }
+
     /// Whether every host the client can reach has sent all its sessions: this machine's host has answered the
     /// subscribe (its catch-up is sent) and the peer list, and each peer listed is caught up likewise or couldn't be
     /// reached (its last attempt failed). What a script lists once it is.
@@ -1470,12 +1496,21 @@ impl Client {
     /// Time passes: a peer waiting to be tried again is, once due, and one that doesn't answer is given up on.
     fn tick_peers(&mut self, now: jiff::Timestamp) -> Vec<ClientCommand> {
         let mut commands = Vec::new();
+        let limit = self.catch_up_limit;
         let machines: Vec<MachineId> = self.peers.keys().cloned().collect();
         for machine in machines {
             let Some(peer) = self.peers.get_mut(&machine) else {
                 continue;
             };
+            let overdue = match (limit, peer.opened) {
+                (Some(limit), Some(opened)) => now >= opened.checked_add(limit).unwrap_or(opened),
+                _ => false,
+            };
             match peer.link {
+                PeerLink::Ready if overdue && peer.feed.catching_up() => {
+                    let why = "it didn't send its sessions in time".to_owned();
+                    commands.extend(self.peer_failed(&machine, why, true));
+                }
                 PeerLink::Waiting { until: None } => {
                     let until = now.checked_add(peer.backoff()).unwrap_or(now);
                     peer.link = PeerLink::Waiting { until: Some(until) };
@@ -1529,6 +1564,9 @@ impl Client {
         let Some(peer) = self.peers.get_mut(machine) else {
             return Vec::new();
         };
+        if let PeerLink::Opening { since, .. } = peer.link {
+            peer.opened = Some(since);
+        }
         peer.link = PeerLink::Ready;
         peer.failures = 0;
         peer.why = None;
@@ -1669,7 +1707,7 @@ impl Client {
         };
         if !self.ready(&at) {
             let (machine, why) = match &at {
-                At::Local => (self.local_label(), self.fatal().map(str::to_owned)),
+                At::Local => (self.local_label(), self.unusable()),
                 At::Peer(m) => (
                     self.machine_label(m).to_owned(),
                     self.peers.get(m).and_then(|p| p.why.clone()),
@@ -3154,6 +3192,8 @@ const NOT_CONNECTED: &str = "not connected to the shepherd host";
 /// What the user is told when the host doesn't know a request's method.
 const UPDATING: &str = "host is older — updating…";
 const UPDATED: &str = "host updated";
+const INCOMPATIBLE: &str =
+    "the shepherd host speaks another protocol version than this client: restart it to use this";
 const OLDER_HOST: &str = "the shepherd host is older than this client: restart it to use this";
 /// The notice for a client whose build is neither the host's nor the one installed at the host's path, while the host
 /// runs the installed one.
