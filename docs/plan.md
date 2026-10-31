@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T40 Capture transcripts from Claude Code and Codex | [conversation-archive](features/conversation-archive.md) | fixing | task/t40-archive-capture @ f9d2c8f | 1 | Blocking: subagent non-regular-file refusal untested (a FIFO would hang capture) |
+| T40 Capture transcripts from Claude Code and Codex | [conversation-archive](features/conversation-archive.md) | merging | task/t40-archive-capture @ f683bec | 2 | round 2 tests-only + doc, PM spot check |
 | F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | building | task/f47-swap-flush @ ec85617 | 0 |  |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | fixing | task/t30-pairing @ 0539136 | 1 | Blocking: printed ticket cut to 128 chars (real ones ~244). PM: CLI validates tickets before join; Ctrl-C stops the pairing |
 
