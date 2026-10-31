@@ -65,6 +65,7 @@ value or one the reference lists. Inferred means a value we picked that fits the
   call's when the subagent is done, a background launch's at once); otherwise by type, only when the one call of
   that type still unclaimed is an open one (inferred: that the call's `PreToolUse` comes before the subagent's
   `SubagentStart`). A completed call whose `agentId` no start claims (none, as in older `Task` results, or one in
-  another format) stays a candidate, so the guess is left out rather than wrong. A `SubagentStop` hook can keep a
+  another format) stays a candidate, so the guess is left out rather than made; a guess its call's result then
+  disowns is retracted. The exact rules and their limits are in `agents::subagents`. A `SubagentStop` hook can keep a
   subagent from stopping (exit code 2).
 - `idle_prompt` doesn't fire while a background subagent is still running.

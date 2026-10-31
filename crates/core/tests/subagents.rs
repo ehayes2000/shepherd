@@ -393,8 +393,8 @@ fn a_call_already_guessed_lends_its_task_to_no_other_start() {
 }
 
 #[test]
-fn a_call_from_an_earlier_turn_names_its_subagent_to_no_one() {
-    // Named before the turn ended, started after: the name is forgotten.
+fn a_subagent_named_in_an_earlier_turn_starts_with_that_calls_task_not_the_next_turns() {
+    // Named before the parent's turn ended, started after, while the next turn has a call of the same type open.
     let mut run = Run::claude();
     run.hooks(vec![
         cc!("UserPromptSubmit"),
@@ -402,9 +402,133 @@ fn a_call_from_an_earlier_turn_names_its_subagent_to_no_one() {
         cc!("PostToolUse.Agent.background"),
         cc!("Stop"),
         cc!("UserPromptSubmit.second"),
+        cc!("PreToolUse.Agent.second"),
         cc!("SubagentStart"),
     ]);
-    assert_eq!(run.only().task(), None);
+    assert_eq!(run.only().task(), Some("Find factorial callers"));
+}
+
+#[test]
+fn a_late_codex_subagent_starts_with_its_own_calls_task() {
+    // `spawn_agent` returns before the child's `SubagentStart`, so the parent's turn can end in between.
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PostToolUse.spawn_agent"),
+        cx!("Stop"),
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent.second"),
+        cx!("SubagentStart"),
+    ]);
+    assert_eq!(
+        run.only().task(),
+        Some("Find every TODO under src and summarize them.")
+    );
+    // The second call's own subagent still gets its task.
+    run.hooks(vec![
+        cx!("PostToolUse.spawn_agent.second"),
+        cx!("SubagentStart.second"),
+    ]);
+    assert_eq!(run.subagents()[1].task(), Some("List the open FIXMEs."));
+}
+
+#[test]
+fn a_guess_its_call_disowns_is_retracted() {
+    // The one open call is guessed for the first start of its type, then its result names another subagent.
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("SubagentStart.second"),
+    ]);
+    assert_eq!(run.only().task(), Some("Find factorial callers"));
+    run.hook(cc!("PostToolUse.Agent.background"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-8b4c", "Explore", None)]
+    );
+    run.hook(cc!("SubagentStart"));
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(
+        tasks,
+        [
+            ("agent-8b4c", None),
+            ("agent-7f3a", Some("Find factorial callers"))
+        ]
+    );
+}
+
+#[test]
+fn a_failed_call_is_no_longer_a_candidate() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+        cc!("PostToolUseFailure.Agent"),
+        cc!("SubagentStart.second"),
+    ]);
+    assert_eq!(run.only().task(), Some("Find fibonacci callers"));
+}
+
+#[test]
+fn a_guessed_call_completing_without_an_id_is_not_a_candidate_again() {
+    let mut post = cc!("PostToolUse.Agent");
+    post["tool_response"] = json!("factorial is called from src/main.rs:12.");
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("SubagentStart"),
+        post,
+        cc!("PreToolUse.Agent.second"),
+        cc!("SubagentStart.second"),
+    ]);
+    assert_eq!(run.subagents()[1].task(), Some("Find fibonacci callers"));
+}
+
+#[test]
+fn ids_named_by_calls_are_remembered_up_to_a_bound() {
+    // Calls of one type whose subagents never start: the oldest names are forgotten, the newest kept.
+    let mut run = Run::codex();
+    run.hook(cx!("UserPromptSubmit"));
+    for i in 0..100 {
+        let mut pre = cx!("PreToolUse.spawn_agent");
+        pre["tool_use_id"] = json!(format!("call_{i}"));
+        pre["tool_input"]["message"] = json!(format!("task {i}"));
+        let mut post = cx!("PostToolUse.spawn_agent");
+        post["tool_use_id"] = json!(format!("call_{i}"));
+        post["tool_response"] = json!(format!("{{\"agent_id\":\"a{i}\"}}"));
+        run.hooks(vec![pre, post]);
+    }
+    for id in ["a0", "a99"] {
+        let mut start = cx!("SubagentStart");
+        start["agent_id"] = json!(id);
+        run.hook(start);
+    }
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(tasks, [("a0", None), ("a99", Some("task 99"))]);
+}
+
+#[test]
+fn a_finished_subagent_is_no_longer_remembered_as_named() {
+    // Its stop forgets the name (here its start went unseen, e.g. across a host restart), so the name doesn't hold
+    // back a guess in a later turn.
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PostToolUse.spawn_agent"),
+        cx!("SubagentStop"),
+        cx!("Stop"),
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent.second"),
+        cx!("SubagentStart.second"),
+    ]);
+    assert_eq!(run.only().task(), Some("List the open FIXMEs."));
 }
 
 #[test]
@@ -936,7 +1060,8 @@ fn working_and_finished_for_an_unknown_subagent_change_nothing() {
 }
 
 #[test]
-fn a_start_again_keeps_what_the_first_one_knew() {
+fn a_start_again_replaces_the_task_and_keeps_where_it_is() {
+    // A start again without a task retracts a guessed one.
     let (state, _) = fold(&[
         prompt(),
         frame(&started("a", "Explore", Some("task"))),
@@ -946,7 +1071,7 @@ fn a_start_again_keeps_what_the_first_one_knew() {
     let [sub] = state.subagents() else {
         panic!("a start again duplicated it: {:?}", state.subagents());
     };
-    assert_eq!(sub.task(), Some("task"));
+    assert_eq!(sub.task(), None);
     assert_eq!(
         sub.status(),
         &blocked_status(BlockKind::Permission, "Bash: ls")

@@ -289,14 +289,12 @@ impl SessionState {
         self.subagents.iter_mut().find(|s| s.id == id)
     }
 
-    /// A start for a subagent already listed (a restarted host's translator announcing it again) updates its type,
-    /// and its task if it has one, and leaves where it is alone.
+    /// A start for a subagent already listed corrects it: its type and task are replaced (a start without a task
+    /// retracts a guessed one), and where it is stays.
     fn subagent_started(&mut self, started: &SubagentStarted) {
         if let Some(sub) = self.subagent_mut(&started.id) {
             sub.agent_type = started.agent_type.clone();
-            if started.task.is_some() {
-                sub.task = started.task.clone();
-            }
+            sub.task = started.task.clone();
             return;
         }
         self.subagents.push(Subagent {

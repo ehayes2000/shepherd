@@ -277,7 +277,7 @@ pub struct AgentExited {
 // report them. `id` is the agent's own subagent id (`agent_id` in its hooks). Their text is the agent's, kept raw:
 // display it only through `display_safe`.
 
-/// A subagent started.
+/// A subagent started. Another for the same `id` corrects it: its type and task replace the earlier ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentStarted {
     pub id: String,

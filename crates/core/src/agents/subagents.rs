@@ -8,12 +8,18 @@
 //!   `PostToolUse` comes when it is done, and a background one's when it is launched.
 //! - The spawning call's `PostToolUse` names the subagent's id (Claude Code: `tool_response.agentId`; Codex: the
 //!   `agent_id` of `SpawnAgentResult`). That pairs the call's task with the subagent exactly: kept for a
-//!   `SubagentStart` still to come, or sent as a corrective `subagent/started` for one already announced (the fold
-//!   takes the task of a repeated start).
-//! - Otherwise a `SubagentStart` guesses its task only when exactly one call of its type is a candidate (an open call
-//!   not guessed yet, or a completed call whose subagent no start has claimed, e.g. its result named no id or one in
-//!   another format) and that candidate is an open call. Else it starts without one: a task is left out, never
-//!   wrong. Only a failed call stops being a candidate.
+//!   `SubagentStart` still to come, in this turn or a later one, or sent as a corrective `subagent/started` for one
+//!   already announced this turn (the fold replaces a subagent's task with a repeated start's).
+//! - A `SubagentStart` whose id no remembered call named guesses its task only when exactly one call of its type is
+//!   a candidate and that candidate is an open call. Candidates are the open calls not guessed yet, and the
+//!   completed calls no start has claimed (their result named no id, or one no start has used yet, e.g. in another
+//!   format). Else it starts without a task. Only a failed call stops being a candidate.
+//! - A guessed call whose result then names another subagent retracts the guess with a corrective start without a
+//!   task.
+//!
+//! So a subagent's task is its own call's, or none, with two exceptions: briefly, a guess its call later retracts;
+//! and a subagent whose call fell out of the [`MAX_NAMED`] remembered ones, or completed without an id in an earlier
+//! turn, can take a guess from a later call.
 //! - Hooks fired inside a subagent carry its `agent_id` and `agent_type`; its permission requests and questions block
 //!   it, and its next tool activity unblocks it.
 //! - `SubagentStop { agent_id }` finishes it.
@@ -25,14 +31,19 @@ use crate::acpp::{
     SubagentWorking,
 };
 
+/// How many unclaimed completed spawning calls are remembered; the oldest go first. A subagent whose call was
+/// forgotten starts with a guess, or without a task.
+pub(crate) const MAX_NAMED: usize = 64;
+
 /// A translator's view of the agent's subagents. It serializes with the translator; a translator carried from a
 /// build without it starts with none.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Subagents {
     /// Spawning tool calls this turn whose `PostToolUse` hasn't named their subagent yet, oldest first.
     spawns: Vec<Spawn>,
-    /// Spawning calls that completed this turn and whose subagent no `SubagentStart` has claimed, with the id their
-    /// result named, if any.
+    /// Completed spawning calls whose subagent no `SubagentStart` has claimed and no `SubagentStop` finished, oldest
+    /// first, with the id their result named: id-less ones from this turn, named ones from any turn, at most
+    /// [`MAX_NAMED`].
     #[serde(default)]
     named: Vec<Named>,
     /// Subagents started this turn, with the task they were announced with.
@@ -94,40 +105,60 @@ impl Subagents {
         });
     }
 
-    /// Tool call `tool_use_id` ended with `outcome`. A failed spawning call spawned nothing. A completed one is kept
-    /// until a `SubagentStart` claims the id it named (if it named one); until then it stays a candidate for the
-    /// starts of its type, so a guess never hands its subagent another call's task. A corrective started frame when
-    /// the subagent it named was already announced with another task.
-    pub(crate) fn tool_done(&mut self, tool_use_id: &str, outcome: ToolOutcome) -> Option<Frame> {
-        let i = self
+    /// Tool call `tool_use_id` ended with `outcome`; the corrective started frames it calls for.
+    ///
+    /// A failed spawning call spawned nothing and is forgotten. A completed one that named a subagent this turn
+    /// already announced gives that subagent its task. One whose guess went to another subagent than the one it
+    /// names retracts the guess (a start without a task). Otherwise it is kept as a candidate until a start claims
+    /// the id it named: an id-less one for the rest of the turn, a named one across turns (see [`MAX_NAMED`]).
+    pub(crate) fn tool_done(&mut self, tool_use_id: &str, outcome: ToolOutcome) -> Vec<Frame> {
+        let Some(i) = self
             .spawns
             .iter()
-            .position(|s| s.tool_use_id == tool_use_id)?;
+            .position(|s| s.tool_use_id == tool_use_id)
+        else {
+            return Vec::new();
+        };
         let spawn = self.spawns.remove(i);
         let ToolOutcome::Completed { spawned } = outcome else {
-            return None;
+            return Vec::new();
         };
+        let mut out = Vec::new();
+        if let Some(guessed) = &spawn.guessed {
+            match spawned {
+                // The guess stands: its own subagent, or no word otherwise.
+                None => return out,
+                Some(agent) if agent == guessed => return out,
+                Some(_) => {
+                    if let Some(wrong) = self.started.iter_mut().find(|s| &s.id == guessed)
+                        && wrong.task.is_some()
+                    {
+                        wrong.task = None;
+                        out.push(started_frame(wrong));
+                    }
+                }
+            }
+        }
         if let Some(agent) = spawned
             && let Some(started) = self.started.iter_mut().find(|s| s.id == agent)
         {
-            if started.task == spawn.task {
-                return None;
+            if started.task != spawn.task {
+                started.task = spawn.task;
+                out.push(started_frame(started));
             }
-            started.task = spawn.task;
-            return Some(started_frame(started));
+            return out;
         }
         if let Some(agent) = spawned {
             self.named.retain(|n| n.id.as_deref() != Some(agent));
         }
-        // A call whose guess already went to a subagent has had its start.
-        if spawn.guessed.is_none() {
-            self.named.push(Named {
-                id: spawned.map(str::to_owned),
-                agent_type: spawn.agent_type,
-                task: spawn.task,
-            });
-        }
-        None
+        self.named.push(Named {
+            id: spawned.map(str::to_owned),
+            agent_type: spawn.agent_type,
+            task: spawn.task,
+        });
+        let excess = self.named.len().saturating_sub(MAX_NAMED);
+        self.named.drain(..excess);
+        out
     }
 
     /// `SubagentStart`: the started frame, with the task of the spawning call that named it, or of the one candidate
@@ -209,13 +240,16 @@ impl Subagents {
     /// `SubagentStop`: the finished frame.
     pub(crate) fn finish(&mut self, id: &str) -> Frame {
         self.blocked.retain(|b| b.id != id);
+        self.named.retain(|n| n.id.as_deref() != Some(id));
         ShepherdFrame::SubagentFinished(SubagentFinished { id: id.to_owned() }).to_frame()
     }
 
-    /// The parent's turn ended: the session fold drops its subagents, so this forgets them too.
+    /// The parent's turn ended: the session fold drops its subagents, so this forgets them too. Ids that completed
+    /// calls named are kept: their subagents may start after the turn (Codex's `spawn_agent` returns before the
+    /// child's `SubagentStart`).
     pub(crate) fn end_turn(&mut self) {
         self.spawns.clear();
-        self.named.clear();
+        self.named.retain(|n| n.id.is_some());
         self.started.clear();
         self.blocked.clear();
     }

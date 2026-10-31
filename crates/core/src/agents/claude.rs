@@ -400,7 +400,7 @@ fn tool_done(
     state.permission_open = false;
     let mut out = vec![(Dir::FromAgent, frame)];
     let corrected = state.subagents.tool_done(id, outcome);
-    out.extend(corrected.map(|f| (Dir::Internal, f)));
+    out.extend(corrected.into_iter().map(|f| (Dir::Internal, f)));
     if let Some(agent) = hook.str("agent_id") {
         out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
     }
