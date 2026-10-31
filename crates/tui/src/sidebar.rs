@@ -1,7 +1,8 @@
 //! The session list on the left.
 //!
 //! The first three lines are the header: the search field (`⌕ Search…` across the sidebar), which opens the finder,
-//! the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the switcher, then a `+ New session` button
+//! the workspace of the selected session's machine (`⌂ <name>`, or `⌂ choose a workspace`; [`Client::workspace`]),
+//! which opens the switcher, then a `+ New session` button
 //! (`⌕`, `⌂` and `+` when collapsed). Each session is two lines: its status glyph,
 //! name and a `×` close button at the right edge, then `machine · PR`: the machine's name, from its host's hello
 //! ([`Client::machine_label`]), then the PR's number and its checks (`#123 ✓` passing, `✗` failing, `…` pending,
@@ -311,7 +312,7 @@ pub(crate) fn visible_rows<'a>(
 }
 
 /// What a machine header's second line says.
-fn machine_status(group: &MachineGroup) -> String {
+pub(crate) fn machine_status(group: &MachineGroup) -> String {
     match (&group.status, group.local) {
         (MachineStatus::Connected, true) => THIS_MACHINE.to_owned(),
         (MachineStatus::Connected, false) => "connected".to_owned(),

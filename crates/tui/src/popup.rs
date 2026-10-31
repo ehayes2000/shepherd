@@ -2,6 +2,11 @@
 //! profile picker for a new session, the workspace switcher, the offer to restart an outdated host, the finder
 //! ([`crate::finder`]), the offer to start a session in an orphan worktree, and the cleanup view ([`crate::cleanup`]).
 //!
+//! While there are peers, the new-session popup and the switcher start with a machine selector (T32): a line asking
+//! which machine, then a row per machine, the chosen one marked `●` and the others `○`. A machine that can't be reached
+//! now is drawn dim with why (`offline: …`) and isn't a control. The new-session popup then also has a `[Start]` button,
+//! which starts the chosen machine's default profile.
+//!
 //! Dialogs are centered, with their buttons right-aligned on their last line. The menu opens with its top-left corner
 //! where it was asked for, moved in to fit the window, wide enough for its longest line. An item that can't be chosen
 //! is drawn dim with the reason, and isn't a control. [`place`] says where a popup and its controls are, for both
@@ -12,7 +17,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Clear};
 use shepherd_core::client::{
-    Cell, Client, CloseCheck, HostOutdated, MenuEntry, MenuItem, Orphan, Popup,
+    Cell, Client, CloseCheck, HostOutdated, MachineStatus, MenuEntry, MenuItem, Orphan, Popup,
 };
 use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
@@ -20,6 +25,7 @@ use shepherd_core::wire::ProfileInfo;
 
 use crate::draw::{self, ShownLine, shown};
 use crate::layout::Target;
+use crate::sidebar::machine_status;
 use crate::width::{columns, cut, cut_left, pad, tail};
 use crate::{cleanup, finder};
 
@@ -69,6 +75,11 @@ const START_DIALOG_WIDTH: u16 = 48;
 
 /// The profile picker's line above its rows.
 const PICK_PROMPT: &str = "Which agent should the session run?";
+/// The machine selector's line above its rows.
+const MACHINE_PROMPT: &str = "Which machine?";
+/// How the chosen machine's row is marked, and the others'.
+const CHOSEN_MARK: &str = "●";
+const OTHER_MARK: &str = "○";
 /// How the default profile's row is marked.
 const DEFAULT_MARK: &str = "(default)";
 
@@ -282,18 +293,28 @@ fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
     placed
 }
 
-/// The profile picker: a prompt, then one row per profile (the default first and marked), each a whole line of the
-/// dialog, then `[Cancel]`. It is as tall as its profiles and fits the window; the rows shown start at the client's
+/// The profile picker: the machine selector while there are peers, a prompt, then one row per profile (the default
+/// first and marked), each a whole line of the dialog, then `[Cancel]` (`[Start]` `[Cancel]` with peers). It is as tall as its profiles and fits the window; the rows shown start at the client's
 /// scroll, moved up as far as the last rows fill it. Its columns are as wide as their longest entries, but a long
 /// name is cut short with `…` so the agent and the mark stay visible.
 fn pick_profile(client: &Client, window: Rect) -> Placed {
     let profiles = client.profiles();
     let count = u16::try_from(profiles.len()).unwrap_or(u16::MAX);
-    let mut placed = dialog(
-        centered(window, DIALOG_WIDTH, count.saturating_add(4)),
-        &[("[Cancel]", Target::Dismiss)],
-    );
+    let block = machine_lines(client);
+    let buttons: &[(&'static str, Target)] = if block > 0 {
+        &[("[Start]", Target::Confirm), ("[Cancel]", Target::Dismiss)]
+    } else {
+        &[("[Cancel]", Target::Dismiss)]
+    };
+    let height = count.saturating_add(4).saturating_add(block);
+    let mut placed = dialog(centered(window, DIALOG_WIDTH, height), buttons);
     let inside = inner(placed.area);
+    machine_rows(
+        client,
+        inside,
+        inside.bottom().saturating_sub(1),
+        &mut placed,
+    );
     let widest = |width: fn(&ProfileInfo) -> usize| profiles.iter().map(width).max().unwrap_or(0);
     let agent_width = widest(|p| columns(shown(p.agent.as_str()).as_str()));
     let mark_width = match client.default_profile() {
@@ -303,7 +324,7 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
     // The leading blank, and two blanks after the name.
     let room = usize::from(inside.width).saturating_sub(3 + agent_width + mark_width);
     let name_width = widest(|p| columns(shown(&p.name).as_str())).min(room.max(1));
-    let rows = (inside.y + 1)..inside.bottom().saturating_sub(1);
+    let rows = (inside.y.saturating_add(block) + 1)..inside.bottom().saturating_sub(1);
     let first = client
         .picker_scroll()
         .min(profiles.len().saturating_sub(rows.len()));
@@ -330,11 +351,70 @@ fn pick_profile(client: &Client, window: Rect) -> Placed {
 /// How many profiles the open picker shows at once in `window`.
 pub(crate) fn picker_rows(client: &Client, window: Rect) -> usize {
     let placed = pick_profile(client, window);
-    // Its border, the prompt and the buttons.
-    usize::from(placed.area.height.saturating_sub(4))
+    // Its border, the prompt and the buttons, and the machine selector.
+    usize::from(
+        placed
+            .area
+            .height
+            .saturating_sub(4)
+            .saturating_sub(machine_lines(client)),
+    )
 }
 
-/// The workspace switcher: the workspaces used before under a line saying so, each a whole line of the dialog with
+/// How many lines the machine selector takes at the top of the new-session popup and the switcher: its prompt and a
+/// row per machine, while there are peers; none otherwise.
+fn machine_lines(client: &Client) -> u16 {
+    match client.machines().len() {
+        0 | 1 => 0,
+        n => u16::try_from(n).unwrap_or(u16::MAX).saturating_add(1),
+    }
+}
+
+/// The machine selector's rows, under its prompt on `inside`'s first line and above line `limit`: a control per
+/// machine that can be reached now, the chosen one marked, and the others drawn dim with why.
+fn machine_rows(client: &Client, inside: Rect, limit: u16, placed: &mut Placed) {
+    if machine_lines(client) == 0 {
+        return;
+    }
+    let rows = (inside.y + 1)..limit;
+    for (group, y) in client.machines().into_iter().zip(rows) {
+        let mark = if client.popup_machine() == Some(&group.id) {
+            CHOSEN_MARK
+        } else {
+            OTHER_MARK
+        };
+        if group.status == MachineStatus::Connected {
+            placed.controls.push(Control {
+                area: Rect::new(inside.x, y, inside.width, 1),
+                target: Target::MachineRow(group.id.clone()),
+                label: shown(&format!(" {mark} {}", group.name)),
+            });
+        } else {
+            let why = machine_status(&group);
+            let label = shown(&format!(" {mark} {} ({why})", group.name));
+            placed.disabled.push((Position::new(inside.x, y), label));
+        }
+    }
+}
+
+/// Draws the machine selector's prompt on `body`'s first line, if there is one and the line is above `limit`.
+fn machine_prompt(client: &Client, body: Rect, limit: u16, buf: &mut Buffer) {
+    if machine_lines(client) == 0 || body.width == 0 || body.y >= limit {
+        return;
+    }
+    let style = Style::new().fg(Color::Gray);
+    draw::set(
+        buf,
+        body.x,
+        body.y,
+        &shown(MACHINE_PROMPT),
+        usize::from(body.width),
+        style,
+    );
+}
+
+/// The workspace switcher: the machine selector while there are peers, then the chosen machine's workspaces used
+/// before under a line saying so, each a whole line of the dialog with
 /// the current one marked; then the path prompt, the input, its error or a hint, and `[Open]` `[Cancel]`. It is as
 /// tall as its workspaces and fits the window; the rows shown start at the client's scroll, moved up as far as the
 /// last rows fill it. A long path is cut from the left with `…` so the repo's name and the mark stay visible.
@@ -347,13 +427,16 @@ fn switcher(client: &Client, window: Rect) -> Placed {
             .unwrap_or(u16::MAX)
             .saturating_add(1)
     };
-    let height = list.saturating_add(SWITCHER_TAIL + 2);
+    let block = machine_lines(client);
+    let height = list.saturating_add(SWITCHER_TAIL + 2).saturating_add(block);
     let mut placed = dialog(
         centered(window, SWITCHER_WIDTH, height),
         &[("[Open]", Target::Confirm), ("[Cancel]", Target::Dismiss)],
     );
     let inside = inner(placed.area);
-    let rows = (inside.y + 1)..inside.bottom().saturating_sub(SWITCHER_TAIL);
+    let limit = inside.bottom().saturating_sub(SWITCHER_TAIL);
+    machine_rows(client, inside, limit, &mut placed);
+    let rows = (inside.y.saturating_add(block) + 1)..limit;
     let first = client
         .switcher_scroll()
         .min(used.len().saturating_sub(rows.len()));
@@ -382,8 +465,14 @@ fn switcher(client: &Client, window: Rect) -> Placed {
 /// How many workspaces the open switcher shows at once in `window`.
 pub(crate) fn switcher_rows(client: &Client, window: Rect) -> usize {
     let placed = switcher(client, window);
-    // Its border, the line above the rows, and the lines below them.
-    usize::from(placed.area.height.saturating_sub(3 + SWITCHER_TAIL))
+    // Its border, the line above the rows, the lines below them, and the machine selector.
+    usize::from(
+        placed
+            .area
+            .height
+            .saturating_sub(3 + SWITCHER_TAIL)
+            .saturating_sub(machine_lines(client)),
+    )
 }
 
 /// Draws the switcher's text in `body`, the dialog above its buttons: the line above the rows, the prompt, the typed
@@ -400,10 +489,12 @@ fn switcher_body(
     }
     let width = usize::from(body.width);
     let gray = Style::new().fg(Color::Gray);
-    if !client.workspaces().is_empty() && body.height > SWITCHER_TAIL - 1 {
-        draw::set(buf, body.x, body.y, &shown(USED_BEFORE), width, gray);
-    }
     let bottom = body.bottom();
+    machine_prompt(client, body, bottom - 3, buf);
+    let used_at = body.y.saturating_add(machine_lines(client));
+    if !client.workspaces().is_empty() && used_at < bottom - 3 {
+        draw::set(buf, body.x, used_at, &shown(USED_BEFORE), width, gray);
+    }
     draw::set(buf, body.x, bottom - 3, &shown(OPEN_PROMPT), width, gray);
     let cursor = text_input(path, Rect::new(body.x, bottom - 2, body.width, 1), buf);
     let (below, style) = match error {
@@ -453,10 +544,12 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             None
         }
         Popup::PickProfile => {
-            if body.height > 0 {
+            machine_prompt(client, body, body.bottom(), buf);
+            let prompt_at = body.y.saturating_add(machine_lines(client));
+            if prompt_at < body.bottom() {
                 let style = Style::new().fg(Color::Gray);
                 let width = usize::from(body.width);
-                draw::set(buf, body.x, body.y, &shown(PICK_PROMPT), width, style);
+                draw::set(buf, body.x, prompt_at, &shown(PICK_PROMPT), width, style);
             }
             None
         }
@@ -490,7 +583,8 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         .filter(|c| !matches!(c.target, Target::FinderRow(_)));
     for control in drawn {
         let style = match (popup, &control.target) {
-            (Popup::Menu { .. }, _) | (_, Target::Profile(_) | Target::WorkspaceRow(_)) => {
+            (Popup::Menu { .. }, _)
+            | (_, Target::Profile(_) | Target::WorkspaceRow(_) | Target::MachineRow(_)) => {
                 Style::new()
             }
             _ => button,

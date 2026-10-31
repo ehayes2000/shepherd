@@ -8,11 +8,11 @@
 //! window regains focus. With the host's `[notify] bell` on, a session that newly wants the user gives a
 //! [`ClientCommand::Alert`], except while the log is being caught up after a (re)connect.
 //!
-//! Workspaces: the host's workspace and the ones used before are folded from its log like the sessions. Every session
-//! is listed, whatever its workspace; one created in a workspace other than the current one is marked
-//! ([`ClientSession::elsewhere`]) rather than hidden, so nothing running is ever out of sight. The switcher
-//! ([`Popup::Workspace`]) asks the host to select a workspace and stays open until the host answers: a refusal is shown
-//! in it.
+//! Workspaces: each machine's host has its own workspace and the ones used before, folded from its log like the
+//! sessions. Every session is listed, whatever its workspace; one created in a workspace other than its host's current
+//! one is marked ([`ClientSession::elsewhere`]) rather than hidden, so nothing running is ever out of sight. The
+//! switcher ([`Popup::Workspace`]) asks a host to select a workspace and stays open until the host answers: a refusal is
+//! shown in it.
 //!
 //! Closing: the close confirmation of a session with a worktree asks the host what removing the worktree would lose
 //! ([`Client::close_check`]). If it loses nothing, confirming lets the host remove it (if that is still true when it
@@ -56,11 +56,19 @@
 //! fold and seqs ([`ClientEvent::Peer`]). Sessions are listed grouped by the host they came from, this machine's
 //! first, then the peers by name, each newest first ([`Client::sidebar`] adds a header per machine while there are
 //! peers). A session id two hosts both claim is listed once, as the first group's. Input, resizes, renames, closes,
-//! resumes and the close check go to the session's own host, and a new session to the selected session's. A peer that
+//! resumes and the close check go to the session's own host. A peer that
 //! drops keeps its last-known sessions (shown dimmed, [`Client::offline`]) and is dialled again at once; a failed
 //! attempt waits [`PEER_RETRY`], doubling up to [`PEER_RETRY_MAX`], counted from the first tick after it failed. A
-//! reconnect subscribes from the last entry folded of each of its logs: no gap, no repeat. Workspaces, the finder's
-//! orphans, cleanup and host updates stay this machine's host's.
+//! reconnect subscribes from the last entry folded of each of its logs: no gap, no repeat. The finder's orphans, cleanup
+//! and host updates stay this machine's host's.
+//!
+//! Where new sessions run (T32): while there are peers, `+ New session` opens the new-session popup
+//! ([`Popup::PickProfile`]) with a machine selector, and the workspace switcher has one too. Each opens on the selected
+//! session's machine (this one with nothing selected, or when that machine can't be reached now): see
+//! [`Client::popup_machine`]. Only a machine that can be reached now can be chosen ([`Intent::PickMachine`]). The
+//! profiles offered, the workspaces listed, and where the session starts or the workspace is selected are the chosen
+//! machine's host's. Without a popup open, the selected session's machine is the one acted on: the new-session key
+//! starts a session there, and [`Client::workspace`] is its workspace.
 //!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
@@ -207,6 +215,9 @@ pub enum Intent {
     BeginNewSession,
     /// Start a session with this profile, from the open profile picker. Ignored when the picker isn't open.
     PickProfile(String),
+    /// Choose the machine the open new-session popup or workspace switcher acts on (a click on its row). Ignored when
+    /// neither is open, or the machine can't be reached now.
+    PickMachine(MachineId),
     ShowHelp,
     /// Open the rename popup for the selected session, starting from its current name.
     BeginRename,
@@ -532,6 +543,9 @@ pub struct Client {
     /// The terminal window has focus. Assumed until the terminal says otherwise.
     window_focused: bool,
     popup: Option<Popup>,
+    /// The host the open new-session popup or workspace switcher acts on, chosen when it opened and by
+    /// [`Intent::PickMachine`]. Only read while one of them is open.
+    target: Option<At>,
     /// What removing the worktree of the session in the close confirmation would lose, while that is open.
     close_check: Option<CloseCheck>,
     /// The status request for the close confirmation's session, while unanswered.
@@ -735,6 +749,7 @@ impl Client {
             focus: Focus::default(),
             window_focused: true,
             popup: None,
+            target: None,
             close_check: None,
             status_request: None,
             size: None,
@@ -767,14 +782,16 @@ impl Client {
         }
     }
 
-    /// The host's workspace, once its log says.
+    /// The workspace of the machine the user is acting on ([`Client::popup_machine`] while the new-session popup or
+    /// the switcher is open, else the selected session's), once its host's log says.
     pub fn workspace(&self) -> Option<&Path> {
-        self.local.registry.workspace()
+        self.acting_feed().registry.workspace()
     }
 
-    /// Every workspace the host has used, the current one first, see [`Host::workspaces`].
+    /// Every workspace the host of the machine the user is acting on has used, the current one first, see
+    /// [`Host::workspaces`] and [`Client::workspace`].
     pub fn workspaces(&self) -> &[PathBuf] {
-        self.local.registry.workspaces()
+        self.acting_feed().registry.workspaces()
     }
 
     /// Open sessions, grouped by machine (this one first, then the peers by name), each group newest first.
@@ -865,6 +882,16 @@ impl Client {
 
     pub fn popup(&self) -> Option<&Popup> {
         self.popup.as_ref()
+    }
+
+    /// The machine the open new-session popup or workspace switcher acts on. `None` when neither is open.
+    pub fn popup_machine(&self) -> Option<&MachineId> {
+        match (&self.popup, &self.target) {
+            (Some(Popup::PickProfile | Popup::Workspace { .. }), Some(at)) => {
+                Some(self.machine_of(at))
+            }
+            _ => None,
+        }
     }
 
     /// What removing the worktree of the session in the open close confirmation would lose. `None` when no close
@@ -992,15 +1019,16 @@ impl Client {
         self.size
     }
 
-    /// The agent profiles offered for new sessions by the host they start on (the selected session's), the default
-    /// first. Empty until that host has said, or from a host older than profiles.
+    /// The agent profiles offered for new sessions by the host they start on (the machine chosen in the open
+    /// new-session popup, else the selected session's), the default first. Empty until that host has said, or from a
+    /// host older than profiles.
     pub fn profiles(&self) -> &[ProfileInfo] {
-        &self.new_session_feed().profiles
+        &self.acting_feed().profiles
     }
 
     /// The profile a session runs when none is picked, once the host new sessions start on has said.
     pub fn default_profile(&self) -> Option<&str> {
-        self.new_session_feed().default_profile.as_deref()
+        self.acting_feed().default_profile.as_deref()
     }
 
     /// Whether a session on this machine that newly wants the user gives a [`ClientCommand::Alert`] (the host's
@@ -1137,15 +1165,62 @@ impl Client {
         self.homes.get(session).cloned().unwrap_or(At::Local)
     }
 
-    /// The host new sessions start on: the selected session's.
-    fn new_session_host(&self) -> At {
+    /// The host the user acts on when nothing says otherwise: the selected session's, or this machine's.
+    fn default_host(&self) -> At {
         self.selected
             .as_ref()
             .map_or(At::Local, |session| self.home(session))
     }
 
-    fn new_session_feed(&self) -> &Feed {
-        self.feed(&self.new_session_host()).unwrap_or(&self.local)
+    /// The host a popup that chooses its machine opens on: the default one, or this machine's if that can't be
+    /// reached now, since an unreachable machine can't be chosen.
+    fn popup_default(&self) -> At {
+        let at = self.default_host();
+        if self.ready(&at) { at } else { At::Local }
+    }
+
+    /// The host the user is acting on: the one chosen in the open new-session popup or switcher, else the default.
+    fn acting_host(&self) -> At {
+        match (&self.popup, &self.target) {
+            (Some(Popup::PickProfile | Popup::Workspace { .. }), Some(at)) => at.clone(),
+            _ => self.default_host(),
+        }
+    }
+
+    fn acting_feed(&self) -> &Feed {
+        self.feed(&self.acting_host()).unwrap_or(&self.local)
+    }
+
+    /// The machine of host `at`.
+    fn machine_of<'a>(&'a self, at: &'a At) -> &'a MachineId {
+        match at {
+            At::Local => self.local.machine.as_ref().unwrap_or(&self.machine),
+            At::Peer(machine) => machine,
+        }
+    }
+
+    /// Chooses `machine` for the open new-session popup or switcher, if one is open and it can be reached now.
+    fn pick_machine(&mut self, machine: MachineId) -> Vec<ClientCommand> {
+        if !matches!(
+            self.popup,
+            Some(Popup::PickProfile | Popup::Workspace { .. })
+        ) {
+            return Vec::new();
+        }
+        let at = if self.peers.contains_key(&machine) {
+            At::Peer(machine)
+        } else if *self.machine_of(&At::Local) == machine {
+            At::Local
+        } else {
+            return Vec::new();
+        };
+        if !self.ready(&at) {
+            return Vec::new();
+        }
+        self.target = Some(at);
+        self.picker_scroll = 0;
+        self.switcher_scroll = 0;
+        Vec::new()
     }
 
     /// This machine's host listed the peers it trusts: drops those it no longer lists (and their sessions), and dials
@@ -1541,6 +1616,18 @@ impl Client {
                 Vec::new()
             }
             (Method::Hello, Err(e)) => self.fail(format!("the shepherd host refused us: {e}")),
+            (method, result) => self.answered(method, &id, result),
+        }
+    }
+
+    /// An answer any host may give, to request `id`.
+    fn answered(
+        &mut self,
+        method: Method,
+        id: &RequestId,
+        result: Result<HostResult, WireError>,
+    ) -> Vec<ClientCommand> {
+        match (method, result) {
             (Method::WorkspaceSelect, result) => {
                 let open = self.popup.as_mut().and_then(|p| match p {
                     Popup::Workspace { error, .. } => Some(error),
@@ -1554,18 +1641,6 @@ impl Client {
                 }
                 Vec::new()
             }
-            (method, result) => self.answered(method, &id, result),
-        }
-    }
-
-    /// An answer any host may give, to request `id`.
-    fn answered(
-        &mut self,
-        method: Method,
-        id: &RequestId,
-        result: Result<HostResult, WireError>,
-    ) -> Vec<ClientCommand> {
-        match (method, result) {
             (Method::WorktreeStatus, result) => {
                 let asked = self.status_request.take_if(|(asked, _)| asked == id);
                 let open = match (&self.popup, asked) {
@@ -2130,26 +2205,20 @@ impl Client {
                 Vec::new()
             }
             Intent::FinderChoose(item) => self.finder_choose(item),
-            Intent::NewSession => self.new_session(None),
-            Intent::BeginNewSession => match self.profiles() {
-                [] => self.new_session(None),
-                [only] => {
-                    let name = only.name.clone();
-                    self.new_session(Some(name))
-                }
-                _ => {
-                    self.popup = Some(Popup::PickProfile);
-                    self.picker_scroll = 0;
-                    Vec::new()
-                }
-            },
+            Intent::NewSession => {
+                let host = self.default_host();
+                self.new_session(&host, None)
+            }
+            Intent::BeginNewSession => self.begin_new_session(),
             Intent::PickProfile(name) => {
                 if self.popup != Some(Popup::PickProfile) {
                     return Vec::new();
                 }
+                let host = self.acting_host();
                 self.popup = None;
-                self.new_session(Some(name))
+                self.new_session(&host, Some(name))
             }
+            Intent::PickMachine(machine) => self.pick_machine(machine),
             Intent::ShowHelp => {
                 self.popup = Some(Popup::Help);
                 Vec::new()
@@ -2193,6 +2262,7 @@ impl Client {
                 }
             }
             Intent::BeginWorkspace => {
+                self.target = Some(self.popup_default());
                 self.popup = Some(Popup::Workspace {
                     path: String::new(),
                     error: None,
@@ -2258,6 +2328,11 @@ impl Client {
                 Some(Popup::Cleanup) => {
                     self.popup = Some(Popup::Cleanup);
                     Vec::new()
+                }
+                // While there are peers, its `[Start]` starts the chosen machine's default profile.
+                Some(Popup::PickProfile) if !self.peers.is_empty() => {
+                    let host = self.target.clone().unwrap_or_else(|| self.default_host());
+                    self.new_session(&host, None)
                 }
                 Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
             },
@@ -2741,15 +2816,35 @@ impl Client {
         commands
     }
 
-    /// Starts a session running `profile`, or the host's default, on the selected session's host.
-    fn new_session(&mut self, profile: Option<String>) -> Vec<ClientCommand> {
-        let host = self.new_session_host();
+    /// The `+ New session` button. While there are peers it opens the popup on the default machine (`popup_default`),
+    /// so the machine can be chosen; otherwise it opens the profile picker, or, with at most one profile, starts a
+    /// session at once.
+    fn begin_new_session(&mut self) -> Vec<ClientCommand> {
+        let host = self.popup_default();
+        if self.peers.is_empty() {
+            match self.profiles() {
+                [] => return self.new_session(&host, None),
+                [only] => {
+                    let name = only.name.clone();
+                    return self.new_session(&host, Some(name));
+                }
+                _ => {}
+            }
+        }
+        self.target = Some(host);
+        self.popup = Some(Popup::PickProfile);
+        self.picker_scroll = 0;
+        Vec::new()
+    }
+
+    /// Starts a session running `profile`, or the host's default, on host `at`.
+    fn new_session(&mut self, at: &At, profile: Option<String>) -> Vec<ClientCommand> {
         let new = ClientRequest::SessionNew(SessionNew {
             profile,
             size: self.view_size(),
             ..SessionNew::default()
         });
-        self.user_request_to(&host, new)
+        self.user_request_to(at, new)
     }
 
     /// A click on `machine`'s header: a peer waiting to be tried again is tried now; otherwise its newest session is
@@ -2787,9 +2882,13 @@ impl Client {
         })
     }
 
-    /// Asks the host to select workspace `path`. The switcher stays open until it answers.
+    /// Asks the switcher's machine's host to select workspace `path`. The switcher stays open until it answers.
     fn select_workspace(&mut self, path: String) -> Vec<ClientCommand> {
-        self.user_request(ClientRequest::WorkspaceSelect(WorkspaceSelect { path }))
+        let host = self.acting_host();
+        self.user_request_to(
+            &host,
+            ClientRequest::WorkspaceSelect(WorkspaceSelect { path }),
+        )
     }
 
     /// A request the user asked for of this machine's host. Dropped, with a notice, while not connected.
