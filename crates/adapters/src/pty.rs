@@ -836,7 +836,8 @@ mod tests {
 
     /// A process that is no child of ours, leading a process group of its own: what a stale or forged token's pid
     /// could name. It writes `ready` to its log once it leads its group, and `pong` on each SIGUSR1. Killed by its pid
-    /// when dropped.
+    /// when dropped, and ends by itself after [`STRANGER_LIFETIME`] anyway. It is signalled only while its pid is
+    /// proven ours: its log's path is in its arguments ([`crate::test_pids`]).
     struct Stranger {
         pid: u32,
         log: std::path::PathBuf,
@@ -847,15 +848,16 @@ mod tests {
         fn start() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let log = dir.path().join("log");
-            let script = r#"use POSIX; setsid(); $| = 1; $SIG{USR1} = sub { print "pong\n" }; print "ready\n"; sleep 1 while 1"#;
+            let script = r#"use POSIX; setsid(); $| = 1; $SIG{USR1} = sub { print "pong\n" }; print "ready\n"; my $end = time + shift; sleep 1 while time < $end"#;
             let out = std::process::Command::new("sh")
                 .args([
                     "-c",
-                    r#"perl -e "$1" </dev/null >"$2" 2>&1 & echo $!"#,
+                    r#"perl -e "$1" "$3" "$2" </dev/null >"$2" 2>&1 & echo $!"#,
                     "sh",
                     script,
                 ])
                 .arg(&log)
+                .arg(STRANGER_LIFETIME.as_secs().to_string())
                 .output()
                 .unwrap();
             let pid = String::from_utf8(out.stdout)
@@ -894,17 +896,50 @@ mod tests {
 
         /// Whether it is alive and answering: a signal sent before this one (a SIGKILL) would be acted on first.
         fn answers(&self) -> bool {
-            // SAFETY: plain syscall on the pid this test started.
-            unsafe { libc::kill(libc::pid_t::try_from(self.pid).unwrap(), libc::SIGUSR1) };
-            self.wait_for("pong", 1)
+            self.signal(libc::SIGUSR1) && self.wait_for("pong", 1)
+        }
+
+        /// Sends `signal` to it while its pid is proven ours. Whether it was sent.
+        fn signal(&self, signal: libc::c_int) -> bool {
+            let pid = libc::pid_t::try_from(self.pid).unwrap();
+            crate::test_pids::signal_if_ours(pid, &self.log, signal)
         }
     }
 
+    /// How long a [`Stranger`] lives at most, in case a failed test leaks it.
+    const STRANGER_LIFETIME: Duration = Duration::from_secs(120);
+
     impl Drop for Stranger {
         fn drop(&mut self) {
-            // SAFETY: plain syscall on the pid this test started.
-            unsafe { libc::kill(libc::pid_t::try_from(self.pid).unwrap(), libc::SIGKILL) };
+            self.signal(libc::SIGKILL);
         }
+    }
+
+    /// A stranger that died may have its pid handed to someone else's process (one leading a group of its own, as a
+    /// git another test runs does): asking it and dropping it leave that process alone (F51).
+    #[test]
+    fn a_stranger_spares_a_process_that_took_its_pid() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut other = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let stranger = Stranger {
+            pid: other.id(),
+            log: dir.path().join("log"),
+            _dir: dir,
+        };
+        let answered = stranger.answers();
+        drop(stranger);
+        let id = libc::pid_t::try_from(other.id()).unwrap();
+        // A signal sent above would be acted on before this SIGTERM.
+        // SAFETY: plain syscall on our own unreaped child.
+        unsafe { libc::kill(id, libc::SIGTERM) };
+        let status = other.wait().unwrap();
+        assert!(!answered);
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
     }
 
     /// A real token's terminals, exported from a live session of `pty`.

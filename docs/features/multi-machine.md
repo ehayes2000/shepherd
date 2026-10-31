@@ -13,9 +13,10 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
 | T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
 | T31 | Remote link and merged sidebar (split into T31a, T31b) | parked | split |  | see T31a/T31b |
-| T31a | Tunnel to a peer's host over iroh | building | task/t31a-iroh-tunnel |  |  |
+| T31a | Tunnel to a peer's host over iroh | review | task/t31a-iroh-tunnel @ 341ea4f |  | built; Link gained pause_reading + open (decision 0021) |
 | T31b | Merged sidebar across machines | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
+| F52 | Peer conn hardening after the tunnel | todo |  |  |  |
 
 ## Specs
 
@@ -168,3 +169,19 @@ acceptance:
 scope: crates/core, crates/tui
 accepted (decision 0019): show on each machine whether its path is relayed or direct (iroh `Connection::paths()`), since
 relayed typing costs about 26 ms more per keystroke.
+
+### F52: Peer conn hardening after the tunnel
+depends: T31a
+touches: core::peering, shepherd::host (swap, runtime), adapters::peers
+goal: From T31a's builder: gaps it left out of scope.
+acceptance:
+- `pair/*` and `peer/remove` requests from a peer machine's conn (`Link::peer(conn).is_some()`) are refused like tunnels
+  are: only local clients manage pairing and trust. Test both.
+- A swap unbinds the iroh endpoint before exec, so peers see the conn close at once instead of at idle timeout; the new host
+  rebinds with the same identity. Test with the fake peers port; note the real behaviour in `scripts/e2e-peers.sh`.
+- Opening more tunnels to one peer than the connection's stream limit (100 concurrent streams) gives a clear error answer,
+  not a hang; or the limit is raised with a stated bound.
+- Lines already handed to the loop before a pause are held by the tunnel unbounded in principle (decision 0021): count them
+  and close the tunnel with a clear reason past a stated cap, test with the fake.
+scope: crates/core, crates/testkit, crates/adapters, crates/shepherd
+

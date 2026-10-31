@@ -99,8 +99,8 @@ fi
 
 # macOS assesses every newly written executable on its first exec, one file at a time machine-wide, which stalls tests
 # under load (F45, F46). Tests in these crates write no script to exec: a stand-in is a symlink to testkit's checked-in
-# script (`shepherd_testkit::stand_in`), whose body is plain data.
-if fresh_exe=$(grep -rnE --include='*.rs' '"#!/' crates/shepherd crates/testkit 2>/dev/null |
+# script (`shepherd_testkit::stand_in`, or the adapters' own `crate::stand_in`), whose body is plain data.
+if fresh_exe=$(grep -rnE --include='*.rs' '"#!/' crates/shepherd crates/testkit crates/adapters 2>/dev/null |
   grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
   printf '%s\n' "$fresh_exe" >&2
   err "tests must not write a script to exec it; install it with shepherd_testkit::stand_in (F46)"

@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | building | task/t31a-iroh-tunnel |  |  |
-| F51 Test cleanup never signals a pid it can't prove is ours | [worktrees](features/worktrees.md) | building | task/f51-pid-ownership |  |  |
+| T31a Tunnel to a peer's host over iroh | [multi-machine](features/multi-machine.md) | review | task/t31a-iroh-tunnel @ 341ea4f |  | built; Link gained pause_reading + open (decision 0021) |
+| F51 Test cleanup never signals a pid it can't prove is ours | [worktrees](features/worktrees.md) | merging | task/f51-pid-ownership @ 99b5f20 | 2 | round 2 APPROVE; ps retry pause untestable (accepted) |
 
 ## Ready to start
 
@@ -42,7 +42,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 9 | 1 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 5 | 2 | A new build replaces the running host in place without stopping sessions |
-| [Multi-machine](features/multi-machine.md) | M4 | 3 | 3 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
+| [Multi-machine](features/multi-machine.md) | M4 | 3 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |

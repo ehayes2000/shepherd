@@ -835,3 +835,15 @@ Context: the user's proposal `docs/proposals/conversation-archive.md`; cleanup m
 Consequences: one new crate and port; T42 adds `Worktrees::commits_since`; a Claude cwd-rewrite on restore is decided by
 T44's evidence, not assumed.
 
+### 0021: `Link` gains reading pause, dialling and per-conn peer identity (amends 0019) (2026-10-31)
+Context: T31a tunnels a local client conn to a peer's host over iroh. Flow control needs the host to stop reading one side
+while the other is backed up, and something has to dial a peer. Decision: `Link` gains, additively and with contract cases
+run against the fake, the unix adapter and the iroh adapter:
+- `peer(conn) -> Option<MachineId>` (None for local conns) and `DisconnectReason::Refused`;
+- `drained_bytes(conn)`, which catch-up stall detection uses as its progress signal;
+- `pause_reading(conn, paused)`: no lines are emitted for a paused conn until it is resumed; it still closes;
+- `open(peer)`: dial a trusted peer; a link that can't dial (unix) returns `LinkError::NoPeers`.
+The runtime joins the unix and iroh links into one `Link` (`HostLinks`: local conn ids even, peer ids odd). Pausing is
+best-effort per line: lines already handed to the loop before a pause are held by the tunnel. A hard bound would need
+credits on `Link` (like the PTY acks); not now.
+Consequences: every `Link` implementation provides these. Requests that only local clients may make check `peer(conn)`.
