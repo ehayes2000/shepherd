@@ -27,7 +27,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
 | F48 | repo_root returns an uncanonical /tmp path under load | done | df99fff | 2 | round 2 APPROVE; not reproduced (accepted); signal death → Other; fixture drops prove ownership; r4 24-copy 0 failures. Minor: ps retries have no pause (F51) |
-| F51 | Test cleanup never signals a pid it can't prove is ours | merging | task/f51-pid-ownership @ 99b5f20 | 2 | round 2 APPROVE; ps retry pause untestable (accepted) |
+| F51 | Test cleanup never signals a pid it can't prove is ours | done | dada354 | 2 | round 2 APPROVE; ps retry pause untestable (accepted) |
 
 ## Specs
 
