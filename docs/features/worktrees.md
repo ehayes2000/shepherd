@@ -26,7 +26,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F33 | Hooks don't queue behind each other or outlive the host | done | 5cf8a10 | 2 | hooks started during shutdown never cancelled; vacuous cancel test; untested tail cap; macOS EPERM group wait |
 | F37 | A killed fetch can leave a stale remote-ref lock | done | 839c963 | 3 | extra refspec locked a 2nd ref; deleting a foreign lock taken mid-fetch (→ private fetch ref); untested kill/before checks; rewind of origin/<default> |
 | F39 | T26 leftovers | todo |  |  |  |
-| F48 | repo_root returns an uncanonical /tmp path under load | building | task/f48-repo-root-spelling @ e074e75 | 0 |  |
+| F48 | repo_root returns an uncanonical /tmp path under load | todo |  | 0 | not reproduced at 4 copies; hypothesis: stray SIGKILL via pid reuse from test cleanup; plan in spec |
 
 ## Specs
 
@@ -338,5 +338,11 @@ goal: In the T30 review's gate, `worktrees::tests::repo_root_of_a_nested_subdire
 (git's `rev-parse --show-toplevel` vs our canonicalization, or a fixture race) breaks "canonicalize at the boundary once".
 acceptance:
 - Reproduce (loaded rounds), find the cause, regression test first (fix-bug); 0 failures in a 24-copy round of the filter.
+- Investigation (2026-10-31, not reproduced at 4 copies): it's not a spelling bug. `NotARepo` came from
+  `Failure::or_not_a_repo`, which maps any git exit, including death by a signal, to NotARepo. Hypothesis: a stray SIGKILL
+  through pid reuse from test cleanup that kills recorded pids that may be dead (`StandInFixture::drop` launcher.rs
+  ~536-547, `ShellFixture::drop` commands.rs ~402). On resume: (1) a signal death maps to `Other`, not NotARepo; (2) those
+  Drops only signal a pid still known to be ours; (3) a 24-copy round with the diagnostic patch (scratchpad
+  `f48-diag.txt`, `f48-load.sh`) to confirm.
 scope: crates/adapters
 
