@@ -252,6 +252,25 @@ pub mod builders {
             self.append(Some(id), source, frame)
         }
 
+        /// Like [`Self::agent_started`], naming the agent session and the transcript path its hook payload gave.
+        pub fn agent_started_with_transcript(
+            &mut self,
+            id: &str,
+            agent: &str,
+            agent_session: &str,
+            transcript_path: &str,
+        ) -> Envelope {
+            let params = json!({
+                "agent": agent,
+                "agent_session_id": agent_session,
+                "transcript_path": transcript_path,
+            });
+            let frame =
+                json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/started", "params": params });
+            let source = Source::new(SourceKind::Hook, Some(agent.to_owned()));
+            self.append(Some(id), source, frame)
+        }
+
         /// A `Resume` of `id`, with `spec`.
         pub fn resume(&mut self, id: &str, spec: ResumeSpec) -> Vec<HostCommand> {
             let reply = self.reply_to();

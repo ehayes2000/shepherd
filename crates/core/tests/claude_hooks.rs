@@ -474,6 +474,29 @@ fn session_start_becomes_agent_started_with_the_agent_session_id() {
 }
 
 #[test]
+fn session_start_carries_the_transcript_path_from_the_payload() {
+    let drafts = one(&[fx!("SessionStart.startup")]);
+    let ShepherdFrame::AgentStarted(s) = shepherd(&drafts[0]) else {
+        panic!("expected agent/started");
+    };
+    assert_eq!(
+        s.transcript_path.as_deref(),
+        Some("/Users/dev/.claude/projects/-Users-dev-app/abc123.jsonl")
+    );
+}
+
+#[test]
+fn session_start_without_a_transcript_path_has_none() {
+    let mut payload = fx!("SessionStart.startup");
+    payload.as_object_mut().map(|o| o.remove("transcript_path"));
+    let drafts = one(&[payload]);
+    let ShepherdFrame::AgentStarted(s) = shepherd(&drafts[0]) else {
+        panic!("expected agent/started");
+    };
+    assert_eq!(s.transcript_path, None);
+}
+
+#[test]
 fn session_start_after_compaction_does_not_restart_the_agent() {
     let drafts = one(&[fx!("SessionStart.compact")]);
     assert_eq!(methods(&drafts), vec![Some("_claude-code/SessionStart")]);

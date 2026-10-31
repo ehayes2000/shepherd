@@ -368,6 +368,33 @@ fn session_start_becomes_agent_started_with_codexs_session_id() {
 }
 
 #[test]
+fn session_start_carries_the_rollout_path_from_the_payload() {
+    let drafts = one(&[fx!("SessionStart.startup")]);
+    let ShepherdFrame::AgentStarted(s) = shepherd(&drafts[0]) else {
+        panic!("expected agent/started");
+    };
+    assert_eq!(
+        s.transcript_path.as_deref(),
+        Some(
+            "/home/me/.codex/sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a0000-0000-7000-8000-00000000c0de.jsonl"
+        )
+    );
+}
+
+#[test]
+fn session_start_with_a_null_transcript_path_has_none() {
+    // `transcript_path` is a `NullableString` in Codex's schema: null when the session has no rollout file.
+    let mut payload = fx!("SessionStart.startup");
+    payload["transcript_path"] = Value::Null;
+    let drafts = one(&[payload]);
+    let ShepherdFrame::AgentStarted(s) = shepherd(&drafts[0]) else {
+        panic!("expected agent/started");
+    };
+    assert_eq!(s.transcript_path, None);
+    assert_eq!(s.agent_session_id.as_deref(), Some(CODEX_SESSION));
+}
+
+#[test]
 fn session_start_after_compaction_does_not_restart_the_agent() {
     assert_eq!(
         methods(&one(&[fx!("SessionStart.compact")])),

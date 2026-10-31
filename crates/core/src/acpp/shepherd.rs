@@ -205,6 +205,10 @@ pub struct AgentStarted {
     /// The command line, as the producer recorded it (a string or an argv array).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Value>,
+    /// Where the agent writes this agent session's transcript, as its hook payload's `transcript_path` said. Data
+    /// only: core never resolves or reads it. The conversation archive captures from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
 }
 
 /// The agent is at its prompt with nothing to do.

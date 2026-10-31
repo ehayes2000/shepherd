@@ -474,14 +474,16 @@ fn arb_shepherd() -> impl Strategy<Value = ShepherdFrame> {
             arb_string(),
             arb_opt_string(),
             proptest::option::of(any::<u32>()),
-            proptest::option::of(arb_present_json())
+            proptest::option::of(arb_present_json()),
+            arb_opt_string()
         )
-            .prop_map(|(agent, agent_session_id, pid, command)| {
+            .prop_map(|(agent, agent_session_id, pid, command, transcript_path)| {
                 ShepherdFrame::AgentStarted(AgentStarted {
                     agent,
                     agent_session_id,
                     pid,
                     command,
+                    transcript_path,
                 })
             }),
         prop_oneof![
