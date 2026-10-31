@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
-| T30 | Pairing and trusted peers | merging | task/t30-pairing @ 060ab1e | 2 | approved r2; minors → T31 notes |
+| T30 | Pairing and trusted peers | done | 08688db | 2 | printed ticket cut to 128 chars; lenient ticket decode; mistyped join went online; Ctrl-C left pairing open |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 

@@ -13,7 +13,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T36a | Build identity in the hello, and a clear mismatch UX | done | 44dac96 | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | T36b | Hot-swap the host by re-exec, keeping sessions running | done | 2de1f2f | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
-| F47 | A swap can lose its Accepted answer before exec | review | task/f47-swap-flush @ 2534cdc (on 3ab1965) | 1 | Link::flush_closed; swap waits bounded by CLOSE_FLUSH; fake keeps slow peer's lines. Reviewer judges shutdown race |
+| F47 | A swap can lose its Accepted answer before exec | fixing | task/f47-swap-flush @ 2534cdc | 1 | Blocking: deadline from env clock, waited on real clock → port takes a Duration. Minor: prune test |
+| F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
 
 ## Specs
 
@@ -128,4 +129,14 @@ scope: crates/core (port), crates/testkit, crates/adapters, crates/shepherd
 notes: (binding) PM-approved port change: `Link` gains an additive way to wait for closed conns to finish flushing, e.g.
 `fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome` (or a joinable close), with a contract case run against
 the fake and the unix adapter. The runtime's single-thread rule (0011) holds: the wait is bounded and only during a swap.
+
+### F49: Shutdown exits without flushing closed connections
+depends: F47
+touches: shepherd::host::runtime (finish)
+goal: From the F47 review: `HostRuntime::finish` closes connections and the process exits without waiting for their
+writers, so trailing notifications are lost. Nobody waits on an answer there (unlike a swap's `Accepted`), so it's minor.
+acceptance:
+- After the loop is done, `finish` calls `flush_closed(CLOSE_FLUSH)` (the same bounded call as a swap); a test shows a slow
+  client receives what was queued before shutdown, and a never-reading client can't hold shutdown past the bound.
+scope: crates/shepherd
 
