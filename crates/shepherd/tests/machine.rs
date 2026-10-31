@@ -32,6 +32,7 @@ fn named(name: &str) -> RawConfig {
     RawConfig {
         machine: Some(RawMachine {
             name: Some(name.to_owned()),
+            ..RawMachine::default()
         }),
         ..shell_default_config()
     }

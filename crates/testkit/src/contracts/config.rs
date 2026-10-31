@@ -116,6 +116,7 @@ bell = true
 
 [machine]
 name = "studio"
+color = "magenta"
 
 [workspaces."/src/app"]
 hook_timeout_s = 30
@@ -155,6 +156,7 @@ pre_remove = ["make clean"]
             notify: Some(RawNotify { bell: Some(true) }),
             machine: Some(RawMachine {
                 name: Some("studio".into()),
+                color: Some("magenta".into()),
             }),
             workspaces: Some(BTreeMap::from([(
                 "/src/app".into(),

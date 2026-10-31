@@ -6,16 +6,17 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use shepherd_core::client::{ClientCommand, ClientEvent, Focus, Intent, PeerEvent};
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::machine::MachineColor;
 use shepherd_core::wire::{
     ClientMessage, HostMessage, HostNotification, LogEntry, PROTOCOL_VERSION, RawResponse,
 };
 use shepherd_term::Modes;
 use shepherd_testkit::builders::{ClientDriver, HostDriver, ts};
-use shepherd_tui::{Pointer, Screens, Target, hit, layout, map_event, render};
+use shepherd_tui::{Pointer, Screens, Target, hit, layout, machine, map_event, render};
 
 const WINDOW: Rect = Rect::new(0, 0, 80, 18);
 
@@ -534,4 +535,141 @@ fn cleanup_is_offered_for_this_machines_workspace_with_a_peers_session_selected(
     let c = in_workspaces(POPUP_WINDOW, Some("/here/app"), None);
     let shown = footer(&buffer(&c, POPUP_WINDOW));
     assert!(shown.contains("Cleanup"), "{shown:?}");
+}
+
+// ---------- machine colors (T62) ----------
+
+/// The foreground, background and modifiers of each cell of the first `text` drawn on line `y` or below.
+fn colors_from(buf: &Buffer, y: u16, text: &str) -> Vec<(Color, Color, Modifier)> {
+    let below = Rect::new(0, y, buf.area.width, buf.area.bottom() - y);
+    let chars: Vec<String> = text.chars().map(String::from).collect();
+    let start = below
+        .positions()
+        .find(|p| {
+            chars.iter().enumerate().all(|(i, ch)| {
+                let x = p.x + i as u16;
+                x < buf.area.right() && buf[(x, p.y)].symbol() == ch
+            })
+        })
+        .unwrap_or_else(|| panic!("{text:?} not drawn below line {y}: {buf:?}"));
+    (0..chars.len() as u16)
+        .map(|i| {
+            let cell = &buf[(start.x + i, start.y)];
+            (cell.fg, cell.bg, cell.modifier)
+        })
+        .collect()
+}
+
+fn colors(buf: &Buffer, text: &str) -> Vec<(Color, Color, Modifier)> {
+    colors_from(buf, 0, text)
+}
+
+/// Every cell of `cells` has foreground `fg`.
+fn all_fg(cells: &[(Color, Color, Modifier)], fg: Color) -> bool {
+    cells.iter().all(|(f, _, _)| *f == fg)
+}
+
+/// What machine `id` is drawn in when its host doesn't say.
+fn derived(id: &str) -> Color {
+    machine::color(MachineColor::of(&m(id)))
+}
+
+/// [`three_machines`], the laptop's host saying its color is `color`.
+fn laptop_colored(window: Rect, color: &str) -> ClientDriver {
+    let mut c = ClientDriver::new();
+    let subscribe = c.connect_named("studio");
+    let hello = json!({ "color": color });
+    three_machines_from(c, subscribe, window, |_| {}, |_| {}, hello)
+}
+
+#[test]
+fn each_machines_name_is_drawn_in_its_color_in_the_sidebar() {
+    let c = laptop_colored(WINDOW, "light-magenta");
+    let buf = buffer(&c, WINDOW);
+    // Headers.
+    assert!(
+        all_fg(&colors(&buf, "studio"), derived("m_test")),
+        "{buf:?}"
+    );
+    assert!(all_fg(&colors(&buf, "laptop"), Color::LightMagenta));
+    let tower = colors(&buf, "tower");
+    assert!(all_fg(&tower, derived("m_tower")));
+    assert!(tower.iter().all(|(_, _, m)| m.contains(Modifier::DIM)));
+    // Line 2 of each session: the machine in its color, the rest as it was.
+    let train = colors_from(&buf, at(&buf, "train").y, "laptop · —");
+    assert!(all_fg(&train[..6], Color::LightMagenta), "{train:?}");
+    assert!(all_fg(&train[6..], Color::Gray), "{train:?}");
+    let api = colors_from(&buf, at(&buf, "api").y, "studio · —");
+    assert!(all_fg(&api[..6], derived("m_test")), "{api:?}");
+    let build = colors_from(&buf, at(&buf, "build").y, "tower · —");
+    assert!(all_fg(&build[..5], derived("m_tower")), "{build:?}");
+    assert!(build.iter().all(|(_, _, m)| m.contains(Modifier::DIM)));
+}
+
+#[test]
+fn a_name_cut_short_on_line_two_keeps_its_color_up_to_the_cut() {
+    let mut c = ClientDriver::new();
+    c.connect_named("workstation-in-the-basement");
+    c.host().new_session("s1");
+    c.sync();
+    let buf = buffer(&c, WINDOW);
+    // Line 2 has room for 20 columns: 19 of the name, then `…`.
+    let cut = colors(&buf, "workstation-in-the-…");
+    assert!(all_fg(&cut[..19], derived("m_test")), "{cut:?}");
+    assert!(all_fg(&cut[19..], Color::Gray), "{cut:?}");
+}
+
+#[test]
+fn the_new_session_popup_draws_each_machine_in_its_color() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::BeginNewSession);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let studio = colors(&buf, "● studio");
+    assert!(all_fg(&studio[2..], derived("m_test")), "{studio:?}");
+    assert_eq!(studio[0].0, Color::Reset, "the mark keeps its style");
+    let laptop = colors(&buf, "○ laptop");
+    assert!(all_fg(&laptop[2..], derived("m_laptop")), "{laptop:?}");
+    let tower = colors(&buf, "○ tower (offline");
+    assert!(all_fg(&tower[2..7], derived("m_tower")), "{tower:?}");
+    assert!(all_fg(&tower[7..], Color::Gray), "{tower:?}");
+    assert!(tower.iter().all(|(_, _, m)| m.contains(Modifier::DIM)));
+}
+
+#[test]
+fn the_workspace_switcher_draws_each_machine_in_its_color() {
+    let mut c = with_profiles(POPUP_WINDOW);
+    c.user(Intent::BeginWorkspace);
+    let buf = buffer(&c, POPUP_WINDOW);
+    let laptop = colors(&buf, "○ laptop");
+    assert!(all_fg(&laptop[2..], derived("m_laptop")), "{laptop:?}");
+}
+
+#[test]
+fn every_machine_color_is_readable_on_the_default_theme() {
+    for color in MachineColor::ALL {
+        let fg = machine::color(color);
+        assert!(
+            ![Color::Reset, Color::Black].contains(&fg),
+            "{color:?} is drawn as the default background"
+        );
+        // On the selection's background, and not.
+        let mut c = laptop_colored(WINDOW, color.as_str());
+        c.user(Intent::SelectSession(SessionId::new("train")));
+        let buf = buffer(&c, WINDOW);
+        let header = colors(&buf, "laptop");
+        let selected = colors_from(&buf, at(&buf, "train").y, "laptop ·");
+        assert_ne!(selected[0].1, Color::Reset, "the row is selected");
+        for (f, bg, _) in header.iter().chain(&selected[..6]) {
+            assert_eq!(*f, fg, "{color:?}: {buf:?}");
+            assert_ne!(f, bg, "{color:?} on its background: {buf:?}");
+        }
+    }
+}
+
+#[test]
+fn every_machine_color_is_drawn_differently() {
+    let drawn: Vec<Color> = MachineColor::ALL.into_iter().map(machine::color).collect();
+    for (i, a) in drawn.iter().enumerate() {
+        assert!(!drawn[i + 1..].contains(a), "{drawn:?}");
+    }
 }

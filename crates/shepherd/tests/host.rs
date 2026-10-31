@@ -396,6 +396,28 @@ fn hello_tells_the_client_to_ring_the_bell_when_the_config_says_so() {
 }
 
 #[test]
+fn hello_carries_the_machine_color_the_config_gives() {
+    let config = shepherd_core::config::RawConfig {
+        machine: Some(shepherd_core::config::RawMachine {
+            color: Some("light-blue".into()),
+            ..Default::default()
+        }),
+        ..shell_default_config()
+    };
+    let mut h = HostHarness::builder().config(config).start();
+    let mut client = h.connect();
+    let req = client.request(ClientRequest::Hello(Hello {
+        version: PROTOCOL_VERSION,
+        machine: MachineId::new("laptop"),
+        cwd: None,
+        build: None,
+    }));
+    h.step();
+    let result = response(&client.take(), &req).expect("hello ok");
+    assert_eq!(result["color"], json!("light-blue"));
+}
+
+#[test]
 fn hello_with_another_version_is_a_version_mismatch() {
     let mut h = HostHarness::new();
     let mut client = h.connect();

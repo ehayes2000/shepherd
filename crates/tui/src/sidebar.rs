@@ -5,18 +5,18 @@
 //! which opens the switcher, then a `+ New session` button
 //! (`⌕`, `⌂` and `+` when collapsed). Each session is two lines: its status glyph,
 //! name and a `×` close button at the right edge, then `machine · PR`: the machine's name, from its host's hello
-//! ([`Client::machine_label`]), then the PR's number and its checks (`#123 ✓` passing, `✗` failing, `…` pending,
-//! nothing without checks), or its state when it isn't open (`#123 merged`), or `—` without one. A session from another
-//! workspace is dimmed, and its second line says which workspace instead. The second line of a session that
+//! ([`Client::machine_label`]) in its color ([`crate::machine`]), then the PR's number and its checks (`#123 ✓`
+//! passing, `✗` failing, `…` pending, nothing without checks), or its state when it isn't open (`#123 merged`), or
+//! `—` without one. A session from another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
 //! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
 //! of one that is closing while its worktree is removed, `removing worktree…`;
 //! of one that started with a warning (a post-create hook failed), the warning, in yellow. A second line too long for
 //! the row ends in `…`. The selected session has a highlighted background, and a session that wants the user has a
 //! yellow bar on its left edge.
 //! While there are peers (T31b), the list is grouped by machine ([`Client::sidebar`]): each group starts with a
-//! two-line header, `≡` and the machine's name, then how it is doing (`this machine`, `connected`, `connecting…`,
-//! `offline: <why>`). A click on it means that machine ([`Target::Machine`]). A peer that can't be reached now has its
-//! header and its last-known sessions dimmed. Collapsed, a header is just its `≡`.
+//! two-line header, `≡` and the machine's name in its color, then how it is doing (`this machine`, `connected`,
+//! `connecting…`, `offline: <why>`). A click on it means that machine ([`Target::Machine`]). A peer that can't be
+//! reached now has its header and its last-known sessions dimmed. Collapsed, a header is just its `≡`.
 //! The newest session is at the top (of each group). The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
 //! the prefix and its bindings while it's pending; otherwise the latest notice across the whole width (one too long
@@ -46,6 +46,7 @@ use shepherd_core::session::Activity;
 
 use crate::draw::{self, shown};
 use crate::layout::{Layout, Target};
+use crate::machine;
 use crate::width::columns;
 
 /// The most lines a notice too long for the footer takes at the bottom of the window.
@@ -331,7 +332,13 @@ fn dimmed(group: &MachineGroup) -> bool {
 
 /// Draws a machine's header on its two `line`s: its mark and name, then how it is doing (just the mark when
 /// collapsed).
-fn render_machine(group: &MachineGroup, layout: &Layout, line: Rect, buf: &mut Buffer) {
+fn render_machine(
+    client: &Client,
+    group: &MachineGroup,
+    layout: &Layout,
+    line: Rect,
+    buf: &mut Buffer,
+) {
     let dim = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
     let mark = match dimmed(group) {
         true => dim,
@@ -349,10 +356,10 @@ fn render_machine(group: &MachineGroup, layout: &Layout, line: Rect, buf: &mut B
         return;
     }
     let width = usize::from(line.width.saturating_sub(3));
-    let name = match dimmed(group) {
-        true => dim.add_modifier(Modifier::BOLD),
-        false => Style::new().add_modifier(Modifier::BOLD),
-    };
+    let mut name = machine::style(client, &group.id).add_modifier(Modifier::BOLD);
+    if dimmed(group) {
+        name = name.add_modifier(Modifier::DIM);
+    }
     draw::set_cut(buf, line.x + 3, line.y, &shown(&group.name), width, name);
     let status = shown(&machine_status(group));
     draw::set_cut(buf, line.x + 3, line.y + 1, &status, width, dim);
@@ -444,25 +451,38 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             Style::new().fg(Color::Gray),
         );
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let (text, style) = match (&session.failed, &session.warning, &session.workspace) {
-            _ if session.removing_worktree => (REMOVING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
-            (Some(reason), _, _) => (reason.clone(), dim.fg(Color::Red)),
-            _ if session.creating_worktree => (CREATING_WORKTREE.to_owned(), dim.fg(Color::Gray)),
-            (None, Some(warning), _) => (warning.clone(), dim.fg(Color::Yellow)),
+        let label = shown(client.machine_label(&session.machine));
+        let (text, style, named) = match (&session.failed, &session.warning, &session.workspace) {
+            _ if session.removing_worktree => {
+                (REMOVING_WORKTREE.to_owned(), dim.fg(Color::Gray), false)
+            }
+            (Some(reason), _, _) => (reason.clone(), dim.fg(Color::Red), false),
+            _ if session.creating_worktree => {
+                (CREATING_WORKTREE.to_owned(), dim.fg(Color::Gray), false)
+            }
+            (None, Some(warning), _) => (warning.clone(), dim.fg(Color::Yellow), false),
             (None, None, Some(workspace)) if session.elsewhere => (
                 format!("in {}", workspace_name(workspace)),
                 dim.fg(Color::Gray),
+                false,
             ),
             _ => (
-                format!(
-                    "{} · {}",
-                    client.machine_label(&session.machine),
-                    pr_label(session)
-                ),
+                format!("{} · {}", label.as_str(), pr_label(session)),
                 dim.fg(Color::Gray),
+                true,
             ),
         };
-        draw::set_cut(buf, line.x + 3, line.y + 1, &shown(&text), width, style);
+        let text = shown(&text);
+        draw::set_cut(buf, line.x + 3, line.y + 1, &text, width, style);
+        if named {
+            // Cut short, the name keeps its color up to the `…`.
+            let room = match columns(text.as_str()) <= width {
+                true => width,
+                false => width.saturating_sub(1),
+            };
+            let at = (line.x + 3, line.y + 1);
+            machine::tint(client, &session.machine, label.as_str(), at, room, buf);
+        }
     });
     let area = inner(layout);
     if area.height > HEADER_HEIGHT {
@@ -540,7 +560,7 @@ fn rows(
         let session = match entry {
             SidebarEntry::Session(session) => session,
             SidebarEntry::Machine(group) => {
-                render_machine(&group, layout, line, buf);
+                render_machine(client, &group, layout, line, buf);
                 continue;
             }
         };

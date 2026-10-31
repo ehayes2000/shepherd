@@ -726,6 +726,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
             build: None,
             installed: None,
             warning: None,
+            color: None,
         })
     );
 }
@@ -804,6 +805,7 @@ fn a_hello_ok_from_an_older_host_has_no_profiles() {
             build: None,
             installed: None,
             warning: None,
+            color: None,
         }))
     );
 }
@@ -926,6 +928,7 @@ fn successful_responses_round_trip_by_method() {
                 build: None,
                 installed: None,
                 warning: None,
+                color: None,
             }),
         ),
         (

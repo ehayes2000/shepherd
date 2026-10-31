@@ -15,7 +15,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T45 | Headless UI test harness | done | caa414b | 1 | APPROVE; exemption wider than gap (removed by F55) |
-| T46 | CLI client: list and start sessions | fixing | task/t46-cli-sessions @ d49c4bd | 1 | round 1 CHANGES: CLI hello cwd sets host workspace (reproduced); Incompatible host stalls 60s; peer catch-up deadline; status mapping; PrJson; relative cwd for peers |
+| T46 | CLI client: list and start sessions | merging | task/t46-cli-sessions @ da0404b | 2 | round 2 APPROVE; 2 minors → T47 |
 | T47 | Prompt an agent and wait for its reply | todo |  |  |  |
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
 | T49 | Render pages and split panes | todo |  |  |  |
@@ -80,6 +80,9 @@ acceptance:
 - The reply is the agent's last assistant message of that turn, read from the transcript the hooks named, through the same
   path checks as capture (crates/archive), parsed per agent (Claude Code JSONL, Codex rollout) from recorded fixtures.
 - Two prompts to one session at once: the second is refused as busy. A session with no agent (a plain shell) is refused.
+- From T46's review: the CLI's `connect()` wiring of `set_catch_up_limit` is untested (`cli_scenarios` builds its own
+  runtime); share one setup helper with the scenarios. And test `new --machine <this machine> --cwd <relative>` is
+  accepted relative to where the command runs.
 - `shepherd reply <session> [--json]` prints the last reply without prompting; `shepherd wait <session> [--timeout]`
   waits for idle or wants-user.
 - Scenario test with a fake agent: new session, prompt, wait, reply comes back; busy refusal; wants-user return; timeout.
