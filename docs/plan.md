@@ -16,7 +16,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ c3cca50 | 2 | Blocking: version peek creates -wal/-shm on a cleanly closed newer WAL index; -wal without -shm now refused |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
-| F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
+| F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | review | task/f17-load-bounds @ d2695c1 (on 597d476) | 1 | cause: 30 s short-call bound under load + fresh-exec stalls; liveness bounds, real errors printed, FIFO gate hang fixed |
 
 ## Ready to start
 
