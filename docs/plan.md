@@ -14,9 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ 2576f9d | 3 | Blocking: side-file check races with closes (racing opens flaky) → close under index.lock |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ 985b5ef (on 86b21c1) | 4 | closes under index.lock; index.live shared lock picks at-rest vs live peek; churn test |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
-| F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | merging | task/f17-load-bounds @ d2695c1 | 1 | approved; 5x24 rounds 0 failures per builder |
 
 ## Ready to start
 
@@ -46,7 +45,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 0 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
-| [Workspaces and worktrees](features/worktrees.md) | M3 | 15 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
+| [Workspaces and worktrees](features/worktrees.md) | M3 | 16 | 1 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 
 <!-- tasks:end -->
 
