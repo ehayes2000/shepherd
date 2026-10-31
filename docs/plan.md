@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ d4e3aa5 | 1 | Blocking: refusing a newer WAL index checkpointed it; migration rollback and newtype validation untested |
-| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | review | task/t29-machine-identity @ fea91a8 (on 60089d5) | 3 | adoption never fails over the key (local + warning); key error also in config_error for old hosts; wiring e2e |
+| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | merging | task/t29-machine-identity @ fea91a8 | 3 | approved r3 |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
