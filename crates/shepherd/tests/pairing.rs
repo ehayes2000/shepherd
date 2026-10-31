@@ -153,8 +153,10 @@ fn unpairing_records_the_removal_drops_the_connection_and_goes_offline() {
         .as_str()
         .expect("ticket")
         .to_owned();
-    b.connect()
-        .request(ClientRequest::PairJoin(PairJoin { ticket }));
+    // Kept until it is answered: a join whose client hung up before its host read it is dropped (F52: whose conn it
+    // was can't be told any more, so it isn't taken for a local one).
+    let mut join = b.connect();
+    join.request(ClientRequest::PairJoin(PairJoin { ticket }));
     settle(&mut a, &mut b);
     a.restart();
     settle(&mut a, &mut b);

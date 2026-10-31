@@ -1089,6 +1089,30 @@ fn this_machines_bell_does_not_ring_for_a_peers_session() {
     assert_eq!(alerts(&net.c.sync()), [sid("a1")]);
 }
 
+/// A peer's session shadowed by a local one of the same id is listed once this machine's goes: that local entry rings
+/// nothing for it, since only its own host (whose bell is off) can say it wants the user.
+#[test]
+fn a_peers_session_unshadowed_by_a_local_entry_does_not_ring_this_machines_bell() {
+    let mut net = with_bells(true, false);
+    net.c.host().new_session("dup");
+    net.c.sync();
+    net.host("m_b").new_session("dup");
+    idle(net.host("m_b"), "dup");
+    assert_eq!(alerts(&net.sync("m_b")), Vec::<SessionId>::new());
+    net.user(Intent::WindowFocus(false));
+    net.c.host().close("dup");
+    let commands = net.c.sync();
+    assert!(
+        net.c
+            .client()
+            .sessions()
+            .iter()
+            .any(|s| s.id == sid("dup") && s.attention),
+        "the peer's session is listed now, wanting the user"
+    );
+    assert_eq!(alerts(&commands), Vec::<SessionId>::new());
+}
+
 #[test]
 fn a_peer_dropped_while_catching_up_is_live_once_caught_up_again() {
     let (mut net, _) = Machines::new(&[("m_b", "laptop")]);

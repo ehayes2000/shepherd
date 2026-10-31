@@ -526,7 +526,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    use shepherd_core::ports::{MachineIdentity, MachineKey};
+    use shepherd_core::ports::{MAX_OPEN_PER_PEER, MachineIdentity, MachineKey};
     use shepherd_testkit::contracts::link::{Events, LinkFixture};
     use shepherd_testkit::contracts::peers::channel;
     use tempfile::TempDir;
@@ -710,6 +710,37 @@ mod tests {
             events.disconnect_of(conn),
             (vec![], DisconnectReason::PeerGone)
         );
+    }
+
+    /// A host refuses a tunnel past [`MAX_OPEN_PER_PEER`] to one machine; up to that many open at once over its one
+    /// connection, none waiting for another to close.
+    #[test]
+    fn as_many_conns_as_a_host_allows_open_at_once_to_one_peer() {
+        let mut machines = LocalMachines::new();
+        let (host_sink, host_events) = Events::channel();
+        let _host = machines.host.peers.link(host_sink);
+        let (sink, events) = Events::channel();
+        let (mut client, first) = machines.client(sink, true);
+        let connected = |events: &Events| {
+            events.wait_for(
+                |e| matches!(e, LinkEvent::Connected { .. }),
+                Duration::from_secs(30),
+            );
+        };
+        // The first dials the connection; the rest are streams on it.
+        connected(&events);
+        let host = machines.host.id.clone();
+        let rest: Vec<ConnId> = (1..MAX_OPEN_PER_PEER)
+            .map(|_| client.open(&host).unwrap())
+            .collect();
+        for _ in 1..MAX_OPEN_PER_PEER {
+            connected(&events);
+        }
+        for _ in 0..MAX_OPEN_PER_PEER {
+            connected(&host_events);
+        }
+        assert_eq!(rest.len() + 1, MAX_OPEN_PER_PEER);
+        assert_ne!(first, rest[0]);
     }
 
     #[test]

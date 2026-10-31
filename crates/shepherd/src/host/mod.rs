@@ -48,7 +48,8 @@ pub use runtime::{
     AdoptedSession, Adoption, CATCH_UP_BATCH, CATCH_UP_TICK, CREATE_CLEANUP_GRACE, CarriedSession,
     HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, MAX_TUNNEL_TICK, PreflightRunner,
     RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError,
-    SwapPlan, TUNNEL_HIGH, TUNNEL_LOW, TUNNEL_TICK, adopt_sessions, runtime_channel,
+    SwapPlan, TUNNEL_HELD_MAX, TUNNEL_HIGH, TUNNEL_LOW, TUNNEL_TICK, adopt_sessions,
+    runtime_channel,
 };
 
 /// The host runtime on the real adapters.

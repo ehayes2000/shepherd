@@ -36,6 +36,11 @@ use crate::ids::MachineId;
 /// The most unsent bytes a conn may have queued before it is disconnected as a slow consumer.
 pub const MAX_QUEUED: usize = 8 * 1024 * 1024;
 
+/// The most conns a link between machines carries open at once to one peer, of those this end [opened](Link::open):
+/// the concurrent stream limit of the one connection they share (QUIC's, on iroh, which each end grants the other).
+/// Opening more would wait for one to close, so the host refuses to.
+pub const MAX_OPEN_PER_PEER: usize = 100;
+
 /// How long a closed conn keeps trying to deliver its queued lines to a peer that isn't reading.
 pub const CLOSE_FLUSH: Duration = Duration::from_secs(2);
 

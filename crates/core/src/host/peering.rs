@@ -27,8 +27,13 @@
 //! the endpoint is bound again), nor is anyone once the endpoint is unbound.
 //!
 //! Tunnels (`_shepherd/tunnel`, T31a): one of this machine's own clients may make its conn, with its first request,
-//! a tunnel to the host of a machine this one trusts ([`Peering::tunnel`]); the runtime splices it. Why one couldn't
-//! open is said in the peer's name ([`Peering::tunnel_failed`]).
+//! a tunnel to the host of a machine this one trusts ([`Peering::tunnel`]), while fewer than
+//! [`MAX_OPEN_PER_PEER`] are open to it; the runtime splices it. Why one couldn't open is said in the peer's name
+//! ([`Peering::tunnel_failed`]). Pairing, trust and updating the host are this machine's own clients' too: another
+//! machine's conn is refused them ([`refused_to_peers`]).
+//!
+//! Swapping (decision 0018): the host goes offline before the exec ([`Peering::suspend`]), so peers see it go at once,
+//! and comes back online if the exec fails ([`Peering::resume`]).
 //!
 //! Not all of this is host state: a pairing, the joins in flight which peers are connected and when to dial each again
 //! are known only to this host run. The runtime keeps one [`Peering`], applies every entry it appends (and replays the logs into it on start),
@@ -43,8 +48,12 @@ use super::{HostCommand, ReplyTo, append_host};
 use crate::acpp::{Envelope, Frame, PeerRemoved, PeerTrusted, ShepherdFrame, Timestamp};
 use crate::ids::MachineId;
 use crate::machine::{UNNAMED, peer_name};
-use crate::ports::{ConnectError, DisconnectReason, PairTicket, PairToken, PairingId, PeersEvent};
-use crate::wire::{HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError};
+use crate::ports::{
+    ConnectError, DisconnectReason, MAX_OPEN_PER_PEER, PairTicket, PairToken, PairingId, PeersEvent,
+};
+use crate::wire::{
+    ClientRequest, HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError,
+};
 
 /// How long a pairing stays open.
 pub const PAIRING_TTL: SignedDuration = SignedDuration::from_mins(10);
@@ -120,6 +129,8 @@ pub struct Peering {
     pushed: BTreeSet<MachineId>,
     /// Trusted peers to dial again, by how many dials in a row failed.
     redial: BTreeMap<MachineId, Redial>,
+    /// Offline for a swap ([`Peering::suspend`]): nothing binds until [`Peering::resume`].
+    suspended: bool,
 }
 
 /// A trusted peer to dial again.
@@ -219,6 +230,23 @@ impl Peering {
         out
     }
 
+    /// Goes offline for a swap (decision 0018), so peers see this machine's connections close at once rather than
+    /// time out: unbinds, and stays unbound until [`Peering::resume`] (the swap failed) or for good (the exec replaced
+    /// this host, and the new one binds as it starts). An open pairing and joins in flight end with it: their clients'
+    /// conns close for the swap.
+    pub fn suspend(&mut self) -> Vec<HostCommand> {
+        self.suspended = true;
+        self.pending = None;
+        self.joins.clear();
+        self.sync()
+    }
+
+    /// Comes back online after [`Peering::suspend`]: binds and dials each trusted peer, if anything wants the endpoint.
+    pub fn resume(&mut self) -> Vec<HostCommand> {
+        self.suspended = false;
+        self.sync()
+    }
+
     /// When the open pairing expires or a peer is to be dialled again, whichever comes first: when to send the next
     /// [`PeeringEvent::Tick`].
     pub fn deadline(&self) -> Option<jiff::Timestamp> {
@@ -228,12 +256,14 @@ impl Peering {
     }
 
     /// Whether a conn may become a tunnel to `machine`'s host: it must be from one of this machine's own clients
-    /// (`from` is `None`: not a peer's conn), this must be its first request, and this machine must trust `machine`.
+    /// (`from` is `None`: not a peer's conn), this must be its first request, this machine must trust `machine`, and
+    /// fewer than [`MAX_OPEN_PER_PEER`] tunnels to it may be `open` already (the most its one connection carries).
     pub fn tunnel(
         &self,
         machine: &MachineId,
         from: Option<&MachineId>,
         first: bool,
+        open: usize,
     ) -> Result<(), WireError> {
         let refuse = |why: &str| Err(WireError::InvalidParams(why.to_owned()));
         if from.is_some() {
@@ -242,8 +272,14 @@ impl Peering {
         if !first {
             return refuse("a tunnel must be the first request on its connection");
         }
-        if !self.trusted.contains_key(machine) {
+        let Some(name) = self.trusted.get(machine) else {
             return refuse("no trusted machine has that id: pair with it first (`shepherd pair`)");
+        };
+        if open >= MAX_OPEN_PER_PEER {
+            return refuse(&format!(
+                "{name} already has {MAX_OPEN_PER_PEER} tunnels open from this machine, the most one connection \
+                 carries: close one first"
+            ));
         }
         Ok(())
     }
@@ -263,9 +299,11 @@ impl Peering {
         })
     }
 
-    /// The endpoint is needed: something is trusted, a pairing is open, or a join is in flight.
+    /// The endpoint is needed: something is trusted, a pairing is open, or a join is in flight, and this host isn't
+    /// offline for a swap.
     fn wanted(&self) -> bool {
-        !self.trusted.is_empty() || self.pending.is_some() || !self.joins.is_empty()
+        !self.suspended
+            && (!self.trusted.is_empty() || self.pending.is_some() || !self.joins.is_empty())
     }
 
     /// The trusted set if it changed, then binding and dialling each trusted peer if the endpoint is wanted and not
@@ -555,6 +593,26 @@ impl Peering {
             connected: self.connected.contains(id),
         }
     }
+}
+
+/// The answer another machine's conn (its host, or a client of its tunnelling here) gets for `request`, if only this
+/// machine's own clients may make it: pairing, trust and updating the host are theirs to manage, as tunnels are
+/// ([`Peering::tunnel`]). `None` for every other request. The caller asks whose conn it is only when this is `Some`,
+/// and refuses it as well when it can no longer tell.
+pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
+    let local_only = matches!(
+        request,
+        ClientRequest::PairStart(_)
+            | ClientRequest::PairWait(_)
+            | ClientRequest::PairJoin(_)
+            | ClientRequest::PeerRemove(_)
+            | ClientRequest::HostUpgrade(_)
+    );
+    local_only.then(|| {
+        WireError::InvalidParams(
+            "only this machine's own clients can manage its pairing, trust and updates".to_owned(),
+        )
+    })
 }
 
 fn peers(command: PeersCommand) -> HostCommand {

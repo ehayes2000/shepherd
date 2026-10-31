@@ -4,6 +4,13 @@
 # That is the discovery route the gate can't exercise (T30, decision 0019): the gate never touches the network. Then a
 # client of the one tunnels through it to the other and catches up on a multi-MB history over the network (T31a).
 #
+# Updating a host in place (F52) isn't exercised here, since it needs a newer build installed at the host's path. What
+# to expect on the real network: before the exec the host unbinds its endpoint and waits (at most the port's 5 s close
+# limit) until its connections are closed, so its peers drop it at once (`shepherd peers` on them says disconnected)
+# instead of after iroh's idle timeout; the new image binds again with the same key and dials each trusted peer. A
+# failed exec binds again too. The gate checks this order with the fake port (hotswap.rs) and the wait on the real one
+# (`settling_waits_until_an_unbind_has_closed_every_connection`).
+#
 # Run by the user, never by the gate or a builder. Each host gets a throwaway HOME, so the real ~/.shepherd is never
 # touched; both are stopped (by the pids this script started, never by name) and their HOMEs removed on exit.
 #

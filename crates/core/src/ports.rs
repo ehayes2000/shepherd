@@ -24,7 +24,7 @@ pub use identity::{IdentityError, MachineIdentity, MachineKey};
 pub use launcher::{HostLauncher, LaunchError, TerminateError};
 pub use link::{
     CLOSE_FLUSH, ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink,
-    MAX_QUEUED,
+    MAX_OPEN_PER_PEER, MAX_QUEUED,
 };
 pub use peers::{
     ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
