@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | done | 9a91698 | 3 | round 3 APPROVE |
 | T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
-| T43 | `shepherd archive` CLI | todo |  |  |  |
+| T43 | `shepherd archive` CLI | building | task/t43-archive-cli |  |  |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
 
 ## Specs
@@ -175,6 +175,13 @@ acceptance:
   (T41's rule) and prints how to resume.
 - Tests run the binary with a tempdir HOME and a fixture archive.
 scope: crates/shepherd
+notes: the patch-id for `find` comes from the same pinned code as capture (T42's `commits_since` path in the git adapter;
+expose a single-commit variant on the Worktrees port if needed, with a contract case), never a second copy of the flags.
+The CLI opens the archive while a host may be writing it (WAL): reads must not block the host or modify the index;
+`restore` writes only through T41's `restore`. `--json` shapes are documented in `docs/` and covered by a test each.
+PM-approved during the build: `Archive::all_sessions()` and `Archive::open_read_only(root)` in crates/archive (additive);
+`Worktrees::patch_id(path, commit)` and `Worktrees::resolve_commit(path, rev)` (abbreviated hashes from `git blame`) with
+contract cases.
 
 ### T44: Real-agent end-to-end suite
 depends: T43
