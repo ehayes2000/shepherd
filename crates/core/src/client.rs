@@ -71,9 +71,15 @@
 //! machine's host's. Without a popup open, the selected session's machine is the one acted on: the new-session key
 //! starts a session there, and [`Client::workspace`] is its workspace.
 //!
+//! Scripts (T46): a command-line client runs this same core headless. [`Client::settled`] says when every host it can
+//! reach has sent its sessions, and [`ClientEvent::Ask`] asks a host something on the caller's behalf: the answer (or
+//! why there is none: the machine is unknown or can't be reached, or its link dropped first) is kept for
+//! [`Client::answer`], and the client acts on none of it. [`automation`] names sessions and machines.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
+pub mod automation;
 pub mod cleanup;
 pub mod finder;
 
@@ -88,6 +94,7 @@ use std::path::{Path, PathBuf};
 use jiff::SignedDuration;
 
 use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp};
+use crate::config::AgentKind;
 use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Content, Layout};
@@ -149,6 +156,59 @@ pub enum ClientEvent {
         machine: MachineId,
         event: PeerEvent,
     },
+    /// Ask the host of `machine` (this machine's for `None`) `request` on behalf of a caller outside the UI, such as a
+    /// script: its answer is kept for [`Client::answer`] under `ask`, and nothing else is done with it.
+    Ask {
+        ask: AskId,
+        machine: Option<MachineId>,
+        request: ClientRequest,
+    },
+}
+
+/// What a caller names a [`ClientEvent::Ask`] by, to read its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AskId(pub u64);
+
+/// Why a [`ClientEvent::Ask`] has no result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AskError {
+    /// No host the client knows of is on this machine.
+    UnknownMachine(MachineId),
+    /// The machine's host can't be asked now: what it is called, and why, if known.
+    NotReachable {
+        machine: String,
+        why: Option<String>,
+    },
+    /// The host refused it.
+    Refused(WireError),
+    /// The link to the machine's host (called `machine`) dropped before it answered: it may or may not have done it.
+    Dropped { machine: String },
+}
+
+impl std::fmt::Display for AskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownMachine(machine) => write!(f, "no machine {machine} is known"),
+            Self::NotReachable { machine, why: None } => write!(f, "{machine} can't be reached"),
+            Self::NotReachable {
+                machine,
+                why: Some(why),
+            } => write!(f, "{machine} can't be reached: {why}"),
+            Self::Refused(e) => f.write_str(&refusal(e.clone())),
+            Self::Dropped { machine } => {
+                write!(f, "the connection to {machine} dropped before it answered")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AskError {}
+
+/// A [`ClientEvent::Ask`]: waiting for host `at` to answer request `request`, or answered.
+#[derive(Debug, Clone)]
+enum Ask {
+    Pending { at: At, request: RequestId },
+    Answered(Result<HostResult, AskError>),
 }
 
 /// What happened on the conn to a peer's host.
@@ -475,6 +535,8 @@ pub struct ClientSession {
     pub removing_worktree: bool,
     /// Its branch's pull request, if it has one the host could find.
     pub pr: Option<Pr>,
+    /// What it runs, see [`crate::host::HostSession::agent`].
+    pub agent: Option<AgentKind>,
 }
 
 /// A machine in the sidebar: this one, or a trusted peer ([`Client::machines`]).
@@ -573,6 +635,10 @@ pub struct Client {
     cleanup: Cleanup,
     /// The latest tick's time: what stale sessions are measured against.
     now: Option<jiff::Timestamp>,
+    /// What callers outside the UI asked ([`ClientEvent::Ask`]), and what came of it.
+    asks: BTreeMap<AskId, Ask>,
+    /// How long a peer may take to send its sessions once reached, if it has a limit.
+    catch_up_limit: Option<SignedDuration>,
 }
 
 /// What one host's hello and log say, and the requests asked of it that it hasn't answered.
@@ -651,6 +717,8 @@ struct Peer {
     why: Option<String>,
     /// Its host answered the hello with another protocol version.
     incompatible: bool,
+    /// When the conn now Ready opened: its catch-up is due by [`Client::with_catch_up_limit`] after it.
+    opened: Option<jiff::Timestamp>,
 }
 
 impl Peer {
@@ -662,6 +730,7 @@ impl Peer {
             failures: 0,
             why: None,
             incompatible: false,
+            opened: None,
         }
     }
 
@@ -768,6 +837,8 @@ impl Client {
             notice: None,
             cleanup: Cleanup::default(),
             now: None,
+            asks: BTreeMap::new(),
+            catch_up_limit: None,
         }
     }
 
@@ -775,6 +846,16 @@ impl Client {
     pub fn with_cwd(self, cwd: impl Into<String>) -> Self {
         Self {
             cwd: Some(cwd.into()),
+            ..self
+        }
+    }
+
+    /// This client, giving each peer `limit` from when its conn opens to send all its sessions: one that hasn't is
+    /// given up on as unreachable (and tried again later), so a script waiting for [`Client::settled`] isn't held up
+    /// by it. Without one (the TUI), a peer catches up however long that takes.
+    pub fn with_catch_up_limit(self, limit: SignedDuration) -> Self {
+        Self {
+            catch_up_limit: Some(limit),
             ..self
         }
     }
@@ -1114,6 +1195,42 @@ impl Client {
         }
     }
 
+    /// Why nothing can be asked of this machine's host now or later without the user's help: the client gave up, or
+    /// the host speaks another protocol version. `None` while connecting or connected.
+    pub fn unusable(&self) -> Option<String> {
+        match &self.connection {
+            Connection::Failed(why) => Some(why.clone()),
+            Connection::Incompatible => Some(INCOMPATIBLE.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Whether every host the client can reach has sent all its sessions: this machine's host has answered the
+    /// subscribe (its catch-up is sent) and the peer list, and each peer listed is caught up likewise or couldn't be
+    /// reached (its last attempt failed). What a script lists once it is.
+    pub fn settled(&self) -> bool {
+        let local_done = self.connection == Connection::Ready
+            && !self
+                .local
+                .pending
+                .values()
+                .any(|m| matches!(m, Method::Subscribe | Method::PeerList));
+        local_done
+            && self.peers.values().all(|peer| match peer.link {
+                PeerLink::Ready => !peer.feed.catching_up(),
+                PeerLink::Waiting { .. } => true,
+                PeerLink::Connecting | PeerLink::Opening { .. } => false,
+            })
+    }
+
+    /// What came of [`ClientEvent::Ask`] `ask`: `None` while it is waiting for its answer, or if it was never asked.
+    pub fn answer(&self, ask: AskId) -> Option<&Result<HostResult, AskError>> {
+        match self.asks.get(&ask)? {
+            Ask::Answered(result) => Some(result),
+            Ask::Pending { .. } => None,
+        }
+    }
+
     pub fn handle(&mut self, event: ClientEvent) -> Vec<ClientCommand> {
         if matches!(self.connection, Connection::Failed(_)) {
             return Vec::new();
@@ -1141,6 +1258,11 @@ impl Client {
             ClientEvent::Host(message) => self.host_message(At::Local, message),
             ClientEvent::User(intent) => self.intent(intent),
             ClientEvent::Peer { machine, event } => self.peer_event(machine, event),
+            ClientEvent::Ask {
+                ask,
+                machine,
+                request,
+            } => self.ask(ask, machine.as_ref(), request),
         }
     }
 
@@ -1292,6 +1414,7 @@ impl Client {
             .cloned()
             .collect();
         for machine in gone {
+            self.drop_asks(&At::Peer(machine.clone()));
             if let Some(peer) = self.peers.remove(&machine) {
                 self.untarget(&machine, &peer.name);
             }
@@ -1343,6 +1466,7 @@ impl Client {
                 PeerLink::Ready => {
                     peer.feed.pending.clear();
                     peer.link = PeerLink::Connecting;
+                    self.drop_asks(&At::Peer(machine.clone()));
                     let mut commands = vec![ClientCommand::ConnectPeer(machine)];
                     commands.extend(self.refresh());
                     commands
@@ -1374,6 +1498,7 @@ impl Client {
         peer.why = Some(why);
         peer.feed.pending.clear();
         peer.link = PeerLink::Waiting { until: None };
+        self.drop_asks(&At::Peer(machine.clone()));
         let mut commands = Vec::new();
         if close {
             commands.push(ClientCommand::DisconnectPeer(machine.clone()));
@@ -1385,12 +1510,21 @@ impl Client {
     /// Time passes: a peer waiting to be tried again is, once due, and one that doesn't answer is given up on.
     fn tick_peers(&mut self, now: jiff::Timestamp) -> Vec<ClientCommand> {
         let mut commands = Vec::new();
+        let limit = self.catch_up_limit;
         let machines: Vec<MachineId> = self.peers.keys().cloned().collect();
         for machine in machines {
             let Some(peer) = self.peers.get_mut(&machine) else {
                 continue;
             };
+            let overdue = match (limit, peer.opened) {
+                (Some(limit), Some(opened)) => now >= opened.checked_add(limit).unwrap_or(opened),
+                _ => false,
+            };
             match peer.link {
+                PeerLink::Ready if overdue && peer.feed.catching_up() => {
+                    let why = "it didn't send its sessions in time".to_owned();
+                    commands.extend(self.peer_failed(&machine, why, true));
+                }
                 PeerLink::Waiting { until: None } => {
                     let until = now.checked_add(peer.backoff()).unwrap_or(now);
                     peer.link = PeerLink::Waiting { until: Some(until) };
@@ -1444,6 +1578,9 @@ impl Client {
         let Some(peer) = self.peers.get_mut(machine) else {
             return Vec::new();
         };
+        if let PeerLink::Opening { since, .. } = peer.link {
+            peer.opened = Some(since);
+        }
         peer.link = PeerLink::Ready;
         peer.failures = 0;
         peer.why = None;
@@ -1546,6 +1683,7 @@ impl Client {
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
                 self.local.pending.clear();
+                self.drop_asks(&At::Local);
                 // Only an accepted update outlives its link: the drop is the host re-executing.
                 let dropped = self.upgrade.take_if(|u| u.phase != UpgradePhase::Accepted);
                 if dropped.is_some() {
@@ -1562,6 +1700,63 @@ impl Client {
                 self.connect(1)
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// Asks `machine`'s host (this machine's for `None`) `request` for a caller, or answers at once why it can't.
+    fn ask(
+        &mut self,
+        ask: AskId,
+        machine: Option<&MachineId>,
+        request: ClientRequest,
+    ) -> Vec<ClientCommand> {
+        let at = match machine {
+            None => At::Local,
+            Some(m) if self.local.machine.as_ref() == Some(m) => At::Local,
+            Some(m) if self.peers.contains_key(m) => At::Peer(m.clone()),
+            Some(m) => {
+                let unknown = AskError::UnknownMachine(m.clone());
+                self.asks.insert(ask, Ask::Answered(Err(unknown)));
+                return Vec::new();
+            }
+        };
+        if !self.ready(&at) {
+            let (machine, why) = match &at {
+                At::Local => (self.local_label(), self.unusable()),
+                At::Peer(m) => (
+                    self.machine_label(m).to_owned(),
+                    self.peers.get(m).and_then(|p| p.why.clone()),
+                ),
+            };
+            let error = AskError::NotReachable { machine, why };
+            self.asks.insert(ask, Ask::Answered(Err(error)));
+            return Vec::new();
+        }
+        let (request, command) = self.request_to(&at, request);
+        self.asks.insert(ask, Ask::Pending { at, request });
+        vec![command]
+    }
+
+    /// What to call this machine's host in a message.
+    fn local_label(&self) -> String {
+        match &self.local.machine {
+            Some(machine) => self.machine_label(machine).to_owned(),
+            None => "the shepherd host".to_owned(),
+        }
+    }
+
+    /// Every ask waiting for host `at` lost its answer with its link.
+    fn drop_asks(&mut self, at: &At) {
+        let machine = match at {
+            At::Local => self.local_label(),
+            At::Peer(m) => self.machine_label(m).to_owned(),
+        };
+        for ask in self.asks.values_mut() {
+            if matches!(ask, Ask::Pending { at: asked, .. } if asked == at) {
+                *ask = Ask::Answered(Err(AskError::Dropped {
+                    machine: machine.clone(),
+                }));
+            }
         }
     }
 
@@ -1612,6 +1807,13 @@ impl Client {
             Ok(typed) => typed.result,
             Err(e) => Err(WireError::Internal(e.to_string())),
         };
+        // A caller's: kept for it, and nothing else.
+        if let Some(ask) = self.asks.values_mut().find(
+            |a| matches!(a, Ask::Pending { at: asked, request } if *asked == at && *request == id),
+        ) {
+            *ask = Ask::Answered(result.map_err(AskError::Refused));
+            return Vec::new();
+        }
         if let At::Peer(machine) = &at {
             match (method, result) {
                 (Method::Tunnel, Ok(_)) => return self.tunnel_open(machine),
@@ -2029,6 +2231,7 @@ impl Client {
                     branch: s.branch,
                     removing_worktree: s.removing_worktree,
                     pr: s.pr,
+                    agent: s.agent,
                 });
             }
         }
@@ -2514,6 +2717,7 @@ impl Client {
             cwd: Some(cwd.to_owned()),
             branch: worktree.branch,
             size: self.view_size(),
+            name: None,
         }))
     }
 
@@ -3004,6 +3208,8 @@ const NOT_CONNECTED: &str = "not connected to the shepherd host";
 /// What the user is told when the host doesn't know a request's method.
 const UPDATING: &str = "host is older — updating…";
 const UPDATED: &str = "host updated";
+const INCOMPATIBLE: &str =
+    "the shepherd host speaks another protocol version than this client: restart it to use this";
 const OLDER_HOST: &str = "the shepherd host is older than this client: restart it to use this";
 /// The notice for a client whose build is neither the host's nor the one installed at the host's path, while the host
 /// runs the installed one.

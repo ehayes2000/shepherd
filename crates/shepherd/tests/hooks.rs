@@ -498,6 +498,7 @@ mod real {
                 cwd: None,
                 branch: None,
                 size: None,
+                name: None,
             }),
         });
         stream.write_all(&request).unwrap();

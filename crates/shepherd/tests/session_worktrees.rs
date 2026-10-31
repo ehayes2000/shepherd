@@ -61,6 +61,7 @@ impl Setup {
             cwd: None,
             branch: None,
             size: None,
+            name: None,
         }))
     }
 }
@@ -354,6 +355,7 @@ fn a_create_that_finishes_as_the_host_shuts_down_is_recorded_and_spawns_nothing(
         cwd: Some(s.app.to_str().unwrap().to_owned()),
         branch: None,
         size: None,
+        name: None,
     }));
     s.h.step();
     s.client.take();
@@ -425,6 +427,7 @@ fn a_session_with_an_explicit_cwd_runs_there_without_a_worktree() {
         cwd: Some(s.app.to_str().unwrap().to_owned()),
         branch: None,
         size: None,
+        name: None,
     }));
     s.h.step();
     let msgs = s.client.take();

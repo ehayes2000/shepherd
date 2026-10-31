@@ -157,6 +157,7 @@ impl Codex {
             cwd: cwd.map(str::to_owned),
             branch: None,
             size: None,
+            name: None,
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -443,6 +444,7 @@ env > "$FAKE_OUT/env"
                         cwd: None,
                         branch: None,
                         size: None,
+                        name: None,
                     }),
                 );
                 let session = SessionId::new(conn.response(2)["session"].as_str().unwrap());

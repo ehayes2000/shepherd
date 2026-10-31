@@ -20,6 +20,7 @@ fn new_session(h: &mut HostHarness, client: &mut FakeClient, profile: &str) -> S
         cwd: None,
         branch: None,
         size: None,
+        name: None,
     }));
     h.step();
     let result = response(&client.take(), &sent).unwrap();

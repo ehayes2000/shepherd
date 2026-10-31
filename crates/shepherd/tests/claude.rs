@@ -168,6 +168,7 @@ impl Claude {
             cwd: cwd.map(str::to_owned),
             branch: None,
             size: None,
+            name: None,
         }));
         self.h.step();
         response(&client.take(), &sent)
@@ -1224,6 +1225,7 @@ read line
                         cwd: None,
                         branch: None,
                         size: None,
+                        name: None,
                     }),
                 );
                 let session = SessionId::new(conn.response(2)["session"].as_str().unwrap());

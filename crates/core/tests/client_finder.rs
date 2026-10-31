@@ -247,6 +247,7 @@ fn starting_a_session_in_a_worktree_asks_for_one_there_on_its_branch() {
             cwd: Some("/wt/app/old-idea".into()),
             branch: Some("old-idea".into()),
             size: None,
+            name: None,
         })]
     );
     assert_eq!(c.client().popup(), None);

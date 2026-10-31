@@ -237,6 +237,10 @@ pub struct SessionNew {
     /// size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ViewSize>,
+    /// What to call it, instead of a placeholder: its worktree's branch is named after it, and it is never named after
+    /// its first prompt. Absent from clients older than `shepherd new --name` (T46).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A client's terminal view, in cells.
