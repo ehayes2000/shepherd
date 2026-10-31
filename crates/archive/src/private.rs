@@ -124,6 +124,16 @@ pub(crate) fn create_new_private_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Creates `path` exactly `0600` if it is missing, or checks an existing one as [`open_existing_private_file`] does.
+/// Returns it open for reading.
+pub(crate) fn open_or_create_private_file(path: &Path) -> Result<File, BlobError> {
+    match create_new_private_file(path) {
+        Ok(_) => open_existing_private_file(path),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => open_existing_private_file(path),
+        Err(e) => Err(io_err(path, e)),
+    }
+}
+
 /// Opens an existing regular file for reading, refusing a symlink, anything but a regular file (checked before the
 /// open, so a FIFO can't block it), a file swapped between the check and the open, and a file group or others can
 /// access.

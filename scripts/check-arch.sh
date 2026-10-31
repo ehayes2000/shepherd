@@ -11,7 +11,7 @@ TUI_ALLOWED="ratatui crossterm unicode-width"
 # External crates shepherd-term may use.
 TERM_ALLOWED="alacritty_terminal"
 # External crates shepherd-archive may use (decision 0020).
-ARCHIVE_ALLOWED="zstd sha2 rusqlite serde serde_json jiff thiserror"
+ARCHIVE_ALLOWED="zstd sha2 rusqlite serde serde_json jiff thiserror percent-encoding"
 
 # Internal crates each crate may depend on (normal + build deps). Unknown crates are not checked.
 internal_allowed() {

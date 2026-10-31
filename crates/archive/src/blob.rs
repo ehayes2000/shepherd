@@ -2,9 +2,16 @@
 //! the file. Writes are atomic (temp file in the same dir, fsync, rename, fsync dir), so a blob is either absent or
 //! complete under its name. Reads verify the hash and are bounded, so a corrupt or hostile file is an error, never
 //! wrong bytes or an unbounded allocation.
+//!
+//! Temp files a crashed `put` left behind are removed by [`BlobStore::sweep_temps`]. There is no clock here, so a temp's
+//! age can't say whether its writer is still alive; a lock file does instead. Every `put` holds a shared `flock` on
+//! `<root>/blobs.lock` from before it creates its temp file until after the rename. The sweep takes the exclusive lock
+//! without waiting: if it gets it, no `put` anywhere is between creating and renaming a temp, so every temp file is
+//! from a process that died (the OS drops a dead process's locks); if it doesn't, a writer is live and the sweep removes
+//! nothing and reports [`Sweep::Busy`].
 
 use std::fmt;
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -14,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::private::{
     create_new_private_file, ensure_private_dir, io_err, normalize, open_existing_private_file,
-    sync_dir,
+    open_or_create_private_file, sync_dir,
 };
 
 /// The largest blob [`BlobStore::put`] accepts and [`BlobStore::get`] inflates, unless set with
@@ -31,6 +38,14 @@ const ZSTD_LEVEL: i32 = 3;
 pub const CRASH_BEFORE_RENAME: &[u8] = b"\0shepherd-archive-test-crash-before-rename\0";
 #[cfg(feature = "fault-injection-crash-before-rename")]
 pub const CRASH_EXIT_CODE: i32 = 86;
+
+/// With the `fault-injection-pause-before-rename` feature (tests only, decision 0015), [`BlobStore::put`] of content
+/// starting with these bytes writes [`PAUSE_MARKER`] and a newline to stdout once its temp file is written and synced,
+/// then waits for a byte (or EOF) on stdin before renaming it.
+#[cfg(feature = "fault-injection-pause-before-rename")]
+pub const PAUSE_BEFORE_RENAME: &[u8] = b"\0shepherd-archive-test-pause-before-rename\0";
+#[cfg(feature = "fault-injection-pause-before-rename")]
+pub const PAUSE_MARKER: &str = "shepherd-archive-paused-before-rename";
 
 /// Names temp files uniquely within this process; the pid separates processes.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -102,10 +117,20 @@ pub enum BlobError {
     Io { path: PathBuf, message: String },
 }
 
+/// What [`BlobStore::sweep_temps`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sweep {
+    /// No writer was live; these stale temp files were removed (sorted).
+    Swept { removed: Vec<PathBuf> },
+    /// A `put` was in progress, so nothing was removed. Try again later.
+    Busy,
+}
+
 /// The blob store under an archive root.
 #[derive(Debug)]
 pub struct BlobStore {
     blobs: PathBuf,
+    lock: PathBuf,
     max_len: u64,
     writes: AtomicU64,
     inflated: AtomicU64,
@@ -133,8 +158,11 @@ impl BlobStore {
         ensure_private_dir(&root)?;
         let blobs = root.join("blobs");
         ensure_private_dir(&blobs)?;
+        let lock = root.join("blobs.lock");
+        open_or_create_private_file(&lock)?;
         Ok(Self {
             blobs,
+            lock,
             max_len: DEFAULT_MAX_BLOB_LEN,
             writes: AtomicU64::new(0),
             inflated: AtomicU64::new(0),
@@ -190,11 +218,19 @@ impl BlobStore {
         }
 
         let compressed = zstd::encode_all(bytes, ZSTD_LEVEL).map_err(|e| io_err(&path, e))?;
+        // Held until this function returns: from before the temp exists until after it is renamed (module docs).
+        let _writing = self.lock_shared()?;
         let temp = self.write_temp(&shard, &id, &compressed)?;
 
         #[cfg(feature = "fault-injection-crash-before-rename")]
         if bytes.starts_with(CRASH_BEFORE_RENAME) {
             std::process::exit(CRASH_EXIT_CODE);
+        }
+        #[cfg(feature = "fault-injection-pause-before-rename")]
+        if bytes.starts_with(PAUSE_BEFORE_RENAME) {
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{PAUSE_MARKER}").and_then(|()| out.flush());
+            let _ = std::io::stdin().read(&mut [0u8; 1]);
         }
 
         // Same content under the same name, so a concurrent writer that got there first is harmless.
@@ -205,6 +241,67 @@ impl BlobStore {
         sync_dir(&shard)?;
         self.writes.fetch_add(1, Ordering::Relaxed);
         Ok(id)
+    }
+
+    /// A shared lock on the writer lock file, held while the returned file is open. Each call opens its own descriptor:
+    /// `flock` locks belong to the open file, so threads sharing one descriptor would release each other's lock.
+    fn lock_shared(&self) -> Result<File, BlobError> {
+        let file = open_existing_private_file(&self.lock)?;
+        file.lock_shared().map_err(|e| io_err(&self.lock, e))?;
+        Ok(file)
+    }
+
+    /// Removes the temp files crashed `put`s left in shard dirs, if no `put` is in progress (module docs). Only files
+    /// named exactly as `put` names its temps, in the shard of the blob they were for, are removed; blobs and any other
+    /// file are never touched.
+    pub fn sweep_temps(&self) -> Result<Sweep, BlobError> {
+        let lock = open_existing_private_file(&self.lock)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(Sweep::Busy),
+            Err(TryLockError::Error(e)) => return Err(io_err(&self.lock, e)),
+        }
+        let mut removed = Vec::new();
+        for shard in read_dir(&self.blobs)? {
+            let shard = shard.map_err(|e| io_err(&self.blobs, e))?;
+            let is_dir = shard
+                .file_type()
+                .map_err(|e| io_err(&shard.path(), e))?
+                .is_dir();
+            if !is_dir {
+                continue;
+            }
+            let mut swept_here = false;
+            for entry in read_dir(&shard.path())? {
+                let entry = entry.map_err(|e| io_err(&shard.path(), e))?;
+                let Some(id) = entry.file_name().to_str().and_then(temp_blob_id) else {
+                    continue;
+                };
+                let is_file = entry
+                    .file_type()
+                    .map_err(|e| io_err(&entry.path(), e))?
+                    .is_file();
+                if shard.path() != self.shard_dir(&id) || !is_file {
+                    continue;
+                }
+                let path = entry.path();
+                match fs::remove_file(&path) {
+                    Ok(()) => {
+                        swept_here = true;
+                        removed.push(path);
+                    }
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(io_err(&path, e)),
+                }
+            }
+            if swept_here {
+                sync_dir(&shard.path())?;
+            }
+        }
+        // Released only now, after the last removal.
+        drop(lock);
+        removed.sort();
+        Ok(Sweep::Swept { removed })
     }
 
     /// Writes `body` to a new `0600` temp file in `dir` and syncs it. Temp names start with `.`, so they never
@@ -313,6 +410,19 @@ impl BlobStore {
         ids.sort();
         Ok(ids)
     }
+}
+
+/// The blob a temp file was for, if `name` is exactly how `write_temp` names temps: `.<blob id>.<pid>.<n>.tmp`.
+fn temp_blob_id(name: &str) -> Option<BlobId> {
+    let inner = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let mut parts = inner.split('.');
+    let (id, pid, n) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    pid.parse::<u32>().ok()?;
+    n.parse::<u64>().ok()?;
+    id.parse().ok()
 }
 
 fn read_dir(dir: &Path) -> Result<fs::ReadDir, BlobError> {
