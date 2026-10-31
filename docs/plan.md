@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | building | task/t47-prompt-wait |  |  |
-| T49 Render pages and split panes | [automation](features/automation.md) | fixing | task/t49-render-layout @ 6a15c34 | 1 | round 1 CHANGES: menu unreachable under mouse tracking; help; focus highlight, mouse offset, cursor and runtime sizing untested; resize-on-layout-change fights |
+| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | review | task/t47-prompt-wait @ d8ba6d4 |  | built; fresh agent counts idle after SessionStart; SessionBusy wire error |
+| T49 Render pages and split panes | [automation](features/automation.md) | review | task/t49-render-layout @ 4f41e42 | 1 | round 1 fixed (Layout button in sidebar header; shared fit_screens); round 2 review |
 | T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | merging | task/t54-subagent-events @ fa40b4e | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
 
 ## Ready to start

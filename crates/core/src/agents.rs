@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+mod subagents;
 
 use std::collections::BTreeMap;
 

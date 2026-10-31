@@ -16,11 +16,25 @@
 //! | `SessionStart` | `_shepherd/agent/started { agent_session_id }`, except after compaction (`source: compact`) |
 //! | `SessionEnd` | `_shepherd/agent/exited` |
 //! | `PreCompact` / `PostCompact` | `compaction_update` `in_progress` / `completed`, same `compactionId` |
-//! | anything else (`SubagentStart`, `SubagentStop`, ...) | `_codex/<hook_name>` with the raw payload (`_codex/unknown` without a usable name) |
+//! | `SubagentStart` | `_shepherd/subagent/started { id, agent_type, task? }`, `task` from the `spawn_agent` call that spawned it |
+//! | `SubagentStop` | `_shepherd/subagent/finished { id }` |
+//! | a subagent's `PermissionRequest` | also `_shepherd/subagent/blocked { id, kind: permission, text }` |
+//! | a blocked subagent's next `PreToolUse` or `PostToolUse` | also `_shepherd/subagent/working { id }` |
+//! | anything else | `_codex/<hook_name>` with the raw payload (`_codex/unknown` without a usable name) |
 //!
 //! Synthesized ACP frames carry `_meta.shepherd.synthesized`. A known hook missing a field its frames need becomes
 //! its vendor frame instead. Continuations work as for Claude Code (see [`super::claude`]): a Codex `Stop` hook can
 //! block `Stop` too, and main-thread tool activity with no prompt open gets an empty continuation prompt.
+//!
+//! Subagents (thread-spawned agents, `codex-rs/hooks/src/events/session_start.rs` and `stop.rs`): a subagent thread
+//! fires `SubagentStart` and `SubagentStop` instead of `SessionStart` and `Stop`, with the parent's `session_id`, and
+//! its tool hooks carry `agent_id` and `agent_type`. `SubagentStart` has no task, so it takes the `message` (else
+//! `task_name`) of the `spawn_agent` call that spawned it (`function_hook_tool_name` in
+//! `codex-rs/core/src/tools/registry.rs`). `spawn_agent` returns its `SpawnAgentResult { agent_id }` before the
+//! child's `SubagentStart` runs (`run_pending_session_start_hooks` in `codex-rs/core/src/hook_runtime.rs`), so its
+//! `PostToolUse` usually pairs them first; else by `agent_type` (default `default`, `DEFAULT_ROLE_NAME`) when that
+//! is unambiguous (see `agents::subagents`).
+//! Codex has no hook for a subagent's questions, so only permission requests block one.
 //!
 //! Codex has no `Notification` hook, so there is no idle notification and no permission-dialog notification; and no
 //! `PostToolUseFailure`, so a failed tool still completes through `PostToolUse` with its output.
@@ -35,16 +49,18 @@ use crate::acpp::acp::{
     ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use crate::acpp::{
-    AgentExited, AgentIdle, AgentStarted, Dir, Frame, FrameDraft, RequestId, ShepherdFrame, Source,
-    SourceKind,
+    AgentExited, AgentIdle, AgentStarted, BlockKind, Dir, Frame, FrameDraft, RequestId,
+    ShepherdFrame, Source, SourceKind,
 };
 use crate::ids::SessionId;
+
+use super::subagents::{Subagents, ToolOutcome};
 
 /// The agent name in `source.agent` and `_shepherd/agent/started`.
 pub const AGENT: &str = "codex";
 
 /// The hooks a Codex session is launched with: every hook the table above maps to more than a vendor frame.
-pub const HOOK_EVENTS: [&str; 10] = [
+pub const HOOK_EVENTS: [&str; 12] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -55,7 +71,15 @@ pub const HOOK_EVENTS: [&str; 10] = [
     "PreCompact",
     "PostCompact",
     "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
 ];
+
+/// The tool that spawns a subagent, as hooks name it.
+const SPAWN_TOOL: &str = "spawn_agent";
+
+/// The subagent type `spawn_agent` spawns when its input names none.
+const DEFAULT_AGENT_TYPE: &str = "default";
 
 /// The `timeout` (seconds) of each shepherd hook. Explicit, because Codex hashes the normalized timeout; within the
 /// 1..=3 s Codex allows for `SessionEnd` and `Interrupt`, and well above `shepherd hook`'s own one-second wait.
@@ -133,6 +157,8 @@ fn event_key_label(event: &str) -> Option<&'static str> {
         "PreCompact" => "pre_compact",
         "PostCompact" => "post_compact",
         "SessionEnd" => "session_end",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
         _ => return None,
     })
 }
@@ -192,6 +218,8 @@ pub struct CodexTranslation {
     tools: Vec<OpenTool>,
     /// The `compactionId` of a compaction that started and hasn't completed.
     compaction: Option<String>,
+    #[serde(default)]
+    subagents: Subagents,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,6 +241,7 @@ impl CodexTranslation {
             prompt: None,
             tools: Vec::new(),
             compaction: None,
+            subagents: Subagents::default(),
         }
     }
 
@@ -229,6 +258,7 @@ impl CodexTranslation {
     fn end_turn(&mut self) {
         self.prompt = None;
         self.tools.clear();
+        self.subagents.end_turn();
     }
 
     fn draft(&self, dir: Dir, frame: Frame) -> FrameDraft {
@@ -259,6 +289,8 @@ pub fn translate(state: &mut CodexTranslation, payload: &Value) -> Vec<FrameDraf
         "SessionEnd" => session_end(state),
         "PreCompact" => pre_compact(state, &hook),
         "PostCompact" => post_compact(state, &hook),
+        "SubagentStart" => subagent_start(state, &hook),
+        "SubagentStop" => subagent_stop(state, &hook),
         _ => None,
     };
     match frames {
@@ -390,6 +422,18 @@ fn pre_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
         input: input.cloned(),
     });
     out.push((Dir::FromAgent, frame));
+    if name == SPAWN_TOOL {
+        let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str);
+        let agent_type = field("agent_type")
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(DEFAULT_AGENT_TYPE);
+        let task = field("message").or(field("task_name"));
+        state.subagents.spawn(id, agent_type, task);
+    }
+    if let Some(agent) = hook.str("agent_id") {
+        out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
+    }
     Some(out)
 }
 
@@ -405,7 +449,18 @@ fn post_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     });
     let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
-    Some(vec![(Dir::FromAgent, frame)])
+    let mut out = vec![(Dir::FromAgent, frame)];
+    // Codex has no failure hook: a failed tool completes too, so a failed `spawn_agent` stays a candidate.
+    let spawned = spawned_agent(hook.field("tool_response"));
+    let outcome = ToolOutcome::Completed {
+        spawned: spawned.as_deref(),
+    };
+    let corrected = state.subagents.tool_done(id, outcome);
+    out.extend(corrected.into_iter().map(|f| (Dir::Internal, f)));
+    if let Some(agent) = hook.str("agent_id") {
+        out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
+    }
+    Some(out)
 }
 
 /// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input. Codex
@@ -438,7 +493,40 @@ fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     .into_synthesized()
     .ok()?;
     out.push((Dir::FromAgent, frame));
+    if let Some(agent) = hook.str("agent_id") {
+        let text = tool_title(name, input);
+        let frame =
+            state
+                .subagents
+                .block(agent, hook.str("agent_type"), BlockKind::Permission, text);
+        out.extend(frame.map(|f| (Dir::Internal, f)));
+    }
     Some(out)
+}
+
+/// The `agent_id` of a `spawn_agent` result (`SpawnAgentResult`), which the hook carries as the model-facing output:
+/// its JSON as a string, or as an object.
+fn spawned_agent(response: Option<&Value>) -> Option<String> {
+    let parsed;
+    let result = match response? {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).ok()?;
+            &parsed
+        }
+        other => other,
+    };
+    result.get("agent_id")?.as_str().map(str::to_owned)
+}
+
+fn subagent_start(state: &mut CodexTranslation, hook: &Hook) -> Frames {
+    let id = hook.str("agent_id")?;
+    let agent_type = hook.str("agent_type").filter(|t| !t.is_empty())?;
+    Some(vec![(Dir::Internal, state.subagents.start(id, agent_type))])
+}
+
+fn subagent_stop(state: &mut CodexTranslation, hook: &Hook) -> Frames {
+    let id = hook.str("agent_id")?;
+    Some(vec![(Dir::Internal, state.subagents.finish(id))])
 }
 
 fn same_input(a: Option<&Value>, b: Option<&Value>) -> bool {

@@ -45,6 +45,23 @@ fn all_fixtures() -> Vec<Value> {
         fx!("Stop.continued"),
         fx!("PreToolUse.Grep.subagent"),
         fx!("PermissionRequest.Grep.subagent"),
+        fx!("PostToolUse.Grep.subagent"),
+        fx!("PreToolUse.AskUserQuestion.subagent"),
+        fx!("PreToolUse.Agent"),
+        fx!("PostToolUse.Agent"),
+        fx!("PostToolUse.Agent.background"),
+        fx!("PostToolUseFailure.Agent"),
+        fx!("PreToolUse.Agent.second"),
+        fx!("PostToolUse.Agent.second"),
+        fx!("SubagentStart.second"),
+        fx!("PreToolUse.Agent.default"),
+        fx!("SubagentStart.default"),
+        fx!("SubagentStart"),
+        fx!("SubagentStop"),
+        fx!("SubagentStart.internal"),
+        fx!("SubagentStop.internal"),
+        fx!("PreToolUse.Agent.hostile"),
+        fx!("SubagentStart.hostile"),
     ]
 }
 

@@ -1,0 +1,15 @@
+{
+  "session_id": "019a0000-0000-7000-8000-00000000c0de",
+  "transcript_path": "/home/me/.codex/sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a0000-0000-7000-8000-00000000c0de.jsonl",
+  "cwd": "/home/me/project",
+  "turn_id": "turn-1",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "tool_name": "spawn_agent",
+  "tool_input": {
+    "message": "Find every TODO under src and summarize them.",
+    "agent_type": "explorer"
+  },
+  "tool_use_id": "call_spawn_1"
+}

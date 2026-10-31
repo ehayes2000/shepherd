@@ -17,6 +17,11 @@
 //! | `SessionStart` | `_shepherd/agent/started { agent_session_id }`, except after compaction (`source: compact`) |
 //! | `SessionEnd` | `_shepherd/agent/exited`, except for `/clear` and `/resume`, which start a new session in the same process |
 //! | `PreCompact` / `PostCompact` | `compaction_update` `in_progress` / `completed`, same `compactionId`; a new `PreCompact` first cancels one left open |
+//! | `SubagentStart` | `_shepherd/subagent/started { id, agent_type, task? }`, `task` from the `Agent` tool call that spawned it; an internal agent (empty `agent_type`) is a vendor frame |
+//! | `PostToolUse` of `Agent` naming an announced subagent with another task | also a corrective `_shepherd/subagent/started` |
+//! | `SubagentStop` | `_shepherd/subagent/finished { id }`; an internal agent's is a vendor frame |
+//! | a subagent's `PermissionRequest`, or `PreToolUse` of `AskUserQuestion` | also `_shepherd/subagent/blocked { id, kind, text }` (`permission`, or `question`) |
+//! | a blocked subagent's next `PreToolUse`, `PostToolUse`, `PostToolUseFailure` or `PermissionDenied` | also `_shepherd/subagent/working { id }` |
 //! | anything else | `_claude-code/<hook_name>` with the raw payload (`_claude-code/unknown` without a usable name) |
 //!
 //! Synthesized ACP frames carry `_meta.shepherd.synthesized`. A known hook missing a field its frames need becomes
@@ -25,6 +30,13 @@
 //! Continuations: when a main-agent `PreToolUse` or `PermissionRequest` (no `agent_id`) arrives with no prompt
 //! open, a `Stop` hook kept the turn going after `Stop` fired. The translator opens an empty `session/prompt`
 //! marked `_meta.shepherd.continuation: true`, which the next `Stop` answers.
+//!
+//! Subagents: hooks fired inside a subagent carry its `agent_id` and `agent_type`. `SubagentStart` has no task, so
+//! it takes the task (`description`, else `prompt`) of the `Agent` tool call (`Task` in older Claude Code) that
+//! spawned it, paired by the subagent id the call's `PostToolUse` names (`tool_response.agentId`, for `completed`
+//! and `async_launched` alike), else by `subagent_type` (default `general-purpose`) when that is unambiguous; see
+//! `agents::subagents`. Claude Code's own internal agents (prompt suggestions, `/btw`) fire `SubagentStop` with an
+//! empty `agent_type`: they are not the session's subagents, so their hooks stay vendor frames.
 //!
 //! Interrupts: Claude Code fires no hook when the user presses Esc (`Stop` "does not run if the stoppage occurred
 //! due to a user interrupt"). The turn ends at the next `UserPromptSubmit` (a new prompt replaces the old turn in
@@ -40,16 +52,18 @@ use crate::acpp::acp::{
     ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use crate::acpp::{
-    AgentExited, AgentIdle, AgentStarted, Dir, Frame, FrameDraft, RequestId, ShepherdFrame, Source,
-    SourceKind,
+    AgentExited, AgentIdle, AgentStarted, BlockKind, Dir, Frame, FrameDraft, RequestId,
+    ShepherdFrame, Source, SourceKind,
 };
 use crate::ids::SessionId;
+
+use super::subagents::{Subagents, ToolOutcome};
 
 /// The agent name in `source.agent` and `_shepherd/agent/started`.
 pub const AGENT: &str = "claude-code";
 
 /// The hooks a Claude Code session is launched with: every hook the table above maps to more than a vendor frame.
-pub const HOOK_EVENTS: [&str; 13] = [
+pub const HOOK_EVENTS: [&str; 15] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -63,7 +77,18 @@ pub const HOOK_EVENTS: [&str; 13] = [
     "PreCompact",
     "PostCompact",
     "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
 ];
+
+/// The tool that spawns a subagent: `Agent`, or `Task` in older Claude Code.
+const SPAWN_TOOLS: [&str; 2] = ["Agent", "Task"];
+
+/// The subagent type the `Agent` tool spawns when its input names none.
+const DEFAULT_AGENT_TYPE: &str = "general-purpose";
+
+/// The tool a subagent asks the user a question with.
+const QUESTION_TOOL: &str = "AskUserQuestion";
 
 /// What the translator remembers between hooks of one shepherd session. The host keeps one per session and passes
 /// it to every [`translate`] call, so a prompt and its `Stop` pair up by id. It serializes, so the host can persist
@@ -85,6 +110,8 @@ pub struct ClaudeTranslation {
     tools: Vec<OpenTool>,
     /// The `compactionId` of a compaction that started and hasn't completed.
     compaction: Option<String>,
+    #[serde(default)]
+    subagents: Subagents,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +138,7 @@ impl ClaudeTranslation {
             permission_open: false,
             tools: Vec::new(),
             compaction: None,
+            subagents: Subagents::default(),
         }
     }
 
@@ -129,6 +157,7 @@ impl ClaudeTranslation {
         self.prompt = None;
         self.permission_open = false;
         self.tools.clear();
+        self.subagents.end_turn();
     }
 
     fn draft(&self, dir: Dir, frame: Frame) -> FrameDraft {
@@ -169,6 +198,8 @@ pub fn translate(state: &mut ClaudeTranslation, payload: &Value) -> Vec<FrameDra
         "SessionEnd" => session_end(state, &hook),
         "PreCompact" => pre_compact(state, &hook),
         "PostCompact" => post_compact(state, &hook),
+        "SubagentStart" => subagent_start(state, &hook),
+        "SubagentStop" => subagent_stop(state, &hook),
         _ => None,
     };
     match frames {
@@ -318,6 +349,24 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     });
     state.permission_open = false;
     out.push((Dir::FromAgent, frame));
+    if SPAWN_TOOLS.contains(&name) {
+        let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str);
+        let agent_type = field("subagent_type").unwrap_or(DEFAULT_AGENT_TYPE);
+        let task = field("description").or(field("prompt"));
+        state.subagents.spawn(id, agent_type, task);
+    }
+    if let Some(agent) = hook.str("agent_id") {
+        let frame = if name == QUESTION_TOOL {
+            let text = question(input).unwrap_or_else(|| tool_title(name, input));
+            let kind = BlockKind::Question;
+            state
+                .subagents
+                .block(agent, hook.str("agent_type"), kind, text)
+        } else {
+            state.subagents.active(agent)
+        };
+        out.extend(frame.map(|f| (Dir::Internal, f)));
+    }
     Some(out)
 }
 
@@ -329,6 +378,15 @@ fn tool_done(
     raw_output: Option<&Value>,
 ) -> Frames {
     let id = hook.str("tool_use_id")?;
+    // A completed or background-launched `Agent` call names its subagent; an older `Task` result may not.
+    let outcome = match status {
+        ToolCallStatus::Completed => ToolOutcome::Completed {
+            spawned: raw_output
+                .and_then(|r| r.get("agentId"))
+                .and_then(Value::as_str),
+        },
+        _ => ToolOutcome::Failed,
+    };
     let patch = SessionUpdate::ToolCallUpdate(ToolCallUpdate {
         tool_call_id: id.to_owned(),
         title: None,
@@ -340,7 +398,13 @@ fn tool_done(
     let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
     state.permission_open = false;
-    Some(vec![(Dir::FromAgent, frame)])
+    let mut out = vec![(Dir::FromAgent, frame)];
+    let corrected = state.subagents.tool_done(id, outcome);
+    out.extend(corrected.into_iter().map(|f| (Dir::Internal, f)));
+    if let Some(agent) = hook.str("agent_id") {
+        out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
+    }
+    Some(out)
 }
 
 /// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input.
@@ -355,7 +419,40 @@ fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         .map(|t| t.id.clone());
     let mut out = continuation(state, hook)?;
     out.extend(permission(state, hook, tool, &tool_title(name, input))?);
+    if let Some(agent) = hook.str("agent_id") {
+        let (kind, text) = match question(input).filter(|_| name == QUESTION_TOOL) {
+            Some(text) => (BlockKind::Question, text),
+            None => (BlockKind::Permission, tool_title(name, input)),
+        };
+        let frame = state
+            .subagents
+            .block(agent, hook.str("agent_type"), kind, text);
+        out.extend(frame.map(|f| (Dir::Internal, f)));
+    }
     Some(out)
+}
+
+/// The first question of an `AskUserQuestion` input.
+fn question(input: Option<&Value>) -> Option<String> {
+    input?
+        .get("questions")?
+        .get(0)?
+        .get("question")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A subagent started. An empty `agent_type` is one of Claude Code's internal agents, not the session's subagent.
+fn subagent_start(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
+    let id = hook.str("agent_id")?;
+    let agent_type = hook.str("agent_type").filter(|t| !t.is_empty())?;
+    Some(vec![(Dir::Internal, state.subagents.start(id, agent_type))])
+}
+
+fn subagent_stop(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
+    let id = hook.str("agent_id")?;
+    hook.str("agent_type").filter(|t| !t.is_empty())?;
+    Some(vec![(Dir::Internal, state.subagents.finish(id))])
 }
 
 fn notification(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {

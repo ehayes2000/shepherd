@@ -14,6 +14,8 @@
 //!   dialog: a key the client marks as one (Enter, Esc, Ctrl-C, a printable key) or a paste. Moving around the
 //!   dialog, focus and mouse reports, and the screen's own query replies (which the runtime writes without telling
 //!   the watch) are not answers.
+//! - **A blocked subagent** (`_shepherd/subagent/blocked`) counts as a permission request, whatever the agent itself is
+//!   doing: the parent waits on the subagent, whose dialog is just as quiet. Each new block needs its own answer.
 //! - Anything else, and shell sessions always, are left alone. Output never makes a session working again: only a
 //!   real turn signal does (`core::session`).
 //! - A tick that asks for an idle restarts that session's quiet period, so an idle the runtime failed to append is
@@ -83,13 +85,21 @@ enum Answer {
 }
 
 impl Watched {
+    /// Whether a dialog is open: the agent's own permission request, or a subagent's block.
+    fn asking(&self) -> bool {
+        matches!(self.state.activity(), Activity::NeedsPermission { .. })
+            || self.state.subagent_blocked()
+    }
+
     /// What it would be inferred as, and from when, if it stayed quiet.
     fn due(&self) -> Option<(jiff::Timestamp, IdleInference)> {
-        let inference = match self.state.activity() {
-            Activity::Working { .. } => IdleInference::Quiet,
-            Activity::NeedsPermission { .. } if self.answer == Answer::Redrawn => {
-                IdleInference::QuietAfterPermission
-            }
+        let in_turn = matches!(
+            self.state.activity(),
+            Activity::Working { .. } | Activity::NeedsPermission { .. }
+        );
+        let inference = match (in_turn, self.asking()) {
+            (true, false) => IdleInference::Quiet,
+            (true, true) if self.answer == Answer::Redrawn => IdleInference::QuietAfterPermission,
             _ => return None,
         };
         let at = self.last?.checked_add(self.quiet).ok()?;
@@ -164,10 +174,14 @@ impl QuietWatch {
         let Some(watched) = self.sessions.get_mut(id) else {
             return;
         };
-        let was_asking = matches!(watched.state.activity(), Activity::NeedsPermission { .. });
+        let was_asking = watched.asking();
         watched.state.apply(env);
-        let asks = matches!(watched.state.activity(), Activity::NeedsPermission { .. });
-        let new_request = matches!(env.frame(), Frame::Acp(m) if matches!(m.body(), AcpFrame::RequestPermission(_)));
+        let asks = watched.asking();
+        let new_request = match env.frame() {
+            Frame::Acp(m) => matches!(m.body(), AcpFrame::RequestPermission(_)),
+            Frame::Shepherd(m) => matches!(m.body(), ShepherdFrame::SubagentBlocked(_)),
+            _ => false,
+        };
         if asks && (!was_asking || new_request) {
             watched.answer = Answer::Untouched;
         }
@@ -193,9 +207,10 @@ impl QuietWatch {
                 bytes,
             } => {
                 if let Some(watched) = self.sessions.get_mut(&session) {
-                    let asking =
-                        matches!(watched.state.activity(), Activity::NeedsPermission { .. });
-                    if asking && watched.answer == Answer::Untouched && answers(kind, &bytes) {
+                    if watched.asking()
+                        && watched.answer == Answer::Untouched
+                        && answers(kind, &bytes)
+                    {
                         watched.answer = Answer::Typed;
                     }
                     watched.last = watched.last.max(Some(at.instant()));

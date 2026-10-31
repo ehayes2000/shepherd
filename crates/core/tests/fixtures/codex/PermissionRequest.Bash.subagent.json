@@ -1,0 +1,16 @@
+{
+  "session_id": "019a0000-0000-7000-8000-00000000c0de",
+  "transcript_path": "/home/me/.codex/sessions/2026/10/30/rollout-2026-10-30T10-00-00-019a0000-0000-7000-8000-00000000c0de.jsonl",
+  "cwd": "/home/me/project",
+  "turn_id": "turn-1",
+  "agent_id": "agent-7f3a",
+  "agent_type": "explorer",
+  "hook_event_name": "PermissionRequest",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rg TODO",
+    "description": null
+  }
+}
