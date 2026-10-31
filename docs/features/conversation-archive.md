@@ -13,8 +13,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 | Archive crate and blob store | merging | task/t38-archive-blobs @ e6f928b | 3 | round 3 tests-only, PM spot check |
-| T39 | Archive index | todo |  |  |  |
+| T38 | Archive crate and blob store | done | 597d476 | 3 | decompression bound untested; put didn't heal a corrupt blob; reservation clamp untested (forged header aborted) |
+| T39 | Archive index | building | task/t39-archive-index @ 597d476 | 0 |  |
 | T40 | Capture transcripts from Claude Code and Codex | todo |  |  |  |
 | T41 | Restore transcripts for a target cwd | todo |  |  |  |
 | T42 | Archive port and host capture | todo |  |  |  |

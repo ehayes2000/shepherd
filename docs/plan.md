@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | merging | task/t38-archive-blobs @ e6f928b | 3 | round 3 tests-only, PM spot check |
-| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | building | task/t39-archive-index @ 597d476 | 0 |  |
+| T29 Machine identity and names | [multi-machine](features/multi-machine.md) | review | task/t29-machine-identity @ 205e0d8 (on 1709ed0) | 1 | PM-accepted: associated Key type; first start records machine/renamed; alias in client. Reviewer judges key failure during hot swap |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
 ## Ready to start
@@ -37,7 +37,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Conversation archive](features/conversation-archive.md) | M3+ | 0 | 7 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
+| [Conversation archive](features/conversation-archive.md) | M3+ | 1 | 6 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 8 | 2 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
