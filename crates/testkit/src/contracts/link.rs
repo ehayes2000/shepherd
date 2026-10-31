@@ -804,16 +804,23 @@ pub fn flush_closed_times_out_while_a_closed_peer_does_not_read<F: LinkFixture>(
 /// A link gives up delivering to a closed conn whose peer hasn't read for [`CLOSE_FLUSH`]. What it gave up on was never
 /// delivered, so the `flush_closed` waiting meanwhile is `TimedOut`, and it returns at the give-up rather than at its
 /// bound. Then the give-up is forgotten, and doesn't hold a later `flush_closed` for its bound. Both bounds are long,
-/// so the link gives up while the first waits; returning well within them is a liveness bound, not a measurement.
+/// so the link gives up while the first waits; returning well within them is a liveness bound, not a measurement. A
+/// give-up never comes before `CLOSE_FLUSH` after the close: a lower bound, which load only makes truer.
 pub fn a_give_up_is_reported_once_and_holds_no_later_flush<F: LinkFixture>(mut h: LinkHarness<F>) {
     let (_peer, conn) = h.stalled_peer();
     stuck_backlog(&mut h, conn);
+    let closed = Instant::now();
     h.host.close(conn).unwrap();
     let long = 6 * TIMEOUT;
     let started = Instant::now();
     assert_eq!(
         h.host.flush_closed(CLOSE_FLUSH + long),
         FlushOutcome::TimedOut
+    );
+    assert!(
+        closed.elapsed() >= CLOSE_FLUSH,
+        "gave up {:?} after the close, before CLOSE_FLUSH",
+        closed.elapsed()
     );
     assert!(
         started.elapsed() < CLOSE_FLUSH + long / 2,
