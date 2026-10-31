@@ -27,6 +27,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::archive::ShepherdArchive;
 use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
@@ -35,6 +36,7 @@ use shepherd_adapters::{
     KeyFileIdentity, PortablePty, ShellCommands, TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
+pub use shepherd_core::host::capture::AgentHomes;
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
     ConfigSource, IdentityError, LogError, LogId, MachineIdentity, MachineKey,
@@ -59,6 +61,7 @@ pub type RealHost = HostRuntime<
     JsonlEventLog,
     RealEnv,
     IrohPeers,
+    ShepherdArchive,
 >;
 
 /// The real host's links: its socket, and its link to other machines.
@@ -72,6 +75,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const RUN_DIR: &str = "run";
 /// Managed worktrees go in `<root>/worktrees/<repo>/<name>`.
 pub const WORKTREES_DIR: &str = "worktrees";
+/// The conversation archive (decision 0020) is `<root>/archive/`.
+pub const ARCHIVE_DIR: &str = "archive";
 /// How long the upgrade preflight (`<shepherd> handoff-check`) may run: a bound on a broken binary, not a timing.
 pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
 
@@ -172,8 +177,9 @@ pub fn file_subscriber(file: File) -> impl tracing::Subscriber + Send + Sync {
 }
 
 /// Builds the host on the real adapters under `root`, in the order the module docs give. `home` is where new
-/// sessions start, `login_shell` the user's `$SHELL`. A failure is also logged, for a host started in the
-/// background with no stderr.
+/// sessions start, `login_shell` the user's `$SHELL`. The agents' homes are their defaults under `home`
+/// ([`AgentHomes::under`]): `shepherd host` itself reads the environment for them instead. A failure is also logged,
+/// for a host started in the background with no stderr.
 pub fn open(
     root: &Path,
     home: PathBuf,
@@ -190,8 +196,17 @@ pub fn open_with_forge(
     login_shell: Option<String>,
     forge: GhForge,
 ) -> Result<RealHost, HostStartError> {
-    open_inner(root, home, login_shell, forge)
+    let homes = AgentHomes::under(&home);
+    open_inner(root, home, login_shell, forge, homes)
         .inspect_err(|e| tracing::error!(error = %e, "host failed to start"))
+}
+
+/// Where the agents keep their transcripts for this user, read once at start: `CLAUDE_CONFIG_DIR` (else
+/// `<home>/.claude`) and `CODEX_HOME` (else `<home>/.codex`). An empty variable counts as unset.
+pub fn agent_homes_from_env(home: &Path) -> AgentHomes {
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let codex = std::env::var_os("CODEX_HOME");
+    AgentHomes::resolve(home, claude.as_deref(), codex.as_deref())
 }
 
 fn open_inner(
@@ -199,6 +214,7 @@ fn open_inner(
     home: PathBuf,
     login_shell: Option<String>,
     forge: GhForge,
+    homes: AgentHomes,
 ) -> Result<RealHost, HostStartError> {
     prepare_root(root)?;
     let log = JsonlEventLog::open(root).map_err(|e| log_error(root, e))?;
@@ -213,14 +229,16 @@ fn open_inner(
     let machine = key.machine_id();
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
-    let settings = settings(root, home, config, shepherd, None, machine);
+    let mut settings = settings(root, home, config, shepherd, None, machine);
+    settings.agent_homes = homes;
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
+    let archive = ShepherdArchive::new(root.join(ARCHIVE_DIR));
     let peers = peers(root, Some(&key), &tx)?;
     let link = HostLinks::new(local, peers.link(RealLinks::peers_sink(tx.link_sink())));
     HostRuntime::start(
-        pty, worktrees, commands, forge, link, peers, log, RealEnv, settings, tx, rx,
+        pty, worktrees, commands, forge, archive, link, peers, log, RealEnv, settings, tx, rx,
     )
     .map_err(|e| start_error(root, e))
 }
@@ -235,7 +253,8 @@ pub fn open_adopted(
     login_shell: Option<String>,
     handoff: &Path,
 ) -> Result<RealHost, HostStartError> {
-    open_adopted_inner(root, home, login_shell, handoff)
+    let homes = AgentHomes::under(&home);
+    open_adopted_inner(root, home, login_shell, handoff, homes)
         .inspect_err(|e| tracing::error!(error = %e, "host failed to take over"))
 }
 
@@ -244,6 +263,7 @@ fn open_adopted_inner(
     home: PathBuf,
     login_shell: Option<String>,
     handoff: &Path,
+    homes: AgentHomes,
 ) -> Result<RealHost, HostStartError> {
     let file = swap::read(root, handoff).map_err(HostStartError::Adopt)?;
     // SAFETY: carried by the previous image for this one alone, and taken once each.
@@ -288,7 +308,7 @@ fn open_adopted_inner(
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (a, b) => a.or(b),
     };
-    let settings = settings(
+    let mut settings = settings(
         root,
         home,
         config,
@@ -296,6 +316,7 @@ fn open_adopted_inner(
         warning,
         machine.clone(),
     );
+    settings.agent_homes = homes;
     // Sessions are adopted by now, so a root that can't be resolved doesn't stop the takeover: it is used as it is.
     let dir = root.join(WORKTREES_DIR);
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&dir).unwrap_or_else(|error| {
@@ -313,6 +334,7 @@ fn open_adopted_inner(
         worktrees,
         commands,
         GhForge::new(),
+        ShepherdArchive::new(root.join(ARCHIVE_DIR)),
         link,
         peers,
         log,
@@ -430,6 +452,7 @@ fn settings(
     }
     RuntimeSettings {
         config,
+        agent_homes: AgentHomes::under(&home),
         home,
         run_root: root.join(RUN_DIR),
         build,
@@ -514,8 +537,16 @@ fn run_default(adopt: Option<&Path>) -> Result<(), HostStartError> {
     let _ = tracing::subscriber::set_global_default(file_subscriber(file));
 
     let mut host = match adopt {
-        None => open(&root, home, shell)?,
-        Some(handoff) => open_adopted(&root, home, shell, handoff)?,
+        None => {
+            let homes = agent_homes_from_env(&home);
+            open_inner(&root, home, shell, GhForge::new(), homes)
+                .inspect_err(|e| tracing::error!(error = %e, "host failed to start"))?
+        }
+        Some(handoff) => {
+            let homes = agent_homes_from_env(&home);
+            open_adopted_inner(&root, home, shell, handoff, homes)
+                .inspect_err(|e| tracing::error!(error = %e, "host failed to take over"))?
+        }
     };
     forward_signals(host.sender());
     tracing::info!(root = %root.display(), "host started");

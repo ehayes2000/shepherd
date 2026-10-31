@@ -65,8 +65,8 @@ use shepherd_core::ports::worktrees::{
     managed_parts, normalize_lexically, repo_name_from_common_dir,
 };
 use shepherd_core::ports::{
-    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
-    WorktreePath, WorktreeStatus, Worktrees,
+    BaseSpec, BaseUsed, BranchName, CommitHash, Created, PatchId, RepoRef, RepoRoot, Worktree,
+    WorktreeError, WorktreeName, WorktreePath, WorktreeStatus, Worktrees,
 };
 
 use crate::process_group::{kill_group, killed_by_signal, wait_group_gone, wait_unreaped};
@@ -271,15 +271,48 @@ impl GitWorktrees {
         call: Option<&CreateCall>,
         vars: &[(&str, &str)],
     ) -> Result<String, Failure> {
+        let mut stdout = self.run_to_file(dir, args, timeout, call, vars, None)?;
         let io = |e: io::Error| Failure::Io(e.to_string());
-        let mut stdout = tempfile::tempfile().map_err(io)?;
+        String::from_utf8(read_all(&mut stdout).map_err(io)?)
+            .map_err(|e| Failure::Io(e.to_string()))
+    }
+
+    /// Runs git with `stdin` (none: closed) and the git timeout, its output read from `stdin` as the call's input,
+    /// e.g. what an earlier call wrote ([`GitWorktrees::run_to_file`]).
+    fn git_reading(&self, dir: &Path, args: &[&str], stdin: File) -> Result<String, Failure> {
+        let mut stdout =
+            self.run_to_file(dir, args, Some(self.git_timeout), None, &[], Some(stdin))?;
+        let io = |e: io::Error| Failure::Io(e.to_string());
+        String::from_utf8(read_all(&mut stdout).map_err(io)?)
+            .map_err(|e| Failure::Io(e.to_string()))
+    }
+
+    /// [`GitWorktrees::run_with`], reading `stdin` (none: closed), and giving back the file git's output went to.
+    fn run_to_file<S: AsRef<OsStr>>(
+        &self,
+        dir: &Path,
+        args: &[S],
+        timeout: Option<Duration>,
+        call: Option<&CreateCall>,
+        vars: &[(&str, &str)],
+        stdin: Option<File>,
+    ) -> Result<File, Failure> {
+        let io = |e: io::Error| Failure::Io(e.to_string());
+        let stdout = tempfile::tempfile().map_err(io)?;
         let mut stderr = tempfile::tempfile().map_err(io)?;
+        let stdin = match stdin {
+            Some(mut file) => {
+                file.seek(SeekFrom::Start(0)).map_err(io)?;
+                Stdio::from(file)
+            }
+            None => Stdio::null(),
+        };
         let mut command = Command::new("git");
         command
             .arg("-C")
             .arg(dir)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(stdout.try_clone().map_err(io)?)
             .stderr(stderr.try_clone().map_err(io)?);
         match &self.isolated_env {
@@ -372,8 +405,7 @@ impl GitWorktrees {
             Err(e) => Err(Failure::Io(e.to_string())),
             Ok(_) if timed_out => Err(Failure::Timeout),
             Ok(_) if cancelled => Err(Failure::Cancelled),
-            Ok(status) if status.success() => String::from_utf8(read_all(&mut stdout).map_err(io)?)
-                .map_err(|e| Failure::Io(e.to_string())),
+            Ok(status) if status.success() => Ok(stdout),
             Ok(status) => Err(Failure::Exit {
                 code: status.code(),
                 stderr: String::from_utf8_lossy(&read_all(&mut stderr).map_err(io)?)
@@ -939,6 +971,7 @@ impl Worktrees for GitWorktrees {
             )
             .map_err(|f| f.into_error("rev-parse"))?;
         let base_oid = base_oid.trim_end_matches('\n');
+        let base_commit = CommitHash::parse(base_oid).ok();
         if matches!(base, BaseUsed::Origin { .. }) {
             // Moves `origin/<default>` to what was fetched, as a plain fetch would, unless it moved since it was read
             // (e.g. the user's own fetch advanced it: it isn't rewound) or another process holds its lock. Either way
@@ -1010,6 +1043,7 @@ impl Worktrees for GitWorktrees {
                     path: WorktreePath::new(path),
                     branch,
                     base,
+                    base_commit,
                 });
             }
             Err(failure) => {
@@ -1127,6 +1161,114 @@ impl Worktrees for GitWorktrees {
         self.git(&common, &args)
             .map_err(|f| f.into_error("worktree remove"))?;
         Ok(())
+    }
+
+    /// `rev-list --reverse --topo-order base..HEAD`, and each commit's `git patch-id --stable` of the patch `git log -p`
+    /// prints for it. Every user setting that changes that patch's text, and so its patch-id, is pinned, so a patch-id is
+    /// the same on every machine; `diff_config_leaves_patch_ids_alone` shows each pin matters. Pinned: paths quoted the
+    /// default way (`core.quotePath=true`), a root commit's patch shown (`log.showRoot=true`: one in range comes from an
+    /// unrelated history merged in), no color, no textconv, everything diffed as text (beats binary attributes
+    /// from the user's attributes file or a repo diff driver's user-level settings), no rename detection, 3 lines of
+    /// context and no hunks merged beyond them, the myers algorithm with the indent heuristic, `a/` and `b/` prefixes,
+    /// submodules shown short and never hidden. Signatures are never shown: `log.showSignature` adds gpg's output to a
+    /// signed commit's patch (the only pin the test can't show, since it signs nothing). Not pinned, because they can't
+    /// change it: external diffs (`git log` runs them only with `--ext-diff`), notes (not printed with an explicit
+    /// format), `diff.relative` (git runs at the checkout's top), and anything that changes only context lines or hunk
+    /// headers, which `patch-id` ignores. Merges print no patch (`--diff-merges=off`), and neither does a commit that
+    /// changes nothing: both have no patch-id (the contract's `merges_and_empty_commits_have_no_patch_id`).
+    fn commits_since(
+        &self,
+        path: &WorktreePath,
+        base: &CommitHash,
+    ) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError> {
+        let dir = path.as_path();
+        self.common_dir(dir)?;
+        let range = format!("{base}..HEAD");
+        let listed = self
+            .git(
+                dir,
+                &["rev-list", "--reverse", "--topo-order", &range, "--"],
+            )
+            .map_err(|f| f.into_error("rev-list"))?;
+        let commits = listed
+            .lines()
+            .map(|line| {
+                CommitHash::parse(line)
+                    .map_err(|e| WorktreeError::Other(format!("unexpected rev-list output: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let log = [
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "log.showRoot=true",
+            "log",
+            "--no-color",
+            "--no-textconv",
+            "--text",
+            "--no-renames",
+            "--diff-merges=off",
+            "--unified=3",
+            "--inter-hunk-context=0",
+            "--diff-algorithm=myers",
+            "--indent-heuristic",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--submodule=short",
+            "--ignore-submodules=none",
+            "--no-show-signature",
+            "--format=commit %H",
+            "--patch",
+            &range,
+            "--",
+        ];
+        let patches = self
+            .run_to_file(dir, &log, Some(self.git_timeout), None, &[], None)
+            .map_err(|f| f.into_error("log"))?;
+        let ids = self
+            .git_reading(dir, &["patch-id", "--stable"], patches)
+            .map_err(|f| f.into_error("patch-id"))?;
+        let mut by_commit = HashMap::new();
+        for line in ids.lines() {
+            let parsed = line.split_once(' ').and_then(|(patch, commit)| {
+                Some((CommitHash::parse(commit).ok()?, PatchId::parse(patch).ok()?))
+            });
+            let (commit, patch) = parsed.ok_or_else(|| {
+                WorktreeError::Other(format!("unexpected patch-id output {line:?}"))
+            })?;
+            by_commit.insert(commit, patch);
+        }
+        Ok(commits
+            .into_iter()
+            .map(|c| {
+                let patch = by_commit.remove(&c);
+                (c, patch)
+            })
+            .collect())
+    }
+
+    /// `rev-list --max-parents=0 HEAD`: the smallest, when the history has several roots.
+    fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError> {
+        let dir = repo.as_path();
+        self.common_dir(dir)?;
+        let roots = self
+            .git(dir, &["rev-list", "--max-parents=0", "HEAD", "--"])
+            .map_err(|f| f.into_error("rev-list"))?;
+        let roots = roots
+            .lines()
+            .map(|line| {
+                CommitHash::parse(line)
+                    .map_err(|e| WorktreeError::Other(format!("unexpected rev-list output: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        roots
+            .into_iter()
+            .min()
+            .map(RepoRoot::new)
+            .ok_or_else(|| WorktreeError::Other(format!("{} has no commits", dir.display())))
     }
 }
 
@@ -1501,6 +1643,34 @@ mod tests {
             self.git(&self.app(), &["update-ref", "-d", &tracking]);
         }
 
+        fn rebase_onto_origin_default(&self, path: &WorktreePath) {
+            self.fetch();
+            let onto = format!("origin/{DEFAULT}");
+            self.git(path.as_path(), &["rebase", "--quiet", &onto]);
+        }
+
+        fn commit_empty(&self, path: &WorktreePath) {
+            let args = ["commit", "--quiet", "--allow-empty", "-m", "nothing"];
+            self.git(path.as_path(), &args);
+        }
+
+        /// A root commit with the same tree as HEAD, merged in (not a fast-forward: the histories are unrelated).
+        fn merge_unrelated_root(&self, path: &WorktreePath) -> String {
+            let dir = path.as_path();
+            let root = self.git(dir, &["commit-tree", "HEAD^{tree}", "-m", "another root"]);
+            self.git(
+                dir,
+                &[
+                    "merge",
+                    "--quiet",
+                    "--no-edit",
+                    "--allow-unrelated-histories",
+                    &root,
+                ],
+            );
+            root
+        }
+
         fn forget_origin_head(&self) {
             self.git(&self.app(), &["remote", "set-head", "origin", "--delete"]);
         }
@@ -1860,6 +2030,112 @@ mod tests {
         assert!(path.as_path().join("untracked.txt").exists());
     }
 
+    /// The user's settings change the patch `git log -p` prints, and so its patch-id: the same commits have the same
+    /// patch-ids on a machine with hostile settings as on one without. Each commit is one each pin needs: dropping any
+    /// pin from `commits_since` fails this (checked by hand, one pin at a time).
+    #[test]
+    fn diff_config_leaves_patch_ids_alone() {
+        let f = GitFixture::new();
+        let created = f
+            .port
+            .create(
+                &RepoRef::new(f.app()),
+                &WorktreeName::new("work").unwrap(),
+                BaseSpec::OriginDefault,
+            )
+            .unwrap();
+        let base = created.base_commit.unwrap();
+        let wt = created.path.as_path();
+        let commit = |files: &[(&str, String)], message: &str| {
+            for (name, content) in files {
+                std::fs::write(wt.join(name), content).unwrap();
+                f.git(wt, &["add", "--", name]);
+            }
+            f.git(wt, &["commit", "--quiet", "-m", message]);
+        };
+        let lines =
+            |word: &str| -> Vec<String> { (0..40).map(|n| format!("{word} {n}\n")).collect() };
+        // Context and hunk merging: two edits 8 lines apart in the middle of an existing file, one hunk each with 3
+        // lines of context, merged by more context or `diff.interHunkContext`.
+        commit(&[("mid.txt", lines("line").concat())], "mid");
+        let mut mid = lines("line");
+        mid[12] = "changed 12\n".to_owned();
+        mid[21] = "changed 21\n".to_owned();
+        commit(&[("mid.txt", mid.concat())], "two close hunks");
+        // Renames: a long file moved with a one-line edit.
+        commit(&[("long.txt", lines("moved").concat())], "long");
+        let mut moved = lines("moved");
+        moved[20] = "changed\n".to_owned();
+        std::fs::write(wt.join("long.txt"), moved.concat()).unwrap();
+        f.git(wt, &["mv", "long.txt", "moved.txt"]);
+        f.git(wt, &["commit", "--quiet", "-am", "move"]);
+        // The diff algorithm: functions swapped among repeated braces.
+        let c = "void a()\n{\n    one();\n}\n\nvoid b()\n{\n    two();\n}\n\nvoid c()\n{\n    three();\n}\n";
+        commit(&[("p.c", c.to_owned())], "c");
+        let swapped = "void b()\n{\n    two();\n}\n\nvoid a()\n{\n    one();\n}\n\nvoid c()\n{\n    three();\n    four();\n}\n";
+        commit(&[("p.c", swapped.to_owned())], "swap");
+        // The indent heuristic: a block inserted after a copy of itself, where it can slide.
+        commit(&[("slide.txt", "1\n2\na\n\nb\n3\n4\n".to_owned())], "slide");
+        commit(
+            &[("slide.txt", "1\n2\na\n\nb\na\n\nb\n3\n4\n".to_owned())],
+            "slid",
+        );
+        // Path quoting: a non-ASCII file name.
+        commit(&[("café.txt", "crème\n".to_owned())], "accents");
+        // Textconv: the repo's own attributes give a diff driver, which the user's config can give a textconv.
+        commit(
+            &[
+                (".gitattributes", "*.up diff=up\n".to_owned()),
+                ("x.up", "lower\n".to_owned()),
+            ],
+            "driver",
+        );
+        // Submodules: a gitlink, which `diff.submodule=log` shows differently and `diff.ignoreSubmodules` hides.
+        let gitlink = format!("160000,{base},sub");
+        f.git(wt, &["update-index", "--add", "--cacheinfo", &gitlink]);
+        f.git(wt, &["commit", "--quiet", "-m", "gitlink"]);
+        // A root commit (an unrelated history merged in), whose patch `log.showRoot=false` drops.
+        let root = f.merge_unrelated_root(&created.path);
+        let plain = f.port.commits_since(&created.path, &base).unwrap();
+        assert_eq!(plain.len(), 13, "{plain:?}");
+        // Every commit has a patch-id but the merge.
+        let without: Vec<&shepherd_core::ports::CommitHash> = plain
+            .iter()
+            .filter(|(_, p)| p.is_none())
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(without.len(), 1, "{plain:?}");
+        let root = shepherd_core::ports::CommitHash::parse(&root).unwrap();
+        assert!(
+            plain.iter().any(|(c, p)| *c == root && p.is_some()),
+            "{plain:?}"
+        );
+
+        // Attributes from the user's own file that make every text file binary.
+        let attributes = f.tmp().join("home").join("attributes");
+        std::fs::write(&attributes, "*.txt -diff\n*.c -diff\n").unwrap();
+        for (key, value) in [
+            ("core.quotePath", "false"),
+            ("core.attributesFile", attributes.to_str().unwrap()),
+            ("color.ui", "always"),
+            ("diff.up.textconv", "tr a-z A-Z"),
+            ("diff.renames", "false"),
+            ("diff.context", "9"),
+            ("diff.interHunkContext", "10"),
+            ("diff.algorithm", "patience"),
+            ("diff.indentHeuristic", "false"),
+            ("diff.noprefix", "true"),
+            ("diff.submodule", "log"),
+            ("diff.ignoreSubmodules", "all"),
+            ("log.showSignature", "true"),
+            ("log.showRoot", "false"),
+        ] {
+            f.git(&f.app(), &["config", key, value]);
+        }
+        let configured = f.port.commits_since(&created.path, &base).unwrap();
+        assert_eq!(configured, plain);
+    }
+
     #[test]
     fn auto_setup_merge_always_still_gives_no_upstream() {
         let f = GitFixture::new();
@@ -1940,7 +2216,7 @@ mod tests {
         let repo = &f.repo();
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
-            s.spawn(move || tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault)));
+            s.spawn(move || drop(tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault))));
             let mut held = Some(held);
             assert_held(&mut held, &rx, || f.port.cancel_create(repo, &name(n)));
             f.port.cancel_create(repo, &name(n));
@@ -1958,7 +2234,9 @@ mod tests {
         let repo = &f.repo();
         let created = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
-            s.spawn(move || tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)));
+            s.spawn(move || {
+                drop(tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)))
+            });
             let mut held = Some(held);
             assert_held(&mut held, &rx, || port.cancel_create(repo, &name("long")));
             let witness = port.git(&f.app(), &["-c", "alias.nap=!sleep 900", "nap"]);
@@ -2138,7 +2416,9 @@ close $out;
         let (first, second) = std::thread::scope(|s| {
             let start = |n: &'static str| {
                 let (tx, rx) = std::sync::mpsc::channel();
-                s.spawn(move || tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)));
+                s.spawn(move || {
+                    drop(tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)))
+                });
                 rx
             };
             let (first_entered, second_entered) = (

@@ -194,6 +194,7 @@ fn removed_with(
         path: path(),
         result,
         exists,
+        note: None,
     })
 }
 
@@ -207,6 +208,7 @@ fn remove(force: bool) -> HostCommand {
         remover: Remover::Session(sid("s1")),
         path: path(),
         force,
+        note: None,
     }
 }
 

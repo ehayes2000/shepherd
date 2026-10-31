@@ -3975,6 +3975,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shepherd-adapters",
+ "shepherd-archive",
  "shepherd-core",
  "shepherd-term",
  "shepherd-testkit",

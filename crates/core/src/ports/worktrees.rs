@@ -145,6 +145,78 @@ pub struct Created {
     pub path: WorktreePath,
     pub branch: BranchName,
     pub base: BaseUsed,
+    /// The commit its branch started at: the base of the commits it makes ([`Worktrees::commits_since`]). `None` when
+    /// it isn't known.
+    pub base_commit: Option<CommitHash>,
+}
+
+/// A git object name that isn't a valid [`CommitHash`] or [`PatchId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0:?} is not 40 or 64 lowercase hex digits")]
+pub struct BadHash(pub String);
+
+/// A git object name: 40 (sha1) or 64 (sha256) lowercase hex digits. One spelling per object, so equal values name the
+/// same object.
+fn check_hash(s: &str) -> Result<(), BadHash> {
+    let hex = s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match matches!(s.len(), 40 | 64) && hex {
+        true => Ok(()),
+        false => Err(BadHash(s.to_owned())),
+    }
+}
+
+macro_rules! hash_newtype {
+    ($(#[$doc:meta])* $t:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $t(String);
+
+        impl $t {
+            /// `s`, if it is 40 or 64 lowercase hex digits.
+            pub fn parse(s: &str) -> Result<Self, BadHash> {
+                check_hash(s).map(|()| Self(s.to_owned()))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $t {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+hash_newtype!(
+    /// A git commit.
+    CommitHash
+);
+hash_newtype!(
+    /// A commit's `git patch-id --stable`: the same change has the same patch-id after a rebase or a cherry-pick.
+    PatchId
+);
+
+/// A repository, named by its root commit: the same in every clone, on every machine.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepoRoot(CommitHash);
+
+impl RepoRoot {
+    pub fn new(root: CommitHash) -> Self {
+        Self(root)
+    }
+
+    pub fn commit(&self) -> &CommitHash {
+        &self.0
+    }
+}
+
+impl fmt::Display for RepoRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// A managed worktree as [`Worktrees::list_managed`] finds it.
@@ -313,6 +385,20 @@ pub trait Worktrees {
     /// Anything not directly under `<root>/<repo-name>/` is [`WorktreeError::OutsideManagedRoot`], whatever `force`
     /// says. A managed-looking path that doesn't exist is [`WorktreeError::NotARepo`].
     fn remove(&self, path: &WorktreePath, force: bool) -> Result<(), WorktreeError>;
+
+    /// The commits of the checkout at `path` that `base` doesn't have (`base..HEAD`), oldest first, each with its
+    /// patch-id, or `None` for one that has none (a merge, or a commit that changes nothing). Works on any checkout. A
+    /// path that doesn't exist is [`WorktreeError::NotARepo`]; a `base` the repo doesn't have is an error.
+    fn commits_since(
+        &self,
+        path: &WorktreePath,
+        base: &CommitHash,
+    ) -> Result<Vec<(CommitHash, Option<PatchId>)>, WorktreeError>;
+
+    /// The root commit of the repo `repo` is in: the same for its main checkout and every worktree of it, and in every
+    /// clone. A history with several roots is named by the smallest. A path outside any checkout, or one that doesn't
+    /// exist, is [`WorktreeError::NotARepo`]; a repo with no commits is an error.
+    fn root_commit(&self, repo: &RepoRef) -> Result<RepoRoot, WorktreeError>;
 }
 
 /// The repo name used under the managed root, from the absolute path `git rev-parse --git-common-dir` prints: the
@@ -397,6 +483,26 @@ mod tests {
                 Err(WorktreeError::InvalidName(name.to_owned())),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn hashes_are_40_or_64_lowercase_hex_digits() {
+        for ok in ["a".repeat(40), "0123456789abcdef".repeat(4)] {
+            let parsed = CommitHash::parse(&ok).map(|c| c.to_string());
+            assert_eq!(parsed, Ok(ok.clone()));
+            assert!(PatchId::parse(&ok).is_ok());
+        }
+        for bad in [
+            String::new(),
+            "a".repeat(39),
+            "a".repeat(41),
+            "A".repeat(40),
+            "g".repeat(40),
+            format!("{} ", "a".repeat(40)),
+        ] {
+            assert_eq!(CommitHash::parse(&bad), Err(BadHash(bad.clone())));
+            assert_eq!(PatchId::parse(&bad), Err(BadHash(bad.clone())));
         }
     }
 

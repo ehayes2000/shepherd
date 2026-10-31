@@ -277,6 +277,7 @@ fn a_hook_for_an_open_session_is_translated_then_acked() {
                 session: sid("s1"),
                 agent: AgentKind::ClaudeCode,
                 payload: json!({ "hook_event_name": "Stop" }),
+                turn_end: true,
             },
             HostCommand::Reply {
                 to: reply,

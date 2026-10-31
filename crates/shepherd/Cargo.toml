@@ -9,6 +9,7 @@ shepherd-core.workspace = true
 shepherd-tui.workspace = true
 shepherd-term.workspace = true
 shepherd-adapters.workspace = true
+shepherd-archive.workspace = true
 jiff.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true

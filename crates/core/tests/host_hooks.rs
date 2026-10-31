@@ -110,6 +110,7 @@ fn worktree_made(hooks: &[&str]) -> (HostDriver, Vec<HostCommand>) {
             base: BaseUsed::Origin {
                 branch: BranchName::new("main"),
             },
+            base_commit: None,
         }),
     });
     (host, commands)
@@ -451,6 +452,7 @@ fn a_session_closed_mid_hook_removes_a_worktree_that_loses_nothing() {
             remover: Remover::Session(sid("s1")),
             path: WorktreePath::new(WORKTREE),
             force: false,
+            note: None,
         }]
     );
 }

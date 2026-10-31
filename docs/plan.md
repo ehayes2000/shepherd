@@ -74,7 +74,8 @@ dependencies are done.
 | `Link` (`UnixListenLink` / `UnixConnectLink`) | both | T10 | unix socket (M1), iroh (M4) |
 | `Config` | both | T14 | `~/.shepherd/config.toml` |
 | `HostLauncher` | client | T12 | detached `shepherd host` process (double fork + setsid); `terminate` via socket peer creds (T36a) |
-| `Worktrees` | host | T20 | git CLI (`repo_root` added in F28) |
+| `Worktrees` | host | T20 | git CLI (`repo_root` added in F28; `commits_since`, `root_commit` in T42) |
+| `Archive` | host | T42 | `shepherd-archive` (`~/.shepherd/archive`), through `ShepherdArchive` in the `shepherd` crate |
 | `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
 | `MachineIdentity` | host | T29 | `~/.shepherd/identity.key` (an iroh secret key; `KeyFileIdentity`) |

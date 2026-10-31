@@ -79,10 +79,22 @@
 //! host log records how it went, and the client's request is answered with that. A host that restarts meanwhile records
 //! it kept. A stale session is cleaned up by closing it.
 //!
+//! Archive (T42, decision 0020): a session running Claude Code or Codex whose hooks named its agent session and
+//! transcript is captured ([`HostCommand::Capture`], see [`capture`]) when a `Stop` hook ends its agent's turn (the
+//! hook's [`HostCommand::TranslateHook`] carries `turn_end`, and the capture follows once its frames are applied), when it
+//! closes, and before any worktree it ran in is removed. Every removal comes through the last step of its pre-remove
+//! hooks, which captures the closing session (or, for an orphan, each closed session that ran there) and removes the
+//! worktree only once [`HostEvent::Captured`] says that worked; a failed capture keeps the worktree and says why. A
+//! transcript that doesn't exist ([`ArchiveError::Missing`]: never written, or deleted since) is nothing to save: the
+//! worktree goes, and `session/closed`'s `note` says no transcript was found.
+//! Sessions with no transcript (shells) capture nothing, and their worktrees are removed as before. A worktree's base
+//! commit, which its session's commits are counted from, is recorded in its `worktree/created`.
+//!
 //! Host state is only a fold over `_shepherd/*` frames and sessions' first user prompts (`docs/acpp.md`, "State is a
 //! fold"). [`Host::handle`] reads state and decides what to do. It never changes state: every change is a
 //! [`HostCommand::Append`] that the runtime seals, appends, and hands back to [`Host::apply`].
 
+pub mod capture;
 pub mod launch;
 pub mod naming;
 pub mod peering;
@@ -106,16 +118,19 @@ use crate::acpp::{
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
 use crate::ids::{MachineId, SessionId};
+use crate::ports::archive::{ArchiveError, CaptureReason};
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{
-    BaseSpec, BaseUsed, BranchName, Created, RepoRef, Worktree, WorktreeError, WorktreeName,
-    WorktreePath, WorktreeStatus,
+    BaseSpec, BaseUsed, BranchName, CommitHash, Created, RepoRef, Worktree, WorktreeError,
+    WorktreeName, WorktreePath, WorktreeStatus,
 };
 use crate::wire::{
     CleanupInfo, CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeCleanupOk,
     WorktreeInfo, WorktreeListOk, WorktreeRemoveOk, WorktreeStatusOk,
 };
+
+use self::capture::{AfterCapture, CaptureJob};
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
 /// request it turns into a [`HostEvent`], and maps it back to the connection and JSON-RPC id when it replies.
@@ -358,9 +373,14 @@ pub enum HostEvent {
         agent: AgentKind,
         payload: Value,
     },
-    /// The runtime appended (and applied) the frames a [`HostCommand::TranslateHook`] for `session` gave. A
-    /// notification from the runtime: never answered.
-    HookTranslated { session: SessionId },
+    /// The runtime appended (and applied) the frames a [`HostCommand::TranslateHook`] for `session` gave, with the
+    /// `turn_end` it carried. A notification from the runtime: never answered.
+    HookTranslated { session: SessionId, turn_end: bool },
+    /// The answer to a [`HostCommand::Capture`], with the `then` it carried: the first capture that failed, if one did.
+    Captured {
+        then: AfterCapture,
+        result: Result<(), ArchiveError>,
+    },
     /// A session's PTY process ended. `code` is `None` when a signal ended it.
     PtyExited {
         session: SessionId,
@@ -412,12 +432,14 @@ pub enum HostEvent {
         force: bool,
         result: Result<CommandOutput, CommandError>,
     },
-    /// The answer to a [`HostCommand::RemoveWorktree`]. `exists`: something is still at the path afterwards.
+    /// The answer to a [`HostCommand::RemoveWorktree`], with the `note` it carried. `exists`: something is still at the
+    /// path afterwards.
     WorktreeRemoved {
         remover: Remover,
         path: WorktreePath,
         result: Result<(), WorktreeError>,
         exists: bool,
+        note: Option<String>,
     },
     /// The runtime has just started, the logs folded: nothing an earlier host run started is still running.
     Restarted,
@@ -451,11 +473,20 @@ pub enum HostCommand {
         session: SessionId,
     },
     /// Translate a hook payload with the session's translator in [`Translators`], then seal, append and apply
-    /// each frame it gives, as for [`HostCommand::Append`].
+    /// each frame it gives, as for [`HostCommand::Append`], and feed back [`HostEvent::HookTranslated`] with the same
+    /// `session` and `turn_end` (the hook ended the agent's turn).
     TranslateHook {
         session: SessionId,
         agent: AgentKind,
         payload: Value,
+        turn_end: bool,
+    },
+    /// Snapshot each of `captures` in the `Archive` port, in order (see [`capture`]), stopping at the first that
+    /// fails, and feed the result back as [`HostEvent::Captured`] with the same `then`. Runs off the runtime thread,
+    /// like [`HostCommand::ProbeWorkspace`].
+    Capture {
+        captures: Vec<CaptureJob>,
+        then: AfterCapture,
     },
     /// Answer the client request `to`.
     Reply {
@@ -538,12 +569,14 @@ pub enum HostCommand {
         path: WorktreePath,
         force: bool,
     },
-    /// Remove worktree `path` (`Worktrees::remove`), and feed the result back as [`HostEvent::WorktreeRemoved`]. Runs
-    /// off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    /// Remove worktree `path` (`Worktrees::remove`), and feed the result back as [`HostEvent::WorktreeRemoved`] with the
+    /// same `note` (for the closing session's `session/closed`). Runs off the runtime thread, like
+    /// [`HostCommand::ProbeWorkspace`].
     RemoveWorktree {
         remover: Remover,
         path: WorktreePath,
         force: bool,
+        note: Option<String>,
     },
     /// Ask the `Forge` port which pull request `branch` of `repo` has (`Forge::pr_for_branch`), and feed the answer to
     /// the [`PrWatch`](pr::PrWatch) as [`PrEvent::Checked`](pr::PrEvent::Checked) with the same `session`. Runs off
@@ -637,6 +670,8 @@ struct Entry {
     pr: Option<Pr>,
     /// When its PTY exited (or it failed to start), while it is exited: the `ts` of that entry.
     exited_at: Option<Timestamp>,
+    /// The commit its worktree's branch started at, from `worktree/created`.
+    base: Option<CommitHash>,
 }
 
 impl Entry {
@@ -646,6 +681,35 @@ impl Entry {
             Phase::Starting => None,
             _ => self.worktree.as_ref(),
         }
+    }
+
+    /// A snapshot of session `id`'s agent transcript, for `reason`: `None` unless it runs Claude Code or Codex whose
+    /// hooks named both its session and its transcript, and it has a directory to find its repo in.
+    fn capture_job(&self, id: &SessionId, reason: CaptureReason) -> Option<CaptureJob> {
+        let agent = self
+            .agent
+            .filter(|a| matches!(a, AgentKind::ClaudeCode | AgentKind::Codex))?;
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| self.worktree.as_ref().map(|(path, _)| path.clone()))?;
+        let branch = match &self.worktree {
+            Some((_, branch)) => Some(branch),
+            None => self.branch.as_ref(),
+        };
+        Some(CaptureJob {
+            session: id.clone(),
+            reason,
+            agent,
+            agent_session_id: self.agent_session_id.clone()?,
+            transcript_path: self.transcript_path.clone()?,
+            name: self.name.clone(),
+            machine: self.machine.clone(),
+            created: self.created.clone(),
+            cwd: WorktreePath::new(cwd),
+            branch: branch.map(BranchName::new),
+            base: self.base.clone(),
+        })
     }
 
     fn resume_target(&self) -> Result<ResumeTarget, ResumeUnavailable> {
@@ -1008,11 +1072,13 @@ impl Host {
                     ));
                     return vec![reply_err(reply, error)];
                 }
+                let turn_end = Translators::ends_turn(agent, &payload);
                 vec![
                     HostCommand::TranslateHook {
                         session,
                         agent,
                         payload,
+                        turn_end,
                     },
                     ack(reply),
                 ]
@@ -1114,7 +1180,52 @@ impl Host {
                 spawn,
                 result,
             } => self.hook_finished(session, command, rest, spawn, result),
-            HostEvent::HookTranslated { session } => self.auto_rename(session),
+            HostEvent::HookTranslated { session, turn_end } => {
+                let capture = turn_end
+                    .then(|| self.capture_open(&session, CaptureReason::TurnEnd))
+                    .flatten();
+                let mut commands = self.auto_rename(session);
+                commands.extend(capture);
+                commands
+            }
+            HostEvent::Captured {
+                then: AfterCapture::Nothing,
+                ..
+            } => Vec::new(),
+            HostEvent::Captured {
+                then:
+                    AfterCapture::Remove {
+                        remover,
+                        path,
+                        force,
+                    },
+                result,
+            } => {
+                if !self.removal_live(&remover, &path) {
+                    return Vec::new();
+                }
+                if let Some(why) = self.still_in_use(&remover, path.as_path()) {
+                    return finish(&remover, &path, false, Some(why));
+                }
+                let note = match result {
+                    Ok(()) => None,
+                    // Nothing to save: an agent that never wrote the transcript it named, or one deleted since.
+                    Err(ArchiveError::Missing(why)) => {
+                        Some(format!("no transcript was found to archive: {why}"))
+                    }
+                    Err(error) => {
+                        let why =
+                            format!("archiving its conversation failed, so it was kept: {error}");
+                        return finish(&remover, &path, false, Some(why));
+                    }
+                };
+                vec![HostCommand::RemoveWorktree {
+                    remover,
+                    path,
+                    force,
+                    note,
+                }]
+            }
             HostEvent::WorktreeInspected {
                 remover: _,
                 path,
@@ -1143,15 +1254,21 @@ impl Host {
                 path,
                 result,
                 exists,
+                note,
             } => {
                 if !self.removal_live(&remover, &path) {
                     return Vec::new();
                 }
-                match result {
-                    Ok(()) => finish(&remover, &path, true, None),
+                let (removed, kept) = match result {
+                    Ok(()) => (true, None),
                     // Already gone: nothing was lost and nothing is left.
-                    Err(error) if is_gone(&error, exists) => finish(&remover, &path, false, None),
-                    Err(error) => finish(&remover, &path, false, Some(error.to_string())),
+                    Err(error) if is_gone(&error, exists) => (false, None),
+                    Err(error) => (false, Some(error.to_string())),
+                };
+                match &remover {
+                    // Only a session's close has a note to give: the cleanup view's answer has no room for one.
+                    Remover::Session(session) => vec![closed_noting(session, removed, kept, note)],
+                    Remover::Orphan { .. } => finish(&remover, &path, removed, kept),
                 }
             }
             HostEvent::MachineNamed { name } => match self.machine_name() == Some(name.as_str()) {
@@ -1206,6 +1323,7 @@ impl Host {
             }),
             _ => {}
         }
+        commands.extend(self.capture_open(&session, CaptureReason::Close));
         let confirmed = match worktree {
             CloseWorktree::Remove { confirmed } => Some(confirmed),
             CloseWorktree::IfSafe | CloseWorktree::Keep => None,
@@ -1376,10 +1494,23 @@ impl Host {
             if let Some(why) = self.still_in_use(&remover, path.as_path()) {
                 return finish(&remover, &path, false, Some(why));
             }
-            return vec![HostCommand::RemoveWorktree {
-                remover,
-                path,
-                force,
+            // Every removal comes through here: the conversations that ran in the worktree are archived first.
+            let captures = self.captures_before_removal(&remover, &path);
+            if captures.is_empty() {
+                return vec![HostCommand::RemoveWorktree {
+                    remover,
+                    path,
+                    force,
+                    note: None,
+                }];
+            }
+            return vec![HostCommand::Capture {
+                captures,
+                then: AfterCapture::Remove {
+                    remover,
+                    path,
+                    force,
+                },
             }];
         }
         let script = hooks.hooks.remove(0);
@@ -1449,6 +1580,40 @@ impl Host {
         commands
     }
 
+    /// A capture of open session `session`'s agent transcript for `reason`, if it has one ([`Entry::capture_job`]).
+    fn capture_open(&self, session: &SessionId, reason: CaptureReason) -> Option<HostCommand> {
+        let job = self.open(session)?.capture_job(session, reason)?;
+        Some(HostCommand::Capture {
+            captures: vec![job],
+            then: AfterCapture::Nothing,
+        })
+    }
+
+    /// The captures to take before `remover` removes the worktree at `path`: the closing session's, or for an orphan,
+    /// each closed session's that ran in it. Sessions without an agent transcript have none.
+    fn captures_before_removal(&self, remover: &Remover, path: &WorktreePath) -> Vec<CaptureJob> {
+        let reason = CaptureReason::BeforeRemove;
+        match remover {
+            Remover::Session(session) => self
+                .sessions
+                .get(session)
+                .and_then(|e| e.capture_job(session, reason))
+                .into_iter()
+                .collect(),
+            Remover::Orphan { .. } => self
+                .sessions
+                .iter()
+                .filter(|(_, e)| {
+                    e.closed
+                        && e.worktree
+                            .as_ref()
+                            .is_some_and(|(p, _)| p == path.as_path())
+                })
+                .filter_map(|(id, e)| e.capture_job(id, reason))
+                .collect(),
+        }
+    }
+
     /// Names an open session after its first user prompt, once that prompt is in the log, unless it was ever renamed.
     fn auto_rename(&self, session: SessionId) -> Vec<HostCommand> {
         let Some(name) = self
@@ -1509,6 +1674,7 @@ impl Host {
             branch: created.branch.to_string(),
             base,
             fetch_error,
+            base_commit: created.base_commit.map(|c| c.to_string()),
             post_create: hooks.hooks.clone(),
         });
         let mut commands = vec![append(&session, recorded)];
@@ -1697,6 +1863,7 @@ impl Host {
                     removing: false,
                     pr: None,
                     exited_at: None,
+                    base: None,
                 };
                 self.sessions.insert(id.clone(), entry);
             }
@@ -1727,6 +1894,11 @@ impl Host {
                     };
                     entry.cwd = Some(PathBuf::from(&worktree.path));
                     entry.worktree = Some((PathBuf::from(&worktree.path), worktree.branch.clone()));
+                    // One that doesn't parse is as good as none: no commits are counted.
+                    entry.base = worktree
+                        .base_commit
+                        .as_deref()
+                        .and_then(|c| CommitHash::parse(c).ok());
                 }
             }
             ShepherdFrame::WorktreeRemoving(_) => {
@@ -2065,9 +2237,20 @@ fn finish(
 
 /// The `session/closed` that ends session `id`.
 fn closed(id: &SessionId, worktree_removed: bool, worktree_kept: Option<String>) -> HostCommand {
+    closed_noting(id, worktree_removed, worktree_kept, None)
+}
+
+/// The `session/closed` that ends session `id`, with `note` for the user.
+fn closed_noting(
+    id: &SessionId,
+    worktree_removed: bool,
+    worktree_kept: Option<String>,
+    note: Option<String>,
+) -> HostCommand {
     let frame = ShepherdFrame::SessionClosed(SessionClosed {
         worktree_removed,
         worktree_kept,
+        note,
     });
     append(id, frame)
 }

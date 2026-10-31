@@ -109,7 +109,8 @@ pub enum RestoreError {
     Symlink(PathBuf),
     #[error("{0} is the wrong kind of file")]
     WrongType(PathBuf),
-    /// A directory on a target's path stopped resolving to itself (a symlink swapped in) during the restore.
+    /// A directory on a target's path is no longer the same directory (device and inode) during the restore: e.g. a
+    /// symlink or another directory was swapped in.
     #[error("{0} changed while it was being restored")]
     Changed(PathBuf),
     #[error("{path}: {message}")]

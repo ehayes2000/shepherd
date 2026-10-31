@@ -102,6 +102,17 @@ impl Translators {
         (restored, dropped)
     }
 
+    /// Whether a hook payload from `agent` says its turn ended: its `Stop` hook, for Claude Code and Codex alike (see
+    /// the translation tables in [`claude`] and [`codex`]).
+    pub fn ends_turn(agent: AgentKind, payload: &Value) -> bool {
+        let name = match agent {
+            AgentKind::ClaudeCode => claude::hook_name(payload),
+            AgentKind::Codex => codex::hook_name(payload),
+            AgentKind::Shell => None,
+        };
+        name == Some("Stop")
+    }
+
     /// Whether hooks from `agent` can be translated.
     pub fn supports(agent: AgentKind) -> bool {
         match agent {

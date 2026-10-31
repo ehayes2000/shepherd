@@ -35,6 +35,14 @@
 //!   cancels every running hook and waits (within the shutdown grace) for their answers, which it drops: a session
 //!   stopping with the host spawns nothing. From then on no hook starts and no PTY spawns (a close's inspection or a
 //!   create's result that arrives later would otherwise start one nothing stops).
+//! - **Captures** (T42). Core's [`HostCommand::Capture`]s run on the `Archive` port's [`Worker`], in order, stamped with
+//!   `Env::now` when submitted: each finds the repo's root commit and the session's commits since its base through the
+//!   `Worktrees` port (shared with its worker) and then records the session and snapshots its transcript. The answer
+//!   comes back as [`RuntimeEvent::Archive`] and goes to core, which removes a worktree only once its capture worked.
+//!   Bounded: a turn end's capture is dropped while another of that session's waits to start (the waiting one reads the
+//!   transcript as it is by then). Shutting down waits for captures running (within [`CREATE_CLEANUP_GRACE`]) and drops
+//!   their answers: a removal that would follow is left to the next start, which keeps the worktree. An upgrade waits
+//!   for them too (`Busy`).
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -78,11 +86,11 @@
 //!   was given (a client's resize, even before its PTY exists, or an adopted session's carried size) and spawns its
 //!   PTY at it. A new session's spec asks for the client's view size from its `session/new`, else [`INITIAL_SIZE`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -91,6 +99,7 @@ use shepherd_core::acpp::{
 };
 use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
+use shepherd_core::host::capture::{AfterCapture, AgentHomes, CaptureJob, Found};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
 use shepherd_core::host::peering::{Peering, PeeringEvent, PeersCommand};
 use shepherd_core::host::pr::{PrEvent, PrWatch};
@@ -103,10 +112,11 @@ use shepherd_core::host::{
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    CLOSE_FLUSH, CommandError, Commands, ConnId, DisconnectReason, EventLog, FlushOutcome, Forge,
-    ForgeError, Link, LinkEvent, LinkEventSink, LogError, LogId, MAX_QUEUED, PairTicket, Peers,
-    PeersEvent, PeersEventSink, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize, RepoRef,
-    RunId, WorktreeError, WorktreeName, WorktreePath, Worktrees,
+    Archive, ArchiveError, CLOSE_FLUSH, CaptureReason, CommandError, Commands, ConnId,
+    DisconnectReason, EventLog, FlushOutcome, Forge, ForgeError, Link, LinkEvent, LinkEventSink,
+    LogError, LogId, MAX_QUEUED, PairTicket, Peers, PeersEvent, PeersEventSink, PtyError, PtyEvent,
+    PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId, WorktreeError, WorktreeName, WorktreePath,
+    Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -162,6 +172,8 @@ pub enum RuntimeEvent {
     Commands(HostEvent),
     /// The answer to a `Forge` call that ran on its worker thread, for the PR watch.
     Forge(PrEvent),
+    /// The answer to a capture (`Archive` and `Worktrees` calls) that ran on its worker thread, for core.
+    Archive(HostEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
     /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
@@ -363,6 +375,8 @@ pub struct RuntimeSettings {
     pub warning: Option<String>,
     /// This machine's id, from its `MachineIdentity` key: every entry is stamped with it.
     pub machine: MachineId,
+    /// Where each agent keeps its transcripts, for captures.
+    pub agent_homes: AgentHomes,
     /// The hostname as the system reports it, which names the machine when the config doesn't
     /// ([`shepherd_core::machine::name`]).
     pub hostname: Option<String>,
@@ -466,7 +480,7 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N> {
+pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
@@ -485,6 +499,12 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N> {
     forge: Worker<F, PrEvent>,
     /// `Forge` calls submitted and not yet answered.
     forge_calls: usize,
+    archive: Worker<A>,
+    /// `Archive` calls (captures) submitted and not yet answered.
+    capture_calls: usize,
+    /// Sessions with a turn end's capture queued and not started yet: another turn end of theirs adds nothing, since
+    /// that capture reads the transcript once it starts. So at most one per session waits on the worker.
+    queued_turn_ends: Arc<Mutex<HashSet<SessionId>>>,
     link: L,
     peers: N,
     log: E,
@@ -551,17 +571,19 @@ impl<
     E: EventLog,
     V: Env,
     N: Peers,
-> HostRuntime<P, W, C, F, L, E, V, N>
+    A: Archive + Send + Sync + 'static,
+> HostRuntime<P, W, C, F, L, E, V, N, A>
 {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
     /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`,
-    /// `commands` and `forge` each move to a worker thread of their own.
+    /// `commands`, `forge` and `archive` each move to a worker thread of their own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
         worktrees: W,
         commands: C,
         forge: F,
+        archive: A,
         link: L,
         peers: N,
         log: E,
@@ -570,7 +592,9 @@ impl<
         tx: RuntimeTx,
         rx: RuntimeRx,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, forge, link, peers, log, env);
+        let ports = (
+            pty, worktrees, commands, forge, archive, link, peers, log, env,
+        );
         Self::start_with(ports, settings, tx, rx, Adoption::default())
     }
 
@@ -584,6 +608,7 @@ impl<
         worktrees: W,
         commands: C,
         forge: F,
+        archive: A,
         link: L,
         peers: N,
         log: E,
@@ -593,12 +618,25 @@ impl<
         rx: RuntimeRx,
         adoption: Adoption,
     ) -> Result<Self, StartError> {
-        let ports = (pty, worktrees, commands, forge, link, peers, log, env);
+        let ports = (
+            pty, worktrees, commands, forge, archive, link, peers, log, env,
+        );
         Self::start_with(ports, settings, tx, rx, adoption)
     }
 
+    #[allow(clippy::type_complexity)]
     fn start_with(
-        (pty, worktrees, commands, forge, link, peers, log, env): (P, W, C, F, L, N, E, V),
+        (pty, worktrees, commands, forge, archive, link, peers, log, env): (
+            P,
+            W,
+            C,
+            F,
+            A,
+            L,
+            N,
+            E,
+            V,
+        ),
         settings: RuntimeSettings,
         tx: RuntimeTx,
         rx: RuntimeRx,
@@ -622,6 +660,8 @@ impl<
             .map_err(StartError::Worker)?;
         let forge = Worker::spawn("forge", forge, tx.clone(), RuntimeEvent::Forge)
             .map_err(StartError::Worker)?;
+        let archive = Worker::spawn("archive", archive, tx.clone(), RuntimeEvent::Archive)
+            .map_err(StartError::Worker)?;
         let machine = settings.machine.clone();
         let mut runtime = Self {
             host,
@@ -634,6 +674,9 @@ impl<
             after_hook: HashMap::new(),
             forge,
             forge_calls: 0,
+            archive,
+            capture_calls: 0,
+            queued_turn_ends: Arc::default(),
             link,
             peers,
             log,
@@ -918,7 +961,8 @@ impl<
             let calls = self.worktree_calls
                 + self.hooks.len()
                 + self.cleanup_hooks.len()
-                + self.forge_calls;
+                + self.forge_calls
+                + self.capture_calls;
             if calls == 0 && !self.preflighting || self.finished {
                 return true;
             }
@@ -1051,6 +1095,22 @@ impl<
                         .map(|deadline| then + until(&at, deadline));
                 }
             }
+            RuntimeEvent::Archive(event) => {
+                self.capture_calls = self.capture_calls.saturating_sub(1);
+                if let HostEvent::Captured {
+                    result: Err(error), ..
+                } = &event
+                {
+                    tracing::warn!(%error, "archiving a conversation failed");
+                }
+                // A capture the shutdown waited for: what would follow (a removal) is left for the next start, which
+                // keeps the worktree of a session still closing.
+                if self.shutdown_by.is_some() {
+                    self.check_shutdown_done();
+                    return;
+                }
+                self.dispatch(event);
+            }
             RuntimeEvent::Shutdown => self.start_shutdown(),
             RuntimeEvent::Preflighted(preflight) => {
                 self.preflighting = false;
@@ -1105,13 +1165,17 @@ impl<
                     session,
                     agent,
                     payload,
+                    turn_end,
                 } => {
                     if let Err(error) = self.translate_hook(&session, agent, &payload) {
                         self.abandon(&error, commands.by_ref());
                         return;
                     }
                     // Core decides what follows from the frames, e.g. naming the session after its first prompt.
-                    follow_up.push_back(HostEvent::HookTranslated { session });
+                    follow_up.push_back(HostEvent::HookTranslated { session, turn_end });
+                }
+                HostCommand::Capture { captures, then } => {
+                    self.capture(captures, then, follow_up);
                 }
                 // Nor does a PTY spawn, e.g. for a create that finished just as the shutdown cancelled it: the PTYs
                 // were killed when it began, so nothing would stop this one. Its session stops with the host.
@@ -1453,6 +1517,7 @@ impl<
                     remover,
                     path,
                     force,
+                    note,
                 } => {
                     let panicked = HostEvent::WorktreeRemoved {
                         remover: remover.clone(),
@@ -1461,6 +1526,7 @@ impl<
                             "removing worktree {path} failed unexpectedly"
                         ))),
                         exists: true,
+                        note: note.clone(),
                     };
                     let call = move |worktrees: &W| {
                         let result = worktrees.remove(&path, force);
@@ -1469,6 +1535,7 @@ impl<
                             result,
                             remover,
                             path,
+                            note,
                         }
                     };
                     match self.worktrees.submit(call, panicked) {
@@ -1479,6 +1546,60 @@ impl<
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Submits `captures` to the archive's worker, stamped with the time now, its answer coming back as
+    /// [`HostEvent::Captured`] with `then`. A turn end's capture is dropped while another of that session's waits to
+    /// start: the waiting one will read the transcript as it is by then.
+    fn capture(
+        &mut self,
+        captures: Vec<CaptureJob>,
+        then: AfterCapture,
+        follow_up: &mut VecDeque<HostEvent>,
+    ) {
+        let turn_end = match (&then, captures.as_slice()) {
+            (AfterCapture::Nothing, [job]) if job.reason == CaptureReason::TurnEnd => {
+                Some(job.session.clone())
+            }
+            _ => None,
+        };
+        if let Some(session) = &turn_end
+            && !lock(&self.queued_turn_ends).insert(session.clone())
+        {
+            tracing::debug!(%session, "a capture of this session is already waiting");
+            return;
+        }
+        let at = self.env.now().instant();
+        let this = self.machine.clone();
+        let homes = self.settings.agent_homes.clone();
+        let worktrees = self.worktrees.shared();
+        let queued = self.queued_turn_ends.clone();
+        let panicked = HostEvent::Captured {
+            then: then.clone(),
+            result: Err(ArchiveError::Failed(
+                "archiving the conversation failed unexpectedly".into(),
+            )),
+        };
+        let waiting = turn_end.clone();
+        let call = move |archive: &A| {
+            if let Some(session) = &waiting {
+                lock(&queued).remove(session);
+            }
+            HostEvent::Captured {
+                result: capture_all(archive, &*worktrees, &captures, at, &this, &homes),
+                then,
+            }
+        };
+        match self.archive.submit(call, panicked) {
+            Ok(()) => self.capture_calls += 1,
+            Err(unanswered) => {
+                tracing::error!("the archive thread is gone");
+                if let Some(session) = &turn_end {
+                    lock(&self.queued_turn_ends).remove(session);
+                }
+                follow_up.push_back(*unanswered);
             }
         }
     }
@@ -1712,6 +1833,7 @@ impl<
                 hooks = self.hooks.len(),
                 cleanup_hooks = self.cleanup_hooks.len(),
                 creates = self.creating.len(),
+                captures = self.capture_calls,
                 "not everything stopped in time; stopping anyway"
             );
             self.finish();
@@ -2042,7 +2164,10 @@ impl<
             installed,
             force: pending.force,
             work: Work {
-                port_calls: self.worktree_calls + self.hooks.len() + self.cleanup_hooks.len(),
+                port_calls: self.worktree_calls
+                    + self.hooks.len()
+                    + self.cleanup_hooks.len()
+                    + self.capture_calls,
                 run_files: self.pending_run_files(),
             },
             failed,
@@ -2659,7 +2784,8 @@ impl<
         if self.shutdown_by.is_some() {
             return;
         }
-        let grace = match self.creating.is_empty() {
+        // A capture reads transcripts and writes the archive: it is waited for as long as a create's cleanup.
+        let grace = match self.creating.is_empty() && self.capture_calls == 0 {
             true => SHUTDOWN_GRACE,
             false => CREATE_CLEANUP_GRACE,
         };
@@ -2689,6 +2815,7 @@ impl<
             && self.hooks.is_empty()
             && self.cleanup_hooks.is_empty()
             && self.creating.is_empty()
+            && self.capture_calls == 0
         {
             self.finish();
         }
@@ -2790,6 +2917,45 @@ fn inspect_orphans(
             (w, status)
         })
         .collect())
+}
+
+/// Takes each of `jobs` in order, stopping at the first that fails: finds its repo's root commit and its commits since
+/// its base (`Worktrees`), then records its session and snapshots its transcript (`Archive`). Runs on the archive's
+/// worker thread.
+fn capture_all(
+    archive: &impl Archive,
+    worktrees: &impl Worktrees,
+    jobs: &[CaptureJob],
+    at: jiff::Timestamp,
+    this: &MachineId,
+    homes: &AgentHomes,
+) -> Result<(), ArchiveError> {
+    for job in jobs {
+        let home = homes.of(job.agent).ok_or_else(|| {
+            ArchiveError::Refused(format!(
+                "{} sessions have no transcript",
+                job.agent.as_str()
+            ))
+        })?;
+        let repo = worktrees
+            .root_commit(&RepoRef::new(job.cwd.as_path()))
+            .map_err(|e| ArchiveError::Failed(format!("finding the repo at {}: {e}", job.cwd)))?;
+        let commits = match &job.base {
+            Some(base) => worktrees.commits_since(&job.cwd, base).map_err(|e| {
+                ArchiveError::Failed(format!("listing the commits in {}: {e}", job.cwd))
+            })?,
+            None => Vec::new(),
+        };
+        let found = Found { repo, commits };
+        let (session, request) = job.requests(found, at, this, home.to_path_buf());
+        archive.put_session(&session)?;
+        archive.capture(&request)?;
+    }
+    Ok(())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether anything (a symlink included, not followed) is at `path`.

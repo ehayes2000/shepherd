@@ -20,6 +20,7 @@ use shepherd::host::{
 use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
 use shepherd_core::host::Host;
+use shepherd_core::host::capture::AgentHomes;
 use shepherd_core::host::upgrade::{HandoffCheck, Preflight};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
@@ -31,6 +32,7 @@ use shepherd_core::wire::{
     SessionInput, SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
     encode_client_notification, encode_request,
 };
+use shepherd_testkit::fakes::archive::FakeArchive;
 use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::forge::FakeForge;
@@ -57,8 +59,20 @@ pub const WORKTREE_ROOT: &str = "/home/test/.shepherd/worktrees";
 pub const MACHINE_KEY: [u8; 32] = [0x5e; 32];
 /// The hostname the harness host is started with.
 pub const HOSTNAME: &str = "testbox";
+/// Where the harness host says Claude Code keeps its transcripts.
+pub const CLAUDE_HOME: &str = "/home/test/.claude";
+/// Where the harness host says Codex keeps its rollouts.
+pub const CODEX_HOME: &str = "/home/test/.codex";
 /// How long [`HostHarness::step`] waits for a port call on a worker thread: a liveness bound, never a measurement.
 const WORKER_LIMIT: Duration = Duration::from_secs(10);
+
+/// The agents' homes the harness host is started with: [`CLAUDE_HOME`] and [`CODEX_HOME`].
+pub fn agent_homes() -> AgentHomes {
+    AgentHomes {
+        claude: CLAUDE_HOME.into(),
+        codex: CODEX_HOME.into(),
+    }
+}
 
 /// The harness machine's id: its key's, as the runtime gets it from the `MachineIdentity` port.
 pub fn machine() -> MachineId {
@@ -229,6 +243,7 @@ pub type Runtime = HostRuntime<
     FakeEventLog,
     TestEnv,
     FakePeers,
+    FakeArchive,
 >;
 
 /// A host's links on fakes: listening on `net` for local clients, and as `machine` on `machines` for other machines,
@@ -260,6 +275,7 @@ pub struct HarnessBuilder {
     worktrees: FakeWorktrees,
     commands: FakeCommands,
     forge: FakeForge,
+    archive: FakeArchive,
     preflight: Option<PreflightRunner>,
     peers: FakePeerNet,
     machines: FakeNetwork,
@@ -347,6 +363,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Uses `archive` (a handle on shared fake state, e.g. with transcripts written) instead of an empty fake.
+    pub fn archive(mut self, archive: FakeArchive) -> Self {
+        self.archive = archive;
+        self
+    }
+
     pub fn start(self) -> HostHarness {
         let HarnessBuilder {
             programs,
@@ -357,6 +379,7 @@ impl HarnessBuilder {
             worktrees,
             commands,
             forge,
+            archive,
             build,
             preflight,
             peers,
@@ -376,7 +399,12 @@ impl HarnessBuilder {
         let runtime = build_runtime(
             &net,
             &programs,
-            (worktrees.clone(), commands.clone(), forge.clone()),
+            (
+                worktrees.clone(),
+                commands.clone(),
+                forge.clone(),
+                archive.clone(),
+            ),
             log,
             env.clone(),
             settings.clone(),
@@ -391,6 +419,7 @@ impl HarnessBuilder {
             worktrees,
             commands,
             forge,
+            archive,
             env,
             settings,
             stopped: None,
@@ -415,6 +444,7 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
         warning: None,
         machine: machine(),
         hostname: Some(HOSTNAME.to_owned()),
+        agent_homes: agent_homes(),
     }
 }
 
@@ -458,7 +488,17 @@ pub fn runtime_with<E: EventLog>(
     log: E,
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers> {
+) -> HostRuntime<
+    FakePty,
+    FakeWorktrees,
+    FakeCommands,
+    FakeForge,
+    Links,
+    E,
+    TestEnv,
+    FakePeers,
+    FakeArchive,
+> {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
@@ -470,12 +510,23 @@ pub fn runtime_with_sinks<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers> {
+) -> HostRuntime<
+    FakePty,
+    FakeWorktrees,
+    FakeCommands,
+    FakeForge,
+    Links,
+    E,
+    TestEnv,
+    FakePeers,
+    FakeArchive,
+> {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
     let workers = (
         FakeWorktrees::new(WORKTREE_ROOT),
         FakeCommands::new(),
         FakeForge::new(),
+        FakeArchive::new(),
     );
     let sinks = (link_sink, pty_sink);
     runtime_in(
@@ -490,8 +541,8 @@ pub fn runtime_with_sinks<E: EventLog>(
     )
 }
 
-/// The ports that run on worker threads: `Worktrees`, `Commands` and `Forge`.
-type WorkerPorts = (FakeWorktrees, FakeCommands, FakeForge);
+/// The ports that run on worker threads: `Worktrees`, `Commands`, `Forge` and `Archive`.
+type WorkerPorts = (FakeWorktrees, FakeCommands, FakeForge, FakeArchive);
 
 /// The link's and the PTY's event sink wrappers.
 type Sinks<FL, FP> = (FL, FP);
@@ -500,13 +551,23 @@ type Sinks<FL, FP> = (FL, FP);
 fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
-    (worktrees, commands, forge): WorkerPorts,
+    (worktrees, commands, forge, archive): WorkerPorts,
     log: E,
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
     (peer_net, machines): (&FakePeerNet, &FakeNetwork),
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers>
+) -> HostRuntime<
+    FakePty,
+    FakeWorktrees,
+    FakeCommands,
+    FakeForge,
+    Links,
+    E,
+    TestEnv,
+    FakePeers,
+    FakeArchive,
+>
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
@@ -520,7 +581,7 @@ where
     let link = links(net, machines, &settings.machine, link_sink(tx.link_sink()));
     let peers = peer_net.peers(settings.machine.clone(), tx.peers_sink());
     HostRuntime::start(
-        pty, worktrees, commands, forge, link, peers, log, env, settings, tx, rx,
+        pty, worktrees, commands, forge, archive, link, peers, log, env, settings, tx, rx,
     )
     .expect("host runtime starts")
 }
@@ -538,6 +599,7 @@ pub struct HostHarness {
     worktrees: FakeWorktrees,
     commands: FakeCommands,
     forge: FakeForge,
+    archive: FakeArchive,
     env: TestEnv,
     settings: RuntimeSettings,
     /// The log of a host [`HostHarness::stop`]ped, for [`HostHarness::restart`].
@@ -558,6 +620,7 @@ impl HostHarness {
             worktrees: FakeWorktrees::new(WORKTREE_ROOT),
             commands: FakeCommands::new(),
             forge: FakeForge::new(),
+            archive: FakeArchive::new(),
             preflight: None,
             peers: FakePeerNet::new(),
             machines: FakeNetwork::new(),
@@ -659,6 +722,11 @@ impl HostHarness {
         &self.worktrees
     }
 
+    /// The harness's fake `Archive` (shared state), e.g. to see what it captured or to hold its next call.
+    pub fn archive(&self) -> &FakeArchive {
+        &self.archive
+    }
+
     /// Completes the swap an accepted upgrade made ready, as the exec would: `tamper` sees the plan first (e.g. to
     /// spoil a token), then a new runtime adopts it on the same log and network, with a fresh fake PTY.
     pub fn swap(&mut self, tamper: impl FnOnce(&mut SwapPlan<FakePtyToken>)) {
@@ -688,6 +756,7 @@ impl HostHarness {
             self.worktrees.clone(),
             self.commands.clone(),
             self.forge.clone(),
+            self.archive.clone(),
             link,
             peers,
             log,
@@ -719,6 +788,7 @@ impl HostHarness {
                 self.worktrees.clone(),
                 self.commands.clone(),
                 self.forge.clone(),
+                self.archive.clone(),
             ),
             log,
             self.env.clone(),
