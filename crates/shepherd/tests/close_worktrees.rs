@@ -39,6 +39,10 @@ use support::*;
 const LIMIT: Duration = Duration::from_secs(10);
 /// How long each wait in a loop polling for two things at once lasts: a liveness slice of [`LIMIT`], never a measurement.
 const STEP: Duration = Duration::from_millis(20);
+/// A liveness bound for the real git adapter, both on each of its git calls and on [`HostRuntime::run_until_settled`]'s
+/// wait for its answer, never a measurement. One answer can take several git calls, each of which can take minutes on a
+/// heavily loaded machine (F17), so only a call stuck this long fails the test.
+const GIT_LIMIT: Duration = Duration::from_secs(600);
 
 /// The workspace config giving `pre_remove` as the pre-remove hooks of the repo at `app`.
 fn config_with(app: &Path, pre_remove: &[&str]) -> RawConfig {
@@ -472,7 +476,9 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
             ],
         );
     }
-    let probe = GitWorktrees::new(&root).with_isolated_env(env.clone());
+    let probe = GitWorktrees::new(&root)
+        .with_isolated_env(env.clone())
+        .with_git_timeout(GIT_LIMIT);
     let victim_status = probe.status(&WorktreePath::new(&victim)).unwrap();
     assert!(victim_status.losses().is_empty(), "{victim_status:?}");
     let listed: Vec<PathBuf> = probe
@@ -493,7 +499,9 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
         root.join("app").join("link"),
     ] {
         let commands = FakeCommands::new();
-        let worktrees = GitWorktrees::new(&root).with_isolated_env(env.clone());
+        let worktrees = GitWorktrees::new(&root)
+            .with_isolated_env(env.clone())
+            .with_git_timeout(GIT_LIMIT);
         let net = FakeNetwork::new();
         let (tx, rx) = runtime_channel();
         let pty = FakePty::new(tx.pty_sink());
@@ -514,12 +522,18 @@ fn refuses_recorded_paths_outside_the_managed_root(with_neighbour: bool) {
         )
         .expect("host runtime starts");
         let mut client = FakeClient::connect_with(&net, false);
-        assert!(runtime.run_until_settled(LIMIT));
+        assert!(
+            runtime.run_until_settled(GIT_LIMIT),
+            "{recorded:?}: startup's git calls never answered"
+        );
         client.request(ClientRequest::SessionClose(SessionClose {
             session: SessionId::new("s1"),
             worktree: CloseWorktree::IfSafe,
         }));
-        assert!(runtime.run_until_settled(LIMIT));
+        assert!(
+            runtime.run_until_settled(GIT_LIMIT),
+            "{recorded:?}: the close's git calls never answered"
+        );
 
         assert!(
             commands.runs().is_empty(),

@@ -1235,9 +1235,7 @@ fn read_all(file: &mut File) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::fs::Permissions;
     use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1249,7 +1247,8 @@ mod tests {
         WorktreePath, Worktrees,
     };
     use shepherd_testkit::contracts::worktrees::{
-        DEFAULT, FsWorktreesFixture, HeldCreate, NESTED, REPO_NAME, SUBDIR, WorktreesFixture,
+        CREATE_LIMIT, DEFAULT, FsWorktreesFixture, HeldCreate, NESTED, REPO_NAME, SUBDIR,
+        WorktreesFixture, wait_held,
     };
     use tempfile::TempDir;
 
@@ -1435,7 +1434,10 @@ mod tests {
         /// An ssh remote whose "ssh" is a long sleep, so the fetch hangs without touching the network.
         fn hang_origin(&self, timeout: Duration) -> GitWorktrees {
             let app = self.app();
-            self.git(&app, &["config", "core.sshCommand", "sh -c 'sleep 900' --"]);
+            self.git(
+                &app,
+                &["config", "core.sshCommand", "sh -c 'sleep 3600' --"],
+            );
             self.git(&app, &["config", "ssh.variant", "simple"]);
             self.git(
                 &app,
@@ -1488,19 +1490,40 @@ mod tests {
         assert!(status.success());
     }
 
-    /// Reads `fifo` to its end on a helper thread, up to `limit` (a liveness bound): whether it said `entered`. A writer
-    /// that never comes leaves the helper blocked until the test process exits, not the test.
-    fn read_entered(fifo: &Path, limit: Duration) -> bool {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let fifo = fifo.to_owned();
-        std::thread::spawn(move || {
-            let mut said = String::new();
-            let ok = std::fs::File::open(&fifo)
-                .and_then(|mut fifo| fifo.read_to_string(&mut said))
-                .is_ok();
-            let _ = tx.send(ok && said.trim() == "entered");
-        });
-        rx.recv_timeout(limit).unwrap_or(false)
+    /// Whether a hook said `entered` on a FIFO, which a helper thread reads to its end from the start. A writer that
+    /// never comes leaves the helper blocked until the test process exits, not the test. One reader for the FIFO's
+    /// whole life, so it can be asked again (see [`wait_held`]) without a second reader racing the first for the line.
+    struct Entered {
+        said: std::sync::mpsc::Receiver<bool>,
+        seen: std::cell::Cell<bool>,
+    }
+
+    impl Entered {
+        fn watch(fifo: &Path) -> Self {
+            let (tx, said) = std::sync::mpsc::channel();
+            let fifo = fifo.to_owned();
+            std::thread::spawn(move || {
+                let mut said = String::new();
+                let ok = std::fs::File::open(&fifo)
+                    .and_then(|mut fifo| fifo.read_to_string(&mut said))
+                    .is_ok();
+                let _ = tx.send(ok && said.trim() == "entered");
+            });
+            Self {
+                said,
+                seen: std::cell::Cell::new(false),
+            }
+        }
+    }
+
+    impl HeldCreate for Entered {
+        fn wait_entered(&self, limit: Duration) -> bool {
+            if !self.seen.get() {
+                self.seen
+                    .set(self.said.recv_timeout(limit).unwrap_or(false));
+            }
+            self.seen.get()
+        }
     }
 
     /// A FIFO hooks wait at. A hook opens it (`exec 3< <path>`, which returns at once because this holds a write end)
@@ -1542,7 +1565,7 @@ mod tests {
     struct HeldHook<'a> {
         f: &'a GitFixture,
         name: &'static str,
-        entered: PathBuf,
+        entered: Entered,
         gate: Option<Gate>,
     }
 
@@ -1570,7 +1593,7 @@ mod tests {
             Self {
                 f,
                 name,
-                entered,
+                entered: Entered::watch(&entered),
                 gate: Some(gate),
             }
         }
@@ -1578,7 +1601,7 @@ mod tests {
 
     impl HeldCreate for HeldHook<'_> {
         fn wait_entered(&self, limit: Duration) -> bool {
-            read_entered(&self.entered, limit)
+            self.entered.wait_entered(limit)
         }
     }
 
@@ -1631,11 +1654,12 @@ mod tests {
             .path
     }
 
-    /// Installs a hook in the clone (hooks are shared by its worktrees).
+    /// Installs a hook in the clone (hooks are shared by its worktrees), in place of any it had: a stand-in, so macOS
+    /// doesn't assess a new executable on its first run (F17, F45).
     fn hook(f: &GitFixture, hook: &str, script: &str) {
         let path = f.app().join(".git").join("hooks").join(hook);
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        crate::stand_in::install(&path, &format!("{script}\n"));
     }
 
     /// Set in a re-run of this test binary that should run the child half of a test.
@@ -1826,8 +1850,9 @@ mod tests {
     }
 
     /// The bound on short git calls in the tests that need one to fire: comfortably more than a metadata call takes
-    /// under load. Only that bound firing is timing-dependent.
-    const SHORT_TIMEOUT: Duration = Duration::from_secs(30);
+    /// under load, which on a heavily loaded machine can be most of a minute (F17). Only that bound firing is
+    /// timing-dependent.
+    const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
 
     /// A port whose short calls (everything but fetch and `worktree add`) time out after [`SHORT_TIMEOUT`]. Cleanup
     /// keeps the generous test timeout.
@@ -1835,25 +1860,26 @@ mod tests {
         port(f.dir.path(), TEST_TIMEOUT).with_git_timeout(SHORT_TIMEOUT)
     }
 
-    /// A liveness bound for a held create to reach its hook, never a measurement.
-    const HELD_LIMIT: Duration = Duration::from_secs(600);
-
     type Answer = std::sync::mpsc::Receiver<Result<Created, WorktreeError>>;
 
-    /// The answer of a create started with its own channel, within [`HELD_LIMIT`] (a liveness bound). If it doesn't
+    /// The answer of a create started with its own channel, within [`CREATE_LIMIT`] (a liveness bound). If it doesn't
     /// come, `release` runs first (so the create's thread can finish and the scope end), then this panics.
     fn answer(answer: &Answer, release: impl FnOnce()) -> Result<Created, WorktreeError> {
-        answer.recv_timeout(HELD_LIMIT).unwrap_or_else(|_| {
+        answer.recv_timeout(CREATE_LIMIT).unwrap_or_else(|_| {
             release();
             panic!("the create never answered");
         })
     }
 
-    /// Fails unless `entered` (a held hook said it started); `release` runs first, as for [`answer`].
-    fn assert_entered(entered: bool, release: impl FnOnce(), what: &str) {
-        if !entered {
-            release();
-            panic!("{what}");
+    /// Waits for `held` to say the create answering on `answer` is held, as [`wait_held`] does within
+    /// [`CREATE_LIMIT`]. If it isn't, `cancel` cancels the create and `held` is dropped (so the create's thread ends
+    /// and the scope with it: a hook that reached the gate only after its release would wait there for good), then
+    /// this panics with why.
+    fn assert_held<H: HeldCreate>(held: &mut Option<H>, answer: &Answer, cancel: impl FnOnce()) {
+        if let Err(why) = wait_held(held.as_ref().unwrap(), answer, CREATE_LIMIT) {
+            cancel();
+            drop(held.take());
+            panic!("the hook never ran: {why}");
         }
     }
 
@@ -1875,9 +1901,8 @@ mod tests {
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
             s.spawn(move || tx.send(f.port.create(repo, &name(n), BaseSpec::OriginDefault)));
-            let entered = held.wait_entered(HELD_LIMIT);
             let mut held = Some(held);
-            assert_entered(entered, || drop(held.take()), "the hook never ran");
+            assert_held(&mut held, &rx, || f.port.cancel_create(repo, &name(n)));
             f.port.cancel_create(repo, &name(n));
             answer(&rx, || drop(held.take()))
         })
@@ -1894,9 +1919,8 @@ mod tests {
         let created = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
             s.spawn(move || tx.send(port.create(repo, &name("long"), BaseSpec::OriginDefault)));
-            let entered = held.wait_entered(HELD_LIMIT);
             let mut held = Some(held);
-            assert_entered(entered, || drop(held.take()), "the hook never ran");
+            assert_held(&mut held, &rx, || port.cancel_create(repo, &name("long")));
             let witness = port.git(&f.app(), &["-c", "alias.nap=!sleep 900", "nap"]);
             let still_held = rx.try_recv().is_err();
             drop(held.take());
@@ -2072,19 +2096,29 @@ close $out;
                 s.spawn(move || tx.send(port.create(repo, &name(n), BaseSpec::OriginDefault)));
                 rx
             };
-            let mut gate = Some(gate);
-            let first = start("first");
-            let entered = read_entered(&fifo("entered-first"), HELD_LIMIT);
-            assert_entered(
-                entered,
-                || gate.take().into_iter().for_each(Gate::release),
-                "the first hook never ran",
+            let (first_entered, second_entered) = (
+                Entered::watch(&fifo("entered-first")),
+                Entered::watch(&fifo("entered-second")),
             );
+            // A create not held in time is cancelled before the gate is released: its hook, reaching the gate only
+            // after that, would wait there for good, and the scope with it.
+            let first = start("first");
+            if let Err(why) = wait_held(&first_entered, &first, CREATE_LIMIT) {
+                port.cancel_create(repo, &name("first"));
+                gate.release();
+                panic!("the first hook never ran: {why}");
+            }
             let second = start("second");
-            let entered = read_entered(&fifo("entered-second"), HELD_LIMIT);
+            let entered = wait_held(&second_entered, &second, CREATE_LIMIT);
             let first_held = first.try_recv().is_err();
-            gate.take().into_iter().for_each(Gate::release);
-            assert!(entered, "the second create waited for the first");
+            if entered.is_err() {
+                port.cancel_create(repo, &name("second"));
+            }
+            gate.release();
+            assert!(
+                entered.is_ok(),
+                "the second create waited for the first: {entered:?}"
+            );
             assert!(
                 first_held,
                 "the first create finished while its hook was held"
@@ -2521,7 +2555,7 @@ close $out;
     /// An origin reached over "ssh" whose stand-in runs a setup script, then is held at a [`Gate`] like a
     /// [`HeldHook`], then fails. Dropping it releases the gate.
     struct HeldOrigin {
-        entered: PathBuf,
+        entered: Entered,
         gate: Option<Gate>,
     }
 
@@ -2531,25 +2565,23 @@ close $out;
             let entered = tmp.join("origin-entered.fifo");
             mkfifo(&entered);
             let gate = Gate::new(tmp.join("origin-gate.fifo"));
-            let ssh = tmp.join("held-ssh.sh");
-            std::fs::write(
+            let ssh = tmp.join("held-ssh");
+            crate::stand_in::install(
                 &ssh,
-                format!(
-                    "#!/bin/sh\n{setup}\nexec 3< '{}'\necho entered > '{}'\n{}\nexit 1\n",
+                &format!(
+                    "{setup}\nexec 3< '{}'\necho entered > '{}'\n{}\nexit 1\n",
                     gate.path.display(),
                     entered.display(),
                     Gate::WAIT
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+            );
             let app = f.app();
             f.git(&app, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
             f.git(&app, &["config", "ssh.variant", "simple"]);
             let url = "ssh://held.invalid/x.git";
             f.git(&app, &["remote", "set-url", "origin", url]);
             Self {
-                entered,
+                entered: Entered::watch(&entered),
                 gate: Some(gate),
             }
         }
@@ -2557,7 +2589,7 @@ close $out;
 
     impl HeldCreate for HeldOrigin {
         fn wait_entered(&self, limit: Duration) -> bool {
-            read_entered(&self.entered, limit)
+            self.entered.wait_entered(limit)
         }
     }
 
@@ -2588,16 +2620,14 @@ close $out;
         let app = f.app();
         // `$2` is `git-upload-pack '<path>'`. The variables git sets for its own repo are cleared, so `setup`'s git
         // calls and upload-pack find theirs.
-        let ssh = f.tmp().join("serving-ssh.sh");
-        std::fs::write(
+        let ssh = f.tmp().join("serving-ssh");
+        crate::stand_in::install(
             &ssh,
-            format!(
-                "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX\n{setup}\n\
+            &format!(
+                "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX\n{setup}\n\
                  exec sh -c \"git ${{2#git-}}\"\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&ssh, Permissions::from_mode(0o755)).unwrap();
+        );
         f.git(&app, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
         f.git(&app, &["config", "ssh.variant", "simple"]);
         let origin = f.tmp().join("origin.git");
@@ -2832,16 +2862,11 @@ close $out;
     fn a_credential_prompt_never_runs_the_users_askpass() {
         let f = GitFixture::new();
         let ran = f.tmp().join("askpass.ran");
-        let askpass = f.tmp().join("askpass.sh");
-        std::fs::write(
+        let askpass = f.tmp().join("askpass");
+        crate::stand_in::install(
             &askpass,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> '{}'\necho secret\n",
-                ran.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&askpass, Permissions::from_mode(0o755)).unwrap();
+            &format!("echo \"$@\" >> '{}'\necho secret\n", ran.display()),
+        );
         let askpass_arg = askpass.to_str().unwrap();
         f.git(&f.app(), &["config", "core.askPass", askpass_arg]);
         let url = origin_asking_for_credentials();
@@ -2864,7 +2889,8 @@ close $out;
         assert!(!fetch_error.contains("timed out"), "{fetch_error}");
     }
 
-    /// The background `sleep` keeps git's stdout and stderr open long after git exits.
+    /// The background `sleep` keeps git's stdout and stderr open for an hour after git exits, so a create that returns
+    /// within [`CREATE_LIMIT`] (a liveness bound, never a measurement) didn't wait for it.
     #[test]
     fn a_hook_that_leaves_a_background_process_does_not_hold_the_call() {
         let f = GitFixture::new();
@@ -2872,7 +2898,7 @@ close $out;
         hook(
             &f,
             "post-checkout",
-            &format!("sleep 900 &\necho $! > '{}'", pid_file.display()),
+            &format!("sleep 3600 &\necho $! > '{}'", pid_file.display()),
         );
         let started = Instant::now();
         let result = f
@@ -2886,7 +2912,7 @@ close $out;
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert!(result.is_ok(), "{result:?}");
-        assert!(elapsed < Duration::from_secs(300), "took {elapsed:?}");
+        assert!(elapsed < CREATE_LIMIT, "took {elapsed:?}");
     }
 
     /// Where the injected hook in [`config_injected_through_the_environment_is_ignored`] leaves its mark.
@@ -2912,8 +2938,7 @@ close $out;
         std::fs::create_dir(&hooks).unwrap();
         let marker = tmp.path().join("injected");
         let hook = hooks.join("post-checkout");
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-        std::fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::install(&hook, &format!("touch '{}'\n", marker.display()));
         let hooks = hooks.to_str().unwrap();
         let injections: [Vec<(&str, String)>; 2] = [
             vec![
