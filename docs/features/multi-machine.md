@@ -11,7 +11,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T28 | Spike: iroh peering | done | decision 0019 |  |  |
 | T29 | Machine identity and names | done | 6fa66e2 | 3 | unusable key accepted the swap and killed sessions; pre-T29 host ignored identity_error; carried-id wiring untested |
-| T30 | Pairing and trusted peers | review | task/t30-pairing @ 0539136 (on b4b5b46) | 1 | PM-accepted: trait shape, token compared in adapter, ALPN gated by hook, retry in T31. Reviewer judges stale join answer, Ctrl-C |
+| T30 | Pairing and trusted peers | fixing | task/t30-pairing @ 0539136 | 1 | Blocking: printed ticket cut to 128 chars (real ones ~244). PM: CLI validates tickets before join; Ctrl-C stops the pairing |
 | T31 | Remote link and merged sidebar | todo |  |  |  |
 | T32 | Create sessions on any machine | todo |  |  |  |
 
