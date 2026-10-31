@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | fixing | task/t38-archive-blobs @ 5c3d534 | 2 | Blocking: reservation clamp untested (forged frame header aborts without it) |
+| T38 Archive crate and blob store | [conversation-archive](features/conversation-archive.md) | merging | task/t38-archive-blobs @ e6f928b | 3 | round 3 tests-only, PM spot check |
 | T29 Machine identity and names | [multi-machine](features/multi-machine.md) | building | task/t29-machine-identity @ e5168ae | 0 | notes added |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
