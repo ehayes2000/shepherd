@@ -27,8 +27,8 @@ use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::link::FakeNetwork;
 use shepherd_testkit::fakes::pty::ProgramInput;
 use support::{
-    FakeClient, HOME, HarnessBuilder, HostHarness, Program, SHEPHERD_EXE, SOCKET, entries,
-    new_session_id, response,
+    FakeClient, HOME, HarnessBuilder, HostHarness, Program, SHEPHERD_EXE, SOCKET,
+    assert_only_the_machine_name, entries, new_session_id, response,
 };
 
 /// The command of the built-in `claude` profile.
@@ -285,7 +285,7 @@ fn a_new_session_with_an_unknown_profile_is_refused_and_creates_nothing() {
         "{result:?}"
     );
     assert!(c.h.host().sessions().is_empty());
-    assert!(c.h.log().logs().unwrap().is_empty());
+    assert_only_the_machine_name(c.h.log());
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn assert_cwd_refused(cwd: &str) {
         "{result:?}"
     );
     assert!(c.h.host().sessions().is_empty());
-    assert!(c.h.log().logs().unwrap().is_empty());
+    assert_only_the_machine_name(c.h.log());
     assert!(c.spawned.lock().unwrap().is_empty());
     assert!(!c.h.run_root().exists());
 }

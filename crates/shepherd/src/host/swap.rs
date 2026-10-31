@@ -33,7 +33,7 @@ use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs;
 use shepherd_core::agents::CarriedTranslators;
 use shepherd_core::host::upgrade::HANDOFF_VERSION;
-use shepherd_core::ids::SessionId;
+use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::wire::{BuildId, base64};
 
 use super::{CarriedSession, RUN_DIR, RealHost, SwapPlan};
@@ -53,6 +53,10 @@ pub struct HandoffFile {
     pub listener: RawFd,
     pub sessions: Vec<HandoffSession>,
     pub translators: CarriedTranslators,
+    /// The old image's machine id (T29), which the new one keeps if it can't read the machine key itself (it changed
+    /// after the preflight). Absent from builds older than machine identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<MachineId>,
 }
 
 /// One carried session.
@@ -153,6 +157,7 @@ pub fn hand_off(
             })
             .collect(),
         translators: plan.translators,
+        machine: Some(host.settings().machine.clone()),
     };
     let handed = HandedOff {
         path: handoff_path(root, std::process::id()),
@@ -297,6 +302,7 @@ mod tests {
                 },
             }],
             translators: CarriedTranslators::default(),
+            machine: Some(MachineId::new("ab12")),
         }
     }
 
@@ -364,5 +370,20 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("accepted"));
         assert!(err.contains("descriptor 2"), "{err}");
+    }
+
+    #[test]
+    fn the_machine_id_is_carried_and_a_file_from_an_older_build_has_none() {
+        let read_back: HandoffFile =
+            serde_json::from_slice(&json(&file(10, 11, 12, 13))).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read_back.machine, Some(MachineId::new("ab12")));
+
+        let mut older =
+            serde_json::to_value(file(10, 11, 12, 13)).unwrap_or_else(|e| panic!("{e}"));
+        if let Some(fields) = older.as_object_mut() {
+            fields.remove("machine");
+        }
+        let older: HandoffFile = serde_json::from_value(older).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(older.machine, None);
     }
 }

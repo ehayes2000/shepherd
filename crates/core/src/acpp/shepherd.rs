@@ -26,6 +26,7 @@ pub enum ShepherdFrame {
     WorktreeRemoving(WorktreeRemoving),
     WorktreeRemoved(WorktreeRemoved),
     WorkspaceSelected(WorkspaceSelected),
+    MachineRenamed(MachineRenamed),
 }
 
 impl ShepherdFrame {
@@ -44,6 +45,7 @@ impl ShepherdFrame {
             Self::WorktreeRemoving(_) => "_shepherd/worktree/removing",
             Self::WorktreeRemoved(_) => "_shepherd/worktree/removed",
             Self::WorkspaceSelected(_) => "_shepherd/workspace/selected",
+            Self::MachineRenamed(_) => "_shepherd/machine/renamed",
         }
     }
 
@@ -64,6 +66,7 @@ impl ShepherdFrame {
             Self::WorktreeRemoving(p) => to_params(p),
             Self::WorktreeRemoved(p) => to_params(p),
             Self::WorkspaceSelected(p) => to_params(p),
+            Self::MachineRenamed(p) => to_params(p),
         };
         Frame::notification(self.method(), params)
     }
@@ -88,6 +91,7 @@ impl ShepherdFrame {
             "_shepherd/worktree/removing" => Self::WorktreeRemoving(p(params)?),
             "_shepherd/worktree/removed" => Self::WorktreeRemoved(p(params)?),
             "_shepherd/workspace/selected" => Self::WorkspaceSelected(p(params)?),
+            "_shepherd/machine/renamed" => Self::MachineRenamed(p(params)?),
             _ => return None,
         })
     }
@@ -293,4 +297,10 @@ pub struct WorktreeRemoved {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSelected {
     pub repo: String,
+}
+
+/// The host started under a name other than the last one recorded (host log).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineRenamed {
+    pub name: String,
 }

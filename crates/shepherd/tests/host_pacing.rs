@@ -341,12 +341,14 @@ fn a_paced_catch_up_reads_each_entry_about_once() {
     let clock = env.clock();
     let mut rt = runtime_with(&net, &[(SHELL.to_owned(), echo_shell())], log, env, |s| s);
     rt.run_until_idle();
-    let total = rt
-        .log()
-        .inner
-        .read(LogId::Session(SessionId::new("s_a")), Seq::ZERO)
+    // Every log's entries: the session's, and the host log's machine name (T29), recorded on start.
+    let inner = &rt.log().inner;
+    let total: usize = inner
+        .logs()
         .unwrap()
-        .len();
+        .into_iter()
+        .map(|log| inner.read(log, Seq::ZERO).unwrap().len())
+        .sum();
     parsed.store(0, Ordering::SeqCst);
     largest.store(0, Ordering::SeqCst);
 

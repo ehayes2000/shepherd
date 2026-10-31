@@ -177,6 +177,7 @@ fn removing_an_orphan_that_loses_nothing_runs_its_pre_remove_hook_then_removes_i
     assert_eq!(
         s.host_methods(),
         [
+            "_shepherd/machine/renamed",
             "_shepherd/workspace/selected",
             "_shepherd/worktree/removing",
             "_shepherd/worktree/hook",

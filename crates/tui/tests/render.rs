@@ -832,6 +832,7 @@ fn status_glyphs_follow_the_documented_table() {
     let session = |activity: Activity, exited: bool| ClientSession {
         id: SessionId::new("s1"),
         name: "s1".into(),
+        machine: shepherd_core::ids::MachineId::new("m_test"),
         created: ts("2026-10-29T12:00:00Z"),
         exited,
         activity,

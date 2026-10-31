@@ -20,7 +20,9 @@ use shepherd_core::session::{Activity, SessionState};
 use shepherd_core::wire::{ClientRequest, HookFrame, SessionClose, WireError};
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::ProgramInput;
-use support::{FakeClient, HostHarness, Program, SHELL, new_session_id, response};
+use support::{
+    FakeClient, HostHarness, Program, SHELL, assert_only_the_machine_name, new_session_id, response,
+};
 
 /// A liveness bound for hook threads in scenarios, never reached when the host is stepped.
 const GENEROUS: Duration = Duration::from_secs(60);
@@ -293,7 +295,7 @@ fn a_hook_for_an_unknown_session_is_refused_and_appends_nothing() {
             session: SessionId::new("s_nope")
         })
     );
-    assert!(h.log().logs().unwrap().is_empty());
+    assert_only_the_machine_name(h.log());
 }
 
 #[test]

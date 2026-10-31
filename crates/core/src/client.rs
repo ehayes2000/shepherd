@@ -91,6 +91,8 @@ pub const NOTICE_TIMEOUT: SignedDuration = SignedDuration::from_secs(5);
 pub const UPGRADE_RETRY: SignedDuration = SignedDuration::from_secs(1);
 /// How long a busy host is asked to update itself before the client offers to restart it instead.
 pub const UPGRADE_DEADLINE: SignedDuration = SignedDuration::from_secs(60);
+/// What a host older than machine names (T29) calls its machine: it is always this one.
+pub const UNNAMED_HOST: &str = "local";
 
 /// Something that happened, for the client to decide on.
 #[derive(Debug, Clone, PartialEq)]
@@ -381,6 +383,9 @@ pub enum Connection {
 pub struct ClientSession {
     pub id: SessionId,
     pub name: String,
+    /// The machine it is on: its `session/created` entry's, an entry from before machines had ids being the connected
+    /// host's ([`MachineId::read_by`]).
+    pub machine: MachineId,
     pub created: Timestamp,
     /// Its PTY process has ended.
     pub exited: bool,
@@ -468,6 +473,8 @@ pub struct Client {
     orphans_request: Option<RequestId>,
     /// The machine of the connected host, from its hello answer.
     host_machine: Option<MachineId>,
+    /// What the connected host's machine is called, from its hello answer. `None` from a host older than names.
+    host_name: Option<String>,
     notice: Option<Notice>,
     /// The host's agent profiles, the default first, from its hello answer.
     profiles: Vec<ProfileInfo>,
@@ -543,6 +550,7 @@ impl Client {
             orphans: None,
             orphans_request: None,
             host_machine: None,
+            host_name: None,
             notice: None,
             profiles: Vec::new(),
             default_profile: None,
@@ -694,6 +702,22 @@ impl Client {
     /// The machine of the connected host, once it has answered the hello.
     pub fn host_machine(&self) -> Option<&MachineId> {
         self.host_machine.as_ref()
+    }
+
+    /// What the connected host's machine is called, once it has answered the hello. `None` from a host older than
+    /// machine names.
+    pub fn host_name(&self) -> Option<&str> {
+        self.host_name.as_deref()
+    }
+
+    /// What to call `machine` (a [`ClientSession::machine`]): the connected host's name for its machine (or
+    /// [`UNNAMED_HOST`] from a host older than machine names), else the id itself.
+    pub fn machine_label<'a>(&'a self, machine: &'a MachineId) -> &'a str {
+        match (&self.host_machine, &self.host_name) {
+            (Some(host), Some(name)) if host == machine => name,
+            (Some(host), None) if host == machine => UNNAMED_HOST,
+            _ => machine.as_str(),
+        }
     }
 
     /// The terminal view's size, once the runtime has reported it.
@@ -936,6 +960,7 @@ impl Client {
                 }
                 self.host_warning = ok.warning;
                 self.host_machine = Some(ok.machine.clone());
+                self.host_name = ok.name.clone();
                 self.set_profiles(ok.profiles, ok.default_profile);
                 self.bell = ok.notify.bell;
                 self.connection = Connection::Ready;
@@ -1281,6 +1306,10 @@ impl Client {
                 let state = self.states.get(&s.id).unwrap_or(&starting);
                 let last_seen = self.seen.get(&s.id).copied().unwrap_or(Seq::ZERO);
                 ClientSession {
+                    machine: match &self.host_machine {
+                        Some(host) => s.machine.read_by(host),
+                        None => s.machine,
+                    },
                     activity: state.activity().clone(),
                     attention: state.attention(last_seen),
                     id: s.id,

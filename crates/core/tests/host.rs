@@ -431,6 +431,7 @@ fn pty_exit_appends_agent_exited() {
         [HostSession {
             id: sid("s1"),
             name: "shell-1".to_owned(),
+            machine: shepherd_core::ids::MachineId::new("m_test"),
             created: Timestamp::parse("2026-10-29T12:00:00.000Z").unwrap_or_else(|e| panic!("{e}")),
             exited: true,
             resume: Err(ResumeUnavailable::NotAnAgent),

@@ -20,6 +20,11 @@ pub struct HandoffCheck {
     /// Why the config can't be used, if it can't. Absent from builds that don't check it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
+    /// Why the machine key (`~/.shepherd/identity.key`, T29) can't be used, if it can't: the new image would have no
+    /// identity. Checking makes the key when there is none, so a swap from a host older than machine identities finds it.
+    /// Absent from builds that don't check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_error: Option<String>,
 }
 
 impl HandoffCheck {
@@ -29,6 +34,23 @@ impl HandoffCheck {
             build,
             handoff_versions: vec![HANDOFF_VERSION],
             config_error,
+            identity_error: None,
+        }
+    }
+
+    /// This answer, with why the machine key can't be used, if it can't. The reason goes in `config_error` too, unless
+    /// that already has one: builds older than machine identities ignore `identity_error` but refuse a swap over
+    /// `config_error`, so they don't hand off to an image with no key.
+    pub fn with_identity_error(self, identity_error: Option<String>) -> Self {
+        let config_error = self.config_error.or_else(|| {
+            identity_error
+                .as_ref()
+                .map(|e| format!("cannot use the machine key: {e}"))
+        });
+        Self {
+            config_error,
+            identity_error,
+            ..self
         }
     }
 }
@@ -130,7 +152,10 @@ fn can_hand_off(preflight: &Preflight) -> Result<(), String> {
             let check: HandoffCheck = serde_json::from_slice(line).map_err(|e| {
                 format!("cannot read the installed shepherd's handoff-check answer: {e}")
             })?;
-            if let Some(error) = check.config_error {
+            // The key first: its reason is in `config_error` too, for older builds.
+            if let Some(error) = check.identity_error {
+                Err(format!("fix the machine key first: {error}"))
+            } else if let Some(error) = check.config_error {
                 Err(format!("fix your config first: {error}"))
             } else if check.handoff_versions.contains(&HANDOFF_VERSION) {
                 Ok(())

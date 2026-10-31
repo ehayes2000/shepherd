@@ -51,7 +51,9 @@ macro_rules! config_contract {
 
 use std::collections::BTreeMap;
 
-use shepherd_core::config::{RawAgent, RawDefaults, RawHooks, RawKeys, RawNotify, RawWorkspace};
+use shepherd_core::config::{
+    RawAgent, RawDefaults, RawHooks, RawKeys, RawMachine, RawNotify, RawWorkspace,
+};
 use shepherd_core::ports::{ConfigError, ConfigSource, RawConfig};
 
 /// A config both as text and as the `RawConfig` it parses to.
@@ -112,6 +114,9 @@ prefix = "ctrl-a"
 [notify]
 bell = true
 
+[machine]
+name = "studio"
+
 [workspaces."/src/app"]
 hook_timeout_s = 30
 
@@ -148,6 +153,9 @@ pre_remove = ["make clean"]
                 prefix: Some("ctrl-a".into()),
             }),
             notify: Some(RawNotify { bell: Some(true) }),
+            machine: Some(RawMachine {
+                name: Some("studio".into()),
+            }),
             workspaces: Some(BTreeMap::from([(
                 "/src/app".into(),
                 RawWorkspace {

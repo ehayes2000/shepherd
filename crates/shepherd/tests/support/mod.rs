@@ -21,8 +21,10 @@ use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
 use shepherd_core::host::Host;
 use shepherd_core::host::upgrade::{HandoffCheck, Preflight};
-use shepherd_core::ids::SessionId;
-use shepherd_core::ports::{ConnId, EventLog, Link, LinkEvent, LinkEventSink, PtyEventSink};
+use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::{
+    ConnId, EventLog, Link, LinkEvent, LinkEventSink, MachineIdentity, MachineKey, PtyEventSink,
+};
 use shepherd_core::wire::{
     BuildId, ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
     SessionInput, SessionNew, SessionResize, Subscribe, SubscribeFrom, decode_host_message,
@@ -31,6 +33,7 @@ use shepherd_core::wire::{
 use shepherd_testkit::fakes::commands::FakeCommands;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
 use shepherd_testkit::fakes::forge::FakeForge;
+use shepherd_testkit::fakes::identity::FakeIdentity;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::{FakePty, FakePtyToken, ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
@@ -48,8 +51,37 @@ pub const SOCKET: &str = "/home/test/.shepherd/host.sock";
 const NO_RUN_ROOT: &str = "/nonexistent/shepherd-run";
 /// The managed worktree root of the harness's fake `Worktrees`, which knows no repos unless a test adds them.
 pub const WORKTREE_ROOT: &str = "/home/test/.shepherd/worktrees";
+/// The harness machine's key, in its fake `MachineIdentity`: its id is [`machine`].
+pub const MACHINE_KEY: [u8; 32] = [0x5e; 32];
+/// The hostname the harness host is started with.
+pub const HOSTNAME: &str = "testbox";
 /// How long [`HostHarness::step`] waits for a port call on a worker thread: a liveness bound, never a measurement.
 const WORKER_LIMIT: Duration = Duration::from_secs(10);
+
+/// The harness machine's id: its key's, as the runtime gets it from the `MachineIdentity` port.
+pub fn machine() -> MachineId {
+    FakeIdentity::holding(&MACHINE_KEY)
+        .load_or_create()
+        .expect("the harness key loads")
+        .machine_id()
+}
+
+/// Asserts that `log` holds only what every start appends (T29): the host log, with the one `machine/renamed` naming
+/// the machine. Nothing else was recorded.
+pub fn assert_only_the_machine_name(log: &impl EventLog) {
+    assert_eq!(
+        log.logs().expect("logs"),
+        [shepherd_core::ports::LogId::Host]
+    );
+    let host = log
+        .read(shepherd_core::ports::LogId::Host, Seq::ZERO)
+        .expect("host log");
+    let methods: Vec<String> = host
+        .iter()
+        .map(|e| serde_json::to_value(e.frame()).expect("frame")["method"].to_string())
+        .collect();
+    assert_eq!(methods, ["\"_shepherd/machine/renamed\""]);
+}
 
 /// The harness's config: the defaults, except that new sessions without a profile run the `shell` profile, so
 /// scenarios don't need a fake `claude`.
@@ -301,6 +333,8 @@ pub fn settings(config: RawConfig, run_root: PathBuf) -> RuntimeSettings {
         installed: InstalledExe::new(SHEPHERD_EXE),
         preflight: passing_preflight(),
         warning: None,
+        machine: machine(),
+        hostname: Some(HOSTNAME.to_owned()),
     }
 }
 

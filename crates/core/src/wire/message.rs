@@ -510,6 +510,9 @@ impl ClientRequest {
 pub struct HelloOk {
     pub version: u32,
     pub machine: MachineId,
+    /// What the host's machine is called (see [`crate::machine`]). `None` from a host older than machine names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The agent profiles new sessions can run, from the host's config. Empty from a host older than profiles.
     #[serde(default)]
     pub profiles: Vec<ProfileInfo>,
@@ -571,6 +574,11 @@ impl HelloOk {
             installed,
             ..self
         }
+    }
+
+    /// This answer, saying what the host's machine is called.
+    pub fn with_machine_name(self, name: Option<String>) -> Self {
+        Self { name, ..self }
     }
 
     /// This answer, with `warning` for the user, if any.
@@ -769,6 +777,7 @@ pub fn negotiate(hello: &Hello, host_machine: &MachineId) -> Result<HelloOk, Wir
     Ok(HelloOk {
         version: PROTOCOL_VERSION,
         machine: host_machine.clone(),
+        name: None,
         profiles: Vec::new(),
         default_profile: None,
         notify: Notify::default(),

@@ -719,6 +719,7 @@ fn hello_with_matching_version_returns_host_version_and_machine() {
         Ok(HelloOk {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_host"),
+            name: None,
             profiles: Vec::new(),
             default_profile: None,
             notify: Notify::default(),
@@ -796,6 +797,7 @@ fn a_hello_ok_from_an_older_host_has_no_profiles() {
         Ok(HostResult::Hello(HelloOk {
             version: PROTOCOL_VERSION,
             machine: MachineId::new("m_host"),
+            name: None,
             profiles: Vec::new(),
             default_profile: None,
             notify: Notify::default(),
@@ -833,6 +835,38 @@ fn hello_ok_with_the_bell_off_leaves_notify_off_the_wire() {
         result: Ok(HostResult::Hello(ok)),
     });
     assert_eq!(wire_json(&line)["result"].get("notify"), None);
+}
+
+#[test]
+fn hello_ok_carries_the_machine_name_and_round_trips() {
+    let ok = negotiate(&hello(), &MachineId::new("m_host"))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .with_machine_name(Some("studio".to_owned()));
+    assert_eq!(ok.name.as_deref(), Some("studio"));
+    let resp = HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    };
+    let line = encode_response(&resp);
+    let result = &wire_json(&line)["result"];
+    assert_eq!(result["machine"], "m_host");
+    assert_eq!(result["name"], "studio");
+    assert_eq!(response(&line, Method::Hello), resp);
+}
+
+#[test]
+fn hello_ok_from_a_host_older_than_machine_names_has_no_name() {
+    let line = br#"{"jsonrpc":"2.0","id":1,"result":{"version":1,"machine":"local"}}"#;
+    let Ok(HostResult::Hello(ok)) = response(line, Method::Hello).result else {
+        panic!("not a hello answer");
+    };
+    assert_eq!(ok.name, None);
+    // And one without a name leaves it off the wire.
+    let line = encode_response(&HostResponse {
+        id: 1.into(),
+        result: Ok(HostResult::Hello(ok)),
+    });
+    assert_eq!(wire_json(&line)["result"].get("name"), None);
 }
 
 fn hello() -> Hello {
@@ -882,6 +916,7 @@ fn successful_responses_round_trip_by_method() {
             HostResult::Hello(HelloOk {
                 version: 1,
                 machine: MachineId::new("m_1"),
+                name: None,
                 profiles: vec![ProfileInfo {
                     name: "codex".into(),
                     agent: AgentKind::Codex,
