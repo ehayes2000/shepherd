@@ -507,16 +507,55 @@ fn a_symlinked_subagent_transcript_is_refused() {
     ));
 }
 
+/// A FIFO at `path`, with a thread waiting to open it for writing. Opening a FIFO for reading blocks until a writer
+/// opens it, so if capture ever opens one, this writer unblocks it (and closes at once, so the read sees EOF) and the
+/// test fails on its assertion instead of hanging. [`release_fifo`] lets the writer finish when nothing opened it.
+fn fifo_with_writer(path: &Path) -> std::thread::JoinHandle<()> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_path` is a valid NUL-terminated path for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = fs::OpenOptions::new().write(true).open(&path);
+    })
+}
+
+/// Opens the FIFO for reading without blocking and holds it while the writer's open completes, so the writer thread
+/// always finishes, whether or not it had started opening yet.
+fn release_fifo(path: &Path, writer: std::thread::JoinHandle<()>) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .unwrap();
+    writer.join().unwrap();
+    drop(reader);
+}
+
 #[test]
 fn a_transcript_that_is_not_a_regular_file_is_refused_without_opening_it() {
     // A FIFO would block a read forever; it is refused from its lstat.
     let s = Setup::claude();
     let main = s.home.join(CLAUDE_MAIN);
     fs::remove_file(&main).unwrap();
-    let c_path = std::ffi::CString::new(main.as_os_str().as_bytes()).unwrap();
-    // SAFETY: `c_path` is a valid NUL-terminated path for the duration of the call.
-    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
-    assert!(matches!(s.refused(&main), CaptureError::WrongType(_)));
+    let writer = fifo_with_writer(&main);
+    let err = s.refused(&main);
+    release_fifo(&main, writer);
+    assert!(matches!(err, CaptureError::WrongType(_)), "{err:?}");
+}
+
+#[test]
+fn a_subagent_transcript_that_is_not_a_regular_file_is_refused_without_opening_it() {
+    let s = Setup::claude();
+    let fifo = s.home.join(CLAUDE_SUBAGENTS).join("agent-x.jsonl");
+    let writer = fifo_with_writer(&fifo);
+    let err = s.refused(&s.home.join(CLAUDE_MAIN));
+    release_fifo(&fifo, writer);
+    assert_eq!(
+        err,
+        CaptureError::WrongType(s.real(&format!("{CLAUDE_SUBAGENTS}/agent-x.jsonl")))
+    );
 }
 
 #[test]

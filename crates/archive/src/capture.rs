@@ -19,6 +19,11 @@
 //!   the transcript or any subagent transcript;
 //! - more bytes in all than [`CaptureLimits::max_bytes`], or more files than [`CaptureLimits::max_files`]. A file is
 //!   read at most one byte past what is left of the budget, so an oversized file is never read whole.
+//!
+//! Each file is opened only after its path is checked, and refused if what was opened isn't the file that was checked
+//! or its path no longer resolves to itself (a symlink swapped in on the way). Known gap: a FIFO swapped in between
+//! the check and the open can still block that open, since std can't open without following or with `O_NONBLOCK`.
+//! Closing it needs `openat`/`O_NONBLOCK`, i.e. `libc` or `rustix` as a dependency; it takes a same-user race.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
@@ -333,8 +338,6 @@ fn claude_subagents(
         check_file(&path, &meta)?;
         found.push((path, meta));
     }
-    // A symlink swapped in above the directory while it was listed would change where the entries came from.
-    unchanged_path(&dir)?;
     found.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(found)
 }
