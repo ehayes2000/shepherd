@@ -27,6 +27,7 @@ libc = "0.2"
 toml = "0.9"
 sha2 = "0.10"
 zstd = { version = "0.13", default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 wait-timeout = "0.2"
 unicode-segmentation = "1.13"
