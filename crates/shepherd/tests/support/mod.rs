@@ -828,6 +828,11 @@ impl FakeClient {
         std::mem::take(&mut self.inbox)
     }
 
+    /// Hangs up, as a client killed with Ctrl-C does.
+    pub fn close(&mut self) {
+        let _ = self.link.close(self.conn);
+    }
+
     pub fn is_disconnected(&mut self) -> bool {
         self.pump();
         self.disconnected

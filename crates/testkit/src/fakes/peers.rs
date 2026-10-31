@@ -257,7 +257,7 @@ impl Peers for FakePeers {
         }
         let host = net.node(&inviter);
         let Some((pairing, expected, host_name)) = host.pending.take() else {
-            return fail(&mut net, JoinError::Refused);
+            return fail(&mut net, JoinError::NotOpen);
         };
         let accepted = expected == token;
         host.send(PeersEvent::PairRequested {

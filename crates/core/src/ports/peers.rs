@@ -127,11 +127,13 @@ pub enum JoinError {
     /// The text isn't a pairing ticket.
     #[error("that is not a shepherd pairing ticket")]
     BadTicket,
-    /// The inviting machine refused: the ticket was used already, has expired, or was replaced by a newer one.
-    #[error(
-        "the other machine refused: the ticket was already used, expired, or replaced by a newer one"
-    )]
+    /// The inviting machine refused the ticket's token: it isn't the open pairing's (a newer one replaced it). That
+    /// used the pairing up.
+    #[error("the other machine refused the ticket: a newer `shepherd pair` replaced it")]
     Refused,
+    /// The inviting machine has no pairing open: the ticket was already used, expired, or was stopped.
+    #[error("the other machine has no pairing open: the ticket was already used, or it expired")]
+    NotOpen,
     /// The inviting machine couldn't be reached.
     #[error("cannot reach the other machine: {0}")]
     Unreachable(String),

@@ -2353,7 +2353,17 @@ impl<
 
     fn forget(&mut self, conn: ConnId) {
         self.conns.remove(&conn);
+        let gone: Vec<ReplyTo> = self
+            .replies
+            .iter()
+            .filter(|(_, (c, _))| *c == conn)
+            .map(|(reply, _)| *reply)
+            .collect();
         self.replies.retain(|_, (c, _)| *c != conn);
+        // A pairing nobody waits on any more (`shepherd pair` stopped with Ctrl-C) is stopped.
+        for reply in gone {
+            self.peering(PeeringEvent::Gone { reply });
+        }
     }
 
     // ---------- shutdown ----------

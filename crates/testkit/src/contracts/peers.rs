@@ -152,10 +152,19 @@ fn pair<P: Peers>(inviter: &mut Machine<P>, joiner: &mut Machine<P>) {
     trusting(joiner, &[&inviter.id]);
 }
 
+/// Join 1 failed: the inviter refused its token.
 fn refused_join() -> PeersEvent {
     PeersEvent::JoinFailed {
         id: PairingId::new(1),
         error: JoinError::Refused,
+    }
+}
+
+/// Join 1 failed: the inviter had no pairing open.
+fn closed_join() -> PeersEvent {
+    PeersEvent::JoinFailed {
+        id: PairingId::new(1),
+        error: JoinError::NotOpen,
     }
 }
 
@@ -199,8 +208,8 @@ pub fn a_wrong_token_is_refused_and_uses_the_pairing_up<F: PeersFixture>(f: &mut
             accepted: false,
         }
     );
-    // Used up: even the right ticket is refused now, and nobody is asked about it.
-    assert_eq!(join(&mut c, 1, &new), refused_join());
+    // Used up: even the right ticket finds no pairing open now, and nobody is asked about it.
+    assert_eq!(join(&mut c, 1, &new), closed_join());
     assert_eq!(a.pending(), vec![]);
 }
 
@@ -217,7 +226,7 @@ pub fn a_ticket_works_once<F: PeersFixture>(f: &mut F) {
         a.next(),
         PeersEvent::PairRequested { accepted: true, .. }
     ));
-    assert_eq!(join(&mut c, 1, &ticket), refused_join());
+    assert_eq!(join(&mut c, 1, &ticket), closed_join());
     assert_eq!(a.pending(), vec![]);
 }
 
@@ -226,7 +235,7 @@ pub fn a_stopped_pairing_refuses_its_ticket<F: PeersFixture>(f: &mut F) {
     let mut b = bound(f);
     let ticket = open(&mut a, 1, token(7));
     a.peers.stop_pairing();
-    assert_eq!(join(&mut b, 1, &ticket), refused_join());
+    assert_eq!(join(&mut b, 1, &ticket), closed_join());
     assert_eq!(a.pending(), vec![]);
 }
 

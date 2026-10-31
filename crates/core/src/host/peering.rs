@@ -13,7 +13,9 @@
 //! randomness ([`PeeringEvent::Start`]), replacing any open one, and is answered with its ticket once the port has it.
 //! The pairing expires [`PAIRING_TTL`] after it started (on the first [`PeeringEvent::Tick`] at or past that). The
 //! first attempt uses it up: the port checks its token and says whether it matched ([`PeersEvent::PairRequested`]);
-//! a match is recorded in `peer/trusted`. `_shepherd/pair/wait` is answered when it ends, however it ends.
+//! a match is recorded in `peer/trusted`. `_shepherd/pair/wait` is answered when it ends, however it ends. Once every
+//! client that was waiting on it (its start, its waits) has gone ([`PeeringEvent::Gone`]: `shepherd pair` stopped with
+//! Ctrl-C), it is stopped.
 //!
 //! Joining (`shepherd join <ticket>`): `_shepherd/pair/join` dials the inviter through the port, and once the inviter
 //! accepted, records it in `peer/trusted` and answers. Names peers give are display-safe before they are recorded
@@ -68,6 +70,10 @@ pub enum PeeringEvent {
     /// It is `at`: the deadline the runtime scheduled, or later.
     Tick {
         at: Timestamp,
+    },
+    /// The client `reply` was to answer went away (`shepherd pair` stopped with Ctrl-C).
+    Gone {
+        reply: ReplyTo,
     },
     Peers(PeersEvent),
 }
@@ -180,6 +186,7 @@ impl Peering {
             }
             PeeringEvent::Remove { reply, peer } => self.remove(reply, &peer),
             PeeringEvent::Tick { at } => self.tick(&at),
+            PeeringEvent::Gone { reply } => self.gone(reply),
             PeeringEvent::Peers(event) => self.port_event(event),
         };
         let mut out = self.bind_if_wanted();
@@ -276,6 +283,25 @@ impl Peering {
         commands
     }
 
+    /// Forgets `reply`; once nobody is left to tell how the open pairing ends, it is stopped.
+    fn gone(&mut self, reply: ReplyTo) -> Vec<HostCommand> {
+        let Some(pending) = &mut self.pending else {
+            return Vec::new();
+        };
+        let before = pending.waiters.len();
+        pending.waiters.retain(|to| *to != reply);
+        let held = pending.waiters.len() < before || pending.start == Some(reply);
+        if pending.start == Some(reply) {
+            pending.start = None;
+        }
+        // Another client going (or this one between its start's answer and its wait) leaves the pairing alone.
+        if !held || pending.start.is_some() || !pending.waiters.is_empty() {
+            return Vec::new();
+        }
+        self.pending = None;
+        vec![peers(PeersCommand::StopPairing)]
+    }
+
     fn remove(&mut self, reply: ReplyTo, who: &str) -> Vec<HostCommand> {
         let by_id = self.trusted.keys().find(|id| id.as_str() == who).cloned();
         let id = match by_id {
@@ -367,17 +393,17 @@ impl Peering {
                 commands
             }
             PeersEvent::Paired { id, peer, name } => {
+                // Only an answer to a join this host asked for trusts anyone.
+                let Some(to) = self.joins.remove(&id) else {
+                    return Vec::new();
+                };
                 let name = peer_name(&name);
-                let mut commands = vec![trust(&peer, &name)];
-                if let Some(to) = self.joins.remove(&id) {
-                    let info = PeerInfo {
-                        connected: self.connected.contains(&peer),
-                        id: peer,
-                        name,
-                    };
-                    commands.push(ok(to, HostResult::PairJoin(info)));
-                }
-                commands
+                let info = PeerInfo {
+                    connected: self.connected.contains(&peer),
+                    id: peer.clone(),
+                    name: name.clone(),
+                };
+                vec![trust(&peer, &name), ok(to, HostResult::PairJoin(info))]
             }
             PeersEvent::JoinFailed { id, error } => match self.joins.remove(&id) {
                 Some(to) => vec![invalid(to, &error.to_string())],

@@ -711,6 +711,94 @@ fn refusals_and_failed_dials_change_nothing() {
 }
 
 #[test]
+fn a_connection_from_a_machine_not_trusted_yet_is_not_counted_once_it_is() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("cc") });
+    d.record(ShepherdFrame::PeerTrusted(PeerTrusted {
+        node: m("cc"),
+        name: "tower".into(),
+    }));
+    d.peering.sync();
+    assert_eq!(
+        d.list(),
+        vec![info("bb", "laptop", false), info("cc", "tower", false)]
+    );
+}
+
+#[test]
+fn a_paired_answer_to_a_join_this_host_never_asked_for_trusts_nobody() {
+    let mut d = Driver::new();
+    let commands = d.peers(PeersEvent::Paired {
+        id: PairingId::new(7),
+        peer: m("aa"),
+        name: "office".into(),
+    });
+    assert_eq!(commands, vec![]);
+    assert_eq!(d.list(), vec![]);
+}
+
+#[test]
+fn a_pairing_is_stopped_once_every_client_waiting_on_it_has_gone() {
+    let mut d = Driver::new();
+    let (start, _) = d.start();
+    d.peers(PeersEvent::PairingOpen {
+        id: PairingId::new(1),
+        ticket: ticket("t1"),
+    });
+    let waiter = d.reply_to();
+    d.handle(PeeringEvent::Wait { reply: waiter });
+    let other = d.reply_to();
+    d.handle(PeeringEvent::Wait { reply: other });
+    // A reply this pairing doesn't hold changes nothing.
+    let stranger = d.reply_to();
+    assert_eq!(d.handle(PeeringEvent::Gone { reply: stranger }), vec![]);
+    assert_eq!(d.handle(PeeringEvent::Gone { reply: start }), vec![]);
+    assert_eq!(d.handle(PeeringEvent::Gone { reply: waiter }), vec![]);
+    assert_eq!(
+        d.handle(PeeringEvent::Gone { reply: other }),
+        vec![
+            peers(PeersCommand::StopPairing),
+            peers(PeersCommand::Unbind)
+        ]
+    );
+    assert_eq!(d.peering.deadline(), None);
+}
+
+#[test]
+fn another_client_going_while_nobody_waits_yet_leaves_the_pairing_open() {
+    let mut d = Driver::new();
+    d.start();
+    d.peers(PeersEvent::PairingOpen {
+        id: PairingId::new(1),
+        ticket: ticket("t1"),
+    });
+    // The start is answered and its wait not sent yet: some other client's request goes with its conn.
+    let other = d.reply_to();
+    assert_eq!(d.handle(PeeringEvent::Gone { reply: other }), vec![]);
+    assert_eq!(d.peering.deadline(), Some(t(600).instant()));
+}
+
+#[test]
+fn a_start_whose_client_left_before_its_ticket_stops_the_pairing() {
+    let mut d = Driver::new();
+    let (start, _) = d.start();
+    assert_eq!(
+        d.handle(PeeringEvent::Gone { reply: start }),
+        vec![
+            peers(PeersCommand::StopPairing),
+            peers(PeersCommand::Unbind)
+        ]
+    );
+    // Its ticket, arriving late, answers nobody.
+    let late = d.peers(PeersEvent::PairingOpen {
+        id: PairingId::new(1),
+        ticket: ticket("t1"),
+    });
+    assert_eq!(late, vec![]);
+}
+
+#[test]
 fn trust_is_only_read_from_the_host_log() {
     // A `peer/trusted` in a session's log (which a host never writes) trusts nobody.
     let mut d = Driver::new();

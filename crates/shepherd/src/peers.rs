@@ -8,7 +8,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink, peers::canonical_peer_id};
+use shepherd_adapters::peers::{canonical_peer_id, is_ticket};
+use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::display::display_safe;
 use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEvent, LinkEventSink};
 use shepherd_core::wire::{
@@ -57,12 +58,16 @@ pub fn pair(host: &mut impl HostRequests, out: &mut impl Write) -> Result<(), St
         HostResult::PairStart(started) => started,
         other => return Err(unexpected(other)),
     };
+    // Printed whole, never cut like a name: so it must be a ticket, and plain letters and digits.
+    let ticket = &started.ticket;
+    if !(is_ticket(ticket) && ticket.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        return Err("the host answered with something that isn't a pairing ticket".to_owned());
+    }
     write(
         out,
         &format!(
-            "On the other machine, run this before {}:\n\n    shepherd join {}\n\nWaiting for it to join...\n",
+            "On the other machine, run this before {}:\n\n    shepherd join {ticket}\n\nWaiting for it to join...\n",
             safe(started.expires.as_str()),
-            safe(&started.ticket)
         ),
     )?;
     match host.request(ClientRequest::PairWait(PairWait {}), WAIT_LIMIT)? {
@@ -84,12 +89,18 @@ pub fn pair(host: &mut impl HostRequests, out: &mut impl Write) -> Result<(), St
     }
 }
 
-/// `shepherd join <ticket>`.
+/// `shepherd join <ticket>`. Text that isn't a ticket is refused here, so the host never goes online for it.
 pub fn join(
     host: &mut impl HostRequests,
     ticket: &str,
     out: &mut impl Write,
 ) -> Result<(), String> {
+    if !is_ticket(ticket) {
+        return Err(
+            "that is not a shepherd pairing ticket: copy the whole line `shepherd pair` printed"
+                .to_owned(),
+        );
+    }
     let ticket = ticket.trim().to_owned();
     match host.request(ClientRequest::PairJoin(PairJoin { ticket }), JOIN_LIMIT)? {
         HostResult::PairJoin(peer) => write(out, &format!("Paired with {}.\n", shown(&peer))),
@@ -294,11 +305,19 @@ mod tests {
         }
     }
 
-    fn started() -> HostResult {
+    /// A ticket as a machine on n0's relays with four LAN addresses and a 12-character name hands it out (made by
+    /// `shepherd-adapters`' ticket tests): longer than any name is ever shown.
+    const TICKET: &str = "shepherdzkj2yfyfdbyhdvt3qpd76dx6qeeor3cfgblv25zgq6jthw62xz6akabdnb2hi4dthixs65ltmuys2mjoojswyylzfzxdaltjojxwqltmnfxgwlrpaeaauaaaa6zn4aybacwbabacwlpagaiaycuacf5s3ybqcagavbaadmw6amgg6ztgnfrwkllun53wk4qha4dqobyha4dqobyha4dqobyh";
+
+    fn started_with(ticket: &str) -> HostResult {
         HostResult::PairStart(PairStartOk {
-            ticket: "shepherdabc".into(),
+            ticket: ticket.into(),
             expires: Timestamp::parse("2026-10-29T12:10:00Z").unwrap(),
         })
+    }
+
+    fn started() -> HostResult {
+        started_with(TICKET)
     }
 
     fn printed(
@@ -319,7 +338,11 @@ mod tests {
         ]);
         let (out, result) = printed(|out| pair(&mut host, out));
         assert_eq!(result, Ok(()));
-        assert!(out.contains("    shepherd join shepherdabc\n"), "{out}");
+        assert!(TICKET.len() > 200);
+        assert!(
+            out.contains(&format!("    shepherd join {TICKET}\n")),
+            "{out}"
+        );
         assert!(out.contains("2026-10-29T12:10:00Z"), "{out}");
         assert!(out.ends_with("Paired with laptop (ab12).\n"), "{out}");
         assert_eq!(
@@ -365,18 +388,42 @@ mod tests {
     }
 
     #[test]
+    fn pair_refuses_a_ticket_that_is_not_plain_letters_and_digits_and_waits_for_nothing() {
+        let mut host = Scripted::answering([Ok(started_with("shepherd\u{1b}[2Jabc"))]);
+        let (out, result) = printed(|out| pair(&mut host, out));
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(out, "");
+        assert_eq!(host.asked.len(), 1);
+    }
+
+    #[test]
     fn join_sends_the_ticket_trimmed_and_prints_who_it_paired_with() {
         let mut host =
             Scripted::answering([Ok(HostResult::PairJoin(peer("office", "ab12", false)))]);
-        let (out, result) = printed(|out| join(&mut host, "  shepherdabc\n", out));
+        let (out, result) = printed(|out| join(&mut host, &format!("  {TICKET}\n"), out));
         assert_eq!(result, Ok(()));
         assert_eq!(out, "Paired with office (ab12).\n");
         assert_eq!(
             host.asked,
             [ClientRequest::PairJoin(PairJoin {
-                ticket: "shepherdabc".into()
+                ticket: TICKET.into()
             })]
         );
+    }
+
+    #[test]
+    fn join_with_text_that_is_not_a_ticket_never_asks_the_host() {
+        for text in ["shepherdabc", &TICKET[..TICKET.len() - 4], "hello"] {
+            let mut host = Scripted::default();
+            let (_, result) = printed(|out| join(&mut host, text, out));
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|e| e.contains("not a shepherd pairing ticket")),
+                "{result:?}"
+            );
+            assert_eq!(host.asked, [], "{text}");
+        }
     }
 
     #[test]

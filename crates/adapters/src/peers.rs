@@ -95,6 +95,12 @@ pub fn canonical_peer_id(text: &str) -> Option<MachineId> {
         .map(machine)
 }
 
+/// Whether `text` is a shepherd pairing ticket, as `shepherd join` takes it (surrounding whitespace aside). Checked
+/// before asking the host, so a mistyped ticket never brings it online.
+pub fn is_ticket(text: &str) -> bool {
+    Invite::decode_string(text.trim()).is_ok()
+}
+
 /// What a ticket carries.
 #[derive(Debug, Serialize, Deserialize)]
 struct Invite {
@@ -111,9 +117,14 @@ impl Ticket for Invite {
         postcard::to_stdvec(self).unwrap_or_default()
     }
 
+    /// Exactly one invite: bytes left over mean it isn't one.
     fn decode_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
-        postcard::from_bytes(bytes)
-            .map_err(|_| ParseError::verification_failed("not a shepherd pairing ticket"))
+        match postcard::take_from_bytes::<Self>(bytes) {
+            Ok((invite, [])) => Ok(invite),
+            _ => Err(ParseError::verification_failed(
+                "not a shepherd pairing ticket",
+            )),
+        }
     }
 }
 
@@ -211,7 +222,8 @@ impl Shared {
     }
 
     /// Holds `conn`, a link connection with `peer`, until it closes. The first one with a peer announces it. A peer
-    /// that stopped being trusted meanwhile is dropped instead.
+    /// that stopped being trusted meanwhile (a race between a dial's greeting and `set_trusted`, which no test
+    /// reproduces deterministically) is dropped instead.
     fn hold(self: &Arc<Self>, peer: EndpointId, conn: Connection) -> bool {
         {
             let mut state = self.state();
@@ -672,7 +684,12 @@ async fn join(
                 name: reply.name,
             });
         }
-        _ if refused(conn.close_reason().as_ref()) => shared.send(fail(JoinError::Refused)),
+        _ if closed_with(conn.close_reason().as_ref(), REFUSED) => {
+            shared.send(fail(JoinError::Refused))
+        }
+        _ if closed_with(conn.close_reason().as_ref(), NO_PAIRING) => {
+            shared.send(fail(JoinError::NotOpen))
+        }
         _ => {
             conn.close(VarInt::from_u32(0), b"no answer");
             shared.send(fail(JoinError::Unreachable("no answer".into())));
@@ -703,7 +720,9 @@ async fn dial(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId) {
                 shared.send(fail(ConnectError::Untrusted));
             }
         }
-        _ if refused(conn.close_reason().as_ref()) => shared.send(fail(ConnectError::Refused)),
+        _ if closed_with(conn.close_reason().as_ref(), REFUSED) => {
+            shared.send(fail(ConnectError::Refused))
+        }
         _ => {
             conn.close(VarInt::from_u32(0), b"no greeting");
             shared.send(fail(ConnectError::Unreachable("no greeting".into())));
@@ -711,15 +730,12 @@ async fn dial(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId) {
     }
 }
 
-/// The other end closed the connection refusing this machine: untrusted, a wrong token, or no pairing open.
-fn refused(reason: Option<&ConnectionError>) -> bool {
-    match reason {
-        Some(ConnectionError::ApplicationClosed(close)) => {
-            close.error_code == VarInt::from_u32(REFUSED)
-                || close.error_code == VarInt::from_u32(NO_PAIRING)
-        }
-        _ => false,
-    }
+/// The other end closed the connection with `code`: [`REFUSED`] (untrusted, or a wrong token) or [`NO_PAIRING`].
+fn closed_with(reason: Option<&ConnectionError>, code: u32) -> bool {
+    matches!(
+        reason,
+        Some(ConnectionError::ApplicationClosed(close)) if close.error_code == VarInt::from_u32(code)
+    )
 }
 
 /// The cache's addresses by machine id. Missing, unreadable or malformed reads as empty: it is only a hint.
@@ -927,5 +943,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// What a machine on n0's relays with four LAN addresses and a 12-character name hands out.
+    fn realistic_invite() -> Invite {
+        let relay: iroh::RelayUrl = "https://use1-1.relay.n0.iroh.link./".parse().unwrap();
+        let mut addr =
+            EndpointAddr::new(SecretKey::from_bytes(&[4; 32]).public()).with_relay_url(relay);
+        for ip in ["192.168.1.23", "10.0.0.7", "172.16.4.2", "192.168.64.1"] {
+            addr = addr.with_ip_addr(format!("{ip}:61234").parse().unwrap());
+        }
+        Invite {
+            addr,
+            name: "office-tower".into(),
+            token: [7; TOKEN_LEN],
+        }
+    }
+
+    /// Any bytes, encoded as a `shepherd` ticket.
+    struct Raw(Vec<u8>);
+
+    impl Ticket for Raw {
+        const KIND: &'static str = "shepherd";
+
+        fn encode_bytes(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+
+        fn decode_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+            Ok(Self(bytes.to_vec()))
+        }
+    }
+
+    #[test]
+    fn a_whole_ticket_is_a_ticket_and_a_realistic_one_is_over_200_characters() {
+        let text = realistic_invite().encode_string();
+        assert!(text.len() > 200, "{}", text.len());
+        assert!(is_ticket(&text));
+        assert!(is_ticket(&format!("  {text}\n")));
+        assert!(text.chars().all(|c| c.is_ascii_alphanumeric()), "{text}");
+    }
+
+    #[test]
+    fn a_ticket_of_another_kind_cut_off_or_with_bytes_left_over_is_not_a_ticket() {
+        let text = realistic_invite().encode_string();
+        assert!(!is_ticket(&text.replacen("shepherd", "endpoint", 1)));
+        assert!(!is_ticket(&text[..text.len() - 8]));
+        let bytes = realistic_invite().encode_bytes();
+        assert!(is_ticket(&Raw(bytes.clone()).encode_string()));
+        let mut longer = bytes;
+        longer.extend([0; 4]);
+        assert!(!is_ticket(&Raw(longer).encode_string()));
+        assert!(!is_ticket("not a ticket"));
     }
 }

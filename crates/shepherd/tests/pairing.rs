@@ -208,3 +208,37 @@ fn a_pairing_nobody_joins_expires_after_ten_minutes_and_the_host_goes_offline() 
     assert!(!net.is_pairing(&a.machine()));
     assert!(!net.is_bound(&a.machine()));
 }
+
+#[test]
+fn a_pairing_whose_client_hangs_up_is_stopped_and_the_host_goes_offline() {
+    let net = FakePeerNet::new();
+    let mut a = host(&net, KEY_A, "office");
+    let mut pair = a.connect();
+    let start = pair.request(ClientRequest::PairStart(PairStart {}));
+    a.step();
+    response(&pair.take(), &start).expect("pairing started");
+    pair.request(ClientRequest::PairWait(PairWait {}));
+    a.step();
+    // Another client coming and going changes nothing.
+    a.connect().close();
+    a.step();
+    assert!(net.is_pairing(&a.machine()));
+    pair.close();
+    a.step();
+    assert!(!net.is_pairing(&a.machine()));
+    assert!(!net.is_bound(&a.machine()));
+}
+
+#[test]
+fn shutting_down_takes_the_host_offline() {
+    let net = FakePeerNet::new();
+    let mut a = host(&net, KEY_A, "office");
+    // Kept open: a pairing whose client went would be stopped.
+    let mut pair = a.connect();
+    pair.request(ClientRequest::PairStart(PairStart {}));
+    a.step();
+    assert!(net.is_bound(&a.machine()));
+    a.send(shepherd::host::RuntimeEvent::Shutdown);
+    assert!(a.runtime().is_finished());
+    assert!(!net.is_bound(&a.machine()));
+}
