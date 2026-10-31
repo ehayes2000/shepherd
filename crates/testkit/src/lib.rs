@@ -22,6 +22,7 @@ pub mod builders {
         Host, HostCommand, HostEvent, NewSessionSpec, PostCreate, ReplyTo, ResumeSpec, WorkspaceAsk,
     };
     use shepherd_core::ids::{MachineId, SessionId};
+    use shepherd_core::layout::LayoutOp;
     use shepherd_core::ports::archive::ArchiveError;
     use shepherd_core::ports::commands::{CommandExit, CommandOutput, CommandSpec};
     use shepherd_core::ports::pty::{PtySize, SpawnSpec};
@@ -290,6 +291,12 @@ pub mod builders {
                 session: SessionId::new(id),
                 name: name.to_owned(),
             })
+        }
+
+        /// A `_shepherd/ui/apply` of `op` (decision 0022).
+        pub fn ui_apply(&mut self, op: LayoutOp) -> Vec<HostCommand> {
+            let reply = self.reply_to();
+            self.handle(HostEvent::UiApply { reply, op })
         }
 
         /// A `Close` of `id` that removes its worktree if that loses nothing, in a workspace with no hooks.

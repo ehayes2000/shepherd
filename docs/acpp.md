@@ -85,6 +85,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/worktree/removed`  | `{ path, removed: bool, kept? }` (host log: how removing the orphan worktree at `path` went; neither `removed` nor `kept`: it was already gone) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
 | `_shepherd/machine/renamed`  | `{ name }` (host log: the host started under a name other than the last one recorded, its first start included; see `core::machine`) |
+| `_shepherd/ui/layout`        | `{ layout }` (host log: the screen layout after a `_shepherd/ui/apply`, decision 0022; the latest is current, with panes of sessions closed since showing nothing; see `core::layout`) |
 | `_shepherd/peer/trusted`     | `{ node, name }` (host log: this machine trusts machine `node`, an iroh node id like `machine`, which calls itself `name` (display-safe); recorded by both sides of a pairing. A later one for the same node renames it. See `core::host::peering`) |
 | `_shepherd/peer/removed`     | `{ node }` (host log: `shepherd unpair`; this machine no longer trusts `node` until they pair again) |
 

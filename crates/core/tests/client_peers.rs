@@ -411,6 +411,37 @@ fn entries_from_each_host_are_folded_by_their_own_seqs() {
 }
 
 #[test]
+fn the_layout_is_this_machines_hosts_not_a_peers() {
+    let mut net = Machines::connected(&[("m_b", "laptop")]);
+    net.host("m_b")
+        .ui_apply(shepherd_core::layout::LayoutOp::PageNew {
+            name: Some("theirs".into()),
+            content: shepherd_core::layout::Content::Empty,
+        });
+    net.sync("m_b");
+    assert_eq!(
+        net.c.client().layout(),
+        shepherd_core::layout::Layout::default()
+    );
+    net.c
+        .host()
+        .ui_apply(shepherd_core::layout::LayoutOp::PageNew {
+            name: Some("ours".into()),
+            content: shepherd_core::layout::Content::Empty,
+        });
+    net.c.sync();
+    let names: Vec<String> = net
+        .c
+        .client()
+        .layout()
+        .pages()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(names, ["1", "ours"]);
+}
+
+#[test]
 fn a_session_id_two_hosts_both_claim_is_listed_once_as_the_local_hosts() {
     let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
     net.c.host().new_session("dup");

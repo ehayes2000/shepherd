@@ -278,6 +278,13 @@ fn pairing_trust_and_updates_are_refused_to_other_machines_and_nothing_else_is()
         ClientRequest::PeerList(PeerList {}),
         ClientRequest::PeerRemove(PeerRemove { peer: "bb".into() }),
         ClientRequest::HostUpgrade(HostUpgrade::default()),
+        ClientRequest::UiGet(shepherd_core::wire::UiGet {}),
+        ClientRequest::UiApply(shepherd_core::wire::UiApply {
+            op: shepherd_core::layout::LayoutOp::PageNew {
+                name: None,
+                content: shepherd_core::layout::Content::Empty,
+            },
+        }),
     ];
     for request in &local_only {
         assert!(

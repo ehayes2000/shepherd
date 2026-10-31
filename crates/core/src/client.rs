@@ -90,6 +90,7 @@ use jiff::SignedDuration;
 use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp};
 use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
+use crate::layout::Layout;
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState};
@@ -798,6 +799,13 @@ impl Client {
     /// [`Host::workspaces`] and [`Client::workspace`].
     pub fn workspaces(&self) -> &[PathBuf] {
         self.acting_feed().registry.workspaces()
+    }
+
+    /// The screen layout this machine's host records (decision 0022), folded from its log: the default until it records
+    /// one, and every pane of a session that closed showing nothing. A peer's host's layout is that machine's windows',
+    /// not this one's.
+    pub fn layout(&self) -> Layout {
+        self.local.registry.layout()
     }
 
     /// Open sessions, grouped by machine (this one first, then the peers by name), each group newest first.

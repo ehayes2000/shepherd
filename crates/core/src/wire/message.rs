@@ -32,6 +32,7 @@ use super::codec::frame;
 use crate::acpp::{Envelope, RequestId, Seq, Timestamp};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
+use crate::layout::{Layout, LayoutOp};
 use crate::ports::worktrees::WorktreeStatus;
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
@@ -59,10 +60,12 @@ pub enum Method {
     PeerList,
     PeerRemove,
     Tunnel,
+    UiGet,
+    UiApply,
 }
 
 impl Method {
-    pub const ALL: [Method; 19] = [
+    pub const ALL: [Method; 21] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -82,6 +85,8 @@ impl Method {
         Self::PeerList,
         Self::PeerRemove,
         Self::Tunnel,
+        Self::UiGet,
+        Self::UiApply,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -105,6 +110,8 @@ impl Method {
             Self::PeerList => "_shepherd/peer/list",
             Self::PeerRemove => "_shepherd/peer/remove",
             Self::Tunnel => "_shepherd/tunnel",
+            Self::UiGet => "_shepherd/ui/get",
+            Self::UiApply => "_shepherd/ui/apply",
         }
     }
 
@@ -141,6 +148,8 @@ pub enum ClientRequest {
     PeerList(PeerList),
     PeerRemove(PeerRemove),
     Tunnel(Tunnel),
+    UiGet(UiGet),
+    UiApply(UiApply),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -464,6 +473,19 @@ pub struct Tunnel {
     pub machine: MachineId,
 }
 
+/// `_shepherd/ui/get`: the host's screen layout (decision 0022). Answered with [`HostResult::Layout`]. Local clients
+/// only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiGet {}
+
+/// `_shepherd/ui/apply`: change the host's screen layout by `op` (decision 0022). Answered with the new
+/// [`HostResult::Layout`] once it is in the host log, which every subscribed client is sent, or
+/// [`WireError::InvalidParams`] saying why `op` was refused (the layout is unchanged). Local clients only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiApply {
+    pub op: LayoutOp,
+}
+
 /// A trusted machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -572,6 +594,8 @@ impl ClientRequest {
             Self::PeerList(_) => Method::PeerList,
             Self::PeerRemove(_) => Method::PeerRemove,
             Self::Tunnel(_) => Method::Tunnel,
+            Self::UiGet(_) => Method::UiGet,
+            Self::UiApply(_) => Method::UiApply,
         }
     }
 
@@ -596,6 +620,8 @@ impl ClientRequest {
             Self::PeerList(p) => json(p),
             Self::PeerRemove(p) => json(p),
             Self::Tunnel(p) => json(p),
+            Self::UiGet(p) => json(p),
+            Self::UiApply(p) => json(p),
         }
     }
 
@@ -622,6 +648,8 @@ impl ClientRequest {
             Method::PeerList => Self::PeerList(invalid_params(params)?),
             Method::PeerRemove => Self::PeerRemove(invalid_params(params)?),
             Method::Tunnel => Self::Tunnel(invalid_params(params)?),
+            Method::UiGet => Self::UiGet(invalid_params(params)?),
+            Method::UiApply => Self::UiApply(invalid_params(params)?),
         })
     }
 }
@@ -746,6 +774,8 @@ pub enum HostResult {
     PairJoin(PeerInfo),
     PeerList(PeerListOk),
     PeerRemove(PeerInfo),
+    /// The layout, for `_shepherd/ui/get` and `_shepherd/ui/apply`.
+    Layout(Layout),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -765,6 +795,7 @@ impl HostResult {
             Self::PairJoin(r) => json(r),
             Self::PeerList(r) => json(r),
             Self::PeerRemove(r) => json(r),
+            Self::Layout(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -783,6 +814,7 @@ impl HostResult {
             Method::PairJoin => Self::PairJoin(serde_json::from_value(result)?),
             Method::PeerList => Self::PeerList(serde_json::from_value(result)?),
             Method::PeerRemove => Self::PeerRemove(serde_json::from_value(result)?),
+            Method::UiGet | Method::UiApply => Self::Layout(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

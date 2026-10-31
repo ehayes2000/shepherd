@@ -600,8 +600,8 @@ impl Peering {
 }
 
 /// The answer another machine's conn (its host, or a client of its tunnelling here) gets for `request`, if only this
-/// machine's own clients may make it: pairing, trust (listing it included) and updating the host are theirs to
-/// manage, as tunnels are ([`Peering::tunnel`]). `None` for every other request. The caller asks whose conn it is only
+/// machine's own clients may make it: pairing, trust (listing it included), updating the host and its screen layout
+/// (decision 0022) are theirs to manage, as tunnels are ([`Peering::tunnel`]). `None` for every other request. The caller asks whose conn it is only
 /// when this is `Some`, and refuses it as well when it can no longer tell. Every request is classified here, so a new
 /// one has to be.
 pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
@@ -611,7 +611,9 @@ pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
         | ClientRequest::PairJoin(_)
         | ClientRequest::PeerList(_)
         | ClientRequest::PeerRemove(_)
-        | ClientRequest::HostUpgrade(_) => true,
+        | ClientRequest::HostUpgrade(_)
+        | ClientRequest::UiGet(_)
+        | ClientRequest::UiApply(_) => true,
         // A peer's own conn may not tunnel on either, but that is the tunnel's decision, with its own answer.
         ClientRequest::Tunnel(_)
         | ClientRequest::Hello(_)
@@ -629,7 +631,8 @@ pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
     };
     local_only.then(|| {
         WireError::InvalidParams(
-            "only this machine's own clients can manage its pairing, trust and updates".to_owned(),
+            "only this machine's own clients can manage its pairing, trust, updates and layout"
+                .to_owned(),
         )
     })
 }
