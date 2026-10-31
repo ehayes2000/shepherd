@@ -39,6 +39,12 @@ pub const MAX_QUEUED: usize = 8 * 1024 * 1024;
 /// The most conns a link between machines carries open at once to one peer, of those this end [opened](Link::open):
 /// the concurrent stream limit of the one connection they share (QUIC's, on iroh, which each end grants the other).
 /// Opening more would wait for one to close, so the host refuses to.
+///
+/// The count is of conns the link still knows, which is not quite the transport's: a closed conn's stream keeps its
+/// place in QUIC's limit while it finishes delivering (up to [`CLOSE_FLUSH`]) and until the peer grants it back. So a
+/// conn opened right after one closed, at the limit, can wait in the transport for a stream, and if none frees up in
+/// time it ends as `PeerGone`, which a tunnel reports as "cannot reach" its machine. Accepted: it takes a hundred
+/// tunnels to one machine at once.
 pub const MAX_OPEN_PER_PEER: usize = 100;
 
 /// How long a closed conn keeps trying to deliver its queued lines to a peer that isn't reading.

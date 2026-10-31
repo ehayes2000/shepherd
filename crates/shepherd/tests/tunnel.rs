@@ -300,6 +300,44 @@ fn another_machine_may_not_update_this_machines_host() {
     assert!(a.runtime_mut().take_swap().is_none());
 }
 
+#[test]
+fn another_machine_may_not_list_this_machines_peers() {
+    let (_, msgs) = ask_from_peer(ClientRequest::PeerList(PeerList {}));
+    let why = refusal(&msgs, &1.into());
+    assert!(why.contains("this machine's own clients"), "{why}");
+}
+
+/// Another machine's conn that asks to pair and to unpair, and goes before the host reads either: the host no longer
+/// knows whose conn it was, so it must not take them for a local client's.
+#[test]
+fn local_only_requests_from_another_machine_that_left_at_once_change_nothing() {
+    let (machines, mut a, mut b) = pair();
+    let (mut c, _events, conn) = peer_conn(&machines, &a);
+    for (id, body) in [
+        (1, ClientRequest::PairStart(PairStart {})),
+        (
+            2,
+            ClientRequest::PeerRemove(PeerRemove {
+                peer: "laptop".into(),
+            }),
+        ),
+    ] {
+        let line = encode_request(&shepherd_core::wire::Request {
+            id: id.into(),
+            body,
+        });
+        c.send(conn, line.strip_suffix(b"\n").unwrap()).unwrap();
+    }
+    c.close(conn).unwrap();
+    settle(&mut a, &mut b);
+    assert!(!a.peer_net().is_pairing(&a.machine()), "a pairing opened");
+    let mut client = a.connect();
+    let list = client.request(ClientRequest::PeerList(PeerList {}));
+    a.step();
+    let peers = response(&client.take(), &list).unwrap();
+    assert_eq!(peers["peers"][0]["name"], "laptop", "{peers}");
+}
+
 /// Another machine's conn that asks for a tunnel and goes before the host reads the request: the host no longer
 /// knows whose conn it was, so it must not take it for a local one and dial on its behalf.
 #[test]
@@ -608,6 +646,38 @@ fn lines_held_for_a_slow_client_reach_it_before_the_other_host_is_gone() {
         t.client.disconnect_reason(),
         Some(DisconnectReason::PeerGone)
     );
+}
+
+/// A client that sends more than the tunnel may hold before the other host has even accepted it: its tunnel request
+/// is answered with why, then the tunnel is closed.
+#[test]
+fn a_tunnel_overflowing_before_it_opens_answers_its_request_with_why() {
+    let machines = FakeNetwork::new();
+    let (a_id, b_id) = (machine_with(KEY_A), machine_with(KEY_B));
+    let a_log =
+        FakeEventLog::new().with_envelopes(LogId::Host, trusting(&[(b_id.clone(), "laptop")]));
+    let mut a = host(&machines, KEY_A, a_log);
+    // B reads nothing until the test says so, so all the client sends waits for B in A.
+    machines.pace(&b_id);
+    let (b_sink, _b_events) = Events::channel();
+    let _b = machines.listen_as(b_id.clone(), b_sink).unwrap();
+    machines.trust(&b_id, &a_id);
+    let mut client = a.connect();
+    let req = tunnel_to(&mut client, b_id);
+    // All of it reaches A before A takes the tunnel request, so before it hears B accepted.
+    let name = "r".repeat(48 * 1024);
+    for i in 0..(TUNNEL_HIGH + TUNNEL_HELD_MAX) / name.len() + 2 {
+        client.request(ClientRequest::SessionRename(SessionRename {
+            session: SessionId::new("s_nobody"),
+            name: format!("{i}-{name}"),
+        }));
+    }
+    a.step();
+    assert_eq!(
+        refusal(&client.take(), &req),
+        "the tunnel to laptop was closed: it fell too far behind"
+    );
+    assert!(client.is_disconnected());
 }
 
 /// Lines handed to A before it stopped reading B are held for the client, but only up to [`TUNNEL_HELD_MAX`] bytes:

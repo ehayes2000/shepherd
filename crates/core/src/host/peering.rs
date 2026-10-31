@@ -295,6 +295,10 @@ impl Peering {
             DisconnectReason::Refused => {
                 format!("{name} doesn't trust this machine: pair them again with `shepherd pair`")
             }
+            // The host closed it: more waited for one end than the tunnel holds.
+            DisconnectReason::SlowConsumer => {
+                format!("the tunnel to {name} was closed: it fell too far behind")
+            }
             _ => format!("cannot reach {name}"),
         })
     }
@@ -596,18 +600,33 @@ impl Peering {
 }
 
 /// The answer another machine's conn (its host, or a client of its tunnelling here) gets for `request`, if only this
-/// machine's own clients may make it: pairing, trust and updating the host are theirs to manage, as tunnels are
-/// ([`Peering::tunnel`]). `None` for every other request. The caller asks whose conn it is only when this is `Some`,
-/// and refuses it as well when it can no longer tell.
+/// machine's own clients may make it: pairing, trust (listing it included) and updating the host are theirs to
+/// manage, as tunnels are ([`Peering::tunnel`]). `None` for every other request. The caller asks whose conn it is only
+/// when this is `Some`, and refuses it as well when it can no longer tell. Every request is classified here, so a new
+/// one has to be.
 pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
-    let local_only = matches!(
-        request,
+    let local_only = match request {
         ClientRequest::PairStart(_)
-            | ClientRequest::PairWait(_)
-            | ClientRequest::PairJoin(_)
-            | ClientRequest::PeerRemove(_)
-            | ClientRequest::HostUpgrade(_)
-    );
+        | ClientRequest::PairWait(_)
+        | ClientRequest::PairJoin(_)
+        | ClientRequest::PeerList(_)
+        | ClientRequest::PeerRemove(_)
+        | ClientRequest::HostUpgrade(_) => true,
+        // A peer's own conn may not tunnel on either, but that is the tunnel's decision, with its own answer.
+        ClientRequest::Tunnel(_)
+        | ClientRequest::Hello(_)
+        | ClientRequest::SessionNew(_)
+        | ClientRequest::SessionRename(_)
+        | ClientRequest::SessionClose(_)
+        | ClientRequest::Subscribe(_)
+        | ClientRequest::HookFrame(_)
+        | ClientRequest::SessionResume(_)
+        | ClientRequest::WorkspaceSelect(_)
+        | ClientRequest::WorktreeStatus(_)
+        | ClientRequest::WorktreeList(_)
+        | ClientRequest::WorktreeCleanup(_)
+        | ClientRequest::WorktreeRemove(_) => false,
+    };
     local_only.then(|| {
         WireError::InvalidParams(
             "only this machine's own clients can manage its pairing, trust and updates".to_owned(),

@@ -275,6 +275,7 @@ fn pairing_trust_and_updates_are_refused_to_other_machines_and_nothing_else_is()
         ClientRequest::PairStart(PairStart {}),
         ClientRequest::PairWait(PairWait {}),
         ClientRequest::PairJoin(PairJoin { ticket: "t".into() }),
+        ClientRequest::PeerList(PeerList {}),
         ClientRequest::PeerRemove(PeerRemove { peer: "bb".into() }),
         ClientRequest::HostUpgrade(HostUpgrade::default()),
     ];
@@ -284,12 +285,30 @@ fn pairing_trust_and_updates_are_refused_to_other_machines_and_nothing_else_is()
             "{request:?}"
         );
     }
-    for request in [
-        ClientRequest::PeerList(PeerList {}),
-        ClientRequest::WorktreeList(WorktreeList {}),
-    ] {
-        assert_eq!(refused_to_peers(&request), None, "{request:?}");
-    }
+    assert_eq!(
+        refused_to_peers(&ClientRequest::WorktreeList(WorktreeList {})),
+        None
+    );
+}
+
+/// A join whose client went with the swap is forgotten: if the swap fails, its late answer trusts nobody and answers
+/// nobody.
+#[test]
+fn a_join_in_flight_when_going_offline_for_a_swap_is_forgotten() {
+    let mut d = Driver::new();
+    let reply = d.reply_to();
+    d.handle(PeeringEvent::Join {
+        reply,
+        ticket: ticket("t1"),
+    });
+    assert_eq!(d.peering.suspend(), vec![peers(PeersCommand::Unbind)]);
+    assert_eq!(d.peering.resume(), vec![], "nothing left to be online for");
+    let late = d.peers(PeersEvent::Paired {
+        id: PairingId::new(1),
+        peer: m("bb"),
+        name: "laptop".into(),
+    });
+    assert_eq!(late, vec![]);
 }
 
 #[test]

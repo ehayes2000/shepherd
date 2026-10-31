@@ -2814,13 +2814,32 @@ impl<
             return;
         };
         let other = end.other;
-        self.tunnels.remove(&other);
+        let other_end = self.tunnels.remove(&other);
         tracing::warn!(
             %conn,
             conn_other = %other,
             held,
             "closing a tunnel: its other end read too slowly, and more than {TUNNEL_HELD_MAX} bytes waited for it"
         );
+        // A client whose tunnel hadn't opened yet is told why, as when it can't open.
+        let opening = [
+            (conn, end.opening),
+            (other, other_end.and_then(|e| e.opening)),
+        ];
+        for (client, opening) in opening {
+            if let Some((id, machine)) = opening {
+                let error = self
+                    .peering
+                    .tunnel_failed(&machine, &DisconnectReason::SlowConsumer);
+                self.respond(
+                    client,
+                    &HostResponse {
+                        id,
+                        result: Err(error),
+                    },
+                );
+            }
+        }
         for conn in [conn, other] {
             if let Err(error) = self.link.close(conn) {
                 tracing::debug!(%conn, %error, "close failed");
