@@ -410,6 +410,27 @@ fn a_manual_rename_before_the_first_prompt_is_never_overridden() {
 }
 
 #[test]
+fn a_session_created_with_a_name_is_never_auto_renamed() {
+    let mut host = HostDriver::new();
+    host.new_session_with(
+        "s1",
+        shepherd_core::host::NewSessionSpec {
+            name: Some("worker".to_owned()),
+            ..claude_session_spec()
+        },
+    );
+    assert_eq!(host.user_prompt("s1", "Fix the login redirect bug"), vec![]);
+    assert_eq!(names(host.host()), ["worker"]);
+    // Decided from the log: a restarted host doesn't name it either.
+    let restarted = replay(&host);
+    let cmds = restarted.handle(HostEvent::HookTranslated {
+        session: sid("s1"),
+        turn_end: false,
+    });
+    assert_eq!(cmds, vec![]);
+}
+
+#[test]
 fn a_manual_rename_after_an_auto_rename_wins_and_stays() {
     let mut host = claude_session();
     host.user_prompt("s1", "Fix the login redirect bug");

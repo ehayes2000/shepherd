@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod archive_cli;
 pub mod build;
+pub mod cli;
 pub mod client;
 pub mod hook;
 pub mod host;

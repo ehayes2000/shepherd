@@ -606,6 +606,7 @@ fn clicking_new_session_then_a_profile_starts_a_session_with_that_profile() {
                 cols: pane.cols,
                 rows: pane.rows,
             }),
+            name: None,
         }]
     );
     assert_eq!(h.host(FakeHost::sessions).len(), 1);

@@ -16,6 +16,14 @@ fn main() -> ExitCode {
             shepherd::hook::main(&args);
             return ExitCode::SUCCESS;
         }
+        Some("sessions") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::cli::sessions::sessions_main(&args)
+        }
+        Some("new") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::cli::sessions::new_main(&args)
+        }
         Some(command @ ("pair" | "join" | "peers" | "unpair")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::peers::main(command, &args)

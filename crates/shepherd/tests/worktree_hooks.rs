@@ -128,6 +128,7 @@ impl Setup {
             cwd: None,
             branch: None,
             size: None,
+            name: None,
         }))
     }
 

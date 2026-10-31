@@ -2473,7 +2473,7 @@ impl<
             None => WorkspaceHooks::default(),
         };
         let spec = NewSessionSpec {
-            name: None,
+            name: new.name.clone(),
             profile: profile.name.clone(),
             agent: profile.kind,
             explicit_cwd: new.cwd.is_some(),

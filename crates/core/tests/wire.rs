@@ -64,6 +64,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             cwd: Some("/src/shepherd".into()),
             branch: None,
             size: None,
+            name: None,
         }),
         ClientRequest::SessionNew(SessionNew::default()),
         ClientRequest::SessionRename(SessionRename {
@@ -110,6 +111,7 @@ fn one_of_each_request() -> Vec<ClientRequest> {
             cwd: Some("/wt/shepherd/old-idea".into()),
             branch: Some("old-idea".into()),
             size: None,
+            name: None,
         }),
         ClientRequest::SessionNew(SessionNew {
             size: Some(ViewSize {
@@ -379,6 +381,31 @@ fn session_new_names_the_branch_of_the_worktree_it_runs_in_only_when_it_has_one(
         wire_json(&encoded)["params"],
         json!({ "profile": "claude" })
     );
+}
+
+#[test]
+fn session_new_carries_a_name_only_when_it_has_one() {
+    let line = request_line("_shepherd/session/new", json!({ "name": "worker" }));
+    assert_eq!(
+        request(&line).body,
+        ClientRequest::SessionNew(SessionNew {
+            name: Some("worker".into()),
+            ..SessionNew::default()
+        })
+    );
+    let named = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::SessionNew(SessionNew {
+            name: Some("worker".into()),
+            ..SessionNew::default()
+        }),
+    });
+    assert_eq!(wire_json(&named)["params"], json!({ "name": "worker" }));
+    let unnamed = encode_request(&Request {
+        id: 1.into(),
+        body: ClientRequest::SessionNew(SessionNew::default()),
+    });
+    assert_eq!(wire_json(&unnamed)["params"], json!({}));
 }
 
 #[test]

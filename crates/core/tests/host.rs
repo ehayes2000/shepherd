@@ -446,6 +446,7 @@ fn pty_exit_appends_agent_exited() {
             branch: None,
             removing_worktree: false,
             pr: None,
+            agent: Some(AgentKind::Shell),
         }]
     );
 }

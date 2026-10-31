@@ -35,11 +35,11 @@ use shepherd_tui::{Pointer, Screens, from_legacy_terminal, map_event};
 
 use shepherd_adapters::{ProcessHostLauncher, UnixConnectLink};
 use shepherd_core::acpp::Timestamp;
-use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent, PeerEvent};
+use shepherd_core::client::{AskId, Client, ClientCommand, ClientEvent, Intent, PeerEvent};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEvent, LinkEventSink, TerminateError};
 use shepherd_core::wire::{
-    BuildId, ClientMessage, HostMessage, HostNotification, decode_host_message,
+    BuildId, ClientMessage, ClientRequest, HostMessage, HostNotification, decode_host_message,
     encode_client_notification, encode_request,
 };
 use shepherd_term::Screen;
@@ -66,6 +66,8 @@ pub enum ClientError {
     Terminal(String),
     /// A thread panicked. Its message was printed when it happened.
     Panicked,
+    /// [`ClientRuntime::run_until`]'s condition didn't come about in time.
+    TimedOut,
 }
 
 impl fmt::Display for ClientError {
@@ -74,6 +76,7 @@ impl fmt::Display for ClientError {
             Self::Fatal(why) => f.write_str(why),
             Self::Terminal(why) => write!(f, "terminal: {why}"),
             Self::Panicked => f.write_str("a thread panicked"),
+            Self::TimedOut => f.write_str("the shepherd host didn't answer in time"),
         }
     }
 }
@@ -277,6 +280,8 @@ pub struct ClientRuntime<L, C, H> {
     /// The terminal alerts go to, once the TUI has taken it over.
     terminal: Option<Restorer>,
     done: bool,
+    /// The last [`AskId`] given out.
+    asks: u64,
 }
 
 impl<L, C, H> ClientRuntime<L, C, H>
@@ -313,6 +318,7 @@ where
             pointer: Pointer::default(),
             terminal: None,
             done: false,
+            asks: 0,
         }
     }
 
@@ -421,6 +427,62 @@ where
             }
         }
         self.handle(ClientEvent::User(intent));
+    }
+
+    /// Asks the host of `machine` (this machine's for `None`) `request` for a caller outside the UI, such as a script.
+    /// Its answer is read with [`Client::answer`] under the id returned.
+    pub fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
+        self.asks += 1;
+        let ask = AskId(self.asks);
+        self.handle(ClientEvent::Ask {
+            ask,
+            machine,
+            request,
+        });
+        ask
+    }
+
+    /// Runs the client, with nothing drawn, until `done` holds of it: [`ClientError::TimedOut`] if that takes longer
+    /// than `limit`, and the client's message if it gives up first. Start it ([`ClientRuntime::start`]) first. What a
+    /// command-line client runs between its steps.
+    pub fn run_until(
+        &mut self,
+        mut done: impl FnMut(&Client) -> bool,
+        limit: Duration,
+    ) -> Result<(), ClientError> {
+        let deadline = Instant::now() + limit;
+        let mut last_tick = Instant::now();
+        loop {
+            if let Some(why) = self.client.fatal() {
+                return Err(ClientError::Fatal(why.to_owned()));
+            }
+            if done(&self.client) {
+                return Ok(());
+            }
+            if self.done {
+                return Err(ClientError::Fatal("the client quit".to_owned()));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(ClientError::TimedOut);
+            }
+            match self
+                .rx
+                .recv_timeout(TICK.saturating_sub(last_tick.elapsed()).min(left))
+            {
+                Ok(input) => {
+                    self.input(input);
+                    self.drain(MAX_BATCH - 1);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                // The runtime holds a sender itself.
+                Err(RecvTimeoutError::Disconnected) => unreachable!("the runtime's own sender"),
+            }
+            if last_tick.elapsed() >= TICK {
+                last_tick = Instant::now();
+                self.tick();
+            }
+        }
     }
 
     /// Handles everything queued so far, without blocking. Returns how many inputs there were.
@@ -769,9 +831,13 @@ where
     }
 }
 
-/// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
-/// `shepherd host` if nothing listens. The terminal is restored however this ends.
-pub fn run(socket: &Path) -> Result<(), ClientError> {
+/// A client runtime on the local host's socket.
+pub type SocketRuntime =
+    ClientRuntime<UnixConnectLink, Connector<UnixConnectLink>, ProcessHostLauncher>;
+
+/// A runtime for a client of the local host serving on `socket`, launching `shepherd host` if nothing listens, that
+/// tells the host in its hello that it started in the current directory. Not started yet.
+pub fn socket_runtime(socket: &Path) -> Result<SocketRuntime, ClientError> {
     let launcher = ProcessHostLauncher::shepherd_host(socket)
         .map_err(|e| ClientError::Fatal(format!("can't find the shepherd executable: {e}")))?;
     let socket = socket.to_path_buf();
@@ -788,6 +854,13 @@ pub fn run(socket: &Path) -> Result<(), ClientError> {
     {
         runtime.set_cwd(cwd);
     }
+    Ok(runtime)
+}
+
+/// Runs `shepherd`: the TUI in the real terminal, against the local host's socket at `socket`, launching
+/// `shepherd host` if nothing listens. The terminal is restored however this ends.
+pub fn run(socket: &Path) -> Result<(), ClientError> {
+    let mut runtime = socket_runtime(socket)?;
     // A client that can't read its own executable compares no builds.
     match std::env::current_exe().and_then(|exe| crate::build::build_id(&exe)) {
         Ok(build) => runtime.set_build(build),

@@ -625,6 +625,9 @@ pub struct HostSession {
     pub removing_worktree: bool,
     /// Its branch's pull request, from the latest `session/pr`.
     pub pr: Option<Pr>,
+    /// What it runs, from its `session/created`. `None` in logs older than resume, or for a kind this build doesn't
+    /// know.
+    pub agent: Option<AgentKind>,
 }
 
 /// Where a session is in its life, as far as its PTY goes.
@@ -819,6 +822,7 @@ impl Host {
                 },
                 removing_worktree: e.removing,
                 pr: e.pr.clone(),
+                agent: e.agent,
             })
             .collect()
     }
@@ -901,6 +905,12 @@ impl Host {
                     let error = WireError::Internal(format!("session {id} already exists"));
                     return vec![reply_err(reply, error)];
                 }
+                // A name the client gave is the user's: recorded as a rename too, so the first prompt never replaces it.
+                let named = spec.name.clone().map(|name| {
+                    let renamed =
+                        ShepherdFrame::SessionRenamed(SessionRenamed { name, auto: false });
+                    append(&id, renamed)
+                });
                 // The placeholder is picked here and written into the frame. The fold only reads it back.
                 let name = spec
                     .name
@@ -989,14 +999,13 @@ impl Host {
                         spec: spec.spawn,
                     },
                 };
-                vec![
-                    append(&id, created),
-                    start,
-                    HostCommand::Reply {
-                        to: reply,
-                        result: Ok(HostResult::SessionNew(SessionNewOk { session: id })),
-                    },
-                ]
+                let mut commands = vec![append(&id, created), start];
+                commands.extend(named);
+                commands.extend([HostCommand::Reply {
+                    to: reply,
+                    result: Ok(HostResult::SessionNew(SessionNewOk { session: id })),
+                }]);
+                commands
             }
             HostEvent::Rename {
                 reply,
