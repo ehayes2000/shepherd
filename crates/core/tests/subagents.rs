@@ -215,12 +215,12 @@ fn an_agent_tool_from_an_earlier_turn_lends_its_task_to_no_one() {
 }
 
 #[test]
-fn an_agent_tool_that_finished_without_a_subagent_lends_its_task_to_no_one() {
+fn an_agent_tool_that_failed_lends_its_task_to_no_one() {
     let mut run = Run::claude();
     run.hooks(vec![
         cc!("UserPromptSubmit"),
         cc!("PreToolUse.Agent"),
-        cc!("PostToolUse.Agent"),
+        cc!("PostToolUseFailure.Agent"),
         cc!("SubagentStart"),
     ]);
     assert_eq!(run.only().task(), None);
@@ -237,8 +237,124 @@ fn claude_codes_internal_agents_are_not_subagents() {
         run.last[0].frame.raw()["params"],
         cc!("SubagentStart.internal")
     );
+    // Internal agents report the session's own agent (`--agent` or the `agent` setting) as `agent_type`, and "" only
+    // without one; with one set, their stops become `subagent/finished` for a subagent nobody listed, which the fold
+    // ignores (log noise only).
     run.hook(cc!("SubagentStop.internal"));
+    assert_eq!(run.methods(), vec![Some("_claude-code/SubagentStop")]);
+    assert_eq!(
+        run.last[0].frame.raw()["params"],
+        cc!("SubagentStop.internal")
+    );
     assert!(run.subagents().is_empty(), "{:?}", run.subagents());
+}
+
+// ---------- Claude Code: pairing a subagent with its task ----------
+
+#[test]
+fn a_foreground_agent_call_that_names_its_subagent_changes_nothing_it_was_guessed_right() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("SubagentStart"),
+        cc!("SubagentStop"),
+    ]);
+    run.hook(cc!("PostToolUse.Agent"));
+    assert_eq!(run.subagent_frames(), vec![]);
+    assert_eq!(run.only().task(), Some("Find factorial callers"));
+}
+
+#[test]
+fn parallel_claude_subagents_of_one_type_get_their_own_tasks_once_their_calls_name_them() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+    ]);
+    // Two open calls of the type: no guess.
+    run.hook(cc!("SubagentStart.second"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-8b4c", "Explore", None)]
+    );
+    run.hook(cc!("SubagentStart"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-7f3a", "Explore", None)]
+    );
+    // The first call finishes, naming its subagent: a corrective start.
+    run.hook(cc!("PostToolUse.Agent"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started(
+            "agent-7f3a",
+            "Explore",
+            Some("Find factorial callers")
+        )]
+    );
+    run.hook(cc!("PostToolUse.Agent.second"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started(
+            "agent-8b4c",
+            "Explore",
+            Some("Find fibonacci callers")
+        )]
+    );
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(
+        tasks,
+        [
+            ("agent-8b4c", Some("Find fibonacci callers")),
+            ("agent-7f3a", Some("Find factorial callers")),
+        ]
+    );
+}
+
+#[test]
+fn a_background_claude_subagent_named_at_launch_starts_with_its_task() {
+    // A background launch returns at once: its `PostToolUse` (`async_launched`) can come before `SubagentStart`,
+    // and the other open call of the type would make a guess ambiguous.
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent"),
+        cc!("PreToolUse.Agent.second"),
+        cc!("PostToolUse.Agent.background"),
+    ]);
+    run.hook(cc!("SubagentStart"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started(
+            "agent-7f3a",
+            "Explore",
+            Some("Find factorial callers")
+        )]
+    );
+    // The other call's subagent is now the only open one of the type.
+    run.hook(cc!("SubagentStart.second"));
+    assert_eq!(run.subagents()[1].task(), Some("Find fibonacci callers"));
+}
+
+#[test]
+fn an_agent_call_without_a_type_or_description_spawns_general_purpose_with_its_prompt() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Agent.default"),
+    ]);
+    run.hook(cc!("SubagentStart.default"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started(
+            "agent-a1b2",
+            "general-purpose",
+            Some("Summarize the README.")
+        )]
+    );
 }
 
 // ---------- Claude Code: block ----------
@@ -309,6 +425,19 @@ fn a_blocked_claude_subagent_works_again_on_its_next_tool_activity() {
     // Tool activity of a subagent that isn't blocked says nothing new.
     run.hook(cc!("PreToolUse.Grep.subagent"));
     assert_eq!(run.subagent_frames(), vec![]);
+}
+
+#[test]
+fn a_blocked_claude_subagent_works_again_when_its_next_tool_starts() {
+    let mut run = Run::claude();
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.AskUserQuestion.subagent"),
+    ]);
+    run.hook(cc!("PreToolUse.Grep.subagent"));
+    assert_eq!(run.subagent_frames(), vec![working("agent-7f3a")]);
+    assert_eq!(run.only().status(), &SubagentStatus::Working);
 }
 
 #[test]
@@ -489,8 +618,13 @@ fn hostile_agent_type_and_task_are_kept_raw_in_the_log_and_are_display_safe_when
 
 #[test]
 fn a_codex_subagent_starts_with_the_message_of_the_spawn_agent_call() {
+    // `spawn_agent` returns before the child's `SubagentStart` runs.
     let mut run = Run::codex();
-    run.hooks(vec![cx!("UserPromptSubmit"), cx!("PreToolUse.spawn_agent")]);
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PostToolUse.spawn_agent"),
+    ]);
     run.hook(cx!("SubagentStart"));
     assert_eq!(
         run.subagent_frames(),
@@ -528,13 +662,84 @@ fn a_codex_subagent_asking_permission_is_blocked_until_its_tool_finishes() {
 }
 
 #[test]
+fn a_blocked_codex_subagent_works_again_when_its_next_tool_starts() {
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("SubagentStart"),
+        cx!("PermissionRequest.Bash.subagent"),
+    ]);
+    run.hook(cx!("PreToolUse.Bash.subagent"));
+    assert_eq!(run.subagent_frames(), vec![working("agent-7f3a")]);
+}
+
+#[test]
+fn parallel_codex_subagents_of_one_type_get_their_own_tasks() {
+    let first = "Find every TODO under src and summarize them.";
+    let second = "List the open FIXMEs.";
+    // The source's order: each call returns, naming its subagent, before that subagent's `SubagentStart`.
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PreToolUse.spawn_agent.second"),
+        cx!("PostToolUse.spawn_agent"),
+        cx!("PostToolUse.spawn_agent.second"),
+        cx!("SubagentStart.second"),
+        cx!("SubagentStart"),
+    ]);
+    let tasks: Vec<(&str, Option<&str>)> =
+        run.subagents().iter().map(|s| (s.id(), s.task())).collect();
+    assert_eq!(
+        tasks,
+        [("agent-8b4c", Some(second)), ("agent-7f3a", Some(first))]
+    );
+
+    // Starts before the calls return: no guess while two are open, then corrective starts.
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent"),
+        cx!("PreToolUse.spawn_agent.second"),
+        cx!("SubagentStart.second"),
+        cx!("SubagentStart"),
+    ]);
+    assert!(run.subagents().iter().all(|s| s.task().is_none()));
+    run.hook(cx!("PostToolUse.spawn_agent.second"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-8b4c", "explorer", Some(second))]
+    );
+    run.hook(cx!("PostToolUse.spawn_agent"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-7f3a", "explorer", Some(first))]
+    );
+    assert_eq!(run.subagents().len(), 2);
+}
+
+#[test]
+fn a_spawn_agent_call_without_a_type_or_message_spawns_default_with_its_task_name() {
+    let mut run = Run::codex();
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("PreToolUse.spawn_agent.default"),
+    ]);
+    run.hook(cx!("SubagentStart.default"));
+    assert_eq!(
+        run.subagent_frames(),
+        vec![started("agent-a1b2", "default", Some("changelog-typos"))]
+    );
+}
+
+#[test]
 fn a_finished_codex_subagent_stays_until_the_parents_turn_ends() {
     let mut run = Run::codex();
     run.hooks(vec![
         cx!("UserPromptSubmit"),
         cx!("PreToolUse.spawn_agent"),
-        cx!("SubagentStart"),
         cx!("PostToolUse.spawn_agent"),
+        cx!("SubagentStart"),
     ]);
     run.hook(cx!("SubagentStop"));
     assert_eq!(run.subagent_frames(), vec![finished("agent-7f3a")]);
@@ -637,12 +842,30 @@ fn a_start_again_keeps_what_the_first_one_knew() {
         frame(&blocked("a", "Explore", BlockKind::Permission, "Bash: ls")),
         frame(&started("a", "Explore", None)),
     ]);
-    let sub = &state.subagents()[0];
+    let [sub] = state.subagents() else {
+        panic!("a start again duplicated it: {:?}", state.subagents());
+    };
     assert_eq!(sub.task(), Some("task"));
     assert_eq!(
         sub.status(),
         &blocked_status(BlockKind::Permission, "Bash: ls")
     );
+}
+
+#[test]
+fn a_start_again_with_a_task_corrects_the_first_entry() {
+    let (state, _) = fold(&[
+        prompt(),
+        frame(&started("a", "Explore", None)),
+        frame(&started("b", "Explore", None)),
+        frame(&started("a", "Explore", Some("task"))),
+    ]);
+    let tasks: Vec<(&str, Option<&str>)> = state
+        .subagents()
+        .iter()
+        .map(|s| (s.id(), s.task()))
+        .collect();
+    assert_eq!(tasks, [("a", Some("task")), ("b", None)]);
 }
 
 #[test]

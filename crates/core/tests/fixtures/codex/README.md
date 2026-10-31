@@ -33,6 +33,8 @@ they list. Inferred means a value we picked that fits the documented type.
 | `SubagentStop` | `turn_id`, `agent_transcript_path` (string or null), `stop_hook_active`, `agent_id`, `agent_type`, `last_assistant_message` (`SubagentStopCommandInput`) | the message |
 | `PreToolUse.spawn_agent`, `PostToolUse.spawn_agent` | `spawn_agent` is a local function tool, named `spawn_agent` in hook stdin (`HookToolName::spawn_agent` in `codex-rs/core/src/tools/hook_names.rs`, matcher alias `Agent`); its input is its arguments, `message` and optional `agent_type` (`SpawnAgentArgs` in `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`) | that its `PreToolUse` fires (the reference's "other local function tools" rows; "some specialized tool paths can opt out"); the `tool_response` text |
 | `PermissionRequest.Bash.subagent`, `PostToolUse.Bash.subagent` | `agent_id`, `agent_type` optional on `PermissionRequestCommandInput` and `PostToolUseCommandInput` | that a subagent's approval fires `PermissionRequest` (the reference doesn't say) |
+| `PreToolUse.spawn_agent.second`, `PostToolUse.spawn_agent.second`, `SubagentStart.second` | as above: a second `explorer` spawn in parallel; the result's `agent_id` and `nickname` (`SpawnAgentResult`) | `agent-8b4c`, `Grace`, `call_spawn_2`, that the hook's `tool_response` is the result's JSON as a string |
+| `PreToolUse.spawn_agent.default`, `SubagentStart.default` | `items` in place of `message`, `task_name`, no `agent_type` (v1 `SpawnAgentArgs`; `task_name` from v2's) | that the child's `agent_type` is then `default` |
 | `PreModelRequest` | an event in `HookEventName` (stands in for any hook without a mapping) | its fields beyond the common ones |
 
 ## Facts from the reference the translator relies on
@@ -48,6 +50,10 @@ they list. Inferred means a value we picked that fits the documented type.
   (`StartHookTarget::SubagentStart` in `codex-rs/hooks/src/events/session_start.rs`, `StopHookTarget::SubagentStop`
   in `stop.rs`). `SessionEnd` and `Interrupt` don't run for subagents. Plain stdout from a `SubagentStart` hook
   becomes model context, so `shepherd hook` must print nothing (it never does).
+- `spawn_agent` returns `SpawnAgentResult { agent_id, nickname }` before the child's `SubagentStart` runs
+  (`run_pending_session_start_hooks` in `codex-rs/core/src/hook_runtime.rs`), so its `PostToolUse` normally comes
+  first; the hook's `tool_response` is the result as the model sees it (`post_tool_use_payload` in
+  `codex-rs/core/src/tools/registry.rs`).
 - `spawn_agent` without an `agent_type` spawns the `default` role (`DEFAULT_ROLE_NAME` in
   `codex-rs/core/src/agent/role.rs`). That `SubagentStart`'s `agent_type` is then `default` is inferred.
 - Codex has no hook for a subagent asking the user a question, so Codex subagents only block on permission.

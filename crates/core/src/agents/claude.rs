@@ -18,6 +18,7 @@
 //! | `SessionEnd` | `_shepherd/agent/exited`, except for `/clear` and `/resume`, which start a new session in the same process |
 //! | `PreCompact` / `PostCompact` | `compaction_update` `in_progress` / `completed`, same `compactionId`; a new `PreCompact` first cancels one left open |
 //! | `SubagentStart` | `_shepherd/subagent/started { id, agent_type, task? }`, `task` from the `Agent` tool call that spawned it; an internal agent (empty `agent_type`) is a vendor frame |
+//! | `PostToolUse` of `Agent` naming an announced subagent with another task | also a corrective `_shepherd/subagent/started` |
 //! | `SubagentStop` | `_shepherd/subagent/finished { id }`; an internal agent's is a vendor frame |
 //! | a subagent's `PermissionRequest`, or `PreToolUse` of `AskUserQuestion` | also `_shepherd/subagent/blocked { id, kind, text }` (`permission`, or `question`) |
 //! | a blocked subagent's next `PreToolUse`, `PostToolUse`, `PostToolUseFailure` or `PermissionDenied` | also `_shepherd/subagent/working { id }` |
@@ -32,7 +33,8 @@
 //!
 //! Subagents: hooks fired inside a subagent carry its `agent_id` and `agent_type`. `SubagentStart` has no task, so
 //! it takes the task (`description`, else `prompt`) of the `Agent` tool call (`Task` in older Claude Code) that
-//! spawned it, paired by `subagent_type` (default `general-purpose`); see `agents::subagents`. Claude Code's own
+//! spawned it, paired by the subagent id the call's `PostToolUse` names (`tool_response.agentId`, for `completed`
+//! and `async_launched` alike), else by `subagent_type` (default `general-purpose`); see `agents::subagents`. Claude Code's own
 //! internal agents (prompt suggestions, `/btw`) fire `SubagentStop` with an empty `agent_type`: they are not the
 //! session's subagents, so their hooks stay vendor frames.
 //!
@@ -376,6 +378,13 @@ fn tool_done(
     raw_output: Option<&Value>,
 ) -> Frames {
     let id = hook.str("tool_use_id")?;
+    // A completed or background-launched `Agent` call names its subagent.
+    let spawned = match status {
+        ToolCallStatus::Completed => raw_output
+            .and_then(|r| r.get("agentId"))
+            .and_then(Value::as_str),
+        _ => None,
+    };
     let patch = SessionUpdate::ToolCallUpdate(ToolCallUpdate {
         tool_call_id: id.to_owned(),
         title: None,
@@ -387,8 +396,9 @@ fn tool_done(
     let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
     state.permission_open = false;
-    state.subagents.tool_done(id);
     let mut out = vec![(Dir::FromAgent, frame)];
+    let corrected = state.subagents.tool_done(id, spawned);
+    out.extend(corrected.map(|f| (Dir::Internal, f)));
     if let Some(agent) = hook.str("agent_id") {
         out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
     }

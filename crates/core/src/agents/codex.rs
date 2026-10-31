@@ -30,8 +30,10 @@
 //! fires `SubagentStart` and `SubagentStop` instead of `SessionStart` and `Stop`, with the parent's `session_id`, and
 //! its tool hooks carry `agent_id` and `agent_type`. `SubagentStart` has no task, so it takes the `message` (else
 //! `task_name`) of the `spawn_agent` call that spawned it (`function_hook_tool_name` in
-//! `codex-rs/core/src/tools/registry.rs`), paired by `agent_type` (default `default`, `DEFAULT_ROLE_NAME`). Codex
-//! has no hook for a subagent's questions, so only permission requests block one.
+//! `codex-rs/core/src/tools/registry.rs`). `spawn_agent` returns its `SpawnAgentResult { agent_id }` before the
+//! child's `SubagentStart` runs (`run_pending_session_start_hooks` in `codex-rs/core/src/hook_runtime.rs`), so its
+//! `PostToolUse` usually pairs them first; else they pair by `agent_type` (default `default`, `DEFAULT_ROLE_NAME`).
+//! Codex has no hook for a subagent's questions, so only permission requests block one.
 //!
 //! Codex has no `Notification` hook, so there is no idle notification and no permission-dialog notification; and no
 //! `PostToolUseFailure`, so a failed tool still completes through `PostToolUse` with its output.
@@ -446,8 +448,10 @@ fn post_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     });
     let frame = update(&agent_session(state, hook), patch)?;
     state.tools.retain(|t| t.id != id);
-    state.subagents.tool_done(id);
     let mut out = vec![(Dir::FromAgent, frame)];
+    let spawned = spawned_agent(hook.field("tool_response"));
+    let corrected = state.subagents.tool_done(id, spawned.as_deref());
+    out.extend(corrected.map(|f| (Dir::Internal, f)));
     if let Some(agent) = hook.str("agent_id") {
         out.extend(state.subagents.active(agent).map(|f| (Dir::Internal, f)));
     }
@@ -493,6 +497,20 @@ fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
         out.extend(frame.map(|f| (Dir::Internal, f)));
     }
     Some(out)
+}
+
+/// The `agent_id` of a `spawn_agent` result (`SpawnAgentResult`), which the hook carries as the model-facing output:
+/// its JSON as a string, or as an object.
+fn spawned_agent(response: Option<&Value>) -> Option<String> {
+    let parsed;
+    let result = match response? {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).ok()?;
+            &parsed
+        }
+        other => other,
+    };
+    result.get("agent_id")?.as_str().map(str::to_owned)
 }
 
 fn subagent_start(state: &mut CodexTranslation, hook: &Hook) -> Frames {

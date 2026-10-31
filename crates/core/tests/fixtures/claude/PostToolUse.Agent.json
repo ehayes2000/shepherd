@@ -11,7 +11,26 @@
     "prompt": "Find every caller of factorial in src and list them with file and line.",
     "subagent_type": "Explore"
   },
-  "tool_response": "factorial is called from src/main.rs:12 and src/lib.rs:40.",
+  "tool_response": {
+    "status": "completed",
+    "agentId": "agent-7f3a",
+    "content": [
+      {
+        "type": "text",
+        "text": "factorial is called from src/main.rs:12 and src/lib.rs:40."
+      }
+    ],
+    "resolvedModel": "claude-sonnet-4-5",
+    "totalTokens": 12450,
+    "totalDurationMs": 48211,
+    "totalToolUseCount": 7,
+    "usage": {
+      "input_tokens": 8320,
+      "output_tokens": 412,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 3718
+    }
+  },
   "tool_use_id": "toolu_04JKL012",
-  "duration_ms": 9120
+  "duration_ms": 48230
 }

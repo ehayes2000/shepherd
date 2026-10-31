@@ -79,7 +79,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/agent/started`     | `{ agent, agent_session_id?, pid?, command, transcript_path? }` (source `shepherd`: a resume respawned the agent; `transcript_path`: the hook payload's, where the agent writes that agent session's transcript) |
 | `_shepherd/agent/idle`        | `{ inferred? }` (agent is at its prompt with nothing to do; `inferred`: no agent signal said so and the host inferred it, `"quiet"` or `"quiet-after-permission"`) |
 | `_shepherd/agent/exited`      | `{ code?, signal? }` |
-| `_shepherd/subagent/started`  | `{ id, agent_type, task? }` (a subagent of the session's agent started; `id` is the agent's `agent_id`; `task`: the spawning tool call's description or prompt, absent when none could be paired. Text is the agent's, raw) |
+| `_shepherd/subagent/started`  | `{ id, agent_type, task? }` (a subagent of the session's agent started; `id` is the agent's `agent_id`; `task`: the spawning tool call's description or prompt, absent when none could be paired; another for the same `id` updates its type, and its task if it has one. Text is the agent's, raw) |
 | `_shepherd/subagent/blocked`  | `{ id, kind, text, agent_type? }` (the subagent waits on the user, answered in the parent's TUI; `kind`: `permission`, `question`, unknown values kept; `agent_type` lists a subagent the session no longer had) |
 | `_shepherd/subagent/working`  | `{ id }` (a blocked subagent's tool activity followed its block) |
 | `_shepherd/subagent/finished` | `{ id }` (it stays listed until the parent's turn ends; the turn ending drops every subagent, finished or not) |
