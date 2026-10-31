@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Dir, Envelope, Frame, FrameDraft, Source, SourceKind, Timestamp};
 use shepherd_core::config::AgentKind;
@@ -1153,7 +1154,24 @@ fn created_ts() -> impl Strategy<Value = String> {
         .prop_map(|(secs, nanos, digits, offset)| rfc3339(secs, nanos, digits, offset))
 }
 
+/// The proptest config for this file: a fixed seed (`0x5eed_0048`, or `PROPTEST_RNG_SEED` to try another), `cases` cases,
+/// and no failure-persistence file, so every run of the gate checks the same cases (as T45's UI invariants do).
+fn fixed_seed(cases: u32) -> ProptestConfig {
+    let seed = match ProptestConfig::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => 0x5eed_0048,
+    };
+    ProptestConfig {
+        cases,
+        rng_seed: RngSeed::Fixed(seed),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
+    #![proptest_config(fixed_seed(ProptestConfig::default().cases))]
+
     #[test]
     fn sessions_are_ordered_by_created_instant_then_id(stamps in proptest::collection::vec(created_ts(), 1..12)) {
         let mut host = HostDriver::new();

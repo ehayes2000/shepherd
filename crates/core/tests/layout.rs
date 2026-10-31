@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use serde_json::json;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{
@@ -1079,8 +1080,23 @@ fn pick_page(layout: &Layout, i: u8) -> PageId {
     layout.pages()[usize::from(i) % layout.pages().len()].id
 }
 
+/// The proptest config for this file: a fixed seed (`0x5eed_0048`, or `PROPTEST_RNG_SEED` to try another), `cases` cases,
+/// and no failure-persistence file, so every run of the gate checks the same cases (as T45's UI invariants do).
+fn fixed_seed(cases: u32) -> ProptestConfig {
+    let seed = match ProptestConfig::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => 0x5eed_0048,
+    };
+    ProptestConfig {
+        cases,
+        rng_seed: RngSeed::Fixed(seed),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(fixed_seed(256))]
 
     #[test]
     fn any_sequence_of_operations_keeps_the_layout_sound(steps in proptest::collection::vec(step(), 0..80)) {
