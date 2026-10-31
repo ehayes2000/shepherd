@@ -70,7 +70,7 @@
 //!   on start (so a host that trusts someone binds and dials them at once). The pairing and peer requests go to it,
 //!   with a fresh token from `Env::pair_token` for a pairing, and so do the `Peers` port's events. After each batch of
 //!   its commands, its `sync` pushes what the batch changed (the trusted set, binding). Its deadline (a pairing's expiry)
-//!   is serviced like the others. Shutting down unbinds.
+//!   is serviced like the others. Shutting down unbinds, and so does a swap before the exec (a failed exec binds again).
 //! - **Tunnels** (T31a, decision 0019). A conn from one of this machine's clients whose first request is
 //!   `_shepherd/tunnel` (core's [`Peering::tunnel`] decides) gets a conn [opened](Link::open) to that machine's host,
 //!   and from then on the two are spliced: each line read from one is sent to the other unchanged. The tunnel request
@@ -81,7 +81,14 @@
 //!   after [`TUNNEL_TICK`], doubling up to [`MAX_TUNNEL_TICK`] while no stopped end makes progress (a line sent, its
 //!   other end's queue shrinking, or reading resumed), so a client that stopped reading costs few wakeups. So a slow client backs up into the conn to the other machine's host, whose own catch-up
 //!   pacing (decision 0013) then waits, and the other way round. Either end going closes the other, after sending
-//!   what it held: a client sees `PeerGone` when the other machine goes, and can reconnect.
+//!   what it held: a client sees `PeerGone` when the other machine goes, and can reconnect. Lines read from an end
+//!   before it stopped being read are held, up to [`TUNNEL_HELD_MAX`] bytes: past that the other end is a slow
+//!   consumer and both ends are closed, logged with why. At most
+//!   [`MAX_OPEN_PER_PEER`](shepherd_core::ports::MAX_OPEN_PER_PEER) tunnels to one machine are open
+//!   at once (the most its one connection carries); one more is refused at once.
+//! - **Local only.** Pairing, trust and updating the host (core's [`peering::refused_to_peers`]) are refused on another
+//!   machine's conn, like a tunnel through this host; a conn the link no longer knows is refused too, never taken for
+//!   a local one.
 //! - **Spawn sizes.** Every event goes to core through a [`Sizes`], which keeps the latest size each session's terminal
 //!   was given (a client's resize, even before its PTY exists, or an adopted session's carried size) and spawns its
 //!   PTY at it. A new session's spec asks for the client's view size from its `session/new`, else [`INITIAL_SIZE`].
@@ -101,7 +108,7 @@ use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
 use shepherd_core::host::capture::{AfterCapture, AgentHomes, CaptureJob, Found};
 use shepherd_core::host::launch::{self, LaunchContext, RunFile};
-use shepherd_core::host::peering::{Peering, PeeringEvent, PeersCommand};
+use shepherd_core::host::peering::{self, Peering, PeeringEvent, PeersCommand};
 use shepherd_core::host::pr::{PrEvent, PrWatch};
 use shepherd_core::host::quiet::{QuietEvent, QuietWatch};
 use shepherd_core::host::sizes::Sizes;
@@ -156,6 +163,10 @@ pub const CATCH_UP_BATCH: usize = 256;
 pub const TUNNEL_HIGH: usize = MAX_QUEUED / 4;
 /// A tunnel end stopped for its other end's sake is read again once that end's queue is under this.
 pub const TUNNEL_LOW: usize = TUNNEL_HIGH / 2;
+/// The most bytes a tunnel end holds for its other end (lines read from it before it stopped being read, decision
+/// 0021): past this the other end is a slow consumer, as a link would drop it past [`MAX_QUEUED`], and the tunnel is
+/// closed on both ends.
+pub const TUNNEL_HELD_MAX: usize = MAX_QUEUED;
 /// How soon a tunnel that stopped reading an end first looks again.
 pub const TUNNEL_TICK: Duration = Duration::from_millis(5);
 /// The longest wait between looks at stopped tunnel ends that make no progress.
@@ -404,12 +415,16 @@ struct TunnelEnd {
     other: ConnId,
     /// Lines read from this end, waiting for room in the other end's queue.
     held: VecDeque<Vec<u8>>,
+    /// The bytes in `held`, at most [`TUNNEL_HELD_MAX`].
+    held_bytes: usize,
     /// This end isn't being read, for the other end's sake.
     paused: bool,
     /// The other end's queue when this end was last looked at.
     last_queued: usize,
     /// The client's end of a tunnel not open yet: its request, and the machine it asked for.
     opening: Option<(RequestId, MachineId)>,
+    /// The end this host opened to another machine's host: that machine, whose connection carries it.
+    to: Option<MachineId>,
 }
 
 impl TunnelEnd {
@@ -417,9 +432,11 @@ impl TunnelEnd {
         Self {
             other,
             held: VecDeque::new(),
+            held_bytes: 0,
             paused: false,
             last_queued: 0,
             opening: None,
+            to: None,
         }
     }
 }
@@ -890,6 +907,11 @@ impl<
     /// backlog for the new image instead of being accepted by this one and cut off by the exec. Returns once what was
     /// sent to each, the upgrade's answer included, is delivered, or after [`CLOSE_FLUSH`] for a client that isn't
     /// reading: the exec would cut the deliveries off. The one wait in the loop, bounded, and only for a swap.
+    ///
+    /// Then it takes this machine offline ([`Peering::suspend`]), so peers see its connections close at once rather
+    /// than time out; the new image binds again as it starts, with the same identity, and [`HostRuntime::swap_failed`]
+    /// binds again if the exec fails. The unbind is asked of the port here; waiting until it is done is the caller's
+    /// (the real port does it on a thread of its own).
     pub fn close_conns(&mut self) {
         let conns: Vec<ConnId> = self
             .conns
@@ -910,11 +932,14 @@ impl<
         if self.link.flush_closed(CLOSE_FLUSH) == FlushOutcome::TimedOut {
             tracing::warn!("a client didn't read what it was sent before the swap; it is cut off");
         }
+        let offline = self.peering.suspend();
+        self.execute_all(offline);
+        self.peer_due = None;
     }
 
-    /// The exec of a swap failed with `why`: the PTYs are resumed and served as before, and the next upgrade
-    /// request is answered with why, until another build is installed. The conns closed for the swap stay closed;
-    /// clients reconnect.
+    /// The exec of a swap failed with `why`: the PTYs are resumed and served as before, the machine comes back online,
+    /// and the next upgrade request is answered with why, until another build is installed. The conns closed for the
+    /// swap stay closed; clients reconnect.
     pub fn swap_failed(&mut self, why: String) {
         tracing::error!(%why, "updating in place failed; carrying on");
         self.pty.resume();
@@ -922,6 +947,13 @@ impl<
         self.swap = None;
         let installed = self.settings.installed.digest();
         self.swap_failed = Some((installed, why));
+        let online = self.peering.resume();
+        self.execute_all(online);
+    }
+
+    /// The `Peers` port, e.g. for the caller of [`HostRuntime::close_conns`] to wait until it is offline.
+    pub fn peers(&self) -> &N {
+        &self.peers
     }
 
     pub fn link_mut(&mut self) -> &mut L {
@@ -1957,6 +1989,21 @@ impl<
 
     /// Handles one request; `first` says it is the first line `conn` sent.
     fn client_request(&mut self, conn: ConnId, id: RequestId, body: ClientRequest, first: bool) {
+        if let Some(refusal) = peering::refused_to_peers(&body) {
+            match self.link.peer(conn) {
+                Ok(None) => {}
+                Ok(Some(machine)) => {
+                    tracing::warn!(%conn, %machine, "refused a request only this machine's clients may make");
+                    let result = Err(refusal);
+                    return self.respond(conn, &HostResponse { id, result });
+                }
+                // A conn the link no longer knows may have been anyone's: refused, never taken for a local one.
+                Err(error) => {
+                    tracing::debug!(%conn, %error, "a local-only request on a conn that is gone");
+                    return self.forget(conn);
+                }
+            }
+        }
         let respond_now = |result| HostResponse {
             id: id.clone(),
             result,
@@ -2621,7 +2668,12 @@ impl<
                 return self.forget(conn);
             }
         };
-        if let Err(error) = self.peering.tunnel(&machine, from.as_ref(), first) {
+        let open = self
+            .tunnels
+            .values()
+            .filter(|end| end.to.as_ref() == Some(&machine))
+            .count();
+        if let Err(error) = self.peering.tunnel(&machine, from.as_ref(), first, open) {
             let close = from.is_none() && first;
             return self.refuse_tunnel(conn, id, error, close);
         }
@@ -2639,9 +2691,11 @@ impl<
         // Not a client of this host any more: from now on its lines are the other host's.
         self.conns.remove(&conn);
         let mut client = TunnelEnd::new(other);
-        client.opening = Some((id, machine));
+        client.opening = Some((id, machine.clone()));
         self.tunnels.insert(conn, client);
-        self.tunnels.insert(other, TunnelEnd::new(conn));
+        let mut far = TunnelEnd::new(conn);
+        far.to = Some(machine);
+        self.tunnels.insert(other, far);
     }
 
     /// Answers tunnel request `id` on `conn` with `error`, then closes `conn` if `close`.
@@ -2683,13 +2737,19 @@ impl<
         );
     }
 
-    /// A line read from tunnel end `conn`: sent on to the other end if it has room, else held.
+    /// A line read from tunnel end `conn`: sent on to the other end if it has room, else held. Holding more than
+    /// [`TUNNEL_HELD_MAX`] closes the tunnel.
     fn tunnel_line(&mut self, conn: ConnId, line: Vec<u8>) {
         let Some(end) = self.tunnels.get_mut(&conn) else {
             return;
         };
+        end.held_bytes += line.len();
         end.held.push_back(line);
         self.tunnel_flow(conn);
+        let held = self.tunnels.get(&conn).map_or(0, |end| end.held_bytes);
+        if held > TUNNEL_HELD_MAX {
+            return self.tunnel_overflow(conn, held);
+        }
         if self.tunnel_due.is_none() && self.tunnels.get(&conn).is_some_and(|end| end.paused) {
             self.tunnel_wait = TUNNEL_TICK;
             self.tunnel_due = Some(self.env.instant() + TUNNEL_TICK);
@@ -2718,6 +2778,7 @@ impl<
             match end.held.front() {
                 Some(line) if room(line.len()) => {
                     let line = end.held.pop_front().unwrap_or_default();
+                    end.held_bytes = end.held_bytes.saturating_sub(line.len());
                     self.send(other, &line);
                     progress = true;
                 }
@@ -2744,6 +2805,46 @@ impl<
             }
         }
         progress
+    }
+
+    /// Tunnel end `conn` holds `held` bytes, more than [`TUNNEL_HELD_MAX`], that its other end has no room for: that end
+    /// is a slow consumer. Both ends are closed, what was held dropped (the other end has what its queue holds).
+    fn tunnel_overflow(&mut self, conn: ConnId, held: usize) {
+        let Some(end) = self.tunnels.remove(&conn) else {
+            return;
+        };
+        let other = end.other;
+        let other_end = self.tunnels.remove(&other);
+        tracing::warn!(
+            %conn,
+            conn_other = %other,
+            held,
+            "closing a tunnel: its other end read too slowly, and more than {TUNNEL_HELD_MAX} bytes waited for it"
+        );
+        // A client whose tunnel hadn't opened yet is told why, as when it can't open.
+        let opening = [
+            (conn, end.opening),
+            (other, other_end.and_then(|e| e.opening)),
+        ];
+        for (client, opening) in opening {
+            if let Some((id, machine)) = opening {
+                let error = self
+                    .peering
+                    .tunnel_failed(&machine, &DisconnectReason::SlowConsumer);
+                self.respond(
+                    client,
+                    &HostResponse {
+                        id,
+                        result: Err(error),
+                    },
+                );
+            }
+        }
+        for conn in [conn, other] {
+            if let Err(error) = self.link.close(conn) {
+                tracing::debug!(%conn, %error, "close failed");
+            }
+        }
     }
 
     /// Tunnel end `conn` is gone, for `reason`: the other end gets what `conn` held, then is closed. A client whose

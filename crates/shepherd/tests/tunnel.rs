@@ -7,19 +7,21 @@ mod support;
 
 use serde_json::Value;
 use shepherd::host::{
-    CATCH_UP_TICK, LOW_WATER, MAX_TUNNEL_TICK, RuntimeEvent, TUNNEL_HIGH, TUNNEL_LOW,
+    CATCH_UP_TICK, LOW_WATER, MAX_TUNNEL_TICK, RuntimeEvent, TUNNEL_HELD_MAX, TUNNEL_HIGH,
+    TUNNEL_LOW,
 };
 use shepherd_core::acpp::{
     Dir, Envelope, FrameDraft, PeerTrusted, RequestId, Seq, ShepherdFrame, Source, SourceKind,
 };
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    DisconnectReason, EventLog, Link, LinkError, LinkEvent, LogId, MAX_QUEUED,
+    ConnId, DisconnectReason, EventLog, Link, LinkError, LinkEvent, LogId, MAX_OPEN_PER_PEER,
+    MAX_QUEUED,
 };
 use shepherd_core::wire::{
-    ClientRequest, Hello, HostMessage, HostNotification, PROTOCOL_VERSION, PeerList, PtyOutput,
-    SessionRename, Tunnel, WireError, decode_host_message, encode_host_notification,
-    encode_request,
+    ClientRequest, Hello, HostMessage, HostNotification, HostUpgrade, PROTOCOL_VERSION, PairJoin,
+    PairStart, PairWait, PeerList, PeerRemove, PtyOutput, SessionRename, Tunnel, WireError,
+    decode_host_message, encode_host_notification, encode_request,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::contracts::link::Events;
@@ -226,6 +228,116 @@ fn a_tunnel_asked_for_by_another_machine_is_refused_and_the_conn_kept() {
     assert!(why.contains("this machine's own clients"), "{why}");
 }
 
+/// Machine C, trusted by A (of [`pair`]), on a conn of its own to A's host, as another machine's host or tunnel would be.
+fn peer_conn(machines: &FakeNetwork, a: &HostHarness) -> (FakeLink, Events, ConnId) {
+    let c_id = machine_with(KEY_C);
+    machines.trust(&a.machine(), &c_id);
+    let (sink, events) = Events::channel();
+    let mut c = machines.listen_as(c_id, sink).unwrap();
+    let conn = c.open(&a.machine()).unwrap();
+    (c, events, conn)
+}
+
+/// Sends `body` as request 1 on C's conn to A and returns what A answered, the conn staying open.
+fn ask_from_peer(body: ClientRequest) -> (HostHarness, Vec<HostMessage>) {
+    let (machines, mut a, mut b) = pair();
+    let (mut c, events, conn) = peer_conn(&machines, &a);
+    let line = encode_request(&shepherd_core::wire::Request { id: 1.into(), body });
+    c.send(conn, line.strip_suffix(b"\n").unwrap()).unwrap();
+    settle(&mut a, &mut b);
+    let msgs = events
+        .ready()
+        .into_iter()
+        .filter_map(|e| match e {
+            LinkEvent::Line { line, .. } => Some(decode_host_message(&line).unwrap()),
+            LinkEvent::Disconnected { .. } => panic!("closed"),
+            LinkEvent::Connected { .. } => None,
+        })
+        .collect();
+    (a, msgs)
+}
+
+fn assert_refused_from_peer(body: ClientRequest) -> HostHarness {
+    let (a, msgs) = ask_from_peer(body);
+    let why = refusal(&msgs, &1.into());
+    assert!(why.contains("this machine's own clients"), "{why}");
+    a
+}
+
+#[test]
+fn another_machine_may_not_start_a_pairing() {
+    let a = assert_refused_from_peer(ClientRequest::PairStart(PairStart {}));
+    assert!(!a.peer_net().is_pairing(&a.machine()));
+}
+
+#[test]
+fn another_machine_may_not_wait_on_a_pairing() {
+    assert_refused_from_peer(ClientRequest::PairWait(PairWait {}));
+}
+
+#[test]
+fn another_machine_may_not_join_a_pairing_for_this_one() {
+    assert_refused_from_peer(ClientRequest::PairJoin(PairJoin {
+        ticket: "a ticket".into(),
+    }));
+}
+
+#[test]
+fn another_machine_may_not_remove_a_trusted_peer() {
+    let mut a = assert_refused_from_peer(ClientRequest::PeerRemove(PeerRemove {
+        peer: "laptop".into(),
+    }));
+    let mut client = a.connect();
+    let list = client.request(ClientRequest::PeerList(PeerList {}));
+    a.step();
+    let peers = response(&client.take(), &list).unwrap();
+    assert_eq!(peers["peers"][0]["name"], "laptop", "{peers}");
+}
+
+#[test]
+fn another_machine_may_not_update_this_machines_host() {
+    let mut a = assert_refused_from_peer(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    assert!(a.runtime_mut().take_swap().is_none());
+}
+
+#[test]
+fn another_machine_may_not_list_this_machines_peers() {
+    let (_, msgs) = ask_from_peer(ClientRequest::PeerList(PeerList {}));
+    let why = refusal(&msgs, &1.into());
+    assert!(why.contains("this machine's own clients"), "{why}");
+}
+
+/// Another machine's conn that asks to pair and to unpair, and goes before the host reads either: the host no longer
+/// knows whose conn it was, so it must not take them for a local client's.
+#[test]
+fn local_only_requests_from_another_machine_that_left_at_once_change_nothing() {
+    let (machines, mut a, mut b) = pair();
+    let (mut c, _events, conn) = peer_conn(&machines, &a);
+    for (id, body) in [
+        (1, ClientRequest::PairStart(PairStart {})),
+        (
+            2,
+            ClientRequest::PeerRemove(PeerRemove {
+                peer: "laptop".into(),
+            }),
+        ),
+    ] {
+        let line = encode_request(&shepherd_core::wire::Request {
+            id: id.into(),
+            body,
+        });
+        c.send(conn, line.strip_suffix(b"\n").unwrap()).unwrap();
+    }
+    c.close(conn).unwrap();
+    settle(&mut a, &mut b);
+    assert!(!a.peer_net().is_pairing(&a.machine()), "a pairing opened");
+    let mut client = a.connect();
+    let list = client.request(ClientRequest::PeerList(PeerList {}));
+    a.step();
+    let peers = response(&client.take(), &list).unwrap();
+    assert_eq!(peers["peers"][0]["name"], "laptop", "{peers}");
+}
+
 /// Another machine's conn that asks for a tunnel and goes before the host reads the request: the host no longer
 /// knows whose conn it was, so it must not take it for a local one and dial on its behalf.
 #[test]
@@ -259,6 +371,42 @@ fn a_tunnel_asked_for_by_another_machine_that_left_at_once_dials_nobody() {
         vec![],
         "A dialled B for a conn it no longer knew"
     );
+}
+
+/// One connection to a machine carries at most [`MAX_OPEN_PER_PEER`] tunnels at once: one more is refused with why at
+/// once, rather than waiting on the connection for a stream that won't come. Closing one makes room.
+#[test]
+fn a_tunnel_past_the_most_one_connection_carries_is_refused_until_one_closes() {
+    let (_machines, mut a, mut b) = pair();
+    let mut open: Vec<FakeClient> = (0..MAX_OPEN_PER_PEER)
+        .map(|_| {
+            let mut client = a.connect();
+            tunnel_to(&mut client, b.machine());
+            client
+        })
+        .collect();
+    settle(&mut a, &mut b);
+    assert!(open.iter_mut().all(|c| !c.is_disconnected()));
+
+    let mut one_more = a.connect();
+    let req = tunnel_to(&mut one_more, b.machine());
+    settle(&mut a, &mut b);
+    let why = refusal(&one_more.take(), &req);
+    assert_eq!(
+        why,
+        format!(
+            "laptop already has {MAX_OPEN_PER_PEER} tunnels open from this machine, the most one connection carries: \
+             close one first"
+        )
+    );
+    assert!(one_more.is_disconnected());
+
+    open.pop().unwrap().close();
+    settle(&mut a, &mut b);
+    let mut client = a.connect();
+    let req = tunnel_to(&mut client, b.machine());
+    settle(&mut a, &mut b);
+    assert!(response(&client.take(), &req).is_ok());
 }
 
 #[test]
@@ -498,6 +646,64 @@ fn lines_held_for_a_slow_client_reach_it_before_the_other_host_is_gone() {
         t.client.disconnect_reason(),
         Some(DisconnectReason::PeerGone)
     );
+}
+
+/// A client that sends more than the tunnel may hold before the other host has even accepted it: its tunnel request
+/// is answered with why, then the tunnel is closed.
+#[test]
+fn a_tunnel_overflowing_before_it_opens_answers_its_request_with_why() {
+    let machines = FakeNetwork::new();
+    let (a_id, b_id) = (machine_with(KEY_A), machine_with(KEY_B));
+    let a_log =
+        FakeEventLog::new().with_envelopes(LogId::Host, trusting(&[(b_id.clone(), "laptop")]));
+    let mut a = host(&machines, KEY_A, a_log);
+    // B reads nothing until the test says so, so all the client sends waits for B in A.
+    machines.pace(&b_id);
+    let (b_sink, _b_events) = Events::channel();
+    let _b = machines.listen_as(b_id.clone(), b_sink).unwrap();
+    machines.trust(&b_id, &a_id);
+    let mut client = a.connect();
+    let req = tunnel_to(&mut client, b_id);
+    // All of it reaches A before A takes the tunnel request, so before it hears B accepted.
+    let name = "r".repeat(48 * 1024);
+    for i in 0..(TUNNEL_HIGH + TUNNEL_HELD_MAX) / name.len() + 2 {
+        client.request(ClientRequest::SessionRename(SessionRename {
+            session: SessionId::new("s_nobody"),
+            name: format!("{i}-{name}"),
+        }));
+    }
+    a.step();
+    assert_eq!(
+        refusal(&client.take(), &req),
+        "the tunnel to laptop was closed: it fell too far behind"
+    );
+    assert!(client.is_disconnected());
+}
+
+/// Lines handed to A before it stopped reading B are held for the client, but only up to [`TUNNEL_HELD_MAX`] bytes:
+/// past that the client is a slow consumer, and the tunnel is closed on both ends rather than held without bound.
+#[test]
+fn a_tunnel_holding_more_than_its_cap_for_a_slow_client_is_closed() {
+    let mut t = bare_tunnel();
+    let line = output_line(48 * 1024);
+    let n = (TUNNEL_HIGH + TUNNEL_HELD_MAX) / line.len() + 2;
+    // Each is handed to A as B sends it, before A runs at all, so B never has much queued itself.
+    for _ in 0..n {
+        t.b.send(t.b_conn, &line).unwrap();
+        t.machines.read_as(&t.a_id, usize::MAX);
+    }
+    t.a.step();
+    assert!(
+        t.b_events
+            .ready()
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Disconnected { conn, .. } if *conn == t.b_conn)),
+        "B's end is still open"
+    );
+    t.client.read(usize::MAX);
+    let delivered = outputs(&t.client.take());
+    assert!(delivered < n, "all {n} delivered");
+    assert!(t.client.is_disconnected());
 }
 
 /// A tunnel end is stopped only once its other end's queue is at [`TUNNEL_HIGH`] (or a line doesn't fit under it), and

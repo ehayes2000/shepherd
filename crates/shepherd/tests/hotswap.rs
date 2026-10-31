@@ -10,16 +10,23 @@ use std::time::Duration;
 
 use serde_json::json;
 use shepherd::host::PreflightRunner;
-use shepherd_core::acpp::{Frame, ShepherdFrame};
+use shepherd_core::acpp::{Dir, Frame, FrameDraft, PeerTrusted, ShepherdFrame, Source, SourceKind};
 use shepherd_core::config::AgentKind;
 use shepherd_core::host::upgrade::Preflight;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::LogId;
 use shepherd_core::wire::{
     BuildId, ClientRequest, DigestHasher, ExeDigest, Hello, HookFrame, HostUpgrade,
-    PROTOCOL_VERSION, UpgradeAnswer,
+    PROTOCOL_VERSION, PeerList, UpgradeAnswer,
 };
+use shepherd_testkit::builders::HostDriver;
+use shepherd_testkit::fakes::event_log::FakeEventLog;
+use shepherd_testkit::fakes::peers::FakePeerNet;
 use shepherd_testkit::fakes::pty::ProgramInput;
-use support::{FakeClient, HostHarness, Program, SHELL, entries, new_session_id, output, response};
+use support::{
+    FakeClient, HostHarness, Program, SHELL, entries, machine_with, new_session_id, output,
+    response,
+};
 
 fn digest(bytes: &[u8]) -> ExeDigest {
     let mut hasher = DigestHasher::new();
@@ -595,4 +602,104 @@ fn requests_queued_when_the_upgrade_is_accepted_start_nothing() {
     );
     let snapshot = String::from_utf8_lossy(&plan.sessions[0].snapshot).into_owned();
     assert!(!snapshot.contains("typed during"), "{snapshot:?}");
+}
+
+// ---------- peers across a swap ----------
+
+const KEY_A: [u8; 32] = [0xaa; 32];
+const KEY_B: [u8; 32] = [0xbb; 32];
+
+/// The host log of a machine that trusts `peer`, called `name`.
+fn trusting(peer: MachineId, name: &str) -> FakeEventLog {
+    let mut driver = HostDriver::new();
+    let frame = ShepherdFrame::PeerTrusted(PeerTrusted {
+        node: peer,
+        name: name.into(),
+    });
+    driver.append_draft(FrameDraft::new(
+        frame.to_frame(),
+        Source::new(SourceKind::Shepherd, None),
+        Dir::Internal,
+        None,
+    ));
+    FakeEventLog::new().with_envelopes(LogId::Host, driver.log().to_vec())
+}
+
+/// A stale host A and a host B that trust each other on one fake peer network, connected.
+fn stale_and_peer() -> (FakePeerNet, Stale, HostHarness) {
+    let net = FakePeerNet::new();
+    let (a_id, b_id) = (machine_with(KEY_A), machine_with(KEY_B));
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("shepherd");
+    std::fs::write(&exe, b"a newer build").unwrap();
+    let running = BuildId {
+        version: "0.1.0".into(),
+        digest: digest(b"the build the host started as"),
+    };
+    let mut b = HostHarness::builder()
+        .peer_net(net.clone())
+        .machine_key(KEY_B)
+        .log(trusting(a_id.clone(), "office"))
+        .start();
+    let mut a = HostHarness::builder()
+        .build(running, &exe)
+        .peer_net(net.clone())
+        .machine_key(KEY_A)
+        .log(trusting(b_id.clone(), "laptop"))
+        .start();
+    // A finds B when it dials it again, twice the first wait after the dial on start failed.
+    net.introduce(&a_id, &b_id);
+    a.clock().advance(Duration::from_secs(2));
+    a.step();
+    b.step();
+    assert!(connected_to(&mut b), "B sees A before the swap");
+    (net, Stale { h: a, _dir: dir }, b)
+}
+
+/// Whether `h` lists its one peer as connected.
+fn connected_to(h: &mut HostHarness) -> bool {
+    let mut client = h.connect();
+    let list = client.request(ClientRequest::PeerList(PeerList {}));
+    h.step();
+    response(&client.take(), &list).expect("peer list")["peers"][0]["connected"] == true
+}
+
+/// A swap takes this machine offline before the exec, so its peers see it go at once rather than when the connection
+/// times out, and the new image comes back online as the same machine.
+#[test]
+fn a_swap_goes_offline_before_the_exec_and_the_new_image_comes_back_as_the_same_machine() {
+    let (net, Stale { h: mut a, _dir }, mut b) = stale_and_peer();
+    let a_id = a.machine();
+    let mut client = a.connect();
+    assert_eq!(upgrade(&mut a, &mut client), UpgradeAnswer::Accepted);
+
+    a.swap(|_| {
+        assert!(!net.is_bound(&a_id), "still online at the exec");
+        b.step();
+        assert!(!connected_to(&mut b), "B still sees A at the exec");
+    });
+
+    assert_eq!(a.machine(), a_id);
+    assert!(net.is_bound(&a_id));
+    b.step();
+    assert!(connected_to(&mut b), "B sees A again");
+}
+
+#[test]
+fn a_swap_whose_exec_fails_comes_back_online() {
+    let (net, Stale { h: mut a, _dir }, mut b) = stale_and_peer();
+    let mut client = a.connect();
+    assert_eq!(upgrade(&mut a, &mut client), UpgradeAnswer::Accepted);
+    drop(a.runtime_mut().take_swap().expect("a swap is ready"));
+    a.runtime_mut().close_conns();
+    assert!(!net.is_bound(&a.machine()));
+
+    a.runtime_mut()
+        .swap_failed("execv: No such file or directory".into());
+    a.step();
+
+    assert!(net.is_bound(&a.machine()));
+    b.step();
+    assert!(connected_to(&mut b), "B sees A again");
+    assert!(connected_to(&mut a), "A sees B again");
 }

@@ -43,8 +43,8 @@ use iroh_tickets::{ParseError, Ticket};
 use serde::{Deserialize, Serialize};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, DisconnectReason, JoinError, LinkEventSink, PairTicket, PairToken, PairingError,
-    PairingId, Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
+    ConnectError, DisconnectReason, JoinError, LinkEventSink, MAX_OPEN_PER_PEER, PairTicket,
+    PairToken, PairingError, PairingId, Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -179,6 +179,8 @@ enum Command {
     },
     Connect(MachineId),
     Addr(std_mpsc::Sender<Option<EndpointAddr>>),
+    /// Answered once every command before it is done.
+    Settle(std_mpsc::Sender<()>),
     Learn(EndpointAddr),
     Open(Opening),
 }
@@ -457,6 +459,15 @@ impl IrohPeers {
         rx.recv().ok().flatten()
     }
 
+    /// Waits until every call made before it is done, e.g. an [`Peers::unbind`] has closed every connection (at most
+    /// [`CLOSE_LIMIT`] for a peer that doesn't answer): for a host about to exec, which would cut the runtime thread
+    /// off mid-close (decision 0018). Never call it from the runtime thread.
+    pub fn settle(&self) {
+        let (tx, rx) = std_mpsc::channel();
+        self.send(Command::Settle(tx));
+        let _ = rx.recv();
+    }
+
     /// Keeps `addr` for dialling its node, as if it had been learned from a pairing.
     pub fn remember(&self, addr: EndpointAddr) {
         self.send(Command::Learn(addr));
@@ -609,6 +620,9 @@ impl Actor {
             Command::Addr(answer) => {
                 let _ = answer.send(self.endpoint.as_ref().map(Endpoint::addr));
             }
+            Command::Settle(answer) => {
+                let _ = answer.send(());
+            }
             Command::Learn(addr) => self.shared.learn(addr),
         }
     }
@@ -634,6 +648,10 @@ impl Actor {
                 .transport_config(
                     QuicTransportConfig::builder()
                         .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+                        // What core's hosts stop at: a peer may open as many link conns at once, and no more.
+                        .max_concurrent_bidi_streams(VarInt::from_u32(
+                            u32::try_from(MAX_OPEN_PER_PEER).unwrap_or(u32::MAX),
+                        ))
                         .build(),
                 )
                 .secret_key(secret)
@@ -1033,6 +1051,29 @@ mod tests {
         b.peers.set_trusted(&BTreeSet::from([a.id.clone()]));
         b.peers.connect(&a.id);
         assert_eq!(b.next(), PeersEvent::Connected { peer: a.id.clone() });
+    }
+
+    /// A host about to exec waits until its unbind is done, so its connections are closed (and said gone) before the
+    /// exec would cut the port's thread off.
+    #[test]
+    fn settling_waits_until_an_unbind_has_closed_every_connection() {
+        let mut f = LocalFixture::new();
+        let mut a = f.machine();
+        let mut b = f.machine();
+        a.peers.bind();
+        b.peers.bind();
+        pair(&mut a, &mut b);
+        b.peers.connect(&a.id);
+        assert_eq!(b.next(), PeersEvent::Connected { peer: a.id.clone() });
+        assert_eq!(a.next(), PeersEvent::Connected { peer: b.id.clone() });
+
+        a.peers.unbind();
+        a.peers.settle();
+        assert_eq!(
+            a.pending(),
+            [PeersEvent::Disconnected { peer: b.id.clone() }]
+        );
+        assert_eq!(a.peers.addr(), None);
     }
 
     #[test]

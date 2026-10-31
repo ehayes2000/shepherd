@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T42b Capture across `/clear` and compressed Codex rollouts | [conversation-archive](features/conversation-archive.md) | building | task/t42b-capture-edges |  |  |
-| F52 Peer conn hardening after the tunnel | [multi-machine](features/multi-machine.md) | fixing | task/f52-peer-hardening @ f98992c | 1 | round 1 CHANGES: peer/list local-only; unknown-conn fail-closed untested; exhaustive match; joins.clear; overflow answer; settle untested |
+| F52 Peer conn hardening after the tunnel | [multi-machine](features/multi-machine.md) | merging | task/f52-peer-hardening @ 81515bc | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 
 ## Ready to start
 

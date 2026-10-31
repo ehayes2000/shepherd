@@ -4,6 +4,13 @@
 # That is the discovery route the gate can't exercise (T30, decision 0019): the gate never touches the network. Then a
 # client of the one tunnels through it to the other and catches up on a multi-MB history over the network (T31a).
 #
+# Then A updates itself in place (`_shepherd/host/upgrade { force }`, re-execing the same build, F52): before the exec
+# it unbinds its endpoint and waits (at most the port's 5 s close limit) until its connections are closed, so B drops
+# it at once instead of at iroh's idle timeout, and the new image binds again with the same key and redials. This is
+# the one check of that wait (`swap::hand_off` calling `IrohPeers::settle`): the gate can't run a real host's swap
+# against a peer without the network. The gate checks the order with the fake port (hotswap.rs) and the wait itself
+# on the real port (`settling_waits_until_an_unbind_has_closed_every_connection`).
+#
 # Run by the user, never by the gate or a builder. Each host gets a throwaway HOME, so the real ~/.shepherd is never
 # touched; both are stopped (by the pids this script started, never by name) and their HOMEs removed on exit.
 #
@@ -179,8 +186,35 @@ done = time.monotonic()
 print(f"tunnel open in {opened - start:.2f} s; {entries} entries, {size / 1e6:.1f} MB in {done - opened:.1f} s")
 PY
 
+say "updating A in place: B sees it go at once, then come back (F52)"
+# Before the exec A unbinds and waits until its connections are closed; without that wait the close is cut off and
+# B only notices at iroh's idle timeout (30 s), by which time the new image has long redialled.
+gone_before=$(grep -c 'peer disconnected' "$B/.shepherd/host.log" || true)
+python3 - "$A/.shepherd/host.sock" <<'PY' || fail "the update in place wasn't accepted"
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "_shepherd/host/upgrade", "params": {"force": True}}).encode() + b"\n")
+for line in s.makefile("rb"):
+    msg = json.loads(line)
+    if msg.get("id") == 1:
+        assert msg.get("result", {}).get("answer") == "accepted", msg
+        break
+PY
+gone=
+for _ in $(seq 10); do
+  if (( $(grep -c 'peer disconnected' "$B/.shepherd/host.log" || true) > gone_before )); then
+    gone=1
+    break
+  fi
+  sleep 1
+done
+[[ -n "$gone" ]] || fail "B didn't see A go within 10 s of its update: the close before the exec didn't get out"
+wait_connected "$B" office
+wait_connected "$A" laptop
+
 say "shepherd unpair on A"
 HOME=$A "$SHEPHERD" unpair laptop
 HOME=$A "$SHEPHERD" peers | grep -q '^No paired machines' || fail "A still lists a peer"
 
-printf '\nPASS: paired, found again by node id over pkarr/DNS, tunnelled, and unpaired\n'
+printf '\nPASS: paired, found again by node id over pkarr/DNS, tunnelled, updated in place, and unpaired\n'

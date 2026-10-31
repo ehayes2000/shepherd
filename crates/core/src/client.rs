@@ -1880,8 +1880,9 @@ impl Client {
         self.set_notice(format!("kept the worktree of {name}: {why}"));
     }
 
-    /// An alert for each session that wants the user and wasn't in `wanted`, after an entry from host `at`, if that
-    /// host's bell is on and it is live. Only that host's sessions can have changed.
+    /// An alert for each of host `at`'s sessions that wants the user and wasn't in `wanted`, after an entry from it, if
+    /// that host's bell is on and it is live. Another host's session can be newly listed by that entry (one of the same
+    /// id here closed), but only its own host rings for it.
     fn alerts(&self, at: &At, wanted: &[SessionId]) -> Vec<ClientCommand> {
         let Some(feed) = self.feed(at) else {
             return Vec::new();
@@ -1891,7 +1892,7 @@ impl Client {
         }
         self.sessions
             .iter()
-            .filter(|s| s.attention && !wanted.contains(&s.id))
+            .filter(|s| s.attention && !wanted.contains(&s.id) && self.homes.get(&s.id) == Some(at))
             .map(|s| ClientCommand::Alert {
                 session: s.id.clone(),
                 message: alert_message(s),

@@ -8,7 +8,9 @@ use shepherd_core::acpp::{
     Dir, Envelope, FrameDraft, MachineRenamed, PeerTrusted, ShepherdFrame, Source, SourceKind,
     Timestamp,
 };
-use shepherd_core::host::peering::{PAIRING_TTL, Peering, PeeringEvent, PeersCommand};
+use shepherd_core::host::peering::{
+    PAIRING_TTL, Peering, PeeringEvent, PeersCommand, refused_to_peers,
+};
 use shepherd_core::host::{HostCommand, ReplyTo};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
@@ -234,6 +236,80 @@ fn a_host_with_trusted_peers_binds_on_start_trusting_them_and_dials_each() {
 }
 
 // ---------- the inviting side ----------
+
+/// A swap goes offline before the exec: what the port reports meanwhile (its own unbind's disconnects) dials nobody and
+/// binds nothing again, until the swap fails and the host comes back online.
+#[test]
+fn a_host_offline_for_a_swap_stays_unbound_until_it_resumes() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.peering.suspend(), vec![peers(PeersCommand::Unbind)]);
+    assert_eq!(d.peers(PeersEvent::Disconnected { peer: m("bb") }), vec![]);
+    assert_eq!(d.peering.deadline(), None, "nobody to dial again");
+    assert_eq!(d.tick(60), vec![]);
+    assert_eq!(
+        d.peering.resume(),
+        vec![
+            peers(PeersCommand::Bind),
+            peers(PeersCommand::Connect { peer: m("bb") }),
+        ]
+    );
+}
+
+#[test]
+fn going_offline_for_a_swap_ends_an_open_pairing() {
+    let mut d = Driver::new();
+    d.open_and_wait();
+    assert_eq!(d.peering.suspend(), vec![peers(PeersCommand::Unbind)]);
+    assert_eq!(d.peering.resume(), vec![], "nothing left to be online for");
+}
+
+#[test]
+fn pairing_trust_and_updates_are_refused_to_other_machines_and_nothing_else_is() {
+    use shepherd_core::wire::{
+        ClientRequest, HostUpgrade, PairJoin, PairStart, PairWait, PeerList, PeerRemove,
+        WorktreeList,
+    };
+    let local_only = [
+        ClientRequest::PairStart(PairStart {}),
+        ClientRequest::PairWait(PairWait {}),
+        ClientRequest::PairJoin(PairJoin { ticket: "t".into() }),
+        ClientRequest::PeerList(PeerList {}),
+        ClientRequest::PeerRemove(PeerRemove { peer: "bb".into() }),
+        ClientRequest::HostUpgrade(HostUpgrade::default()),
+    ];
+    for request in &local_only {
+        assert!(
+            matches!(refused_to_peers(request), Some(WireError::InvalidParams(why)) if why.contains("own clients")),
+            "{request:?}"
+        );
+    }
+    assert_eq!(
+        refused_to_peers(&ClientRequest::WorktreeList(WorktreeList {})),
+        None
+    );
+}
+
+/// A join whose client went with the swap is forgotten: if the swap fails, its late answer trusts nobody and answers
+/// nobody.
+#[test]
+fn a_join_in_flight_when_going_offline_for_a_swap_is_forgotten() {
+    let mut d = Driver::new();
+    let reply = d.reply_to();
+    d.handle(PeeringEvent::Join {
+        reply,
+        ticket: ticket("t1"),
+    });
+    assert_eq!(d.peering.suspend(), vec![peers(PeersCommand::Unbind)]);
+    assert_eq!(d.peering.resume(), vec![], "nothing left to be online for");
+    let late = d.peers(PeersEvent::Paired {
+        id: PairingId::new(1),
+        peer: m("bb"),
+        name: "laptop".into(),
+    });
+    assert_eq!(late, vec![]);
+}
 
 #[test]
 fn starting_a_pairing_binds_then_opens_it_with_the_token_and_this_machines_name() {
@@ -967,7 +1043,7 @@ fn a_machine_that_was_never_trusted_or_an_unbound_endpoint_dials_nobody_again() 
 #[test]
 fn a_local_client_may_tunnel_to_a_trusted_machine_with_its_first_request() {
     let d = Driver::trusting(&[("bb", "laptop")]);
-    assert_eq!(d.peering.tunnel(&m("bb"), None, true), Ok(()));
+    assert_eq!(d.peering.tunnel(&m("bb"), None, true, 0), Ok(()));
 }
 
 fn invalid_params(result: Result<(), WireError>) -> String {
@@ -984,7 +1060,7 @@ fn a_tunnel_to_a_machine_this_one_does_not_trust_is_refused() {
         shepherd_core::acpp::PeerRemoved { node: m("bb") },
     ));
     for machine in ["bb", "zz", "laptop"] {
-        let why = invalid_params(d.peering.tunnel(&m(machine), None, true));
+        let why = invalid_params(d.peering.tunnel(&m(machine), None, true, 0));
         assert!(why.contains("no trusted machine"), "{machine}: {why}");
     }
 }
@@ -992,10 +1068,22 @@ fn a_tunnel_to_a_machine_this_one_does_not_trust_is_refused() {
 #[test]
 fn a_tunnel_from_another_machine_or_after_another_request_is_refused() {
     let d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
-    let why = invalid_params(d.peering.tunnel(&m("bb"), Some(&m("cc")), true));
+    let why = invalid_params(d.peering.tunnel(&m("bb"), Some(&m("cc")), true, 0));
     assert!(why.contains("this machine's own clients"), "{why}");
-    let why = invalid_params(d.peering.tunnel(&m("bb"), None, false));
+    let why = invalid_params(d.peering.tunnel(&m("bb"), None, false, 0));
     assert!(why.contains("first request"), "{why}");
+}
+
+#[test]
+fn a_tunnel_past_the_most_one_connection_to_its_machine_carries_is_refused() {
+    let d = Driver::trusting(&[("bb", "laptop")]);
+    let most = shepherd_core::ports::MAX_OPEN_PER_PEER;
+    assert_eq!(d.peering.tunnel(&m("bb"), None, true, most - 1), Ok(()));
+    let why = invalid_params(d.peering.tunnel(&m("bb"), None, true, most));
+    assert!(
+        why.starts_with("laptop already has 100 tunnels open"),
+        "{why}"
+    );
 }
 
 #[test]
