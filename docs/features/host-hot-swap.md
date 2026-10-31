@@ -12,7 +12,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T36 | Spike: hot-swap the host on a version mismatch | done | spike merged 4e2ec1d; decision 0018 |  |  |
 | T36a | Build identity in the hello, and a clear mismatch UX | done | 44dac96 | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | T36b | Hot-swap the host by re-exec, keeping sessions running | done | 2de1f2f | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
-| F44 | hotswap_e2e times out under load | building | task/f44-f46-shepherd-tests @ 950354f | 0 |  |
+| F44 | hotswap_e2e times out under load | merging | task/f44-f46-shepherd-tests @ acbbde4 | PM spot check | stall from macOS scan of copied binaries fixed; residual failures are a product race → F47 |
+| F47 | A swap can lose its Accepted answer before exec | todo |  |  |  |
 
 ## Specs
 
@@ -109,3 +110,22 @@ goal: `a_swap_after_a_new_build_is_renamed_over_the_startup_path_runs_the_new_fi
 within 60s" while other worktrees were building; passes alone. Find what it waits on (likely a build or a fixed bound) and
 make every bound a generous liveness bound or count progress; 0 failures in a 12-copy round under parallel builds.
 scope: crates/shepherd (tests)
+
+### F47: A swap can lose its Accepted answer before exec
+depends: T36b
+touches: shepherd::host::swap, ports::link, adapters::link
+goal: From F44: `hand_off` calls `close_conns()`, which only drops each connection's queue sender; the writer threads
+flush in the background, and `swap.rs` writes the handoff file and `execv`s at once, so exec can kill a writer before it
+sends `Accepted`. The client then sees "host closed the connection" without the answer (1 in ~50-70 runs of the hot-swap
+e2e tests under load).
+acceptance:
+- Regression test first (fix-bug), deterministic where possible (e.g. a fake/slow link writer in the runtime test, or a
+  contract case that a closed conn's queued bytes are delivered before `close` reports done).
+- Before exec, the swap waits until every closed connection's queued bytes are written (or the conn is gone), bounded by
+  `CLOSE_FLUSH`; then execs. A peer that never reads can't hold the swap past the bound.
+- 0 failures in a 12-copy round of hotswap_e2e under load.
+scope: crates/core (port), crates/testkit, crates/adapters, crates/shepherd
+notes: (binding) PM-approved port change: `Link` gains an additive way to wait for closed conns to finish flushing, e.g.
+`fn flush_closed(&mut self, deadline: Instant) -> FlushOutcome` (or a joinable close), with a contract case run against
+the fake and the unix adapter. The runtime's single-thread rule (0011) holds: the wait is bounded and only during a swap.
+
