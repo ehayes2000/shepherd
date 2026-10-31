@@ -6,7 +6,7 @@ use shepherd_core::ids::MachineId;
 use shepherd_core::wire::{
     ClientMessage, ClientRequest, HostMessage, HostResponse, HostResult, Method, PairJoin,
     PairOutcome, PairStart, PairStartOk, PairWait, PeerInfo, PeerList, PeerListOk, PeerRemove,
-    Request, decode_client_message, decode_host_message, encode_request, encode_response,
+    Request, Tunnel, decode_client_message, decode_host_message, encode_request, encode_response,
 };
 
 fn request(line: &[u8]) -> Request {
@@ -168,4 +168,21 @@ fn the_peer_list_names_each_peer_and_a_peer_without_connected_is_not_connected()
     let parsed: PeerInfo = serde_json::from_value(json!({ "id": "ab12", "name": "desk" }))
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!parsed.connected);
+}
+
+#[test]
+fn a_tunnel_names_the_machine_and_is_answered_with_an_empty_ack() {
+    let req = Request {
+        id: 1.into(),
+        body: ClientRequest::Tunnel(Tunnel {
+            machine: MachineId::new("bb"),
+        }),
+    };
+    let line = encode_request(&req);
+    assert_eq!(wire_json(&line)["method"], "_shepherd/tunnel");
+    assert_eq!(wire_json(&line)["params"], json!({ "machine": "bb" }));
+    assert_eq!(request(&line), req);
+    let (value, typed) = answered(HostResult::Ack, Method::Tunnel);
+    assert_eq!(value, json!({}));
+    assert_eq!(typed.result, Ok(HostResult::Ack));
 }

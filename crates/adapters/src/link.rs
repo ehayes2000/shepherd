@@ -7,7 +7,11 @@
 //! conn's `Line`s and its `Disconnected`, so `Disconnected` is sent once, after every `Line`. Whoever decides a
 //! conn is over (close, slow consumer, bad line, write error) records the reason, first one wins, and shuts the
 //! socket down, which ends the reader. A closed conn's writer keeps delivering what was queued in the background;
-//! the link remembers it until it is done, so `flush_closed` can wait for it.
+//! the link remembers it until it is done, so `flush_closed` can wait for it. A paused conn's reader waits before its
+//! next read until it is resumed or the conn ends, so the socket fills and the peer's writer backs up.
+//!
+//! Only this machine's user can reach the socket, so a conn is with no other machine ([`Link::peer`] is `None`), and
+//! the link opens no conns to other machines ([`LinkError::NoPeers`]).
 //!
 //! Anyone who can connect to the socket can drive the user's agents, so it is private: its directory must not be
 //! accessible to group or others (it is created exactly `0700` if missing, and an existing one that is open to
@@ -27,6 +31,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
     CLOSE_FLUSH, ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink,
     MAX_QUEUED,
@@ -258,6 +263,22 @@ impl Link for UnixListenLink {
     fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
         self.conns.flush_closed(Instant::now() + within)
     }
+
+    fn peer(&self, _: ConnId) -> Option<MachineId> {
+        None
+    }
+
+    fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
+        self.conns.drained_bytes(conn)
+    }
+
+    fn pause_reading(&mut self, conn: ConnId, paused: bool) -> Result<(), LinkError> {
+        self.conns.pause_reading(conn, paused)
+    }
+
+    fn open(&mut self, _: &MachineId) -> Result<ConnId, LinkError> {
+        Err(LinkError::NoPeers)
+    }
 }
 
 impl Drop for UnixListenLink {
@@ -313,6 +334,22 @@ impl Link for UnixConnectLink {
 
     fn flush_closed(&mut self, within: Duration) -> FlushOutcome {
         self.conns.flush_closed(Instant::now() + within)
+    }
+
+    fn peer(&self, _: ConnId) -> Option<MachineId> {
+        None
+    }
+
+    fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
+        self.conns.drained_bytes(conn)
+    }
+
+    fn pause_reading(&mut self, conn: ConnId, paused: bool) -> Result<(), LinkError> {
+        self.conns.pause_reading(conn, paused)
+    }
+
+    fn open(&mut self, _: &MachineId) -> Result<ConnId, LinkError> {
+        Err(LinkError::NoPeers)
     }
 }
 
@@ -420,6 +457,11 @@ struct Shared {
     stream: UnixStream,
     /// Bytes sent but not yet taken by the writer.
     queued: AtomicUsize,
+    /// Bytes the writer has written.
+    drained: AtomicU64,
+    /// Whether the reader waits before its next read. Notified when it changes or the conn ends.
+    paused: Mutex<bool>,
+    resumed: Condvar,
     /// Why the conn ended. Set once, by whoever ended it first.
     reason: OnceLock<DisconnectReason>,
     /// When `close` was called. The reader holds this lock while it emits a `Line`, so once `close` has set it
@@ -439,13 +481,35 @@ impl Shared {
     fn end(&self, reason: DisconnectReason) {
         let _ = self.reason.set(reason);
         let _ = self.stream.shutdown(Shutdown::Both);
+        self.wake_reader();
+    }
+
+    fn paused(&self) -> MutexGuard<'_, bool> {
+        self.paused.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wakes a paused reader to look again: it was resumed, or its conn is ending.
+    fn wake_reader(&self) {
+        let _paused = self.paused();
+        self.resumed.notify_all();
+    }
+
+    /// Waits while the conn is paused and not ending.
+    fn wait_until_resumed(&self) {
+        let mut paused = self.paused();
+        while *paused && self.reason.get().is_none() {
+            paused = self
+                .resumed
+                .wait(paused)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
     }
 }
 
 /// Whether a conn's writer has exited: everything queued is written, or it gave up. Apart from [`Shared`], so a
 /// closed conn remembered for `flush_closed` doesn't keep its socket open.
 #[derive(Default)]
-struct Written {
+pub(crate) struct Written {
     done: Mutex<bool>,
     changed: Condvar,
 }
@@ -455,12 +519,12 @@ impl Written {
         self.done.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn is_done(&self) -> bool {
+    pub(crate) fn is_done(&self) -> bool {
         *self.done()
     }
 
     /// Waits until the writer has exited, or `deadline` passes. Returns whether it has.
-    fn wait(&self, deadline: Instant) -> bool {
+    pub(crate) fn wait(&self, deadline: Instant) -> bool {
         let mut done = self.done();
         while !*done {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -478,7 +542,7 @@ impl Written {
 }
 
 /// Marks the writer done when it exits, however it exits.
-struct WrittenOnExit(Arc<Written>);
+pub(crate) struct WrittenOnExit(pub(crate) Arc<Written>);
 
 impl Drop for WrittenOnExit {
     fn drop(&mut self) {
@@ -523,6 +587,9 @@ impl Conns {
         let shared = Arc::new(Shared {
             stream: stream.try_clone()?,
             queued: AtomicUsize::new(0),
+            drained: AtomicU64::new(0),
+            paused: Mutex::new(false),
+            resumed: Condvar::new(),
             reason: OnceLock::new(),
             closed_at: Mutex::new(None),
             written: Arc::default(),
@@ -605,9 +672,25 @@ impl Conns {
         Some(handle.shared.queued.load(Ordering::SeqCst))
     }
 
+    fn drained_bytes(&self, conn: ConnId) -> Option<u64> {
+        let conns = self.lock();
+        let handle = conns.get(&conn)?;
+        Some(handle.shared.drained.load(Ordering::SeqCst))
+    }
+
+    fn pause_reading(&self, conn: ConnId, paused: bool) -> Result<(), LinkError> {
+        let conns = self.lock();
+        let handle = conns.get(&conn).ok_or(LinkError::UnknownConn)?;
+        *handle.shared.paused() = paused;
+        handle.shared.wake_reader();
+        Ok(())
+    }
+
     fn close(&self, conn: ConnId) -> Result<(), LinkError> {
         let handle = self.lock().remove(&conn).ok_or(LinkError::UnknownConn)?;
         let _ = handle.shared.reason.set(DisconnectReason::Closed);
+        // A paused reader reads on, so it sees the socket shut down once the writer is done; it emits nothing more.
+        handle.shared.wake_reader();
         // Waits for a `Line` being emitted right now; none follow.
         *handle.shared.closed_at() = Some(Instant::now());
         let mut closing = self.closing();
@@ -646,6 +729,7 @@ fn read_loop(
     let mut decoder = Decoder::new();
     let mut buf = vec![0; READ_BUF];
     'read: loop {
+        shared.wait_until_resumed();
         let n = match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
@@ -653,7 +737,12 @@ fn read_loop(
             Err(_) => break,
         };
         decoder.push(&buf[..n]);
-        while let Some(line) = decoder.next_line() {
+        loop {
+            // Paused after this read started: what it read waits in the decoder.
+            shared.wait_until_resumed();
+            let Some(line) = decoder.next_line() else {
+                break;
+            };
             match line {
                 Ok(line) => {
                     let closed = shared.closed_at();
@@ -711,7 +800,10 @@ fn write_all(stream: &mut UnixStream, mut bytes: &[u8], shared: &Shared) -> std:
     while !bytes.is_empty() {
         match stream.write(bytes) {
             Ok(0) => return Err(ErrorKind::WriteZero.into()),
-            Ok(n) => bytes = &bytes[n..],
+            Ok(n) => {
+                shared.drained.fetch_add(n as u64, Ordering::SeqCst);
+                bytes = &bytes[n..];
+            }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 if shared
                     .closed_at()
@@ -777,6 +869,18 @@ mod tests {
 
         fn stalled_peer(&mut self) -> UnixStream {
             UnixStream::connect(self.path()).unwrap()
+        }
+
+        fn machine_of(&self, _: &UnixConnectLink) -> Option<MachineId> {
+            None
+        }
+
+        fn host_machine(&self) -> Option<MachineId> {
+            None
+        }
+
+        fn untrusted(&mut self, _: Arc<dyn LinkEventSink>) -> Option<(UnixConnectLink, ConnId)> {
+            None
         }
     }
 
@@ -1074,6 +1178,16 @@ mod tests {
         // The last close or two may not have been forgotten yet; without pruning, all 50 are.
         let remembered = host.conns.closing().len();
         assert!(remembered <= 2, "{remembered} closed conns still held");
+    }
+
+    #[test]
+    fn a_unix_link_opens_no_conns_to_other_machines() {
+        let dir = short_tempdir();
+        let (mut host, _events) = bind(&dir.path().join("host.sock")).unwrap();
+        assert_eq!(
+            host.open(&MachineId::new("elsewhere")),
+            Err(LinkError::NoPeers)
+        );
     }
 
     #[test]

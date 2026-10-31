@@ -18,7 +18,7 @@ pub use message::{
     HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, PairJoin, PairOutcome,
     PairStart, PairStartOk, PairWait, PeerInfo, PeerList, PeerListOk, PeerRemove, ProfileInfo,
     PtyOutput, RawResponse, Request, RequestError, SessionClose, SessionInput, SessionNew,
-    SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom,
+    SessionNewOk, SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, Tunnel,
     UpgradeAnswer, ViewSize, WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeCleanupOk,
     WorktreeInfo, WorktreeList, WorktreeListOk, WorktreeRemove, WorktreeRemoveOk, WorktreeStatusOk,
     decode_client_message, decode_host_message, encode_client_notification,

@@ -42,6 +42,14 @@ macro_rules! link_contract {
             closed_conn_is_flushed_once_its_peer_has_read_everything,
             flush_closed_times_out_while_a_closed_peer_does_not_read,
             closed_conn_whose_peer_goes_away_is_flushed,
+            each_end_names_the_machine_the_other_is,
+            a_machine_the_host_does_not_trust_is_refused_and_never_announced,
+            a_paused_conn_emits_no_lines_until_resumed_then_all_in_order,
+            the_peer_of_a_paused_conn_queues_what_it_sends,
+            a_paused_conn_still_closes,
+            pausing_an_unknown_conn_is_an_error,
+            drained_bytes_rise_as_the_peer_reads,
+            drained_bytes_of_an_unknown_or_closed_conn_is_none,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -61,6 +69,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
     ConnId, DisconnectReason, FlushOutcome, Link, LinkError, LinkEvent, LinkEventSink, MAX_QUEUED,
 };
@@ -84,6 +93,13 @@ pub trait LinkFixture {
     /// A client end connected to the host from [`listen`](Self::listen), and its conn.
     fn connect(&mut self, sink: Arc<dyn LinkEventSink>) -> (Self::Client, ConnId);
     fn stalled_peer(&mut self) -> Self::Stalled;
+    /// The machine the host's link should name for `client`'s conn ([`Link::peer`]): `None` for a local transport.
+    fn machine_of(&self, client: &Self::Client) -> Option<MachineId>;
+    /// The machine a client's link should name for its conn to the host: `None` for a local transport.
+    fn host_machine(&self) -> Option<MachineId>;
+    /// A client end on a machine the host doesn't trust, and its conn, which the host refuses. `None` for a transport
+    /// with nothing to refuse (a local socket only this machine's user can reach).
+    fn untrusted(&mut self, sink: Arc<dyn LinkEventSink>) -> Option<(Self::Client, ConnId)>;
 }
 
 /// A sink that forwards events to an mpsc channel. Send errors (receiver gone) are ignored.
@@ -331,6 +347,10 @@ impl<F: LinkFixture> LinkHarness<F> {
 
     pub fn send(&mut self, conn: ConnId, line: impl AsRef<[u8]>) {
         self.host.send(conn, line.as_ref()).unwrap();
+    }
+
+    pub fn fixture(&self) -> &F {
+        &self.fixture
     }
 
     fn next_connected(&self) -> ConnId {
@@ -763,4 +783,121 @@ pub fn closed_conn_whose_peer_goes_away_is_flushed<F: LinkFixture>(mut h: LinkHa
     h.host.close(conn).unwrap();
     drop(peer);
     assert_eq!(h.host.flush_closed(TIMEOUT), FlushOutcome::Flushed);
+}
+
+pub fn each_end_names_the_machine_the_other_is<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let c = h.connect();
+    assert_eq!(h.host.peer(c.host_conn), h.fixture().machine_of(&c.link));
+    assert_eq!(c.link.peer(c.conn), h.fixture().host_machine());
+    assert_eq!(h.host.peer(ConnId::new(u64::MAX)), None);
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(h.host.peer(c.host_conn), None);
+}
+
+/// Refused once the client's machine is known and before anything else: the host never announces it, and the client's
+/// conn ends saying why.
+pub fn a_machine_the_host_does_not_trust_is_refused_and_never_announced<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let (sink, events) = Events::channel();
+    let Some((mut link, conn)) = h.fixture.untrusted(sink) else {
+        return;
+    };
+    // Sent before the refusal arrives, or after: either way it goes nowhere.
+    let _ = link.send(conn, b"let me in");
+    assert_eq!(
+        events.disconnect_of(conn),
+        (vec![], DisconnectReason::Refused)
+    );
+    h.host_events.assert_quiet(QUIET);
+}
+
+pub fn a_paused_conn_emits_no_lines_until_resumed_then_all_in_order<F: LinkFixture>(
+    mut h: LinkHarness<F>,
+) {
+    let mut c = h.connect();
+    h.host.pause_reading(c.host_conn, true).unwrap();
+    for l in lines("client", 100) {
+        c.send(l);
+    }
+    h.host_events.assert_quiet(QUIET);
+    h.host.pause_reading(c.host_conn, false).unwrap();
+    assert_eq!(
+        h.host_events.lines_of(c.host_conn, 100),
+        lines("client", 100)
+    );
+}
+
+/// The back-pressure a paused conn is for: what its peer sends piles up in the peer's own queue, and drains once the
+/// conn is resumed.
+pub fn the_peer_of_a_paused_conn_queues_what_it_sends<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let mut c = h.connect();
+    h.host.pause_reading(c.host_conn, true).unwrap();
+    let chunk = vec![b'x'; CHUNK];
+    for _ in 0..BACKLOG / CHUNK {
+        c.send(&chunk);
+    }
+    spin_until("most of the backlog is queued at the client", || {
+        c.link
+            .queued_bytes(c.conn)
+            .is_some_and(|q| q >= BACKLOG / 2)
+    });
+    h.host.pause_reading(c.host_conn, false).unwrap();
+    h.host_events.lines_of(c.host_conn, BACKLOG / CHUNK);
+    spin_until("the client's queue is empty", || {
+        c.link.queued_bytes(c.conn) == Some(0)
+    });
+}
+
+pub fn a_paused_conn_still_closes<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let mut c = h.connect();
+    h.host.pause_reading(c.host_conn, true).unwrap();
+    c.send("unread");
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(
+        h.host_events.disconnect_of(c.host_conn),
+        (vec![], DisconnectReason::Closed)
+    );
+    assert_eq!(c.events.disconnect_of(c.conn).1, DisconnectReason::PeerGone);
+}
+
+pub fn pausing_an_unknown_conn_is_an_error<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let c = h.connect();
+    let nobody = ConnId::new(u64::MAX);
+    assert_eq!(
+        h.host.pause_reading(nobody, true),
+        Err(LinkError::UnknownConn)
+    );
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(
+        h.host.pause_reading(c.host_conn, true),
+        Err(LinkError::UnknownConn)
+    );
+}
+
+/// Counted as delivered: every byte of every line the peer read, its framing at most one byte a line.
+pub fn drained_bytes_rise_as_the_peer_reads<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let c = h.connect();
+    assert_eq!(h.host.drained_bytes(c.host_conn), Some(0));
+    let chunk = vec![b'x'; CHUNK];
+    let n = BACKLOG / CHUNK;
+    for _ in 0..n {
+        h.send(c.host_conn, &chunk);
+    }
+    c.events.lines_of(c.conn, n);
+    spin_until("everything read is counted", || {
+        h.host
+            .drained_bytes(c.host_conn)
+            .is_some_and(|d| d >= BACKLOG as u64)
+    });
+    let drained = h.host.drained_bytes(c.host_conn).unwrap();
+    assert!(drained <= (BACKLOG + n) as u64, "{drained} bytes drained");
+}
+
+pub fn drained_bytes_of_an_unknown_or_closed_conn_is_none<F: LinkFixture>(mut h: LinkHarness<F>) {
+    let c = h.connect();
+    assert_eq!(h.host.drained_bytes(ConnId::new(u64::MAX)), None);
+    assert_eq!(c.link.drained_bytes(c.conn), Some(0));
+    h.host.close(c.host_conn).unwrap();
+    assert_eq!(h.host.drained_bytes(c.host_conn), None);
 }

@@ -266,12 +266,13 @@ impl FakeHost {
             ClientRequest::WorktreeRemove(_) => Ok(HostResult::WorktreeRemove(
                 shepherd_core::wire::WorktreeRemoveOk::default(),
             )),
-            // The client TUI never pairs: the scripted host doesn't either.
+            // The client TUI never pairs or tunnels yet: the scripted host doesn't either.
             other @ (ClientRequest::PairStart(_)
             | ClientRequest::PairWait(_)
             | ClientRequest::PairJoin(_)
             | ClientRequest::PeerList(_)
-            | ClientRequest::PeerRemove(_)) => Err(shepherd_core::wire::WireError::MethodNotFound(
+            | ClientRequest::PeerRemove(_)
+            | ClientRequest::Tunnel(_)) => Err(shepherd_core::wire::WireError::MethodNotFound(
                 other.method().as_str().to_owned(),
             )),
         };

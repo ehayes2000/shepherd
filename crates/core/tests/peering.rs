@@ -12,7 +12,8 @@ use shepherd_core::host::peering::{PAIRING_TTL, Peering, PeeringEvent, PeersComm
 use shepherd_core::host::{HostCommand, ReplyTo};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, PeersEvent,
+    ConnectError, DisconnectReason, JoinError, PairTicket, PairToken, PairingError, PairingId,
+    PeersEvent,
 };
 use shepherd_core::wire::{HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError};
 use shepherd_testkit::builders::HostDriver;
@@ -151,7 +152,16 @@ impl Driver {
     }
 
     fn peers(&mut self, event: PeersEvent) -> Vec<HostCommand> {
-        self.handle(PeeringEvent::Peers(event))
+        self.peers_at(event, 0)
+    }
+
+    /// What the port reports, `secs` in.
+    fn peers_at(&mut self, event: PeersEvent, secs: i64) -> Vec<HostCommand> {
+        self.handle(PeeringEvent::Peers { event, at: t(secs) })
+    }
+
+    fn tick(&mut self, secs: i64) -> Vec<HostCommand> {
+        self.handle(PeeringEvent::Tick { at: t(secs) })
     }
 
     fn reply_to(&mut self) -> ReplyTo {
@@ -813,4 +823,195 @@ fn trust_is_only_read_from_the_host_log() {
     );
     d.peering.apply(&env);
     assert_eq!(d.peering.sync(), vec![]);
+}
+
+#[test]
+fn a_waiter_leaving_before_the_ticket_came_leaves_the_pairing_to_its_start() {
+    let mut d = Driver::new();
+    // The start isn't answered yet: its client is still waiting for the ticket.
+    d.start();
+    let waiter = d.reply_to();
+    assert_eq!(d.handle(PeeringEvent::Wait { reply: waiter }), vec![]);
+    assert_eq!(d.handle(PeeringEvent::Gone { reply: waiter }), vec![]);
+    assert_eq!(d.peering.deadline(), Some(t(600).instant()));
+}
+
+// ---------- reconnecting ----------
+
+/// `bb` trusted, bound, dialled on start, and connected.
+fn connected_to_bb() -> Driver {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    d
+}
+
+fn unreachable(peer: &str) -> PeersEvent {
+    PeersEvent::ConnectFailed {
+        peer: m(peer),
+        error: ConnectError::Unreachable("no route".into()),
+    }
+}
+
+#[test]
+fn a_trusted_peer_that_goes_away_is_dialled_again_a_second_later() {
+    let mut d = connected_to_bb();
+    assert_eq!(
+        d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 10),
+        vec![]
+    );
+    assert_eq!(d.peering.deadline(), Some(t(11).instant()));
+    assert_eq!(d.tick(10), vec![], "not due yet");
+    assert_eq!(
+        d.tick(11),
+        vec![peers(PeersCommand::Connect { peer: m("bb") })]
+    );
+    // Dialling: nothing is due until it answers.
+    assert_eq!(d.peering.deadline(), None);
+    assert_eq!(d.tick(100), vec![]);
+}
+
+#[test]
+fn each_failed_dial_doubles_the_wait_up_to_a_minute() {
+    let mut d = connected_to_bb();
+    d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 0);
+    let mut at = 1;
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        assert_eq!(
+            d.tick(at),
+            vec![peers(PeersCommand::Connect { peer: m("bb") })]
+        );
+        d.peers_at(unreachable("bb"), at);
+        let due = d.peering.deadline().unwrap_or_else(|| panic!("no retry"));
+        let wait = due.duration_since(t(at).instant()).as_secs();
+        waits.push(wait);
+        at += wait;
+    }
+    assert_eq!(waits, [2, 4, 8, 16, 32, 60, 60, 60]);
+}
+
+#[test]
+fn a_connection_starts_the_waits_over() {
+    let mut d = connected_to_bb();
+    d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 0);
+    d.tick(1);
+    d.peers_at(unreachable("bb"), 1);
+    d.tick(3);
+    d.peers_at(PeersEvent::Connected { peer: m("bb") }, 3);
+    assert_eq!(d.peering.deadline(), None);
+    d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 50);
+    assert_eq!(d.peering.deadline(), Some(t(51).instant()));
+}
+
+#[test]
+fn a_first_dial_that_fails_is_tried_again() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers_at(unreachable("bb"), 0);
+    assert_eq!(d.peering.deadline(), Some(t(2).instant()));
+    assert_eq!(
+        d.tick(2),
+        vec![peers(PeersCommand::Connect { peer: m("bb") })]
+    );
+}
+
+#[test]
+fn a_peer_that_refuses_this_machine_or_a_dial_with_no_endpoint_is_not_tried_again() {
+    let mut d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
+    d.peering.sync();
+    for (peer, error) in [("bb", ConnectError::Refused), ("cc", ConnectError::Unbound)] {
+        d.peers_at(
+            PeersEvent::ConnectFailed {
+                peer: m(peer),
+                error,
+            },
+            0,
+        );
+    }
+    assert_eq!(d.peering.deadline(), None);
+}
+
+#[test]
+fn a_peer_unpaired_while_waiting_is_not_dialled_again() {
+    let mut d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
+    d.peering.sync();
+    d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 0);
+    let to = d.reply_to();
+    d.handle(PeeringEvent::Remove {
+        reply: to,
+        peer: "bb".into(),
+    });
+    assert_eq!(d.peering.deadline(), None);
+    assert_eq!(d.tick(5), vec![]);
+}
+
+#[test]
+fn a_machine_that_was_never_trusted_or_an_unbound_endpoint_dials_nobody_again() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers_at(PeersEvent::Disconnected { peer: m("zz") }, 0);
+    assert_eq!(d.peering.deadline(), None);
+    // The last peer unpaired: the endpoint is unbound, and the peer it lost on the way isn't dialled.
+    d.peers_at(PeersEvent::Disconnected { peer: m("bb") }, 0);
+    let to = d.reply_to();
+    d.handle(PeeringEvent::Remove {
+        reply: to,
+        peer: "bb".into(),
+    });
+    assert_eq!(d.peering.deadline(), None);
+}
+
+// ---------- tunnels ----------
+
+#[test]
+fn a_local_client_may_tunnel_to_a_trusted_machine_with_its_first_request() {
+    let d = Driver::trusting(&[("bb", "laptop")]);
+    assert_eq!(d.peering.tunnel(&m("bb"), None, true), Ok(()));
+}
+
+fn invalid_params(result: Result<(), WireError>) -> String {
+    match result {
+        Err(WireError::InvalidParams(why)) => why,
+        other => panic!("expected InvalidParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tunnel_to_a_machine_this_one_does_not_trust_is_refused() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.record(ShepherdFrame::PeerRemoved(
+        shepherd_core::acpp::PeerRemoved { node: m("bb") },
+    ));
+    for machine in ["bb", "zz", "laptop"] {
+        let why = invalid_params(d.peering.tunnel(&m(machine), None, true));
+        assert!(why.contains("no trusted machine"), "{machine}: {why}");
+    }
+}
+
+#[test]
+fn a_tunnel_from_another_machine_or_after_another_request_is_refused() {
+    let d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
+    let why = invalid_params(d.peering.tunnel(&m("bb"), Some(&m("cc")), true));
+    assert!(why.contains("this machine's own clients"), "{why}");
+    let why = invalid_params(d.peering.tunnel(&m("bb"), None, false));
+    assert!(why.contains("first request"), "{why}");
+}
+
+#[test]
+fn a_tunnel_that_cannot_open_says_whether_the_machine_refused_or_could_not_be_reached() {
+    let d = Driver::trusting(&[("bb", "laptop")]);
+    let refused = d
+        .peering
+        .tunnel_failed(&m("bb"), &DisconnectReason::Refused);
+    assert_eq!(
+        refused,
+        WireError::InvalidParams(
+            "laptop doesn't trust this machine: pair them again with `shepherd pair`".into()
+        )
+    );
+    let gone = d
+        .peering
+        .tunnel_failed(&m("bb"), &DisconnectReason::PeerGone);
+    assert_eq!(gone, WireError::InvalidParams("cannot reach laptop".into()));
 }

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use shepherd::build::InstalledExe;
 use shepherd::host::{
-    Env, HostRuntime, PreflightRunner, RuntimeEvent, RuntimeSettings, SwapPlan, adopt_sessions,
-    runtime_channel,
+    Env, HostLinks, HostRuntime, PreflightRunner, RuntimeEvent, RuntimeSettings, SwapPlan,
+    adopt_sessions, runtime_channel,
 };
 use shepherd_core::acpp::{EntryId, Envelope, RequestId, Seq, Timestamp};
 use shepherd_core::config::{Config, RawConfig, RawDefaults};
@@ -23,8 +23,8 @@ use shepherd_core::host::Host;
 use shepherd_core::host::upgrade::{HandoffCheck, Preflight};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::ports::{
-    ConnId, EventLog, Link, LinkEvent, LinkEventSink, MachineIdentity, MachineKey, PairToken,
-    PtyEventSink, TOKEN_LEN,
+    ConnId, DisconnectReason, EventLog, Link, LinkEvent, LinkEventSink, MachineIdentity,
+    MachineKey, PairToken, PtyEventSink, TOKEN_LEN,
 };
 use shepherd_core::wire::{
     BuildId, ClientNotification, ClientRequest, HostMessage, HostNotification, InputKind, Request,
@@ -217,16 +217,36 @@ pub fn echo_shell() -> Program {
     })
 }
 
+/// A fake host's links: its local network, and its machine's link to other machines.
+pub type Links = HostLinks<FakeLink, FakeLink>;
+
 pub type Runtime = HostRuntime<
     FakePty,
     FakeWorktrees,
     FakeCommands,
     FakeForge,
-    FakeLink,
+    Links,
     FakeEventLog,
     TestEnv,
     FakePeers,
 >;
+
+/// A host's links on fakes: listening on `net` for local clients, and as `machine` on `machines` for other machines,
+/// both reporting to `sink`.
+pub fn links(
+    net: &FakeNetwork,
+    machines: &FakeNetwork,
+    machine: &MachineId,
+    sink: Arc<dyn LinkEventSink>,
+) -> Links {
+    let local = net
+        .listen(Links::local_sink(sink.clone()))
+        .expect("fake host listens");
+    let peers = machines
+        .listen_as(machine.clone(), Links::peers_sink(sink))
+        .expect("fake machine listens");
+    HostLinks::new(local, peers)
+}
 
 /// Builds a [`HostHarness`].
 pub struct HarnessBuilder {
@@ -242,10 +262,18 @@ pub struct HarnessBuilder {
     forge: FakeForge,
     preflight: Option<PreflightRunner>,
     peers: FakePeerNet,
+    machines: FakeNetwork,
     key: [u8; 32],
 }
 
 impl HarnessBuilder {
+    /// Puts this host's machine on `machines` for its links to other machines (tunnels), e.g. so two harnesses can
+    /// reach each other.
+    pub fn machines(mut self, machines: FakeNetwork) -> Self {
+        self.machines = machines;
+        self
+    }
+
     /// Puts this host's `Peers` port on `peers`, e.g. so two harnesses can pair.
     pub fn peer_net(mut self, peers: FakePeerNet) -> Self {
         self.peers = peers;
@@ -325,6 +353,7 @@ impl HarnessBuilder {
             build,
             preflight,
             peers,
+            machines,
             key,
         } = self;
         let dir = tempfile::tempdir().expect("tempdir for run files");
@@ -344,12 +373,13 @@ impl HarnessBuilder {
             log,
             env.clone(),
             settings.clone(),
-            &peers,
+            (&peers, &machines),
         );
         let mut harness = HostHarness {
             runtime: Some(runtime),
             net,
             peers,
+            machines,
             programs,
             worktrees,
             commands,
@@ -405,7 +435,7 @@ fn build_runtime(
     log: FakeEventLog,
     env: TestEnv,
     settings: RuntimeSettings,
-    peers: &FakePeerNet,
+    peers: (&FakePeerNet, &FakeNetwork),
 ) -> Runtime {
     let sinks = (|sink| sink, |sink| sink);
     runtime_in(net, programs, workers, log, env, sinks, settings, peers)
@@ -420,7 +450,7 @@ pub fn runtime_with<E: EventLog>(
     log: E,
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers> {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
 
@@ -432,7 +462,7 @@ pub fn runtime_with_sinks<E: EventLog>(
     env: TestEnv,
     link_sink: impl FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     pty_sink: impl FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers> {
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers> {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
     let workers = (
         FakeWorktrees::new(WORKTREE_ROOT),
@@ -448,7 +478,7 @@ pub fn runtime_with_sinks<E: EventLog>(
         env,
         sinks,
         settings,
-        &FakePeerNet::new(),
+        (&FakePeerNet::new(), &FakeNetwork::new()),
     )
 }
 
@@ -467,8 +497,8 @@ fn runtime_in<E: EventLog, FL, FP>(
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
     settings: RuntimeSettings,
-    peer_net: &FakePeerNet,
-) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, FakeLink, E, TestEnv, FakePeers>
+    (peer_net, machines): (&FakePeerNet, &FakeNetwork),
+) -> HostRuntime<FakePty, FakeWorktrees, FakeCommands, FakeForge, Links, E, TestEnv, FakePeers>
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
     FP: FnOnce(Arc<dyn PtyEventSink>) -> Arc<dyn PtyEventSink>,
@@ -479,9 +509,7 @@ where
         let program = program.clone();
         pty = pty.with_program(command.clone(), move |input, p| program(input, p));
     }
-    let link = net
-        .listen(link_sink(tx.link_sink()))
-        .expect("fake host listens");
+    let link = links(net, machines, &settings.machine, link_sink(tx.link_sink()));
     let peers = peer_net.peers(settings.machine.clone(), tx.peers_sink());
     HostRuntime::start(
         pty, worktrees, commands, forge, link, peers, log, env, settings, tx, rx,
@@ -496,6 +524,8 @@ pub struct HostHarness {
     net: FakeNetwork,
     /// The network its `Peers` port is on.
     peers: FakePeerNet,
+    /// The network its links to other machines are on.
+    machines: FakeNetwork,
     programs: Vec<(String, Program)>,
     worktrees: FakeWorktrees,
     commands: FakeCommands,
@@ -520,6 +550,7 @@ impl HostHarness {
             forge: FakeForge::new(),
             preflight: None,
             peers: FakePeerNet::new(),
+            machines: FakeNetwork::new(),
             key: MACHINE_KEY,
         }
     }
@@ -584,6 +615,11 @@ impl HostHarness {
         &self.peers
     }
 
+    /// The network this host's links to other machines are on.
+    pub fn machines(&self) -> &FakeNetwork {
+        &self.machines
+    }
+
     /// This host's machine id.
     pub fn machine(&self) -> MachineId {
         self.settings.machine.clone()
@@ -628,7 +664,12 @@ impl HostHarness {
             pty = pty.with_program(command.clone(), move |input, p| program(input, p));
         }
         let adoption = adopt_sessions(&mut pty, plan);
-        let link = self.net.listen(tx.link_sink()).expect("fake host listens");
+        let link = links(
+            &self.net,
+            &self.machines,
+            &self.settings.machine,
+            tx.link_sink(),
+        );
         let peers = self
             .peers
             .peers(self.settings.machine.clone(), tx.peers_sink());
@@ -667,7 +708,7 @@ impl HostHarness {
             log,
             self.env.clone(),
             self.settings.clone(),
-            &self.peers,
+            (&self.peers, &self.machines),
         );
         self.runtime = Some(runtime);
         self.step();
@@ -716,7 +757,7 @@ pub struct FakeClient {
     next_id: i64,
     /// What arrived and was not yet taken.
     inbox: Vec<HostMessage>,
-    disconnected: bool,
+    disconnected: Option<DisconnectReason>,
 }
 
 impl FakeClient {
@@ -740,7 +781,7 @@ impl FakeClient {
             events: rx,
             next_id: 0,
             inbox: Vec::new(),
-            disconnected: false,
+            disconnected: None,
         }
     }
 
@@ -753,6 +794,22 @@ impl FakeClient {
     /// any is waiting). Returns the bytes read.
     pub fn read(&mut self, max_bytes: usize) -> usize {
         self.net.deliver(self.conn, max_bytes)
+    }
+
+    /// A paced client shown `bytes` more of the line it is reading on its way, without reading it: the host's link
+    /// sees bytes drained while its queue doesn't shrink.
+    pub fn trickle(&mut self, bytes: usize) {
+        self.net.trickle(self.conn, bytes);
+    }
+
+    /// What this client sent that the host hasn't read: its own `queued_bytes`.
+    pub fn queued(&self) -> usize {
+        self.link.queued_bytes(self.conn).unwrap_or(0)
+    }
+
+    /// What the host has queued for this client that it hasn't read: the host's `queued_bytes` for its conn.
+    pub fn unread(&self) -> usize {
+        self.net.unread(self.conn)
     }
 
     /// Sends a request and returns its id.
@@ -821,7 +878,7 @@ impl FakeClient {
                     let msg = decode_host_message(&line).expect("host sent a valid message");
                     self.inbox.push(msg);
                 }
-                LinkEvent::Disconnected { .. } => self.disconnected = true,
+                LinkEvent::Disconnected { reason, .. } => self.disconnected = Some(reason),
                 LinkEvent::Connected { .. } => {}
             }
         }
@@ -842,7 +899,13 @@ impl FakeClient {
     /// it has read them, as from a socket.
     pub fn is_disconnected(&mut self) -> bool {
         self.pump();
-        self.disconnected || self.net.closed_by_peer(self.conn)
+        self.disconnected.is_some() || self.net.closed_by_peer(self.conn)
+    }
+
+    /// Why its conn ended, once its `Disconnected` arrived.
+    pub fn disconnect_reason(&mut self) -> Option<DisconnectReason> {
+        self.pump();
+        self.disconnected.clone()
     }
 }
 
