@@ -18,7 +18,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T41 Restore transcripts for a target cwd | [conversation-archive](features/conversation-archive.md) | review | task/t41-archive-restore @ 418b8da (on da21144) | 0 | built; review deferred (paused). Not rebased. Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
-| F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | fixing | task/f47-swap-flush @ 2534cdc | 1 | Blocking: deadline from env clock, waited on real clock → port takes a Duration. Minor: prune test |
+| F47 A swap can lose its Accepted answer before exec | [host-hot-swap](features/host-hot-swap.md) | review | task/f47-swap-flush @ 8684af0 | 1 | fixed: flush_closed(within: Duration); pruning test found & fixed a socket-copy leak. Re-review deferred (paused). Builder disclosed a hook-less rebase commit; final tree gated |
 | F48 repo_root returns an uncanonical /tmp path under load | [worktrees](features/worktrees.md) | building | task/f48-repo-root-spelling @ e074e75 | 0 |  |
 
 ## Ready to start

@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T36a | Build identity in the hello, and a clear mismatch UX | done | 44dac96 | 2 | stale restart dialog survived reconnect; terminate didn't validate socket path/dir/peer; leaking test stand-in |
 | T36b | Hot-swap the host by re-exec, keeping sessions running | done | 2de1f2f | 3 | bad config after adoption killed sessions; refuse() could killpg/close what isn't ours; several required steps untested |
 | F44 | hotswap_e2e times out under load | done | ec85617 | PM spot check | stall from macOS scan of copied binaries; residual product race → F47 |
-| F47 | A swap can lose its Accepted answer before exec | fixing | task/f47-swap-flush @ 2534cdc | 1 | Blocking: deadline from env clock, waited on real clock → port takes a Duration. Minor: prune test |
+| F47 | A swap can lose its Accepted answer before exec | review | task/f47-swap-flush @ 8684af0 | 1 | fixed: flush_closed(within: Duration); pruning test found & fixed a socket-copy leak. Re-review deferred (paused). Builder disclosed a hook-less rebase commit; final tree gated |
 | F49 | Shutdown exits without flushing closed connections | todo |  |  |  |
 
 ## Specs
