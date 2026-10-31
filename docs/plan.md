@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T39 Archive index | [conversation-archive](features/conversation-archive.md) | review | task/t39-archive-index @ c3cca50 (on 60089d5) | 2 | read-only version peek; rollback/newtype/lock tests; percent-encoding allowed |
+| T39 Archive index | [conversation-archive](features/conversation-archive.md) | fixing | task/t39-archive-index @ c3cca50 | 2 | Blocking: version peek creates -wal/-shm on a cleanly closed newer WAL index; -wal without -shm now refused |
 | T30 Pairing and trusted peers | [multi-machine](features/multi-machine.md) | building | task/t30-pairing @ 112bbcc | 0 | notes added |
 | F17 Worktrees contract flake under heavy load | [worktrees](features/worktrees.md) | building | task/f17-load-bounds @ 187c64a | 0 |  |
 
