@@ -59,9 +59,11 @@ fn client_creates_a_session_types_into_it_and_sees_output_and_log_entries() {
     let msgs = client.take();
     let id = new_session_id(&msgs, &req);
     let created = entries(&msgs);
-    assert_eq!(created.len(), 1);
-    assert_eq!(method(&created[0]), "_shepherd/session/created");
-    assert_eq!(created[0].session(), Some(&id));
+    // The host log's catch-up first: the machine's name, recorded when the host started.
+    assert_eq!(created.len(), 2);
+    assert_eq!(method(&created[0]), "_shepherd/machine/renamed");
+    assert_eq!(method(&created[1]), "_shepherd/session/created");
+    assert_eq!(created[1].session(), Some(&id));
 
     client.input(&id, b"hello");
     h.step();
@@ -174,13 +176,14 @@ fn on_start_sessions_whose_pty_is_gone_become_exited() {
 // ---------- executing commands ----------
 
 #[test]
-fn appended_entries_are_stamped_with_id_ts_and_the_local_machine() {
+fn appended_entries_are_stamped_with_id_ts_and_this_machines_id() {
     let mut h = HostHarness::new();
     let (_client, id) = with_session(&mut h);
     let env = &h.log().read(LogId::Session(id), Seq::ZERO).unwrap()[0];
-    assert_eq!(env.id().as_str(), "e1");
-    assert_eq!(env.ts().as_str(), "2026-10-29T12:00:00.002Z");
-    assert_eq!(env.machine(), &MachineId::new("local"));
+    // e1 is the host log's `machine/renamed`, appended when the host started.
+    assert_eq!(env.id().as_str(), "e2");
+    assert_eq!(env.ts().as_str(), "2026-10-29T12:00:00.003Z");
+    assert_eq!(env.machine(), &machine());
     assert_eq!(env.seq(), Seq::new(1));
 }
 
@@ -322,7 +325,8 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
         response(&client.take(), &req),
         Ok(json!({
             "version": PROTOCOL_VERSION,
-            "machine": "local",
+            "machine": machine().as_str(),
+            "name": HOSTNAME,
             "profiles": [
                 { "name": "claude", "agent": "claude-code" },
                 { "name": "codex", "agent": "codex" },
@@ -473,8 +477,12 @@ fn subscribe_from_a_seq_replays_the_rest_then_goes_live_with_no_gap_or_duplicate
     h.step();
 
     let msgs = b.take();
-    let seqs: Vec<u64> = entries(&msgs).iter().map(|e| e.seq().get()).collect();
-    assert_eq!(seqs, [3, 4, 5]);
+    // The host log (from its start: just the machine's name) is caught up too.
+    let seqs: Vec<(bool, u64)> = entries(&msgs)
+        .iter()
+        .map(|e| (e.session().is_some(), e.seq().get()))
+        .collect();
+    assert_eq!(seqs, [(false, 1), (true, 3), (true, 4), (true, 5)]);
     // The ack follows the catch-up.
     let ack = msgs
         .iter()

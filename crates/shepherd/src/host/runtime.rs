@@ -101,8 +101,6 @@ use super::worker::Worker;
 use crate::build::InstalledExe;
 use crate::screen_guard;
 
-/// The machine id every entry is stamped with until machines get names (T29).
-pub const LOCAL_MACHINE: &str = "local";
 /// The size a session's PTY starts at when no size is known for it: its `session/new` gave none and no client has
 /// resized it (see [`Sizes`]).
 pub const INITIAL_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
@@ -321,6 +319,11 @@ pub struct RuntimeSettings {
     pub preflight: PreflightRunner,
     /// Something every client's hello tells the user, e.g. that the config couldn't be used after an update.
     pub warning: Option<String>,
+    /// This machine's id, from its `MachineIdentity` key: every entry is stamped with it.
+    pub machine: MachineId,
+    /// The hostname as the system reports it, which names the machine when the config doesn't
+    /// ([`shepherd_core::machine::name`]).
+    pub hostname: Option<String>,
 }
 
 /// An upgrade request being decided.
@@ -533,6 +536,7 @@ impl<
             .map_err(StartError::Worker)?;
         let forge = Worker::spawn("forge", forge, tx.clone(), RuntimeEvent::Forge)
             .map_err(StartError::Worker)?;
+        let machine = settings.machine.clone();
         let mut runtime = Self {
             host,
             pty,
@@ -548,7 +552,7 @@ impl<
             log,
             env,
             settings,
-            machine: MachineId::new(LOCAL_MACHINE),
+            machine,
             tx,
             rx,
             screens: BTreeMap::new(),
@@ -591,6 +595,11 @@ impl<
         }
         // A session that was closing lost its worktree's inspection, hooks or removal with the old host.
         runtime.dispatch(HostEvent::Restarted);
+        let name = shepherd_core::machine::name(
+            &runtime.settings.config,
+            runtime.settings.hostname.as_deref(),
+        );
+        runtime.dispatch(HostEvent::MachineNamed { name });
         // Every other run directory is stale: the log lock is held and nothing else has been spawned yet.
         run_files::sweep_except(&runtime.settings.run_root, &adopted);
         runtime.restore(adoption);
@@ -1651,6 +1660,7 @@ impl<
                 let result = wire::negotiate(&hello, &self.machine).map(|ok| {
                     let ok = ok.with_profiles(config).with_notify(config);
                     let ok = ok.with_warning(settings.warning.clone());
+                    let ok = ok.with_machine_name(self.host.machine_name().map(str::to_owned));
                     HostResult::Hello(ok.with_build(settings.build.clone(), installed))
                 });
                 let accepted = result.is_ok();

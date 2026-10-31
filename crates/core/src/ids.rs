@@ -39,6 +39,21 @@ macro_rules! string_id {
 string_id!(SessionId);
 string_id!(MachineId);
 
+impl MachineId {
+    /// What hosts stamped every entry with before machines had ids (T29).
+    pub const LEGACY_LOCAL: &str = "local";
+
+    /// The machine an entry stamped `self` is from, read by whoever knows the log was written on machine `this`: an
+    /// entry from before machines had ids ([`MachineId::LEGACY_LOCAL`]) is `this` machine's. The one alias, so logs
+    /// written before an upgrade read the same as those written after it.
+    pub fn read_by(&self, this: &MachineId) -> MachineId {
+        match self.as_str() {
+            Self::LEGACY_LOCAL => this.clone(),
+            _ => self.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +63,16 @@ mod tests {
         let id = SessionId::new("s_01");
         assert_eq!(serde_json::to_string(&id).unwrap(), "\"s_01\"");
         assert_eq!(serde_json::from_str::<SessionId>("\"s_01\"").unwrap(), id);
+    }
+
+    #[test]
+    fn local_is_read_as_the_machine_that_wrote_the_log_and_other_ids_as_themselves() {
+        let this = MachineId::new("ab12");
+        assert_eq!(MachineId::new("local").read_by(&this), this);
+        assert_eq!(MachineId::new("ab12").read_by(&this), this);
+        assert_eq!(
+            MachineId::new("cd34").read_by(&this),
+            MachineId::new("cd34")
+        );
     }
 }

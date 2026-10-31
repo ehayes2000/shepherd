@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use shepherd::host::{self, HostStartError, LOG_FILE, RuntimeEvent, SOCKET_FILE};
 use shepherd_adapters::JsonlEventLog;
+use shepherd_core::ports::IdentityError;
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -145,6 +146,47 @@ fn a_bad_config_names_the_config_file() {
 }
 
 #[test]
+fn a_first_start_makes_the_machine_key_and_a_restart_keeps_the_machine() {
+    let tmp = tempdir();
+    let root = tmp.path().join("shepherd");
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    let first = open(&root).unwrap();
+    let machine = first.settings().machine.clone();
+    drop(first);
+    assert_eq!(mode(&key), 0o600);
+    let bytes = fs::read(&key).unwrap();
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(machine.as_str().len(), 64, "{machine}");
+
+    let again = open(&root).unwrap();
+    assert_eq!(again.settings().machine, machine);
+    assert_eq!(fs::read(&key).unwrap(), bytes, "the key was replaced");
+}
+
+#[test]
+fn a_machine_key_that_cannot_be_used_stops_the_host_and_is_left_alone() {
+    let tmp = tempdir();
+    let root = tmp.path().join("shepherd");
+    host::prepare_root(&root).unwrap();
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    write_private(&key, "short");
+
+    let err = open(&root).err().expect("refused");
+    assert!(
+        matches!(
+            err,
+            HostStartError::Identity { ref path, error: IdentityError::WrongSize { len: 5 } }
+                if *path == key
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(message.contains(&key.display().to_string()), "{message}");
+    assert!(message.contains("move it aside"), "{message}");
+    assert_eq!(fs::read_to_string(&key).unwrap(), "short");
+}
+
+#[test]
 fn a_corrupt_log_names_the_file_and_what_to_do() {
     let tmp = tempdir();
     let root = tmp.path().join("shepherd");
@@ -243,6 +285,7 @@ fn a_client_can_attach_to_a_history_bigger_than_the_link_queue() {
             }
 
             let mut seqs = Vec::new();
+            let mut host_entries = 0;
             let mut bytes = 0;
             let mut reader = BufReader::new(slow);
             loop {
@@ -251,8 +294,12 @@ fn a_client_can_attach_to_a_history_bigger_than_the_link_queue() {
                 assert!(n > 0, "disconnected after {bytes} bytes");
                 bytes += n;
                 match decode_host_message(line.strip_suffix(b"\n").unwrap()).unwrap() {
+                    // The session's; the host log holds just the machine's name (T29), recorded on start.
                     HostMessage::Notification(HostNotification::LogEntry(e)) => {
-                        seqs.push(e.envelope.seq().get());
+                        match e.envelope.session() {
+                            Some(_) => seqs.push(e.envelope.seq().get()),
+                            None => host_entries += 1,
+                        }
                     }
                     HostMessage::Response(r) => {
                         assert_eq!(r.id, 1.into());
@@ -262,6 +309,7 @@ fn a_client_can_attach_to_a_history_bigger_than_the_link_queue() {
                     _ => {}
                 }
             }
+            assert_eq!(host_entries, 1);
             (seqs, bytes)
         });
         tx.send(RuntimeEvent::Shutdown);

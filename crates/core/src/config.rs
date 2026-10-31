@@ -24,6 +24,15 @@ pub struct RawConfig {
     pub notify: Option<RawNotify>,
     /// `[workspaces."<repo path or name>"]`.
     pub workspaces: Option<BTreeMap<String, RawWorkspace>>,
+    pub machine: Option<RawMachine>,
+}
+
+/// `[machine]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawMachine {
+    /// What this machine is called (see [`crate::machine`]). Defaults to its hostname.
+    pub name: Option<String>,
 }
 
 /// `[defaults]`.
@@ -118,6 +127,10 @@ pub enum ConfigError {
     },
     #[error("workspace `{0}`: hook_timeout_s must be more than 0")]
     ZeroHookTimeout(String),
+    #[error("machine.name is empty")]
+    EmptyMachineName,
+    #[error("machine.name is longer than {max} characters")]
+    LongMachineName { max: usize },
 }
 
 // ---------- resolved ----------
@@ -277,6 +290,7 @@ pub struct Config {
     notify_bell: bool,
     cleanup_after_days: u32,
     workspaces: Vec<(WorkspaceKey, WorkspaceHooks)>,
+    machine_name: Option<String>,
 }
 
 /// How many days after its PTY exited a session whose branch is merged counts as stale, when the config doesn't say.
@@ -305,6 +319,8 @@ impl Config {
     /// - `[notify] bell` defaults to off.
     /// - `[defaults] cleanup_after_days` defaults to [`DEFAULT_CLEANUP_AFTER_DAYS`].
     /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
+    /// - `[machine] name` must not be empty or longer than [`crate::machine::MAX_NAME`] grapheme clusters once made
+    ///   display-safe and trimmed.
     /// - `[workspaces."<key>"]`: `<key>` is an absolute repo path (it has a `/`) or a repo directory's name. Hooks
     ///   must not be empty, and `hook_timeout_s` defaults to [`DEFAULT_HOOK_TIMEOUT`] and must be more than 0.
     pub fn resolve(
@@ -352,6 +368,12 @@ impl Config {
             .map(|(key, workspace)| workspace_hooks(key, workspace))
             .collect::<Result<_, _>>()?;
 
+        let machine_name = raw
+            .machine
+            .and_then(|m| m.name)
+            .map(|name| crate::machine::configured(&name))
+            .transpose()?;
+
         Ok(Self {
             default_agent,
             profiles,
@@ -359,6 +381,7 @@ impl Config {
             notify_bell: raw.notify.and_then(|n| n.bell).unwrap_or(false),
             cleanup_after_days,
             workspaces,
+            machine_name,
         })
     }
 
@@ -397,6 +420,11 @@ impl Config {
     /// (`[defaults] cleanup_after_days`).
     pub fn cleanup_after_days(&self) -> u32 {
         self.cleanup_after_days
+    }
+
+    /// What `[machine] name` calls this machine, display-safe (see [`crate::machine`]). `None` when it doesn't say.
+    pub fn machine_name(&self) -> Option<&str> {
+        self.machine_name.as_deref()
     }
 
     /// The hooks of the workspace whose repo is at `repo` (as resolved, symlinks followed): the table whose key is

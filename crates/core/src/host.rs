@@ -98,13 +98,13 @@ use serde_json::Value;
 
 use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
-    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, Pr, SessionClosed, SessionCreated,
-    SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, WorkspaceSelected,
-    WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
+    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr, SessionClosed,
+    SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp,
+    WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
 };
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
-use crate::ids::SessionId;
+use crate::ids::{MachineId, SessionId};
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
 use crate::ports::worktrees::{
@@ -410,6 +410,9 @@ pub enum HostEvent {
     },
     /// The runtime has just started, the logs folded: nothing an earlier host run started is still running.
     Restarted,
+    /// The runtime has just started, the logs folded, and this machine is called `name` (see [`crate::machine::name`]).
+    /// A name other than the last one recorded is recorded in `machine/renamed`, in the host log.
+    MachineNamed { name: String },
 }
 
 /// Something for the runtime to do.
@@ -544,6 +547,9 @@ pub enum HostCommand {
 pub struct HostSession {
     pub id: SessionId,
     pub name: String,
+    /// The machine its `session/created` entry was stamped with, as recorded: `local` in logs older than machine
+    /// ids (see [`MachineId::read_by`]).
+    pub machine: MachineId,
     /// The `ts` of its `session/created` entry.
     pub created: Timestamp,
     /// Its PTY process has ended, or it failed before one started.
@@ -586,6 +592,8 @@ enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     name: String,
+    /// The machine its `session/created` entry was stamped with, as recorded.
+    machine: MachineId,
     /// With the session id, orders [`Host::sessions`].
     created: Timestamp,
     phase: Phase,
@@ -686,6 +694,8 @@ pub struct Host {
     /// Orphan worktrees the cleanup view is removing: a `worktree/removing` in the host log, until its
     /// `worktree/removed`.
     cleaning: BTreeSet<PathBuf>,
+    /// What this machine was last recorded as being called (`machine/renamed`).
+    machine_name: Option<String>,
 }
 
 impl Host {
@@ -701,6 +711,7 @@ impl Host {
             .map(|(id, e)| HostSession {
                 id: id.clone(),
                 name: e.name.clone(),
+                machine: e.machine.clone(),
                 created: e.created.clone(),
                 exited: e.removing || matches!(e.phase, Phase::Exited | Phase::Failed(_)),
                 resume: e.resume_target().map(|_| ()),
@@ -721,6 +732,11 @@ impl Host {
                 pr: e.pr.clone(),
             })
             .collect()
+    }
+
+    /// What this machine was last recorded as being called, if it ever was (see [`HostEvent::MachineNamed`]).
+    pub fn machine_name(&self) -> Option<&str> {
+        self.machine_name.as_deref()
     }
 
     /// The selected workspace, if any.
@@ -1108,6 +1124,12 @@ impl Host {
                     Err(error) => finish(&remover, &path, false, Some(error.to_string())),
                 }
             }
+            HostEvent::MachineNamed { name } => match self.machine_name() == Some(name.as_str()) {
+                true => Vec::new(),
+                false => vec![append_host(ShepherdFrame::MachineRenamed(MachineRenamed {
+                    name,
+                }))],
+            },
             HostEvent::Restarted => {
                 let why = || Some("the host stopped before the worktree was removed".to_owned());
                 let sessions = self
@@ -1601,6 +1623,9 @@ impl Host {
                 ShepherdFrame::WorktreeRemoved(removed) => {
                     self.cleaning.remove(Path::new(&removed.path));
                 }
+                ShepherdFrame::MachineRenamed(renamed) => {
+                    self.machine_name = Some(renamed.name.clone());
+                }
                 _ => {}
             }
             return;
@@ -1618,6 +1643,7 @@ impl Host {
                 self.branches.extend(created.branch.iter().cloned());
                 let entry = Entry {
                     name: created.name.clone(),
+                    machine: env.machine().clone(),
                     created: env.ts().clone(),
                     phase,
                     closed: false,

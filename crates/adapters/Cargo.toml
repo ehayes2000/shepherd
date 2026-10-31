@@ -14,6 +14,9 @@ wait-timeout.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+# The machine identity (T29) is an iroh secret key, so the endpoint (T30) binds with the same key. Features as in
+# spike T28: no portmapper, no metrics.
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 
 [dev-dependencies]
 shepherd-testkit.workspace = true

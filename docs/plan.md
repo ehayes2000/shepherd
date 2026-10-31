@@ -76,7 +76,8 @@ dependencies are done.
 | `Worktrees` | host | T20 | git CLI (`repo_root` added in F28) |
 | `Commands` (run hook scripts) | host | T23 | `/bin/sh -c` via std::process |
 | `Forge` | host | T27 | `gh` CLI |
-| `Peers` | host | T29 | iroh |
+| `MachineIdentity` | host | T29 | `~/.shepherd/identity.key` (an iroh secret key; `KeyFileIdentity`) |
+| `Peers` | host | T30 | iroh |
 
 ## Out of scope for the initial feature set
 

@@ -36,7 +36,7 @@ and worktree. This gives us:
 | `seq`     | Monotonic per log, starting at 1, gapless. Assigned by the host at append time. Readers resume with `from: seq`, the last seq they already have, and receive the entries after it. |
 | `id`      | ULID, globally unique. Used to dedupe when logs are relayed between machines. |
 | `ts`      | Host wall-clock time at append. Writers emit RFC 3339 UTC with ms; readers accept any ISO 8601 instant jiff parses and keep the original text. Ordering within a log comes from `seq`; across logs, by instant. |
-| `machine` | ID of the machine whose host appended the entry. |
+| `machine` | ID of the machine whose host appended the entry: its iroh node id, lowercase hex (T29). Logs from before T29 say `local`, which reads as the machine whose log it is. |
 | `session` | Shepherd session ID (`[a-z0-9_-]{1,64}`, lowercase only so case-insensitive filesystems can't alias; the runtime uses `s_<lowercase ulid>`), or `null` for host-level entries. |
 | `source`  | Who produced the frame. `kind` ∈ `acp` (a real ACP wire), `hook` (translated from agent hooks), `shepherd` (the host itself), `ext` (third-party producer). Optional `agent` names the agent. |
 | `dir`     | `to_agent`, `from_agent`, or `internal`. Gives ACP direction for wire frames. |
@@ -84,6 +84,7 @@ These are for facts ACP has no message for. The method name is `_<namespace>/<ar
 | `_shepherd/worktree/removing` | `{ path, force?, pre_remove? }` (closing is removing the session's worktree: `force` even if that loses work; `pre_remove`: the hooks run there first, each then a `worktree/hook`; `session/closed` ends it. In the host log: the cleanup view is removing an orphan worktree, its hooks' `worktree/hook`s in the host log too, and `worktree/removed` ends it) |
 | `_shepherd/worktree/removed`  | `{ path, removed: bool, kept? }` (host log: how removing the orphan worktree at `path` went; neither `removed` nor `kept`: it was already gone) |
 | `_shepherd/workspace/selected`| `{ repo }` (host log) |
+| `_shepherd/machine/renamed`  | `{ name }` (host log: the host started under a name other than the last one recorded, its first start included; see `core::machine`) |
 
 - `_<vendor>/...` is for anyone else, e.g. `_claude-code/...` for hook data with no ACP or shepherd equivalent.
   When a vendor frame turns out to be generally useful, promote it to a `_shepherd/` method. Never repurpose

@@ -141,6 +141,18 @@ pub fn create_or_open_private_file(
     path: &Path,
     opts: &OpenOptions,
 ) -> Result<File, PrivateFsError> {
+    match create_new_private_file(path, opts)? {
+        Some(file) => Ok(file),
+        None => open_existing_private_file(path, opts),
+    }
+}
+
+/// Creates `path` exactly `0600` with `O_CREAT|O_EXCL` and opens it with `opts`, or returns `None` if something is
+/// already there (which is left alone, whatever it is). The parent directory must already exist.
+pub fn create_new_private_file(
+    path: &Path,
+    opts: &OpenOptions,
+) -> Result<Option<File>, PrivateFsError> {
     let path = &normalize(path);
     let mut new = opts.clone();
     new.create_new(true)
@@ -150,9 +162,9 @@ pub fn create_or_open_private_file(
         Ok(file) => {
             file.set_permissions(fs::Permissions::from_mode(FILE_MODE))
                 .map_err(|e| io_err(path, e))?;
-            Ok(file)
+            Ok(Some(file))
         }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => open_existing_private_file(path, opts),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(None),
         Err(e) => Err(open_err(path, e)),
     }
 }

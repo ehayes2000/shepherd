@@ -341,6 +341,67 @@ fn a_forced_upgrade_re_execs_the_host_in_place_and_the_shell_keeps_running() {
     );
 }
 
+fn is_rename(e: &Envelope) -> bool {
+    matches!(e.frame(), Frame::Shepherd(m) if matches!(m.body(), ShepherdFrame::MachineRenamed(_)))
+}
+
+/// T29: the first run makes the machine key in the temp `HOME`; entries and the hello carry the id derived from it, and
+/// an update in place keeps both the id and the name.
+#[test]
+fn the_machine_keeps_its_key_id_and_name_across_an_upgrade() {
+    use shepherd_adapters::KeyFileIdentity;
+    use shepherd_core::ports::{MachineIdentity, MachineKey};
+
+    let (_running, root) = start_host();
+    let socket = root.join(shepherd::host::SOCKET_FILE);
+    let key = root.join(shepherd_adapters::identity::IDENTITY_FILE);
+    let bytes = fs::read(&key).expect("the first run made the key");
+    assert_eq!(bytes.len(), 32);
+    let machine = KeyFileIdentity::new(&root)
+        .load_or_create()
+        .unwrap()
+        .machine_id();
+    let name = shepherd_core::machine::name(
+        &shepherd::host::load_config(&root, None).unwrap(),
+        shepherd_adapters::hostname::hostname().as_deref(),
+    );
+
+    let mut a = Client::connect(&socket);
+    a.request(ClientRequest::Subscribe(Subscribe::default()));
+    a.request(ClientRequest::SessionNew(SessionNew::default()));
+    let mut seen = Seen::default();
+    a.read_until(&mut seen, |s| answered(s, Method::SessionNew).is_some());
+    let hello = answered(&seen, Method::Hello).unwrap().clone();
+    assert_eq!(hello["machine"], machine.as_str());
+    assert_eq!(hello["name"], name.as_str());
+    assert!(seen.entries.iter().all(|e| e.machine() == &machine));
+    assert_eq!(seen.entries.iter().filter(|e| is_rename(e)).count(), 1);
+
+    a.request(ClientRequest::HostUpgrade(HostUpgrade { force: true }));
+    a.read_until(&mut seen, |s| s.closed);
+
+    let mut b = Client::connect(&socket);
+    b.request(ClientRequest::Subscribe(Subscribe::default()));
+    b.request(ClientRequest::SessionNew(SessionNew::default()));
+    let mut after = Seen::default();
+    b.read_until(&mut after, |s| answered(s, Method::SessionNew).is_some());
+    let hello = answered(&after, Method::Hello).unwrap().clone();
+    assert_eq!(hello["machine"], machine.as_str());
+    assert_eq!(hello["name"], name.as_str());
+    // The new image's own entries: the second session's.
+    let second = SessionId::new(
+        answered(&after, Method::SessionNew).unwrap()["session"]
+            .as_str()
+            .unwrap(),
+    );
+    b.read_until(&mut after, |s| {
+        s.entries.iter().any(|e| e.session() == Some(&second))
+    });
+    assert!(after.entries.iter().all(|e| e.machine() == &machine));
+    assert_eq!(after.entries.iter().filter(|e| is_rename(e)).count(), 1);
+    assert_eq!(fs::read(&key).unwrap(), bytes, "the key was replaced");
+}
+
 #[test]
 fn an_exec_that_fails_restores_cloexec_takes_the_listener_back_and_resumes_the_sessions() {
     use shepherd_adapters::handoff::is_inherited;

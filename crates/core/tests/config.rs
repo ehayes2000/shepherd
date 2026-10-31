@@ -456,3 +456,45 @@ fn a_zero_hook_timeout_is_an_error() {
     let result = resolve(json!({ "workspaces": { "app": { "hook_timeout_s": 0 } } }));
     assert_eq!(result, Err(ConfigError::ZeroHookTimeout("app".to_owned())));
 }
+
+// ---------- [machine] ----------
+
+#[test]
+fn no_machine_table_names_no_machine() {
+    assert_eq!(Config::resolve(None, None).unwrap().machine_name(), None);
+    assert_eq!(
+        resolve(json!({ "machine": {} })).unwrap().machine_name(),
+        None
+    );
+}
+
+#[test]
+fn machine_name_comes_from_the_machine_table() {
+    let config = resolve(json!({ "machine": { "name": "studio mac" } })).unwrap();
+    assert_eq!(config.machine_name(), Some("studio mac"));
+}
+
+#[test]
+fn machine_name_is_made_display_safe_and_trimmed() {
+    let config =
+        resolve(json!({ "machine": { "name": "  desk\u{1b}[2J\u{202e}top \n" } })).unwrap();
+    assert_eq!(config.machine_name(), Some("desk[2Jtop"));
+}
+
+#[test]
+fn an_empty_machine_name_is_an_error() {
+    for name in ["", "   ", "\u{1b}\u{200b}\n"] {
+        let result = resolve(json!({ "machine": { "name": name } }));
+        assert_eq!(result, Err(ConfigError::EmptyMachineName), "{name:?}");
+    }
+}
+
+#[test]
+fn a_machine_name_may_have_64_grapheme_clusters_and_no_more() {
+    // `e` and a combining acute: one grapheme cluster of two chars.
+    let cluster = "e\u{301}";
+    let config = resolve(json!({ "machine": { "name": cluster.repeat(64) } })).unwrap();
+    assert_eq!(config.machine_name(), Some("\u{e9}".repeat(64).as_str()));
+    let result = resolve(json!({ "machine": { "name": cluster.repeat(65) } }));
+    assert_eq!(result, Err(ConfigError::LongMachineName { max: 64 }));
+}

@@ -6,7 +6,9 @@
 //! 2. The event log is opened, which takes the root's exclusive lock. A second host fails here, cleanly, before it
 //!    could mistake the first host's socket for a stale one and replace it.
 //! 3. Only then is the socket bound.
-//! 4. Once serving, `shepherd host` releases its stderr (`shepherd_adapters::launcher::release_stderr`), which tells
+//! 4. The machine key (`identity.key`, T29) is read, or made on the first run, with the lock held. One that can't be
+//!    used stops the host and is never replaced.
+//! 5. Once serving, `shepherd host` releases its stderr (`shepherd_adapters::launcher::release_stderr`), which tells
 //!    a client that launched it that it started. A startup error before that is printed there, for that client.
 
 mod env;
@@ -26,18 +28,21 @@ use crate::build::{InstalledExe, build_of};
 use shepherd_adapters::handoff;
 use shepherd_adapters::private_fs::{self, PrivateFsError};
 use shepherd_adapters::{
-    GhForge, GitWorktrees, JsonlEventLog, PortablePty, ShellCommands, TomlConfigSource,
-    UnixLinkError, UnixListenLink,
+    GhForge, GitWorktrees, JsonlEventLog, KeyFileIdentity, PortablePty, ShellCommands,
+    TomlConfigSource, UnixLinkError, UnixListenLink,
 };
 use shepherd_core::config::{Config, ConfigError};
-use shepherd_core::ports::{ConfigSource, LogError, LogId};
+use shepherd_core::ids::MachineId;
+use shepherd_core::ports::{
+    ConfigSource, IdentityError, LogError, LogId, MachineIdentity, MachineKey,
+};
 
 pub use env::{Env, RealEnv};
 pub use runtime::{
     AdoptedSession, Adoption, CATCH_UP_BATCH, CATCH_UP_TICK, CREATE_CLEANUP_GRACE, CarriedSession,
-    HostRuntime, INITIAL_SIZE, LOCAL_MACHINE, LOW_WATER, MAX_CATCH_UP_TICK, PreflightRunner,
-    RuntimeEvent, RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError,
-    SwapPlan, adopt_sessions, runtime_channel,
+    HostRuntime, INITIAL_SIZE, LOW_WATER, MAX_CATCH_UP_TICK, PreflightRunner, RuntimeEvent,
+    RuntimeRx, RuntimeSettings, RuntimeTx, SHUTDOWN_GRACE, STALL_TIMEOUT, StartError, SwapPlan,
+    adopt_sessions, runtime_channel,
 };
 
 /// The host runtime on the real adapters.
@@ -97,6 +102,11 @@ pub enum HostStartError {
     Thread(String),
     #[error("cannot take over from the previous host image: {0}")]
     Adopt(String),
+    #[error(
+        "cannot use the machine key {path}: {error}. It is never replaced, since a new key makes this a new machine to \
+         every peer: fix it, or move it aside to start as a new machine"
+    )]
+    Identity { path: PathBuf, error: IdentityError },
 }
 
 fn root_error(root: &Path, e: PrivateFsError) -> HostStartError {
@@ -188,9 +198,10 @@ fn open_inner(
     let link = UnixListenLink::bind(root.join(SOCKET_FILE), tx.link_sink())
         .map_err(HostStartError::Socket)?;
     let config = load_config(root, login_shell)?;
+    let machine = load_machine(root)?;
     let shepherd =
         std::env::current_exe().map_err(|e| HostStartError::Executable(e.to_string()))?;
-    let settings = settings(root, home, config, shepherd, None);
+    let settings = settings(root, home, config, shepherd, None, machine);
     let pty = PortablePty::new(tx.pty_sink());
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&root.join(WORKTREES_DIR))?);
     let commands = ShellCommands::new();
@@ -227,6 +238,9 @@ fn open_adopted_inner(
     let (tx, rx) = runtime_channel();
     let link = UnixListenLink::adopt(root.join(SOCKET_FILE), listener, tx.link_sink())
         .map_err(HostStartError::Socket)?;
+    // The previous image's key, read again: updating in place keeps the machine. Read before any session is adopted,
+    // like the log and the listener, so a key that can't be used stops the takeover cleanly.
+    let machine = load_machine(root)?;
     let (config, warning) = match load_config(root, login_shell.clone()) {
         Ok(config) => (config, None),
         Err(error) => {
@@ -251,7 +265,7 @@ fn open_adopted_inner(
         "took over from the previous host image"
     );
     // The path the previous image execed is this one's startup path: `current_exe()` may already name another file.
-    let settings = settings(root, home, config, file.exe.clone(), warning);
+    let settings = settings(root, home, config, file.exe.clone(), warning, machine);
     // Sessions are adopted by now, so a root that can't be resolved doesn't stop the takeover: it is used as it is.
     let dir = root.join(WORKTREES_DIR);
     let worktrees = GitWorktrees::new(resolve_worktrees_root(&dir).unwrap_or_else(|error| {
@@ -275,6 +289,19 @@ fn open_adopted_inner(
     .map_err(|e| start_error(root, e))
 }
 
+/// This machine's id, from its key in `root` (`identity.key`), which the first run makes. The log's lock must be held
+/// already, so no other host is making one at the same time.
+fn load_machine(root: &Path) -> Result<MachineId, HostStartError> {
+    let identity = KeyFileIdentity::new(root);
+    identity
+        .load_or_create()
+        .map(|key| key.machine_id())
+        .map_err(|error| HostStartError::Identity {
+            path: identity.path(),
+            error,
+        })
+}
+
 /// The config under `root`, resolved with the user's login shell.
 pub fn load_config(root: &Path, login_shell: Option<String>) -> Result<Config, HostStartError> {
     let config_path = root.join(CONFIG_FILE);
@@ -289,13 +316,14 @@ pub fn load_config(root: &Path, login_shell: Option<String>) -> Result<Config, H
 }
 
 /// The runtime's settings under `root`: `config`, and the build at `shepherd`, the path this host started from.
-/// `warning` is for every client's hello.
+/// `warning` is for every client's hello. `machine` is this machine's id; its hostname is read here.
 fn settings(
     root: &Path,
     home: PathBuf,
     config: Config,
     shepherd: PathBuf,
     warning: Option<String>,
+    machine: MachineId,
 ) -> RuntimeSettings {
     // A host that can't read its own executable says no build: clients take it for an older host.
     // Hashed once: the first hello finds the same file there and reuses the digest.
@@ -314,6 +342,8 @@ fn settings(
         socket: root.join(SOCKET_FILE),
         preflight: PreflightRunner::new(|exe| handoff::preflight(exe, PREFLIGHT_BOUND)),
         warning,
+        machine,
+        hostname: shepherd_adapters::hostname::hostname(),
     }
 }
 

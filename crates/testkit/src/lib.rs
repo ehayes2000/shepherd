@@ -126,6 +126,8 @@ pub mod builders {
         seqs: BTreeMap<Option<SessionId>, u64>,
         next_reply: u64,
         pinned_ts: Option<Timestamp>,
+        /// The machine later entries are stamped with, when not `m_test`.
+        machine: Option<MachineId>,
     }
 
     impl HostDriver {
@@ -151,6 +153,12 @@ pub mod builders {
 
         pub fn unpin_ts(&mut self) {
             self.pinned_ts = None;
+        }
+
+        /// Stamps every later entry with machine `machine` instead of `m_test`, e.g. `local`, as hosts did before machines
+        /// had ids.
+        pub fn stamp_machine(&mut self, machine: &str) {
+            self.machine = Some(MachineId::new(machine));
         }
 
         /// The `ts` the next entry gets: the pinned one, else `2026-10-29T12:00:00.000Z` plus 1 ms per entry
@@ -197,7 +205,10 @@ pub mod builders {
             let stamp = Stamp {
                 id: EntryId::new(format!("e{}", self.log.len() + 1)),
                 ts: self.now(),
-                machine: MachineId::new("m_test"),
+                machine: self
+                    .machine
+                    .clone()
+                    .unwrap_or_else(|| MachineId::new("m_test")),
             };
             let seq = self.seqs.entry(draft.session.clone()).or_insert(0);
             *seq += 1;
@@ -493,6 +504,12 @@ pub mod builders {
             self.connect_answering(answer)
         }
 
+        /// Like [`ClientDriver::connect`], with a host whose machine is called `name`.
+        pub fn connect_named(&mut self, name: &str) -> Vec<ClientCommand> {
+            let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test", "name": name });
+            self.connect_answering(answer)
+        }
+
         /// Like [`ClientDriver::connect`], with a host whose config has `profiles` (name, agent), `default` the
         /// default one.
         pub fn connect_with_profiles(
@@ -668,6 +685,7 @@ pub mod contracts {
     pub mod config;
     pub mod event_log;
     pub mod forge;
+    pub mod identity;
     pub mod launcher;
     pub mod link;
     pub mod pty;
@@ -682,6 +700,7 @@ pub mod fakes {
     pub mod event_log;
     pub mod forge;
     pub mod hold;
+    pub mod identity;
     pub mod launcher;
     pub mod link;
     pub mod pty;

@@ -3,10 +3,10 @@
 //! The first three lines are the header: the search field (`⌕ Search…` across the sidebar), which opens the finder,
 //! the workspace (`⌂ <name>`, or `⌂ choose a workspace`), which opens the switcher, then a `+ New session` button
 //! (`⌕`, `⌂` and `+` when collapsed). Each session is two lines: its status glyph,
-//! name and a `×` close button at the right edge, then `machine · PR` (the machine is `local` until M4): the PR's number
-//! and its checks (`#123 ✓` passing, `✗` failing, `…` pending, nothing without checks), or its state when it isn't open
-//! (`#123 merged`), or `—` without one. A session from
-//! another workspace is dimmed, and its second line says which workspace instead. The second line of a session that
+//! name and a `×` close button at the right edge, then `machine · PR`: the machine's name, from its host's hello
+//! ([`Client::machine_label`]), then the PR's number and its checks (`#123 ✓` passing, `✗` failing, `…` pending,
+//! nothing without checks), or its state when it isn't open (`#123 merged`), or `—` without one. A session from another
+//! workspace is dimmed, and its second line says which workspace instead. The second line of a session that
 //! failed to start is the reason, in red; of one whose worktree is being made (or its hooks run), `creating worktree…`;
 //! of one that is closing while its worktree is removed, `removing worktree…`;
 //! of one that started with a warning (a post-create hook failed), the warning, in yellow. A second line too long for
@@ -51,8 +51,6 @@ const HEADER_HEIGHT: u16 = 3;
 const SELECTED_BG: Color = Color::DarkGray;
 const ATTENTION: Color = Color::Yellow;
 const ATTENTION_BAR: &str = "▌";
-/// What line 2 names the machine as, until sessions know theirs (M4).
-const MACHINE: &str = "local";
 /// What line 2 says of a session without a PR.
 const NO_PR: &str = "—";
 /// What line 2 says while a session's worktree is being made.
@@ -387,7 +385,11 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
                 dim.fg(Color::Gray),
             ),
             _ => (
-                format!("{MACHINE} · {}", pr_label(session)),
+                format!(
+                    "{} · {}",
+                    client.machine_label(&session.machine),
+                    pr_label(session)
+                ),
                 dim.fg(Color::Gray),
             ),
         };
