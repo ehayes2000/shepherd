@@ -18,7 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T40 | Capture transcripts from Claude Code and Codex | done | 4380131 | 2 | subagent non-regular-file refusal untested (FIFO would hang capture) |
 | T41 | Restore transcripts for a target cwd | done | f810144 | 2 | round 2 APPROVE; minor: RestoreError::Changed doc still says 'stopped resolving to itself' (fix in T42). Flags for T44: >200-char and non-ASCII cwds refused; cwd used as given |
 | T42 | Archive port and host capture | done | 9a91698 | 3 | round 3 APPROVE |
-| T42b | Capture across `/clear` and compressed Codex rollouts | todo |  |  |  |
+| T42b | Capture across `/clear` and compressed Codex rollouts | building | task/t42b-capture-edges |  |  |
 | T43 | `shepherd archive` CLI | done | f594ec9 | 2 | round 2 APPROVE; argv faithful-check test → T44 |
 | T44 | Real-agent end-to-end suite | todo |  |  |  |
 
@@ -160,8 +160,12 @@ acceptance:
 - From T42: `session/closed` carries an optional `note` (e.g. "no transcript was found"), but the client doesn't show it
   yet. Show it as the close notice (core client + tui), with a test.
 - From T42's review: an agent session whose cwd is not in a git repo fails `root_commit` on every turn end (a warning each
-  time) and is never archived. Archive it under a repo-less key, or say clearly once that it can't be archived.
-scope: crates/core, crates/archive, crates/shepherd
+  time) and is never archived. PM decision: no schema change now; log once per session that it can't be archived
+  (not on every turn end), and never block anything (such a session has no worktree to remove). Test it.
+scope: crates/core, crates/archive, crates/shepherd, crates/tui
+notes: (binding) `agent_home` stays a parameter to the archive crate; the session's launch env is known to the host (the
+profile's env), resolved in core purely from that data, never by reading the process env in core. Builders never run the
+real agents; compressed-rollout fixtures are built from the documented format and marked provisional (T44 re-records).
 
 ### T43: `shepherd archive` CLI
 depends: T42, T41
