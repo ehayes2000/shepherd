@@ -1,11 +1,15 @@
-//! Random sequences of what a user does (clicks on drawn words, keys, the wheel, pastes, resizes down to 1x1) and of
-//! what the host does never panic and keep two invariants after every step:
+//! Random sequences of what a user does (clicks on drawn words, keys, the wheel, pastes, resizes down to 1x1, dragging
+//! dividers) and of what the host does (including layout ops from elsewhere: pages, splits, closes, what panes show,
+//! ratios) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
+//! after each step.
 //!
 //! - every button drawn whole is hittable: a click on its first cell finds a control, not nothing, the popup's body,
 //!   the backdrop or the terminal;
 //! - the selected session's row stays visible: unless the user has wheeled the list (or the host has listed a new
 //!   session above it) since the selection or the window last changed, some cell of the sidebar hits it (while no
-//!   popup covers it and the sidebar has room for a row).
+//!   popup covers it and the sidebar has room for a row);
+//! - the focused pane is a pane of the current page, and the session it shows (if it has room for a terminal) was last
+//!   sized by this window to exactly that terminal.
 //!
 //! Seeded and bounded by count (cases x steps), not time. A failure prints its seed and its (shrunk) steps. Run another
 //! seed with `PROPTEST_RNG_SEED=<n> cargo test -p shepherd-tui --test ui invariants`.
@@ -15,9 +19,12 @@ use proptest::sample::Index;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunner};
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Position;
-use shepherd_core::ids::SessionId;
+use shepherd_core::client::panes::{Area, arrange};
+use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
+use shepherd_core::ports::pty::PtySize;
 use shepherd_tui::Target;
-use shepherd_tui::layout::{layout, sidebar_rows};
+use shepherd_tui::layout::{layout, pane_size, sidebar_rows};
 
 use crate::harness::Ui;
 
@@ -66,6 +73,34 @@ enum Step {
     HostRename(Index, Index),
     /// A session's PTY exits.
     HostExit(Index),
+    /// Something else (another window, the CLI) changes the host's layout.
+    HostLayout(LayoutStep),
+    /// The mouse dragged from one cell to another, each taken modulo the window.
+    Drag(u16, u16, u16, u16),
+}
+
+#[derive(Debug, Clone)]
+enum LayoutStep {
+    /// Split a pane of the current page, side by side (`true`) or stacked, the new half showing a content.
+    Split(Index, bool, Index),
+    Close(Index),
+    Put(Index, Index),
+    PageNew,
+    PageSelect(Index),
+    PageClose(Index),
+    Ratio(Index, u16),
+}
+
+fn layout_step() -> impl Strategy<Value = LayoutStep> {
+    prop_oneof![
+        3 => (any::<Index>(), any::<bool>(), any::<Index>()).prop_map(|(p, h, c)| LayoutStep::Split(p, h, c)),
+        2 => any::<Index>().prop_map(LayoutStep::Close),
+        2 => (any::<Index>(), any::<Index>()).prop_map(|(p, c)| LayoutStep::Put(p, c)),
+        1 => Just(LayoutStep::PageNew),
+        1 => any::<Index>().prop_map(LayoutStep::PageSelect),
+        1 => any::<Index>().prop_map(LayoutStep::PageClose),
+        1 => (any::<Index>(), 0u16..=1000).prop_map(|(p, r)| LayoutStep::Ratio(p, r)),
+    ]
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -81,6 +116,9 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::HostNew),
         1 => (any::<Index>(), any::<Index>()).prop_map(|(s, n)| Step::HostRename(s, n)),
         1 => any::<Index>().prop_map(Step::HostExit),
+        3 => layout_step().prop_map(Step::HostLayout),
+        1 => (any::<u16>(), any::<u16>(), any::<u16>(), any::<u16>())
+            .prop_map(|(x0, y0, x1, y1)| Step::Drag(x0, y0, x1, y1)),
     ]
 }
 
@@ -195,21 +233,140 @@ impl Run {
                     });
                 }
             }
+            Step::HostLayout(step) => {
+                if let Some(op) = self.layout_op(step) {
+                    self.ui.host_layout(op);
+                }
+            }
+            Step::Drag(x0, y0, x1, y1) => {
+                let (from, to) = (self.cell(*x0, *y0), self.cell(*x1, *y1));
+                self.ui.drag(from, to);
+            }
         }
+        self.ui.apply_layout_ops();
         if self.ui.client().selected() != before.as_ref() {
             self.unfitted = false;
         }
     }
 
+    /// What `step` asks of the host's layout, on the panes and pages it has now.
+    fn layout_op(&self, step: &LayoutStep) -> Option<LayoutOp> {
+        let layout = self.ui.client().host_layout();
+        let mut leaves = Vec::new();
+        let mut splits = Vec::new();
+        walk(&layout.current_page().root, &mut leaves, &mut splits);
+        let pages: Vec<_> = layout.pages().iter().map(|p| p.id).collect();
+        let leaf = |at: &Index| leaves[at.index(leaves.len())];
+        let page = |at: &Index| pages[at.index(pages.len())];
+        Some(match step {
+            LayoutStep::Split(at, side, content) => LayoutOp::Split {
+                pane: leaf(at),
+                dir: if *side {
+                    SplitDir::Horizontal
+                } else {
+                    SplitDir::Vertical
+                },
+                ratio: Ratio::default(),
+                content: self.content(content),
+            },
+            LayoutStep::Close(at) => LayoutOp::Close { pane: leaf(at) },
+            LayoutStep::Put(at, content) => LayoutOp::Put {
+                pane: leaf(at),
+                content: self.content(content),
+            },
+            LayoutStep::PageNew => LayoutOp::PageNew {
+                name: None,
+                content: Content::Selected,
+            },
+            LayoutStep::PageSelect(at) => LayoutOp::PageSelect { page: page(at) },
+            LayoutStep::PageClose(at) => LayoutOp::PageClose { page: page(at) },
+            LayoutStep::Ratio(at, permille) => {
+                if splits.is_empty() {
+                    return None;
+                }
+                LayoutOp::Ratio {
+                    pane: splits[at.index(splits.len())],
+                    ratio: Ratio::from_permille(*permille),
+                }
+            }
+        })
+    }
+
+    /// Something for a pane to show: the selection, nothing, a view, a listed session or a peer's.
+    fn content(&self, at: &Index) -> Content {
+        let mut choices = vec![
+            Content::Selected,
+            Content::Empty,
+            Content::View(ViewKind::Status),
+            Content::peer_session(MachineId::new("m_far"), SessionId::new("p1")),
+        ];
+        choices.extend(
+            self.ui
+                .client()
+                .sessions()
+                .iter()
+                .map(|s| Content::session(s.id.clone())),
+        );
+        choices[at.index(choices.len())].clone()
+    }
+
     /// The invariants, or what broke them.
     fn check(&self) -> Result<(), String> {
         self.buttons_are_hittable()?;
-        self.selection_is_visible()
+        self.selection_is_visible()?;
+        self.focused_pane_is_sized()
+    }
+
+    fn focused_pane_is_sized(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        let host_layout = client.host_layout();
+        let focused = client.focused_pane();
+        match host_layout.current_page().root.find(focused) {
+            Some(Pane::Leaf { .. }) => {}
+            other => return Err(format!("the focused pane {focused} is {other:?}")),
+        }
+        let window = self.ui.window();
+        let pane = layout(window).pane;
+        let size = pane_size(window.width, window.height);
+        // The client arranges the layout at the pane area's size, never under the emulator's smallest screen.
+        if (pane.width, pane.height) != (size.cols, size.rows) {
+            return Ok(());
+        }
+        let Some(session) = client.focused_session() else {
+            return Ok(());
+        };
+        if !client.sessions().iter().any(|s| s.id == session) {
+            return Ok(());
+        }
+        let view = Area {
+            x: 0,
+            y: 0,
+            cols: size.cols,
+            rows: size.rows,
+        };
+        let arranged = arrange(&client.layout(), view);
+        let Some(terminal) = arranged.pane(focused).and_then(|p| p.terminal()) else {
+            return Ok(());
+        };
+        let wanted = PtySize {
+            cols: terminal.cols,
+            rows: terminal.rows,
+        };
+        match client.session_size(&session) {
+            Some(given) if given == wanted => Ok(()),
+            given => Err(format!(
+                "the focused session {session} was last sized {given:?}, not to its pane's {wanted:?}"
+            )),
+        }
     }
 
     fn buttons_are_hittable(&self) -> Result<(), String> {
         let popup = self.ui.client().popup().is_some();
         for (at, word) in self.ui.words() {
+            // A pane's menu button is under the popup's backdrop like everything else outside it.
+            if popup && word.starts_with("[≡") {
+                continue;
+            }
             let bracketed = word.starts_with('[') && word.ends_with(']') && word.len() > 2;
             // `[Start session]` and the like are two words; the first of them starts the button.
             let opens_button = word.starts_with('[') && !word.contains(']') && word.len() > 1;
@@ -252,6 +409,18 @@ impl Run {
             Err(format!(
                 "the selected session {selected} has no visible row"
             ))
+        }
+    }
+}
+
+/// The leaves and the splits of `pane`, in order.
+fn walk(pane: &Pane, leaves: &mut Vec<PaneId>, splits: &mut Vec<PaneId>) {
+    match pane {
+        Pane::Leaf { id, .. } => leaves.push(*id),
+        Pane::Split { id, a, b, .. } => {
+            splits.push(*id);
+            walk(a, leaves, splits);
+            walk(b, leaves, splits);
         }
     }
 }

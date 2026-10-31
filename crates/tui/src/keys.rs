@@ -6,10 +6,12 @@
 //!
 //! The mouse clicks what [`crate::hit`] finds under it (decision 0014), on the release of a press of the same button
 //! that went down on the same control ([`Pointer`] remembers it). A left click presses the control; a right click on a
-//! session opens its context menu at the click. Under an open popup, a click outside it dismisses it. The wheel
+//! session opens its context menu at the click, and in a pane, the pane's menu. Under an open popup, a click outside it
+//! dismisses it. A left press on a divider between split panes drags it: its release, wherever it lands, sets the
+//! split's ratio (one layout op per drag). The wheel
 //! scrolls the sidebar when no popup is open, and the profile picker, the workspace switcher, the finder or the cleanup
 //! view over it. Only a session
-//! that tracks the mouse gets mouse events in its pane.
+//! that tracks the mouse gets mouse events, in the focused pane's terminal; a click in another pane focuses it.
 //!
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
 //! be handled in order.
@@ -18,13 +20,15 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
+use shepherd_core::client::panes::Divider;
 use shepherd_core::client::{Cell, Client, Focus, Intent, Popup};
+use shepherd_core::layout::{Content, LayoutOp};
 use shepherd_core::wire::InputKind;
 use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
 use crate::layout::{Target, hit, layout, pane_size, sidebar_rows};
-use crate::{cleanup, finder, popup};
+use crate::{cleanup, finder, panes, popup};
 
 /// The prefix key. Configurable later.
 pub const PREFIX: char = 'b';
@@ -69,10 +73,12 @@ fn key_kind(key: &KeyEvent) -> InputKind {
     }
 }
 
-/// What the mouse is doing between events: the button last pressed and the control it went down on.
+/// What the mouse is doing between events: the button last pressed and the control it went down on, and a divider
+/// being dragged with the cell it was grabbed at.
 #[derive(Debug, Clone, Default)]
 pub struct Pointer {
     pressed: Option<(MouseButton, Target)>,
+    dragging: Option<(Divider, (u16, u16))>,
 }
 
 /// What a terminal event means. `window` is the whole window, for placing mouse events.
@@ -140,15 +146,31 @@ fn map_mouse(
 ) -> Vec<Intent> {
     // Every press or release ends the earlier press, whatever it lands on (a tracked pane, nothing), so only a press
     // below can arm the next release.
-    let pressed = match mouse.kind {
-        MouseEventKind::Down(_) | MouseEventKind::Up(_) => pointer.pressed.take(),
-        _ => None,
+    let (pressed, dragging) = match mouse.kind {
+        MouseEventKind::Down(_) | MouseEventKind::Up(_) => {
+            (pointer.pressed.take(), pointer.dragging.take())
+        }
+        _ => (None, None),
     };
+    if let (MouseEventKind::Up(MouseButton::Left), Some((divider, from))) = (mouse.kind, dragging) {
+        return divider
+            .dragged(from, (mouse.column, mouse.row))
+            .map(|ratio| {
+                Intent::ApplyLayout(LayoutOp::Ratio {
+                    pane: divider.split,
+                    ratio,
+                })
+            })
+            .into_iter()
+            .collect();
+    }
     let layout = layout(window);
     let target = hit(&layout, client, mouse.column, mouse.row);
     let tracked = modes.mouse.tracking != MouseTracking::Off;
     if target == Some(Target::Terminal) && tracked && client.focus() == Focus::Terminal {
-        let (col, row) = (mouse.column - layout.pane.x, mouse.row - layout.pane.y);
+        let origin = panes::focused_terminal(client, layout.pane).unwrap_or(layout.pane);
+        let col = mouse.column.saturating_sub(origin.x);
+        let row = mouse.row.saturating_sub(origin.y);
         return input(InputKind::Mouse, encode::mouse(mouse, col, row, modes));
     }
     let over_sidebar = client.popup().is_none()
@@ -191,6 +213,12 @@ fn map_mouse(
         _ => Vec::new(),
     };
     match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) if matches!(target, Some(Target::Divider(_))) => {
+            if let Some(Target::Divider(divider)) = target {
+                pointer.dragging = Some((divider, (mouse.column, mouse.row)));
+            }
+            Vec::new()
+        }
         MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) => {
             pointer.pressed = target.map(|target| (button, target));
             Vec::new()
@@ -202,8 +230,8 @@ fn map_mouse(
                     row: mouse.row,
                 };
                 match button {
-                    MouseButton::Left => click(target, client),
-                    _ => right_click(target, at),
+                    MouseButton::Left => click(target, client, at),
+                    _ => right_click(target, client, at),
                 }
             }
             _ => Vec::new(),
@@ -221,8 +249,8 @@ fn first_line(text: &str) -> &str {
     text.split(['\r', '\n']).next().unwrap_or_default()
 }
 
-/// A left click on `target`.
-fn click(target: Target, client: &Client) -> Vec<Intent> {
+/// A left click on `target`, at `at`.
+fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
     match target {
         Target::Search => vec![Intent::BeginFind],
         Target::FinderRow(item) => vec![Intent::FinderChoose(item)],
@@ -250,16 +278,32 @@ fn click(target: Target, client: &Client) -> Vec<Intent> {
         Target::Dismiss | Target::Backdrop => vec![Intent::Dismiss],
         Target::Profile(name) => vec![Intent::PickProfile(name)],
         Target::MachineRow(machine) => vec![Intent::PickMachine(machine)],
+        Target::Pane(pane) => vec![Intent::FocusPane(pane)],
+        Target::PaneMenu(pane) => vec![Intent::OpenPaneMenu { pane, at }],
+        Target::PaneMenuItem(item) => vec![Intent::PaneMenuChoose(item)],
+        Target::Page(page) if page == client.host_layout().current() => Vec::new(),
+        Target::Page(page) => vec![Intent::ApplyLayout(LayoutOp::PageSelect { page })],
+        Target::NewPage => vec![Intent::ApplyLayout(LayoutOp::PageNew {
+            name: None,
+            content: Content::Selected,
+        })],
+        // Dragged, not clicked.
+        Target::Divider(_) => Vec::new(),
         Target::Popup => Vec::new(),
     }
 }
 
-/// A right click on `target`, at `at`: a session's context menu, or away from an open popup.
-fn right_click(target: Target, at: Cell) -> Vec<Intent> {
+/// A right click on `target`, at `at`: a session's context menu, a pane's menu, or away from an open popup.
+fn right_click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
     match target {
         Target::Session(session) | Target::CloseSession(session) => {
             vec![Intent::OpenMenu { session, at }]
         }
+        Target::Terminal => vec![Intent::OpenPaneMenu {
+            pane: client.focused_pane(),
+            at,
+        }],
+        Target::Pane(pane) | Target::PaneMenu(pane) => vec![Intent::OpenPaneMenu { pane, at }],
         Target::Backdrop => vec![Intent::Dismiss],
         _ => Vec::new(),
     }
@@ -310,7 +354,7 @@ fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
             _ => None,
         },
         // Only a click removes anything.
-        Popup::Menu { .. } | Popup::PickProfile | Popup::Cleanup => {
+        Popup::Menu { .. } | Popup::PaneMenu { .. } | Popup::PickProfile | Popup::Cleanup => {
             (key.code == KeyCode::Esc).then_some(Intent::Dismiss)
         }
         // Only a click restarts the host.

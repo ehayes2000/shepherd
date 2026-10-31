@@ -17,7 +17,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Clear};
 use shepherd_core::client::{
-    Cell, Client, CloseCheck, HostOutdated, MachineStatus, MenuEntry, MenuItem, Orphan, Popup,
+    Cell, Client, CloseCheck, HostOutdated, MachineStatus, MenuEntry, MenuItem, Orphan,
+    PaneMenuItem, Popup,
 };
 use shepherd_core::display::DisplayText;
 use shepherd_core::ports::Loss;
@@ -145,6 +146,17 @@ pub(crate) fn place(client: &Client, window: Rect) -> Option<Placed> {
             ),
         },
         Popup::Menu { at, .. } => menu(&client.menu(), *at, window),
+        Popup::PaneMenu { at, .. } => {
+            let lines = client
+                .pane_menu()
+                .into_iter()
+                .map(|item| {
+                    let label = shown(&format!(" {}", pane_menu_label(item)));
+                    (label, Some(Target::PaneMenuItem(item)))
+                })
+                .collect();
+            menu_lines(lines, *at, window)
+        }
         Popup::PickProfile => pick_profile(client, window),
         Popup::Workspace { .. } => switcher(client, window),
         Popup::RestartHost { why } => {
@@ -262,18 +274,45 @@ fn menu_label(entry: &MenuEntry) -> DisplayText {
     })
 }
 
+/// What a pane menu's item is called.
+fn pane_menu_label(item: PaneMenuItem) -> &'static str {
+    match item {
+        PaneMenuItem::SplitRight => "Split right",
+        PaneMenuItem::SplitDown => "Split down",
+        PaneMenuItem::Close => "Close pane",
+        PaneMenuItem::MoveSessionHere => "Move session here",
+        PaneMenuItem::NewPage => "New page",
+        PaneMenuItem::ClosePage => "Close page",
+    }
+}
+
 /// The menu, its top-left corner at `at` or as near as fits in `window`. Each item is a whole line of it.
 fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
-    let labels: Vec<DisplayText> = entries.iter().map(menu_label).collect();
-    // A column after the longest label, and the border.
-    let longest = labels
+    let lines = entries
         .iter()
-        .map(|l| columns(l.as_str()))
+        .map(|entry| {
+            let target = entry
+                .unavailable
+                .is_none()
+                .then_some(Target::MenuItem(entry.item));
+            (menu_label(entry), target)
+        })
+        .collect();
+    menu_lines(lines, at, window)
+}
+
+/// A menu of `lines`, each a label and what clicking it does (`None`: it can't be chosen, and is drawn dim), its
+/// top-left corner at `at` or as near as fits in `window`.
+fn menu_lines(lines: Vec<(DisplayText, Option<Target>)>, at: Cell, window: Rect) -> Placed {
+    // A column after the longest label, and the border.
+    let longest = lines
+        .iter()
+        .map(|(l, _)| columns(l.as_str()))
         .max()
         .unwrap_or(0);
     let wanted = u16::try_from(longest + 3).unwrap_or(u16::MAX);
     let width = wanted.max(MENU_WIDTH).min(window.width);
-    let height = (entries.len() as u16 + 2).min(window.height);
+    let height = (lines.len() as u16 + 2).min(window.height);
     let x = at.col.min(window.right() - width).max(window.x);
     let y = at.row.min(window.bottom() - height).max(window.y);
     let area = Rect::new(x, y, width, height);
@@ -284,15 +323,14 @@ fn menu(entries: &[MenuEntry], at: Cell, window: Rect) -> Placed {
         disabled: Vec::new(),
         tints: Vec::new(),
     };
-    for ((entry, label), y) in entries.iter().zip(labels).zip(inside.y..inside.bottom()) {
-        if entry.unavailable.is_some() {
-            placed.disabled.push((Position::new(inside.x, y), label));
-        } else {
-            placed.controls.push(Control {
+    for ((label, target), y) in lines.into_iter().zip(inside.y..inside.bottom()) {
+        match target {
+            None => placed.disabled.push((Position::new(inside.x, y), label)),
+            Some(target) => placed.controls.push(Control {
                 area: Rect::new(inside.x, y, inside.width, 1),
-                target: Target::MenuItem(entry.item),
+                target,
                 label,
-            });
+            }),
         }
     }
     placed
@@ -528,7 +566,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         Popup::Help => " help ",
         Popup::Rename { .. } => " rename session ",
         Popup::ConfirmClose { .. } => " close session ",
-        Popup::Menu { .. } => "",
+        Popup::Menu { .. } | Popup::PaneMenu { .. } => "",
         Popup::PickProfile => " new session ",
         Popup::Workspace { .. } => " workspace ",
         Popup::RestartHost { .. } => " restart the host ",
@@ -568,7 +606,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
             }
             None
         }
-        Popup::Menu { .. } => None,
+        Popup::Menu { .. } | Popup::PaneMenu { .. } => None,
         Popup::Workspace { path, error } => {
             switcher_body(client, path, error.as_deref(), body, buf)
         }
@@ -598,7 +636,7 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) -> Option<Po
         .filter(|c| !matches!(c.target, Target::FinderRow(_)));
     for control in drawn {
         let style = match (popup, &control.target) {
-            (Popup::Menu { .. }, _)
+            (Popup::Menu { .. } | Popup::PaneMenu { .. }, _)
             | (_, Target::Profile(_) | Target::WorkspaceRow(_) | Target::MachineRow(_)) => {
                 Style::new()
             }

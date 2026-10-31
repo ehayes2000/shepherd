@@ -10,7 +10,7 @@
 //!
 //! Each tick also ends any session's synchronized update (`CSI ? 2026 h`) whose deadline has passed: a screen reads no
 //! clock ([`Screen::sync_hold`]), so without this a session that never ends its update would keep showing the frame
-//! from before it. [`TerminalView`] passes the selected session's cursor shape and blink to the real terminal.
+//! from before it. [`TerminalView`] passes the focused session's cursor shape and blink to the real terminal.
 //!
 //! Each trusted peer gets a conn of its own, opened with the same connector as the local host's (T31b): the client's
 //! core makes it a tunnel to that machine's host with its first request. Every conn's events are tagged with the
@@ -242,8 +242,9 @@ struct SyncDeadline {
     due: jiff::Timestamp,
 }
 
-fn selected_screen<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
-    screens.get(client.selected()?)
+/// The terminal of the session the focused pane shows: where keys go.
+fn focused_screen<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
+    screens.get(&client.focused_session()?)
 }
 
 fn terminal_error(e: impl fmt::Display) -> ClientError {
@@ -532,7 +533,7 @@ where
         self.keyboard_enhanced = on;
     }
 
-    /// A terminal event: what it means is decided by the TUI from the client's state and the selected session's
+    /// A terminal event: what it means is decided by the TUI from the client's state and the focused session's
     /// input modes.
     pub fn terminal_event(&mut self, event: Event) {
         let event = match event {
@@ -543,7 +544,7 @@ where
             }
             event => event,
         };
-        let modes = selected_screen(&self.client, &self.screens)
+        let modes = focused_screen(&self.client, &self.screens)
             .map(Screen::modes)
             .unwrap_or_default();
         let window = Rect::new(0, 0, self.window.0, self.window.1);
@@ -675,7 +676,8 @@ where
             }
             let (cols, rows) = self
                 .client
-                .size()
+                .session_size(&out.session)
+                .or(self.client.size())
                 .map_or(DEFAULT_SIZE, |s| (s.cols, s.rows));
             let screen = self
                 .screens
@@ -718,6 +720,18 @@ where
             }
             for command in self.client.handle(event) {
                 queue.extend(self.execute(command));
+            }
+        }
+        self.fit_screens();
+    }
+
+    /// Resizes each session's terminal to the size the client last gave it: its pane's (T49).
+    fn fit_screens(&mut self) {
+        for (id, screen) in &mut self.screens {
+            if let Some(size) = self.client.session_size(id)
+                && screen.size() != (size.cols, size.rows)
+            {
+                screen.resize(size.cols, size.rows);
             }
         }
     }

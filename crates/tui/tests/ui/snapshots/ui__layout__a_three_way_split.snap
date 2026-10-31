@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/ui/layout.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │┌ api · local ────────────────── [≡] ┐┌ fix-login · local ──────────── [≡] ┐
+ ⌂ choose a workspace  ││in api                              ││in fix-login                        │
+ + New session         ││                                    ││                                    │
+ ◌ api                ×││                                    ││                                    │
+   local · —           ││                                    ││                                    │
+ ◌ docs               ×││                                    ││                                    │
+   local · —           ││                                    ││                                    │
+ ◌ fix-login          ×││                                    │└────────────────────────────────────┘
+   local · —           ││                                    │┌ docs · local ───────────────── [≡] ┐
+                       ││                                    ││in docs                             │
+                       ││                                    ││                                    │
+                       ││                                    ││                                    │
+                       ││                                    ││                                    │
+                       ││                                    ││                                    │
+                       ││                                    ││                                    │
+ ctrl-b ? help Detach ?│└────────────────────────────────────┘└────────────────────────────────────┘

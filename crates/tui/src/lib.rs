@@ -1,7 +1,7 @@
 //! Pure rendering of client state and key mapping. See `docs/architecture.md`.
 //!
-//! - [`render`] draws the sidebar ([`sidebar`]), the selected session's terminal in the pane ([`layout`]), and any
-//!   popup or menu. [`cursor_style`] is the cursor shape to go with it, which a ratatui frame can't carry.
+//! - [`render`] draws the sidebar ([`sidebar`]), the host's layout in the pane area ([`layout`]): its page bar and
+//!   panes, each showing its session's terminal (`panes`), and any popup or menu. [`cursor_style`] is the cursor shape to go with it, which a ratatui frame can't carry.
 //! - [`map_event`] / [`map_key`] turn terminal events into client [`Intent`](shepherd_core::client::Intent)s, with input
 //!   for the session encoded by [`encode`] for its [`Screen::modes`].
 //!
@@ -26,6 +26,7 @@ mod finder;
 mod keys;
 pub mod layout;
 pub mod machine;
+mod panes;
 mod popup;
 mod screen;
 pub mod sidebar;
@@ -54,35 +55,31 @@ pub type Screens = BTreeMap<SessionId, Screen>;
 /// Draws the whole window.
 pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
     let layout = layout(frame.area());
-    let selected = client.selected().and_then(|id| screens.get(id));
     let buf = frame.buffer_mut();
     sidebar::render(client, &layout, buf);
-    match selected {
-        Some(screen) => render_screen(screen, layout.pane, buf),
-        None if client.sessions().is_empty() => empty(client, layout.pane, buf),
-        None => {}
-    }
+    panes::render(client, screens, layout.pane, buf);
     sidebar::wide_notice(client, &layout, buf);
     let popup_cursor = popup::render(client, frame.area(), frame.buffer_mut());
-    let cursor = match (client.popup(), cursor_session(client, screens)) {
-        (Some(_), _) => popup_cursor,
-        (None, Some(screen)) => session_cursor(screen, layout.pane),
-        (None, None) => None,
+    let terminal = panes::focused_terminal(client, layout.pane);
+    let cursor = match (client.popup(), cursor_session(client, screens), terminal) {
+        (Some(_), ..) => popup_cursor,
+        (None, Some(screen), Some(terminal)) => session_cursor(screen, terminal),
+        (None, ..) => None,
     };
     if let Some(at) = cursor {
         frame.set_cursor_position(at);
     }
 }
 
-/// The session whose cursor [`render`] shows: the selected one, while keys go to it and no popup is open.
+/// The session whose cursor [`render`] shows: the focused pane's, while keys go to it and no popup is open.
 fn cursor_session<'a>(client: &Client, screens: &'a Screens) -> Option<&'a Screen> {
     if client.popup().is_some() || client.focus() != Focus::Terminal {
         return None;
     }
-    screens.get(client.selected()?)
+    screens.get(&client.focused_session()?)
 }
 
-/// The shape and blink of the real terminal's cursor, for the runtime to set after each draw: the selected session's
+/// The shape and blink of the real terminal's cursor, for the runtime to set after each draw: the focused session's
 /// while [`render`] shows its cursor, else the user's own.
 ///
 /// A [`Screen`] reports a steady block both for a program that never chose a cursor and for one that asked for a
@@ -112,7 +109,7 @@ fn session_cursor(screen: &Screen, pane: Rect) -> Option<Position> {
 }
 
 /// The pane with no sessions: how to make one, or why there can't be one yet.
-fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
+pub(crate) fn empty(client: &Client, pane: Rect, buf: &mut ratatui::buffer::Buffer) {
     let gray = Style::new().fg(Color::Gray);
     let lines = match client.connection() {
         Connection::Ready => vec![

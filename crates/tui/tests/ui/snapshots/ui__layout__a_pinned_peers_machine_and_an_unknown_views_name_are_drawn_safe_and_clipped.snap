@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/ui/layout.rs
+expression: screen
+---
+ ⌕ Search…             │┌ ]0;xvvvvvvvvvvvvvv…  [≡] ┐┌ p1 · [31mevilmmmmm…  [≡] ┐
+ ⌂ choose a workspace  ││                          ││                          │
+ + New session         ││                          ││                          │
+ ◌ fix-login          ×││                          ││                          │
+   local · —           ││ ]0;xvvvvvvvvvvvvvvvvvvv… ││ [31mevilmmmmmmmmmmmmmmm… │
+                       ││   isn't available yet.   ││   can't be reached now   │
+                       ││                          ││                          │
+                       ││                          ││                          │
+                       ││                          ││                          │
+ ctrl-b ? help Detach ?│└──────────────────────────┘└──────────────────────────┘

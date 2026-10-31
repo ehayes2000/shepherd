@@ -1,17 +1,20 @@
-//! Where things go on the window: the sidebar on the left, the selected session's terminal (the pane) on the right.
+//! Where things go on the window: the sidebar on the left, the pane area on the right, where the host's layout is drawn
+//! (its page bar and panes, see `panes`).
 //!
-//! The pane is the whole height of the window, so the size a session is resized to ([`pane_size`]) is exactly the
-//! area [`crate::render`] draws its screen in.
+//! The pane area is the whole height of the window. Its size ([`pane_size`]) is what the client arranges the layout
+//! in, the same way [`crate::render`] does, so each session is resized to exactly the area its screen is drawn in.
 
 use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
-use shepherd_core::client::{Client, FinderItem, MenuItem, SidebarEntry};
+use shepherd_core::client::panes::Divider;
+use shepherd_core::client::{Client, FinderItem, MenuItem, PaneMenuItem, SidebarEntry};
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::layout::{PageId, PaneId};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{MIN_COLS, MIN_ROWS};
 
-use crate::{popup, sidebar};
+use crate::{panes, popup, sidebar};
 
 /// The sidebar's width, its right border included.
 pub const SIDEBAR_WIDTH: u16 = 24;
@@ -64,8 +67,20 @@ pub enum Target {
     Machine(MachineId),
     /// The `×` at the right of a session's row.
     CloseSession(SessionId),
-    /// The pane: the selected session's terminal.
+    /// The focused pane's terminal (the whole pane area with one pane).
     Terminal,
+    /// A pane other than the focused one, or a focused pane's border: a click focuses it.
+    Pane(PaneId),
+    /// A split pane's menu button, `[≡]` at the right of its top edge.
+    PaneMenu(PaneId),
+    /// An item of the open pane menu.
+    PaneMenuItem(PaneMenuItem),
+    /// A page's name in the page bar.
+    Page(PageId),
+    /// The page bar's `+`.
+    NewPage,
+    /// Where two split panes meet: dragged, it sets the split's ratio.
+    Divider(Divider),
     /// The sidebar footer's `Detach` button (`⏏` when collapsed).
     Detach,
     /// The sidebar footer's `?` button.
@@ -118,7 +133,7 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
         });
     }
     if layout.pane.contains(at) {
-        return Some(Target::Terminal);
+        return panes::hit(client, layout.pane, col, row);
     }
     if sidebar::search_field(layout).contains(at) {
         return Some(Target::Search);

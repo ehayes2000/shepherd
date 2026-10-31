@@ -82,6 +82,7 @@
 pub mod automation;
 pub mod cleanup;
 pub mod finder;
+pub mod panes;
 
 pub use cleanup::{CleanupCheck, CleanupItem, CleanupListing, CleanupOutcome, CleanupRow};
 pub use finder::{FinderItem, Orphan, Orphans};
@@ -97,7 +98,7 @@ use crate::acpp::{Envelope, Frame, Pr, RequestId, Seq, ShepherdFrame, Timestamp}
 use crate::config::AgentKind;
 use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
-use crate::layout::{Content, Layout};
+use crate::layout::{Content, Layout, LayoutOp, Pane, PaneId, SplitDir};
 use crate::machine::MachineColor;
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
@@ -106,9 +107,9 @@ use crate::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HelloOk,
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
     PeerInfo, PeerList, ProfileInfo, RawResponse, Request, SessionClose, SessionInput, SessionNew,
-    SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, Tunnel, UpgradeAnswer,
-    ViewSize, WireError, WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeList,
-    WorktreeRemove,
+    SessionRename, SessionResize, SessionResume, Subscribe, SubscribeFrom, Tunnel, UiApply,
+    UpgradeAnswer, ViewSize, WireError, WorkspaceSelect, WorktreeCheck, WorktreeCleanup,
+    WorktreeList, WorktreeRemove,
 };
 
 /// Connect attempts per outage, the first included, before the client gives up.
@@ -333,6 +334,19 @@ pub enum Intent {
     RestartHost,
     /// Show the host's warning again ([`Client::host_warning`]); ignored when it has none.
     ShowHostWarning,
+    /// Focus pane `pane` (a click on it): input goes to what it shows, and its session is resized to it. Ignored unless
+    /// it is a pane of the current page that isn't split.
+    FocusPane(PaneId),
+    /// Ask this machine's host to change the layout by `op` (decision 0022): a click on the page bar, a dragged divider.
+    ApplyLayout(LayoutOp),
+    /// Open the menu of pane `pane` at a cell of the window (a click on its title's menu button, or a right click in
+    /// it). Ignored unless it is a pane of the current page that isn't split.
+    OpenPaneMenu {
+        pane: PaneId,
+        at: Cell,
+    },
+    /// Run an item of the open pane menu on its pane. Ignored unless the menu offers it ([`Client::pane_menu`]).
+    PaneMenuChoose(PaneMenuItem),
     /// Detach. Sessions keep running on the host.
     Quit,
 }
@@ -398,6 +412,23 @@ pub enum MenuItem {
     Resume,
 }
 
+/// What a pane's menu offers ([`Client::pane_menu`]): each asks the host for a layout op on the pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneMenuItem {
+    /// Split it side by side, an empty pane on the right.
+    SplitRight,
+    /// Split it, an empty pane below.
+    SplitDown,
+    /// Close it. Offered while its page has another pane.
+    Close,
+    /// Show the selected session in it, pinned. Offered while a session is selected that it doesn't show already.
+    MoveSessionHere,
+    /// Add a page showing the selection, after the others.
+    NewPage,
+    /// Close its page and everything on it. Offered while there is another page.
+    ClosePage,
+}
+
 /// One line of the open context menu: [`Client::menu`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuEntry {
@@ -445,6 +476,11 @@ pub enum Popup {
     },
     /// The cleanup view: [`Client::cleanup_rows`].
     Cleanup,
+    /// A pane's menu ([`Client::pane_menu`]), asked for at `at`. The TUI places it there, kept inside the window.
+    PaneMenu {
+        pane: PaneId,
+        at: Cell,
+    },
 }
 
 /// Why the restart dialog offers to restart the host (spike T36's table).
@@ -616,6 +652,11 @@ pub struct Client {
     /// The status request for the close confirmation's session, while unanswered.
     status_request: Option<(RequestId, SessionId)>,
     size: Option<PtySize>,
+    /// The pane the user last focused in this window. Focus is the first pane of the current page while this isn't
+    /// one of its panes ([`Client::focused_pane`]).
+    focused: Option<PaneId>,
+    /// The size this window last resized each session to.
+    given: BTreeMap<SessionId, PtySize>,
     /// The index of the first session the sidebar shows, before clamping to the list (see
     /// [`Client::sidebar_scroll`]).
     scroll: usize,
@@ -827,6 +868,8 @@ impl Client {
             close_check: None,
             status_request: None,
             size: None,
+            focused: None,
+            given: BTreeMap::new(),
             scroll: 0,
             sidebar_rows: None,
             picker_scroll: 0,
@@ -895,14 +938,98 @@ impl Client {
     /// The layout as this window shows it: [`Client::host_layout`] with every [`Content::Selected`] pane showing this
     /// client's selected session (naming its machine when a peer's host has it), or nothing with none selected.
     pub fn layout(&self) -> Layout {
-        let shown = match &self.selected {
+        self.host_layout()
+            .resolve_selected(&self.selected_content())
+    }
+
+    /// What a [`Content::Selected`] pane shows in this window: the selected session, naming its machine when a peer's
+    /// host has it, or nothing with none selected.
+    fn selected_content(&self) -> Content {
+        match &self.selected {
             None => Content::Empty,
             Some(id) => match self.homes.get(id) {
                 Some(At::Peer(machine)) => Content::peer_session(machine.clone(), id.clone()),
                 Some(At::Local) | None => Content::session(id.clone()),
             },
+        }
+    }
+
+    /// The pane this window's input goes to: the one the user last focused ([`Intent::FocusPane`]) while it is a pane
+    /// of the current page that isn't split, else the current page's first.
+    pub fn focused_pane(&self) -> PaneId {
+        focused_in(&self.host_layout(), self.focused)
+    }
+
+    /// The session the focused pane shows, if it shows one: where input goes.
+    pub fn focused_session(&self) -> Option<SessionId> {
+        self.focused_target().map(|(id, _)| id)
+    }
+
+    /// The size this window last resized `session` to, if it has: its pane's terminal (T49).
+    pub fn session_size(&self, session: &SessionId) -> Option<PtySize> {
+        self.given.get(session).copied()
+    }
+
+    /// The items of the open pane menu, in order: split right, split down, close (while its page has another pane),
+    /// move session here (while a session is selected that it doesn't show already), new page, close page (while
+    /// there is another). Empty when no pane menu is open.
+    pub fn pane_menu(&self) -> Vec<PaneMenuItem> {
+        match &self.popup {
+            Some(Popup::PaneMenu { pane, .. }) => self.pane_menu_of(*pane),
+            _ => Vec::new(),
+        }
+    }
+
+    fn pane_menu_of(&self, pane: PaneId) -> Vec<PaneMenuItem> {
+        let layout = self.host_layout();
+        let root = &layout.current_page().root;
+        let Some(Pane::Leaf { content, .. }) = root.find(pane) else {
+            return Vec::new();
         };
-        self.host_layout().resolve_selected(&shown)
+        let mut items = vec![PaneMenuItem::SplitRight, PaneMenuItem::SplitDown];
+        if root.leaf_count() > 1 {
+            items.push(PaneMenuItem::Close);
+        }
+        let selected = self.selected_content();
+        if selected != Content::Empty && *content != Content::Selected && *content != selected {
+            items.push(PaneMenuItem::MoveSessionHere);
+        }
+        items.push(PaneMenuItem::NewPage);
+        if layout.pages().len() > 1 {
+            items.push(PaneMenuItem::ClosePage);
+        }
+        items
+    }
+
+    /// Whether `pane` is a pane of the current page that isn't split: one that can be focused or have a menu.
+    fn is_shown_leaf(&self, pane: PaneId) -> bool {
+        matches!(
+            self.host_layout().current_page().root.find(pane),
+            Some(Pane::Leaf { .. })
+        )
+    }
+
+    /// The session the focused pane shows, and the host it is on.
+    fn focused_target(&self) -> Option<(SessionId, At)> {
+        let layout = self.layout();
+        let pane = focused_in(&layout, self.focused);
+        match layout.pane(pane)? {
+            Pane::Leaf {
+                content: Content::Session { machine, id },
+                ..
+            } => Some((id.clone(), self.content_home(machine.as_ref()))),
+            _ => None,
+        }
+    }
+
+    /// The host of a session a pane shows on `machine`: this machine's for `None` (the layout's own host) or this
+    /// machine, else that peer's.
+    fn content_home(&self, machine: Option<&MachineId>) -> At {
+        match machine {
+            None => At::Local,
+            Some(m) if self.local.machine.as_ref() == Some(m) => At::Local,
+            Some(m) => At::Peer(m.clone()),
+        }
     }
 
     /// Open sessions, grouped by machine (this one first, then the peers by name), each group newest first.
@@ -1595,8 +1722,8 @@ impl Client {
         let subscribe = ClientRequest::Subscribe(Subscribe { from });
         let mut commands = vec![self.request_to(&at, subscribe).1];
         commands.extend(self.refresh());
-        if self.selected.as_ref().map(|s| self.home(s)) == Some(at) {
-            commands.extend(self.resize_selected());
+        if self.focused_target().map(|(_, home)| home) == Some(at) {
+            commands.extend(self.resize_focused());
         }
         commands
     }
@@ -1859,7 +1986,7 @@ impl Client {
                 };
                 let mut commands = vec![self.request(ClientRequest::Subscribe(subscribe))];
                 commands.extend(update);
-                commands.extend(self.resize_selected());
+                commands.extend(self.resize_focused());
                 commands
             }
             (Method::HostUpgrade, result) => {
@@ -2082,7 +2209,10 @@ impl Client {
         }
         feed.seqs.insert(log, env.seq());
         let live = !feed.catching_up();
+        // The layout is this machine's host's, recorded in its host log.
+        let before = (*at == At::Local && env.session().is_none()).then(|| feed.registry.layout());
         feed.registry.apply(env);
+        let layout_changed = before.is_some_and(|before| before != feed.registry.layout());
         if let Some(id) = env.session() {
             feed.states.entry(id.clone()).or_default().apply(env);
         }
@@ -2098,7 +2228,21 @@ impl Client {
         if *at == At::Local {
             commands.extend(self.cleanup_closed(env));
         }
+        if layout_changed {
+            commands.extend(self.layout_changed());
+        }
         commands
+    }
+
+    /// The host's layout changed: a pane menu whose pane is gone closes, and the focused pane may have moved or changed
+    /// size.
+    fn layout_changed(&mut self) -> Option<ClientCommand> {
+        if let Some(Popup::PaneMenu { pane, .. }) = &self.popup
+            && !self.is_shown_leaf(*pane)
+        {
+            self.popup = None;
+        }
+        self.resize_focused()
     }
 
     /// The close notice of a `live` `session/closed`: why the host kept the session's worktree, if it says, else its
@@ -2356,18 +2500,47 @@ impl Client {
         self.select(id)
     }
 
-    /// Resizes the selected session on its host to the view.
-    fn resize_selected(&self) -> Option<ClientCommand> {
-        let (session, size) = (self.selected.clone()?, self.size?);
-        let home = self.home(&session);
-        self.notify_to(
+    /// [`Client::resize_focused`], if the focused pane shows the selected session.
+    fn resize_selected(&mut self) -> Option<ClientCommand> {
+        let selected = self.selected.as_ref()?;
+        if self.focused_session().as_ref() != Some(selected) {
+            return None;
+        }
+        self.resize_focused()
+    }
+
+    /// Resizes the focused pane's session on its host to the pane's terminal (decision 0022: a session is sized to the
+    /// pane showing it on the window that last focused that pane). Nothing for a pane too small for a terminal.
+    fn resize_focused(&mut self) -> Option<ClientCommand> {
+        let view = self.size?;
+        let layout = self.layout();
+        let arranged = panes::arrange(
+            &layout,
+            panes::Area {
+                x: 0,
+                y: 0,
+                cols: view.cols,
+                rows: view.rows,
+            },
+        );
+        let terminal = arranged
+            .pane(focused_in(&layout, self.focused))?
+            .terminal()?;
+        let (session, home) = self.focused_target()?;
+        let size = PtySize {
+            cols: terminal.cols,
+            rows: terminal.rows,
+        };
+        let command = self.notify_to(
             &home,
             ClientNotification::SessionResize(SessionResize {
-                session,
+                session: session.clone(),
                 cols: size.cols,
                 rows: size.rows,
             }),
-        )
+        )?;
+        self.given.insert(session, size);
+        Some(command)
     }
 
     // ---------- notices ----------
@@ -2402,13 +2575,12 @@ impl Client {
             Intent::NextSession => self.step(true),
             Intent::PrevSession => self.step(false),
             Intent::Input(kind, data) => {
-                let Some(session) = self.selected.clone() else {
+                let Some((session, home)) = self.focused_target() else {
                     return Vec::new();
                 };
                 if self.focus != Focus::Terminal || self.popup.is_some() {
                     return Vec::new();
                 }
-                let home = self.home(&session);
                 let note = ClientNotification::SessionInput(SessionInput {
                     session,
                     data,
@@ -2418,7 +2590,55 @@ impl Client {
             }
             Intent::Resize(size) => {
                 self.size = Some(size);
-                self.resize_selected().into_iter().collect()
+                self.resize_focused().into_iter().collect()
+            }
+            Intent::FocusPane(pane) => {
+                if !self.is_shown_leaf(pane) {
+                    return Vec::new();
+                }
+                self.focused = Some(pane);
+                self.focus = Focus::Terminal;
+                self.resize_focused().into_iter().collect()
+            }
+            Intent::ApplyLayout(op) => self.user_request(ClientRequest::UiApply(UiApply { op })),
+            Intent::OpenPaneMenu { pane, at } => {
+                if self.is_shown_leaf(pane) {
+                    self.popup = Some(Popup::PaneMenu { pane, at });
+                }
+                Vec::new()
+            }
+            Intent::PaneMenuChoose(item) => {
+                let Some(Popup::PaneMenu { pane, .. }) = self.popup.clone() else {
+                    return Vec::new();
+                };
+                if !self.pane_menu_of(pane).contains(&item) {
+                    return Vec::new();
+                }
+                self.popup = None;
+                let split = |dir| LayoutOp::Split {
+                    pane,
+                    dir,
+                    ratio: Default::default(),
+                    content: Content::Empty,
+                };
+                let op = match item {
+                    PaneMenuItem::SplitRight => split(SplitDir::Horizontal),
+                    PaneMenuItem::SplitDown => split(SplitDir::Vertical),
+                    PaneMenuItem::Close => LayoutOp::Close { pane },
+                    PaneMenuItem::MoveSessionHere => LayoutOp::Put {
+                        pane,
+                        content: self.selected_content(),
+                    },
+                    PaneMenuItem::NewPage => LayoutOp::PageNew {
+                        name: None,
+                        content: Content::Selected,
+                    },
+                    PaneMenuItem::ClosePage => match self.host_layout().page_of(pane) {
+                        Some(page) => LayoutOp::PageClose { page },
+                        None => return Vec::new(),
+                    },
+                };
+                self.user_request(ClientRequest::UiApply(UiApply { op }))
             }
             Intent::SetFocus(focus) => {
                 self.focus = focus;
@@ -2605,7 +2825,10 @@ impl Client {
                     let host = self.target.clone().unwrap_or_else(|| self.default_host());
                     self.new_session(&host, None)
                 }
-                Some(Popup::Help | Popup::Menu { .. } | Popup::PickProfile) | None => Vec::new(),
+                Some(
+                    Popup::Help | Popup::Menu { .. } | Popup::PaneMenu { .. } | Popup::PickProfile,
+                )
+                | None => Vec::new(),
             },
             Intent::CloseRemovingWorktree | Intent::CloseKeepingWorktree => {
                 // Removing anyway confirms the losses the user was shown, so it needs some shown.
@@ -3179,6 +3402,22 @@ impl Client {
             return Vec::new();
         }
         vec![self.request_to(at, body).1]
+    }
+}
+
+/// The pane focus is on in `layout`: `focused` while it is a pane of the current page that isn't split, else that
+/// page's first.
+fn focused_in(layout: &Layout, focused: Option<PaneId>) -> PaneId {
+    fn first(pane: &Pane) -> PaneId {
+        match pane {
+            Pane::Leaf { id, .. } => *id,
+            Pane::Split { a, .. } => first(a),
+        }
+    }
+    let root = &layout.current_page().root;
+    match focused.and_then(|id| root.find(id)) {
+        Some(Pane::Leaf { id, .. }) => *id,
+        _ => first(root),
     }
 }
 
