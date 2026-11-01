@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/ui/status.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │ 1   status  +
+ ⌂ choose a workspace  │ ▲ 1 need you   ● 2 working   ○ 1 idle   ✕ 1 e
+ + New session ⊞ Layout│┌ agents ────────────────────[g: by machine]─┐
+ ● docs-arch          ×││   NAME    MACHINE    DOING       PR        │
+   studio · —          ││                                            │
+▌▲ t28-hello-build    ×││ EXITED  1                                  │
+▌  studio · #416 ✗     ││ ✕ wire-v2 studio     exited      —         │
+ ctrl-b ? help Detach ?│└────────────────────────────────────────────┘

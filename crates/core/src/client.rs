@@ -76,6 +76,10 @@
 //! why there is none: the machine is unknown or can't be reached, or its link dropped first) is kept for
 //! [`Client::answer`], and the client acts on none of it. [`automation`] names sessions and machines.
 //!
+//! Status page (T57): [`status`] groups every listed session by what the user owes it, or by machine, for the status
+//! page's table. Its grouping, selection and scroll are this window's; attaching a session from it selects it here and
+//! focuses a pane showing it. `ctrl-b s` ([`Intent::OpenStatus`]) selects the page showing it, or asks for one.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
@@ -83,6 +87,7 @@ pub mod automation;
 pub mod cleanup;
 pub mod finder;
 pub mod panes;
+pub mod status;
 
 pub use cleanup::{CleanupCheck, CleanupItem, CleanupListing, CleanupOutcome, CleanupRow};
 pub use finder::{FinderItem, Orphan, Orphans};
@@ -350,6 +355,33 @@ pub enum Intent {
     },
     /// Run an item of the open pane menu on its pane. Ignored unless the menu offers it ([`Client::pane_menu`]).
     PaneMenuChoose(PaneMenuItem),
+    /// Show the status page (`ctrl-b s`): focus a pane showing it, or ask the host for a page showing it.
+    OpenStatus,
+    /// Group the status page's table by `by` (its toggle, or `g`), when it shows `shown` lines at once.
+    StatusGroupBy {
+        by: status::Grouping,
+        shown: usize,
+    },
+    /// Select this session in the status page's table (a click on its row), when it shows `shown` lines at once. The
+    /// sidebar's selection stays. A session that isn't listed is ignored.
+    StatusSelect {
+        session: SessionId,
+        shown: usize,
+    },
+    /// Move the status page's table selection by `by` sessions (down for positive), when it shows `shown` lines.
+    StatusStep {
+        by: i32,
+        shown: usize,
+    },
+    /// Scroll the status page's table by `by` lines (down for positive), when it shows `shown` at once. Its selection
+    /// stays put, even out of view.
+    StatusScroll {
+        by: i32,
+        shown: usize,
+    },
+    /// Attach this session from the status page (`⏎`, or a click on its selected row): select it in this window and
+    /// focus a pane showing it. A session that isn't listed is ignored.
+    StatusAttach(SessionId),
     /// Detach. Sessions keep running on the host.
     Quit,
 }
@@ -706,6 +738,8 @@ pub struct Client {
     asks: BTreeMap<AskId, Ask>,
     /// How long a peer may take to send its sessions once reached, if it has a limit.
     catch_up_limit: Option<SignedDuration>,
+    /// The status page's table: its grouping, selection and scroll in this window.
+    status: status::StatusTable,
 }
 
 /// What one host's hello and log say, and the requests asked of it that it hasn't answered.
@@ -910,6 +944,7 @@ impl Client {
             now: None,
             asks: BTreeMap::new(),
             catch_up_limit: None,
+            status: status::StatusTable::default(),
         }
     }
 
@@ -2989,6 +3024,12 @@ impl Client {
                 self.popup = None;
                 Vec::new()
             }
+            Intent::OpenStatus => self.open_status(),
+            Intent::StatusGroupBy { by, shown } => self.status_group_by(by, shown),
+            Intent::StatusSelect { session, shown } => self.status_select(session, shown),
+            Intent::StatusStep { by, shown } => self.status_step(by, shown),
+            Intent::StatusScroll { by, shown } => self.status_scroll_by(by, shown),
+            Intent::StatusAttach(session) => self.status_attach(session),
             Intent::ShowHostWarning => {
                 if let Some(warning) = self.host_warning.clone() {
                     self.set_notice(warning);

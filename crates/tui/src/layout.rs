@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
 use shepherd_core::client::panes::Divider;
+use shepherd_core::client::status::Grouping;
 use shepherd_core::client::{Client, FinderItem, MenuItem, PaneMenuItem, SidebarEntry};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{PageId, PaneId};
@@ -121,6 +122,20 @@ pub enum Target {
     Cleanup,
     /// The cleanup view's `[Remove safe]`.
     CleanupRemoveSafe,
+    /// A session's row in the status page's table, in pane `pane`, which shows `shown` lines of it at once: a click
+    /// selects it in the table, a click on the selected row attaches it.
+    StatusRow {
+        pane: PaneId,
+        session: SessionId,
+        shown: usize,
+    },
+    /// The status page's grouping toggle (`[g: by machine]` / `[g: by state]`) in pane `pane`: groups the table by
+    /// `by`.
+    StatusGroupBy {
+        pane: PaneId,
+        by: Grouping,
+        shown: usize,
+    },
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

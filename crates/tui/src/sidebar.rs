@@ -82,7 +82,7 @@ const CREATING_WORKTREE: &str = "creating worktree…";
 const REMOVING_WORKTREE: &str = "removing worktree…";
 
 /// A session's PR as line 2 shows it: `#123 ✓`, `#123 merged`, or `—`.
-fn pr_label(session: &ClientSession) -> String {
+pub(crate) fn pr_label(session: &ClientSession) -> String {
     let Some(pr) = &session.pr else {
         return NO_PR.to_owned();
     };

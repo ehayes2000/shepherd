@@ -7,8 +7,8 @@
 //! - Split panes are boxes: the top edge carries the title (the session's name and its machine, in the machine's
 //!   color) and, at its right, the pane's menu button `[≡]`. The focused pane's border is bright, the others dim.
 //! - A pane shows its session's terminal; a session on a machine that can't be reached now is drawn dimmed (its last
-//!   screen, or a placeholder without one). A view (not built yet), an empty pane and a pane too small for a terminal
-//!   show a placeholder.
+//!   screen, or a placeholder without one). A view other than the status page ([`crate::status`]) (not built yet),
+//!   an empty pane and a pane too small for a terminal show a placeholder.
 //!
 //! [`hit`] says what is under a cell of the pane area: a page, `+`, a divider (dragged to set its split's ratio), a pane's
 //! menu button, the focused pane's terminal ([`Target::Terminal`]) or another pane ([`Target::Pane`]).
@@ -140,6 +140,12 @@ pub(crate) fn hit(client: &Client, pane: Rect, col: u16, row: u16) -> Option<Tar
     }
     let focused = client.focused_pane();
     let place = arranged.panes.iter().find(|p| p.area.contains(col, row))?;
+    if place.content == Content::View(ViewKind::Status)
+        && let Some(terminal) = place.terminal().filter(|t| t.contains(col, row))
+        && let Some(target) = crate::status::hit(client, place.pane, rect(terminal), col, row)
+    {
+        return Some(target);
+    }
     let in_terminal = place.terminal().is_some_and(|t| t.contains(col, row));
     if place.pane == focused && (in_terminal || !place.bordered) {
         return Some(Target::Terminal);
@@ -321,6 +327,7 @@ fn render_pane(
             terminal,
             buf,
         ),
+        Shown::View(ViewKind::Status) => crate::status::render(client, terminal, buf),
         Shown::View(kind) => {
             let line = format!("{} isn't available yet.", cut(&view_name(kind), NAME_MAX));
             placeholder(&[&line], terminal, buf);

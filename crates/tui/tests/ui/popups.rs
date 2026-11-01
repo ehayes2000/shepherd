@@ -90,3 +90,16 @@ fn clicking_a_profile_creates_a_session_with_it() {
         assert_eq!(ui.client().popup(), None, "{name}");
     }
 }
+
+#[test]
+fn help_is_whole_in_a_default_80x24_window() {
+    let mut ui = Ui::with_sessions(&["name-01", "name-02", "name-03"], 80, 24);
+    ui.ctrl('b').type_text("?");
+    assert_eq!(ui.client().popup(), Some(&Popup::Help));
+    for (keys, what) in shepherd_tui::BINDINGS {
+        let line = ui.region(ui.line_of(what));
+        assert!(line.contains(keys), "{keys:?} not beside {what:?}: {line}");
+    }
+    ui.assert_contains("Other keys go to the session. Any key closes this.")
+        .assert_contains("[Close]");
+}
