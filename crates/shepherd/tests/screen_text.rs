@@ -53,6 +53,10 @@ fn past_the_byte_budget_the_oldest_lines_are_left_out() {
     assert_eq!(text.lines, ["three", "four"]);
     assert_eq!(text.scrollback, 0);
     assert!(text.truncated);
+    // Each line break counts: "three" and "four" are 9 bytes, but not joined.
+    let text = screen_text(&s, 2, 9);
+    assert_eq!(text.lines, ["four"]);
+    assert!(text.truncated);
     let text = screen_text(&s, 2, 4);
     assert_eq!(text.lines, ["four"]);
     assert!(text.truncated);
@@ -61,12 +65,25 @@ fn past_the_byte_budget_the_oldest_lines_are_left_out() {
 #[test]
 fn a_row_skips_the_cell_a_wide_character_covers_and_makes_symbols_display_safe() {
     let cells = [
-        ("漢", 2),
-        ("", 1),
-        ("a", 1),
-        ("\u{202e}", 1),
-        ("b", 1),
-        (" ", 1),
+        ("漢", 2, false),
+        ("", 1, false),
+        ("a", 1, false),
+        ("\u{202e}", 1, false),
+        ("b", 1, false),
+        (" ", 1, false),
     ];
     assert_eq!(row_text(cells), "漢a b");
+}
+
+#[test]
+fn concealed_text_is_left_blank_keeping_what_follows_in_its_column() {
+    let s = screen(30, 1, "pw: \x1b[8msecret 漢\x1b[0m ok".as_bytes());
+    assert_eq!(screen_text(&s, 0, usize::MAX).lines, ["pw:           ok"]);
+    let cells = [
+        ("a", 1, false),
+        ("漢", 2, true),
+        ("", 1, true),
+        ("b", 1, false),
+    ];
+    assert_eq!(row_text(cells), "a  b");
 }

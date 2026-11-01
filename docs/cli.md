@@ -119,8 +119,9 @@ its panes, indented by depth: `split <id> right|down <R>`, then its two halves; 
 ### `shepherd ui screenshot`
 
 Draws the window a user would see at `--size` (120x40 by default; each from 1 up to 1000x500), with the TUI's own
-renderer, headless, and prints it as text, one line per row without trailing blanks, display-safe. It shows the shown
-page, or `--page P` instead (the host's shown page stays as it is). It changes nothing: no session is resized.
+renderer, headless, and prints it as text, one line per row without trailing blanks, display-safe, concealed text
+(SGR 8) blank. It shows the shown page, or `--page P` instead (the host's shown page stays as it is). It changes
+nothing: no session is resized.
 
 - The sidebar is a newly opened window's: it selects the first session it lists (this machine's newest). A
   `selected` pane shows that session.
@@ -133,9 +134,10 @@ page, or `--page P` instead (the host's shown page stays as it is). It changes n
 
 Prints what the session's terminal shows now, as text, the way a user would read it: its host reads it from its own
 terminal emulator, at the session's own size, so colours and other control sequences are gone, a wide character is
-one character (never followed by a blank for the cell it covers), and each line is display-safe and has no trailing
-blanks. `--lines N` adds up to `N` lines of scrollback above the screen (none on an agent's full-screen view, which
-keeps none). The human form leaves out the blank rows below the last one drawn; `--json` gives every row.
+one character (never followed by a blank for the cell it covers), concealed text (SGR 8) is blank, and each line is
+display-safe and has no trailing blanks. `--lines N` adds up to `N` lines of scrollback above the screen (none on an
+agent's full-screen view, which keeps none). The human form leaves out the blank rows below the last one drawn;
+`--json` gives every row.
 
 Bounded, so asking can't make a host build a huge answer: at most 1000 lines of scrollback (as many as the host keeps;
 asking for more gives what there is), and at most 1 MiB of text, past which the oldest lines are left out

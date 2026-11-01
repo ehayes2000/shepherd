@@ -1355,3 +1355,20 @@ fn screen_of_a_session_that_exited_is_refused_saying_so() {
         "{err:?}"
     );
 }
+
+#[test]
+fn ui_screenshot_and_screen_leave_out_concealed_text() {
+    let mut w = World::new();
+    let id = shell_session(&mut w, "plain");
+    type_into(&mut w, &id, b"pw: \x1b[8msecret\x1b[0m ok\r\n");
+    // Asking the host waits for its answer, and the output it sent before it reaches the client first.
+    let shown = screen_json(&mut w, "plain", None);
+    assert_eq!(shown["lines"][0], "pw:        ok");
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: None,
+    });
+    assert!(shot.contains("pw:") && shot.contains("ok"), "{shot}");
+    assert!(!shot.contains("secret"), "{shot}");
+}

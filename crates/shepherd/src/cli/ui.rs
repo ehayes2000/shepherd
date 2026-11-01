@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use serde::Serialize;
 use shepherd_core::client::Client;
 use shepherd_core::client::panes::{Area, arrange};
@@ -613,13 +614,14 @@ fn fitted(screens: &Screens, arranged: &shepherd_core::client::panes::Arrangemen
 }
 
 /// The text of each row of `buf`, as [`row_text`] reads a row: display-safe, without trailing blanks, the cell a wide
-/// character covers skipped.
+/// character covers skipped, a concealed (`HIDDEN`) cell blank.
 fn lines_of(buf: &Buffer) -> Vec<String> {
     (buf.area.top()..buf.area.bottom())
         .map(|y| {
             row_text((buf.area.left()..buf.area.right()).map(|x| {
                 let cell = &buf[(x, y)];
-                (cell.symbol(), cell.cell_width())
+                let hidden = cell.modifier.contains(Modifier::HIDDEN);
+                (cell.symbol(), cell.cell_width(), hidden)
             }))
         })
         .collect()

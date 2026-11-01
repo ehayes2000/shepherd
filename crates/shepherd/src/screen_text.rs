@@ -1,18 +1,21 @@
 //! A terminal's text as a user reads it: each row display-safe, without trailing blanks, a wide character once (the
-//! cell it covers skipped). The host answers `_shepherd/session/screen` with [`screen_text`].
+//! cell it covers skipped), concealed text blank. The host answers `_shepherd/session/screen` with [`screen_text`].
 
 use shepherd_core::display::display_safe;
 use shepherd_core::wire::SessionScreenOk;
 use shepherd_term::{Cell, Screen, Width};
 
-/// The text of one row, from each cell's symbol and how many columns it takes, left to right: each symbol
-/// display-safe (one that is left empty shows as a blank), the cells a wide character covers skipped, and trailing
+/// The text of one row, from each cell's symbol, how many columns it takes and whether it is concealed (SGR 8), left
+/// to right: each symbol display-safe (one that is left empty shows as a blank), the cells a wide character covers
+/// skipped, a concealed cell blank (as many blanks as it is wide, so what follows stays in its column), and trailing
 /// blanks trimmed.
-pub fn row_text<S: AsRef<str>>(cells: impl IntoIterator<Item = (S, u16)>) -> String {
+pub fn row_text<S: AsRef<str>>(cells: impl IntoIterator<Item = (S, u16, bool)>) -> String {
     let mut line = String::new();
     let mut skip: u16 = 0;
-    for (symbol, width) in cells {
-        if skip == 0 {
+    for (symbol, width, hidden) in cells {
+        if skip == 0 && hidden {
+            line.extend(std::iter::repeat_n(' ', usize::from(width.max(1))));
+        } else if skip == 0 {
             let symbol = display_safe(symbol.as_ref(), 1).into_string();
             line.push_str(if symbol.is_empty() { " " } else { &symbol });
         }
@@ -23,8 +26,7 @@ pub fn row_text<S: AsRef<str>>(cells: impl IntoIterator<Item = (S, u16)>) -> Str
 
 /// What `screen` shows, as text: up to `scrollback` lines of its scrollback (oldest first), then each of its rows.
 /// The newest lines are kept first: once the text (its lines joined with line breaks) would pass `max_bytes`, the
-/// older lines are left out and the answer says it was truncated. Only the rows kept, and the one
-/// that didn't fit, are read.
+/// older lines are left out and the answer says it was truncated.
 pub fn screen_text(screen: &Screen, scrollback: u32, max_bytes: usize) -> SessionScreenOk {
     let (cols, rows) = screen.size();
     let kept = screen
@@ -68,6 +70,6 @@ fn cells_text<'a>(cells: impl Iterator<Item = Cell<'a>>) -> String {
             Width::Wide => 2,
             Width::Single | Width::Spacer => 1,
         };
-        (symbol, width)
+        (symbol, width, cell.attrs.hidden)
     }))
 }
