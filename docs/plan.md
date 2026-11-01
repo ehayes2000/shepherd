@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | merging | task/t50-ui-cli @ c316135 | 2 | round 2 APPROVE; focused_on dup → F56 |
-| T51 Answer an agent's pending question | [automation](features/automation.md) | building | task/t51-answer |  |  |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | review | task/t51-answer @ e766620 |  | built; no question id on answer (PM: add optional asked seq); Claude always=Shift+Tab unverified (T44) |
 | T52 Read a session's screen as text | [automation](features/automation.md) | building | task/t52-screen-text |  |  |
 
 ## Ready to start
@@ -40,13 +39,14 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
+| F58 A worktree session on a peer world exits at once in cli_scenarios | [worktrees](features/worktrees.md) | todo | T50 |
 
 ## Features
 
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 5 | 4 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 6 | 3 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
