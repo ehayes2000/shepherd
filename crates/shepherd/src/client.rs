@@ -270,6 +270,8 @@ pub struct ClientRuntime<L, C, H> {
     sync_deadlines: HashMap<SessionId, SyncDeadline>,
     /// The window's `(cols, rows)`, from the last resize.
     window: (u16, u16),
+    /// The `(cols, rows)` a session's terminal is made at when the client has given it no size.
+    blank_size: (u16, u16),
     /// Why the terminal stopped working, if it did.
     terminal_failed: Option<String>,
     /// A thread panicked.
@@ -313,6 +315,7 @@ where
             screens: Screens::new(),
             sync_deadlines: HashMap::new(),
             window: DEFAULT_SIZE,
+            blank_size: DEFAULT_SIZE,
             terminal_failed: None,
             panicked: false,
             keyboard_enhanced: false,
@@ -342,6 +345,13 @@ where
     /// [`ClientRuntime::start`].
     pub fn set_build(&mut self, build: BuildId) {
         self.client = self.client.clone().with_build(build);
+    }
+
+    /// Makes each session's terminal at `(cols, rows)` while the client has given it no size (the TUI's view size until
+    /// it reports one): a command-line client, which never resizes a session, makes them big enough that the host's
+    /// snapshot of each replays whole (T50).
+    pub fn set_blank_screen_size(&mut self, size: (u16, u16)) {
+        self.blank_size = size;
     }
 
     /// The terminal of `session`, once it has printed anything.
@@ -674,8 +684,8 @@ where
             if !self.client.is_home(peer.as_ref(), &out.session) {
                 return;
             }
-            let (cols, rows) =
-                screen_size(&self.client, &out.session).map_or(DEFAULT_SIZE, |s| (s.cols, s.rows));
+            let (cols, rows) = screen_size(&self.client, &out.session)
+                .map_or(self.blank_size, |s| (s.cols, s.rows));
             let screen = self
                 .screens
                 .entry(out.session.clone())
