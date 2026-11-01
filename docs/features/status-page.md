@@ -14,7 +14,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 |---|---|---|---|---|---|
 | T57 | Status table | done | 27c7f26 | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
 | T58 | Preview and answer in place | todo |  |  |  |
-| T59 | Events feed and message line | fixing | task/t59-events-message @ 2c69c61 | 1 | round 1 CHANGES: multi-line paste truncated; machine target, offline skip, peer drop untested |
+| T59 | Events feed and message line | merging | task/t59-events-message @ 2c69c61 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Specs
 

@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T53 Shepherd MCP server for agents | [automation](features/automation.md) | building | task/t53-mcp-server |  |  |
-| T59 Events feed and message line | [status-page](features/status-page.md) | fixing | task/t59-events-message @ 2c69c61 | 1 | round 1 CHANGES: multi-line paste truncated; machine target, offline skip, peer drop untested |
+| T59 Events feed and message line | [status-page](features/status-page.md) | merging | task/t59-events-message @ 2c69c61 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Ready to start
 
