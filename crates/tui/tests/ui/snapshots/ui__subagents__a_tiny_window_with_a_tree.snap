@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/ui/subagents.rs
+expression: ui.region(sidebar(&ui))
+---
+ ⌕│
+ ⌂│
+ +│
+ ▲│
+  │
+├●│
+├●│
+├▲│
+└✓│
+ ⊞│
+ ⏏│
+ ?│

@@ -13,3 +13,4 @@ mod layout;
 mod popups;
 mod sidebar;
 mod steps;
+mod subagents;

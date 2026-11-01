@@ -16,6 +16,9 @@
 //! | exited                           | `✕`   | red        |
 //! | unknown                          | `·`   | dark gray  |
 //!
+//! A session one of whose subagents is blocked on the user shows `▲` whatever the agent itself is doing (unless it
+//! exited).
+//!
 //! A session that wants the user (blocked on them, or idle since they last looked) also gets a yellow `▌` on the
 //! left edge of its row, in both the full and the collapsed sidebar.
 

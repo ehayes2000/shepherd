@@ -1,13 +1,14 @@
 //! Random sequences of what a user does (clicks on drawn words, keys, the wheel, pastes, resizes down to 1x1, dragging
 //! dividers) and of what the host does (including layout ops from elsewhere: pages, splits, closes, what panes show,
-//! ratios) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
+//! ratios, and subagents starting, blocking, finishing and dropping at a turn's end) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
 //! after each step.
 //!
 //! - every button drawn whole is hittable: a click on its first cell finds a control, not nothing, the popup's body,
-//!   the backdrop or the terminal;
+//!   the backdrop or the terminal, and a subagent badge (`▸N` / `▾N`) finds its session's badge;
+//! - in the narrow sidebar, the glyph of a session with subagents and each subagent's branch toggle its tree;
 //! - the selected session's row stays visible: unless the user has wheeled the list (or the host has listed a new
 //!   session above it) since the selection or the window last changed, some cell of the sidebar hits it (while no
-//!   popup covers it and the sidebar has room for a row);
+//!   popup covers it and the sidebar has room for a row), however the subagent trees above it change;
 //! - the focused pane is a pane of the current page, and the session it shows (if it has room for a terminal) was last
 //!   sized by this window to exactly that terminal.
 //!
@@ -19,6 +20,9 @@ use proptest::sample::Index;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunner};
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Position;
+use serde_json::json;
+use shepherd_core::acpp::{Source, SourceKind};
+use shepherd_core::client::Popup;
 use shepherd_core::client::panes::{Area, arrange};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
@@ -43,6 +47,14 @@ const KEYS: &[(KeyCode, KeyModifiers)] = &[
     (KeyCode::PageDown, KeyModifiers::NONE),
     (KeyCode::Char('b'), KeyModifiers::CONTROL),
     (KeyCode::Char('c'), KeyModifiers::CONTROL),
+];
+
+const AGENT_TYPES: &[&str] = &[
+    "builder",
+    "Explore",
+    "",
+    "a-type-much-longer-than-the-sidebar",
+    "日本語",
 ];
 
 const NAMES: &[&str] = &[
@@ -77,6 +89,14 @@ enum Step {
     HostLayout(LayoutStep),
     /// The mouse dragged from one cell to another, each taken modulo the window.
     Drag(u16, u16, u16, u16),
+    /// A session's agent starts a subagent of a type.
+    SubagentStart(Index, Index),
+    /// One of a session's subagents (the index taken modulo the subagents it has had) blocks on the user.
+    SubagentBlock(Index, u8),
+    /// One of a session's subagents finishes.
+    SubagentFinish(Index, u8),
+    /// A session's agent ends its turn, dropping its subagents.
+    TurnEnd(Index),
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +139,10 @@ fn step() -> impl Strategy<Value = Step> {
         3 => layout_step().prop_map(Step::HostLayout),
         1 => (any::<u16>(), any::<u16>(), any::<u16>(), any::<u16>())
             .prop_map(|(x0, y0, x1, y1)| Step::Drag(x0, y0, x1, y1)),
+        3 => (any::<Index>(), any::<Index>()).prop_map(|(s, t)| Step::SubagentStart(s, t)),
+        1 => (any::<Index>(), any::<u8>()).prop_map(|(s, a)| Step::SubagentBlock(s, a)),
+        1 => (any::<Index>(), any::<u8>()).prop_map(|(s, a)| Step::SubagentFinish(s, a)),
+        1 => any::<Index>().prop_map(Step::TurnEnd),
     ]
 }
 
@@ -147,6 +171,8 @@ struct Run {
     ui: Ui,
     /// How many sessions the host has made, for fresh ids.
     made: usize,
+    /// How many subagents the host has started, for fresh ids.
+    subagents: u8,
     /// The sidebar's scroll may have left the selection since the selection or the window last changed: the user
     /// wheeled it, or the host listed a session above it.
     unfitted: bool,
@@ -242,11 +268,59 @@ impl Run {
                 let (from, to) = (self.cell(*x0, *y0), self.cell(*x1, *y1));
                 self.ui.drag(from, to);
             }
+            Step::SubagentStart(session, kind) => {
+                if let Some(id) = self.session(session) {
+                    self.subagents = self.subagents.wrapping_add(1);
+                    let params = json!({
+                        "id": format!("a{}", self.subagents),
+                        "agent_type": AGENT_TYPES[kind.index(AGENT_TYPES.len())],
+                        "task": "look into it",
+                    });
+                    self.subagent_frame(&id, "_shepherd/subagent/started", params);
+                }
+            }
+            Step::SubagentBlock(session, which) => {
+                if let Some(id) = self.session(session) {
+                    let params = json!({
+                        "id": self.subagent_id(*which),
+                        "kind": "permission",
+                        "text": "Bash(ls)",
+                        "agent_type": "builder",
+                    });
+                    self.subagent_frame(&id, "_shepherd/subagent/blocked", params);
+                }
+            }
+            Step::SubagentFinish(session, which) => {
+                if let Some(id) = self.session(session) {
+                    let params = json!({ "id": self.subagent_id(*which) });
+                    self.subagent_frame(&id, "_shepherd/subagent/finished", params);
+                }
+            }
+            Step::TurnEnd(session) => {
+                if let Some(id) = self.session(session) {
+                    self.subagent_frame(&id, "_shepherd/agent/idle", json!({}));
+                }
+            }
         }
         self.ui.apply_layout_ops();
         if self.ui.client().selected() != before.as_ref() {
             self.unfitted = false;
         }
+    }
+
+    /// One of the subagents started so far (`a1` when none has).
+    fn subagent_id(&self, which: u8) -> String {
+        format!("a{}", which % self.subagents.max(1) + 1)
+    }
+
+    /// Appends a subagent (or turn) frame to session `id`'s log as a hook would. An expanded tree above the selection
+    /// that changes size moves it, and the client scrolls it back into view, so this never unfits the list.
+    fn subagent_frame(&mut self, id: &str, method: &str, params: serde_json::Value) {
+        let frame = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let source = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+        self.ui.on_host(|h| {
+            h.append(Some(id), source, frame);
+        });
     }
 
     /// What `step` asks of the host's layout, on the panes and pages it has now.
@@ -313,6 +387,7 @@ impl Run {
     /// The invariants, or what broke them.
     fn check(&self) -> Result<(), String> {
         self.buttons_are_hittable()?;
+        self.narrow_trees_toggle()?;
         self.selection_is_visible()?;
         self.focused_pane_is_sized()
     }
@@ -360,6 +435,40 @@ impl Run {
         }
     }
 
+    /// In the narrow sidebar, which has no badges, the glyph of a session with subagents and the branch of each
+    /// subagent's line toggle the tree.
+    fn narrow_trees_toggle(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        let layout = layout(self.ui.window());
+        if !layout.collapsed || client.popup().is_some() || layout.sidebar.width < 3 {
+            return Ok(());
+        }
+        let x = layout.sidebar.x;
+        for y in layout.sidebar.top()..layout.sidebar.bottom() {
+            let branch = matches!(self.ui.buffer()[(x, y)].symbol(), "├" | "└");
+            if branch && !matches!(self.ui.hit_at(x, y), Some(Target::Subagents(_))) {
+                return Err(format!(
+                    "the branch at ({x}, {y}) hits {:?}",
+                    self.ui.hit_at(x, y)
+                ));
+            }
+            let glyph = !self.ui.buffer()[(x + 1, y)].symbol().trim().is_empty();
+            if let (true, Some(Target::Session(id))) = (glyph, self.ui.hit_at(x + 1, y)) {
+                let has_tree = client
+                    .sessions()
+                    .iter()
+                    .any(|s| s.id == id && !s.subagents.is_empty());
+                if has_tree {
+                    return Err(format!(
+                        "the glyph of {id}, which has subagents, at ({}, {y}) only selects it",
+                        x + 1
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn buttons_are_hittable(&self) -> Result<(), String> {
         let popup = self.ui.client().popup().is_some();
         for (at, word) in self.ui.words() {
@@ -367,10 +476,28 @@ impl Run {
             if popup && word.starts_with("[≡") {
                 continue;
             }
+            // Help's prose names `[≡]`; in a narrow help it is cut at the border, leaving `[│`.
+            let help = self.ui.client().popup() == Some(&Popup::Help);
+            if help && word.starts_with("[│") {
+                continue;
+            }
             let bracketed = word.starts_with('[') && word.ends_with(']') && word.len() > 2;
             // `[Start session]` and the like are two words; the first of them starts the button.
             let opens_button = word.starts_with('[') && !word.contains(']') && word.len() > 1;
             let sidebar_button = !popup && matches!(word.as_str(), "Detach" | "×" | "⊞");
+            let in_sidebar = layout(self.ui.window()).sidebar.contains(at);
+            let badge = !popup
+                && in_sidebar
+                && word.starts_with(['▸', '▾'])
+                && word.chars().skip(1).all(|c| c.is_ascii_digit());
+            if badge && !matches!(self.ui.hit_at(at.x, at.y), Some(Target::Subagents(_))) {
+                return Err(format!(
+                    "the badge {word:?} at ({}, {}) hits {:?}",
+                    at.x,
+                    at.y,
+                    self.ui.hit_at(at.x, at.y)
+                ));
+            }
             if !(bracketed || opens_button || sidebar_button) {
                 continue;
             }
@@ -433,6 +560,7 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
     let mut run = Run {
         ui: Ui::with_sessions(&names, case.size.0, case.size.1),
         made: 0,
+        subagents: 0,
         unfitted: false,
     };
     let fail = |run: &Run, after: &str, why: String| {
@@ -477,6 +605,7 @@ fn the_invariants_see_a_selection_scrolled_out_of_view() {
     let mut run = Run {
         ui: Ui::with_sessions(&names, 80, 12),
         made: 0,
+        subagents: 0,
         unfitted: false,
     };
     assert_eq!(run.check(), Ok(()));

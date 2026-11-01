@@ -89,7 +89,7 @@ pub use finder::{FinderItem, Orphan, Orphans};
 
 use cleanup::{Cleanup, Removal};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use jiff::SignedDuration;
@@ -102,7 +102,7 @@ use crate::layout::{Content, Layout, LayoutOp, Pane, PaneId, SplitDir};
 use crate::machine::MachineColor;
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
-use crate::session::{Activity, SessionState};
+use crate::session::{Activity, SessionState, Subagent, SubagentStatus};
 use crate::wire::{
     BuildId, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HelloOk,
     HostMessage, HostNotification, HostResult, HostUpgrade, InputKind, Method, PROTOCOL_VERSION,
@@ -246,8 +246,11 @@ pub enum Intent {
     /// Scroll the session list by this many rows: down for positive, up for negative. The selection stays put, even
     /// out of view.
     ScrollSidebar(i32),
-    /// How many sessions the sidebar shows at once, from the TUI's layout. The list scrolls to fit.
+    /// How many sidebar entries are sure to fit at once, from the TUI's layout. The list scrolls to fit.
     SidebarRows(usize),
+    /// Expand or collapse the tree of this session's subagents in the sidebar (a click on its badge). Ignored for a
+    /// session that isn't listed or has no subagents.
+    ToggleSubagents(SessionId),
     /// Scroll the open profile picker by `by` rows (down for positive), when it shows `shown` profiles at once, from
     /// the TUI's layout. Ignored when the picker isn't open.
     ScrollPicker {
@@ -573,6 +576,17 @@ pub struct ClientSession {
     pub pr: Option<Pr>,
     /// What it runs, see [`crate::host::HostSession::agent`].
     pub agent: Option<AgentKind>,
+    /// Its agent's subagents, see [`SessionState::subagents`].
+    pub subagents: Vec<Subagent>,
+}
+
+impl ClientSession {
+    /// Whether one of its subagents is waiting on the user.
+    pub fn subagent_blocked(&self) -> bool {
+        self.subagents
+            .iter()
+            .any(|s| matches!(s.status(), SubagentStatus::Blocked { .. }))
+    }
 }
 
 /// A machine in the sidebar: this one, or a trusted peer ([`Client::machines`]).
@@ -604,6 +618,13 @@ pub enum SidebarEntry<'a> {
     /// A machine's header, above its sessions. Only while there are peers.
     Machine(MachineGroup),
     Session(&'a ClientSession),
+    /// A subagent of session `parent`, listed under it while its tree is expanded ([`Client::expanded`]). `last` is
+    /// the tree's last row.
+    Subagent {
+        parent: &'a SessionId,
+        subagent: &'a Subagent,
+        last: bool,
+    },
 }
 
 /// The client's state and decisions. For each [`ClientEvent`], call [`Client::handle`] and execute the commands
@@ -660,6 +681,8 @@ pub struct Client {
     /// The focused pane's session and terminal size this window last resized, so a layout change that changes neither
     /// doesn't take the session back from the window that last focused it (decision 0022).
     sized: Option<(SessionId, PtySize)>,
+    /// The sessions whose subagent tree this window shows ([`Intent::ToggleSubagents`]).
+    expanded: BTreeSet<SessionId>,
     /// The index of the first session the sidebar shows, before clamping to the list (see
     /// [`Client::sidebar_scroll`]).
     scroll: usize,
@@ -874,6 +897,7 @@ impl Client {
             focused: None,
             given: BTreeMap::new(),
             sized: None,
+            expanded: BTreeSet::new(),
             scroll: 0,
             sidebar_rows: None,
             picker_scroll: 0,
@@ -1074,22 +1098,48 @@ impl Client {
     }
 
     /// The sidebar's list, top to bottom: each machine's header followed by its sessions, newest first, while there
-    /// are peers; just the sessions otherwise.
+    /// are peers; just the sessions otherwise. An expanded session is followed by its subagents.
     pub fn sidebar(&self) -> Vec<SidebarEntry<'_>> {
-        if self.peers.is_empty() {
-            return self.sessions.iter().map(SidebarEntry::Session).collect();
-        }
         let mut entries = Vec::with_capacity(self.sessions.len() + self.peers.len() + 1);
+        if self.peers.is_empty() {
+            for session in &self.sessions {
+                self.push_session(&mut entries, session);
+            }
+            return entries;
+        }
         for (group, at) in self.machines().into_iter().zip(self.host_order()) {
             entries.push(SidebarEntry::Machine(group));
-            entries.extend(
-                self.sessions
-                    .iter()
-                    .filter(|s| self.homes.get(&s.id) == Some(&at))
-                    .map(SidebarEntry::Session),
-            );
+            for session in self
+                .sessions
+                .iter()
+                .filter(|s| self.homes.get(&s.id) == Some(&at))
+            {
+                self.push_session(&mut entries, session);
+            }
         }
         entries
+    }
+
+    /// `session`'s entry, then its subagents' while its tree is expanded.
+    fn push_session<'a>(&self, entries: &mut Vec<SidebarEntry<'a>>, session: &'a ClientSession) {
+        entries.push(SidebarEntry::Session(session));
+        if !self.expanded.contains(&session.id) {
+            return;
+        }
+        let count = session.subagents.len();
+        entries.extend(session.subagents.iter().enumerate().map(|(i, subagent)| {
+            SidebarEntry::Subagent {
+                parent: &session.id,
+                subagent,
+                last: i + 1 == count,
+            }
+        }));
+    }
+
+    /// Whether the sidebar lists session `id`'s subagents under it. A tree whose subagents are all gone stays
+    /// expanded, so the next ones are listed at once.
+    pub fn expanded(&self, id: &SessionId) -> bool {
+        self.expanded.contains(id)
     }
 
     /// Whether the host of `peer` (this machine's for `None`) is where `session` lives, so what it says of the session
@@ -2312,7 +2362,14 @@ impl Client {
     /// Rebuilds the list from the folds, keeps the selection valid, and selects a session the user created.
     fn refresh(&mut self) -> Vec<ClientCommand> {
         let old_index = self.selected_index();
+        let tree_above = self.tree_above_selection();
+        let in_view = self.selection_in_view();
         self.rebuild();
+        // Subagents come and go far more often than sessions: a tree above the selection that changed size moves it,
+        // so it is scrolled back into view, unless the wheel had already left it.
+        if in_view && self.tree_above_selection() != tree_above {
+            self.scroll_to_selected();
+        }
         let homes = &self.homes;
         self.seen.retain(|id, _| homes.contains_key(id));
         // A popup about a session that's gone has nothing left to act on.
@@ -2396,6 +2453,7 @@ impl Client {
                     removing_worktree: s.removing_worktree,
                     pr: s.pr,
                     agent: s.agent,
+                    subagents: state.subagents().to_vec(),
                 });
             }
         }
@@ -2406,6 +2464,8 @@ impl Client {
                 feed.states.retain(|id, _| open.iter().any(|s| &s.id == id));
             }
         }
+        self.expanded
+            .retain(|id| sessions.iter().any(|s| &s.id == id));
         self.sessions = sessions;
         self.homes = homes;
     }
@@ -2431,12 +2491,31 @@ impl Client {
             .position(|e| matches!(e, SidebarEntry::Session(s) if &s.id == id))
     }
 
-    /// How many entries the sidebar lists: the sessions, and a header per machine while there are peers.
+    /// How many subagent entries the sidebar lists above the selected session.
+    fn tree_above_selection(&self) -> usize {
+        let Some(id) = &self.selected else {
+            return 0;
+        };
+        self.sidebar()
+            .iter()
+            .take_while(|e| !matches!(e, SidebarEntry::Session(s) if &s.id == id))
+            .filter(|e| matches!(e, SidebarEntry::Subagent { .. }))
+            .count()
+    }
+
+    /// Whether the selected session is among the entries the sidebar shows from its scroll, once its height is known.
+    fn selection_in_view(&self) -> bool {
+        let (Some(index), Some(rows)) = (self.selected_entry(), self.sidebar_rows) else {
+            return false;
+        };
+        let first = self.sidebar_scroll();
+        (first..first + rows).contains(&index)
+    }
+
+    /// How many entries the sidebar lists: the sessions, a header per machine while there are peers, and the
+    /// subagents of expanded sessions.
     fn sidebar_len(&self) -> usize {
-        match self.peers.len() {
-            0 => self.sessions.len(),
-            peers => self.sessions.len() + peers + 1,
-        }
+        self.sidebar().len()
     }
 
     /// Selects `id`, which is listed (or `None`). If the selection changed, scrolls it into view and resizes it to
@@ -2691,6 +2770,20 @@ impl Client {
             }
             Intent::SidebarRows(rows) => {
                 self.sidebar_rows = Some(rows);
+                self.scroll_to_selected();
+                Vec::new()
+            }
+            Intent::ToggleSubagents(id) => {
+                let has_tree = self
+                    .sessions
+                    .iter()
+                    .any(|s| s.id == id && !s.subagents.is_empty());
+                if !has_tree {
+                    return Vec::new();
+                }
+                if !self.expanded.remove(&id) {
+                    self.expanded.insert(id);
+                }
                 self.scroll_to_selected();
                 Vec::new()
             }

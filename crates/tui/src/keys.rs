@@ -48,7 +48,7 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
     match client.focus() {
         Focus::Command => {
             let mut intents = vec![Intent::SetFocus(Focus::Terminal)];
-            intents.extend(command(key, modes));
+            intents.extend(command(key, client, modes));
             intents
         }
         Focus::Terminal if is_prefix(key) => vec![Intent::SetFocus(Focus::Command)],
@@ -262,6 +262,14 @@ fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
         }
         Target::Session(id) => vec![Intent::SelectSession(id), Intent::SetFocus(Focus::Terminal)],
         Target::CloseSession(id) => vec![Intent::BeginCloseSession(id)],
+        Target::Subagents(id) => vec![Intent::ToggleSubagents(id)],
+        Target::Subagent { session, .. } if client.selected() == Some(&session) => {
+            vec![Intent::SetFocus(Focus::Terminal)]
+        }
+        Target::Subagent { session, .. } => vec![
+            Intent::SelectSession(session),
+            Intent::SetFocus(Focus::Terminal),
+        ],
         Target::Machine(machine) => vec![Intent::SelectMachine(machine)],
         Target::Terminal => vec![Intent::SetFocus(Focus::Terminal)],
         Target::Detach => vec![Intent::Quit],
@@ -323,7 +331,7 @@ fn input(kind: InputKind, bytes: Option<Vec<u8>>) -> Vec<Intent> {
 }
 
 /// The key after the prefix.
-fn command(key: &KeyEvent, modes: &Modes) -> Option<Intent> {
+fn command(key: &KeyEvent, client: &Client, modes: &Modes) -> Option<Intent> {
     if is_prefix(key) {
         return encode::key(key, modes).map(Intent::keys);
     }
@@ -339,6 +347,7 @@ fn command(key: &KeyEvent, modes: &Modes) -> Option<Intent> {
         KeyCode::Char('x') => Intent::BeginClose,
         KeyCode::Char('?') => Intent::ShowHelp,
         KeyCode::Char('q') => Intent::Quit,
+        KeyCode::Tab => Intent::ToggleSubagents(client.selected()?.clone()),
         _ => return None,
     })
 }

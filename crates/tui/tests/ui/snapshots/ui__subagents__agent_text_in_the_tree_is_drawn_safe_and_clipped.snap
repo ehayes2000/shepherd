@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/ui/subagents.rs
+expression: ui.region(sidebar(&ui))
+---
+ ⌕ Search…             │
+ ⌂ choose a workspace  │
+ + New session ⊞ Layout│
+ ● pm             ▾1  ×│
+   local · —           │
+   └ ● a-very-… a tas… │
+ ● docs               ×│
+   local · —           │
+                       │
+ ctrl-b ? help Detach ?│
