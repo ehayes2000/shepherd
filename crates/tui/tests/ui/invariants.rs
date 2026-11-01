@@ -47,6 +47,7 @@ const KEYS: &[(KeyCode, KeyModifiers)] = &[
     (KeyCode::Up, KeyModifiers::NONE),
     (KeyCode::Down, KeyModifiers::NONE),
     (KeyCode::PageDown, KeyModifiers::NONE),
+    (KeyCode::PageUp, KeyModifiers::NONE),
     (KeyCode::Char('b'), KeyModifiers::CONTROL),
     (KeyCode::Char('c'), KeyModifiers::CONTROL),
 ];
@@ -233,7 +234,10 @@ impl Run {
             Step::Key(at) => {
                 let (code, modifiers) = KEYS[at.index(KEYS.len())];
                 self.ui.key_with(code, modifiers);
-                let moves = matches!(code, KeyCode::Up | KeyCode::Down | KeyCode::PageDown);
+                let moves = matches!(
+                    code,
+                    KeyCode::Up | KeyCode::Down | KeyCode::PageDown | KeyCode::PageUp
+                );
                 self.status_moved = on_status && moves && modifiers == KeyModifiers::NONE;
             }
             Step::Type(ch) => {

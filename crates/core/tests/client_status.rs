@@ -376,3 +376,151 @@ fn opening_the_status_page_selects_its_page_and_focuses_it() {
     // Already shown: nothing to ask.
     assert!(ui_ops(&c.user(Intent::OpenStatus)).is_empty());
 }
+
+#[test]
+fn opening_the_status_page_focuses_its_pane_on_the_current_page() {
+    let mut c = mixed();
+    c.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
+    let first = only_pane(&c);
+    c.host().ui_apply(LayoutOp::Split {
+        pane: first,
+        dir: SplitDir::Horizontal,
+        ratio: Default::default(),
+        content: Content::View(ViewKind::Status),
+    });
+    c.sync();
+    assert_eq!(c.client().focused_pane(), first);
+    let commands = c.user(Intent::OpenStatus);
+    assert!(ui_ops(&commands).is_empty());
+    let focused = c.client().focused_pane();
+    assert_ne!(focused, first);
+    assert!(matches!(
+        c.client().host_layout().pane(focused),
+        Some(Pane::Leaf {
+            content: Content::View(ViewKind::Status),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn selecting_a_row_out_of_view_scrolls_it_into_view() {
+    // 12 lines; 3 shown at once; s2 is the last line, 11.
+    let mut c = mixed();
+    c.user(Intent::StatusSelect {
+        session: sid("s2"),
+        shown: 3,
+    });
+    assert_eq!(c.client().status_scroll(), 9);
+}
+
+/// Each session resized by `commands`.
+fn resized(commands: &[ClientCommand]) -> Vec<SessionId> {
+    notifications(commands)
+        .into_iter()
+        .filter_map(|n| match n {
+            ClientNotification::SessionResize(SessionResize { session, .. }) => {
+                Some(session.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// `mixed`, sized, with the status page current: page one is its only pane showing `first`, page two (`status`) the
+/// status view.
+fn status_on_page_two(first: Content) -> ClientDriver {
+    let mut c = mixed();
+    c.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
+    let pane = only_pane(&c);
+    c.host().ui_apply(LayoutOp::Put {
+        pane,
+        content: first,
+    });
+    c.host().ui_apply(LayoutOp::PageNew {
+        name: Some("status".to_owned()),
+        content: Content::View(ViewKind::Status),
+    });
+    c.sync();
+    c
+}
+
+#[test]
+fn attaching_selects_the_page_of_a_pane_pinning_the_session() {
+    let mut c = status_on_page_two(Content::session(sid("s1")));
+    let page_one = c.client().host_layout().pages()[0].id;
+    let pinned = match &c.client().host_layout().pages()[0].root {
+        Pane::Leaf { id, .. } => *id,
+        other => panic!("not one pane: {other:?}"),
+    };
+    let commands = c.user(Intent::StatusAttach(sid("s1")));
+    assert_eq!(ui_ops(&commands), [LayoutOp::PageSelect { page: page_one }]);
+    c.host().ui_apply(LayoutOp::PageSelect { page: page_one });
+    c.sync();
+    assert_eq!(c.client().focused_pane(), pinned);
+    assert_eq!(c.client().focused_session(), Some(sid("s1")));
+}
+
+#[test]
+fn a_pane_pinning_the_same_id_on_another_machine_is_not_the_sessions() {
+    let other = Content::peer_session(shepherd_core::ids::MachineId::new("m_far"), sid("s1"));
+    let mut c = status_on_page_two(other);
+    let commands = c.user(Intent::StatusAttach(sid("s1")));
+    assert_eq!(
+        ui_ops(&commands),
+        [LayoutOp::PageNew {
+            name: None,
+            content: Content::Selected,
+        }]
+    );
+}
+
+#[test]
+fn attaching_the_selected_session_resizes_it_to_the_pane_newly_focused() {
+    let mut c = mixed();
+    c.user(Intent::Resize(PtySize { cols: 80, rows: 24 }));
+    let status = only_pane(&c);
+    c.host().ui_apply(LayoutOp::Put {
+        pane: status,
+        content: Content::View(ViewKind::Status),
+    });
+    c.host().ui_apply(LayoutOp::Split {
+        pane: status,
+        dir: SplitDir::Vertical,
+        ratio: Default::default(),
+        content: Content::Selected,
+    });
+    c.sync();
+    c.user(Intent::FocusPane(status));
+    assert_eq!(c.client().selected(), Some(&sid("s5")));
+    let commands = c.user(Intent::StatusAttach(sid("s5")));
+    assert_eq!(
+        resized(&commands),
+        [sid("s5")],
+        "once, to the pane now focused"
+    );
+    assert_eq!(c.client().focused_session(), Some(sid("s5")));
+    let size = c.client().session_size(&sid("s5"));
+    let PtySize { cols, rows } = size.unwrap_or(PtySize { cols: 0, rows: 0 });
+    assert_eq!(cols, 78, "the bottom pane's inside");
+    assert!(rows < 22, "the bottom half, not the whole view: {rows}");
+}
+
+#[test]
+fn attaching_prefers_a_pane_on_the_current_page() {
+    let mut c = status_on_page_two(Content::Selected);
+    let status = c.client().focused_pane();
+    c.host().ui_apply(LayoutOp::Split {
+        pane: status,
+        dir: SplitDir::Horizontal,
+        ratio: Default::default(),
+        content: Content::Selected,
+    });
+    c.sync();
+    let commands = c.user(Intent::StatusAttach(sid("s1")));
+    assert!(ui_ops(&commands).is_empty(), "{:?}", ui_ops(&commands));
+    let page_two = c.client().host_layout().pages()[1].id;
+    assert_eq!(c.client().host_layout().current(), page_two);
+    assert_ne!(c.client().focused_pane(), status);
+    assert_eq!(c.client().focused_session(), Some(sid("s1")));
+}

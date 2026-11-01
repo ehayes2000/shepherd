@@ -682,7 +682,7 @@ fn help_lines() -> Vec<ShownLine> {
             (shown(what), Style::new()),
         ])
     }));
-    lines.push(plain(""));
+    // No blank line before it: the help fits a default 80x24 window whole.
     lines.push(draw::line(
         shown("Other keys go to the session. Any key closes this."),
         Style::new().fg(Color::Gray).add_modifier(Modifier::DIM),

@@ -9,7 +9,7 @@ use shepherd_core::acpp::{Source, SourceKind};
 use shepherd_core::client::status::Grouping;
 use shepherd_core::client::{ClientCommand, ClientEvent, Focus, PeerEvent};
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::layout::{Content, Pane, ViewKind};
+use shepherd_core::layout::{Content, LayoutOp, Pane, SplitDir, ViewKind};
 use shepherd_core::wire::{
     ClientMessage, HostMessage, HostNotification, LogEntry, PROTOCOL_VERSION, RawResponse,
 };
@@ -281,9 +281,42 @@ fn the_selected_row_is_highlighted() {
     assert!(ui.buffer()[(at.x, at.y)].modifier.contains(Modifier::BOLD));
 }
 
+#[test]
+fn a_click_on_the_selected_row_of_an_unfocused_status_pane_focuses_it_without_attaching() {
+    let mut ui = Ui::with_sessions(&["fix-login", "docs"], 120, 20);
+    let first = ui.client().focused_pane();
+    ui.host_layout(LayoutOp::Split {
+        pane: first,
+        dir: SplitDir::Horizontal,
+        ratio: Default::default(),
+        content: Content::View(ViewKind::Status),
+    });
+    assert_eq!(ui.client().focused_pane(), first);
+    let table = ui.boxed("Status");
+    // The table's selection is its first row: docs, the newest.
+    assert_eq!(ui.client().status_selected(), Some(&sid("s2")));
+    let at = ui.at_in(table, "docs");
+    ui.click_at(at.x, at.y);
+    assert_ne!(
+        ui.client().focused_pane(),
+        first,
+        "the status pane is focused"
+    );
+    assert!(
+        ui.layout_ops().is_empty(),
+        "nothing attached: {:?}",
+        ui.layout_ops()
+    );
+    assert_eq!(ui.client().focused_session(), None);
+    // Now it is focused, a click on the selected row attaches it, to the pane showing the selection.
+    ui.click_at(at.x, at.y);
+    assert_eq!(ui.client().focused_pane(), first);
+    assert_eq!(ui.client().focused_session(), Some(sid("s2")));
+}
+
 // ---------- scrolling ----------
 
-/// `n` idle sessions `name-01` (oldest) to `name-<n>`, the status page open in a `cols` x `rows` window.
+/// `n` sessions just started (working, as far as the table can tell) `name-01` (oldest) to `name-<n>`, the status page open in a `cols` x `rows` window.
 fn many(n: usize, cols: u16, rows: u16) -> Ui {
     let names: Vec<String> = (1..=n).map(|i| format!("name-{i:02}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
