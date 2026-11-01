@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/ui/status_feed.rs
+expression: ui.region(feed(&ui))
+---
+  59s  studio      docs-arch             + created
+  59s  studio      fix-login             ✓ PR         #409 open · checks passing
+  59s  studio      f36-cleanup-view      … PR         #417 open · checks pending
+  59s  studio      t28-hello-build       ✗ PR         #416 open · checks failing
+  59s  studio      wire-v2               ✕ exited     code 1
+  59s  studio      t28-hello-build       ▲ asked      Bash(cargo test)
+  59s  studio      fix-login             ❯ prompted   by mcp:s9: rebase on main

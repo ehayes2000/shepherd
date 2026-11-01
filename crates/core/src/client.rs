@@ -79,13 +79,18 @@
 //! Status page (T57): [`status`] groups every listed session by what the user owes it, or by machine, for the status
 //! page's table. Its grouping, selection and scroll are this window's; attaching a session from it selects it here and
 //! focuses a pane showing it. `ctrl-b s` ([`Intent::OpenStatus`]) selects the page showing it, or asks for one.
+//! Below the table (T59), [`events`] is the feed of what happens in sessions across every host, and [`message`] the
+//! message line, which prompts the table's selected agent or every eligible agent of a group, `by: client`, and keeps
+//! how that went.
 //!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
 pub mod automation;
 pub mod cleanup;
+pub mod events;
 pub mod finder;
+pub mod message;
 pub mod panes;
 pub mod status;
 
@@ -383,6 +388,16 @@ pub enum Intent {
     /// Attach this session from the status page (`⏎`, or a click on its selected row): select it in this window and
     /// focus a pane showing it. A session that isn't listed is ignored.
     StatusAttach(SessionId),
+    /// The status page's message line takes the keys (`true`, a click on it) or gives them back to the table (`esc`).
+    ComposeMessage(bool),
+    /// Replace the text in the status page's message line.
+    EditMessage(String),
+    /// Send the status page's message line to this target from now on (`tab`, or a click on the target): see
+    /// [`Client::next_message_target`]. A machine that isn't listed is ignored.
+    MessageTarget(message::MessageTarget),
+    /// Send the message line's text to its target (`⏎`, or its send button): a prompt to each eligible session, `by:
+    /// client`. Blank text sends nothing.
+    SendMessage,
     /// Detach. Sessions keep running on the host.
     Quit,
 }
@@ -745,6 +760,10 @@ pub struct Client {
     catch_up_limit: Option<SignedDuration>,
     /// The status page's table: its grouping, selection and scroll in this window.
     status: status::StatusTable,
+    /// The status page's events feed.
+    events: events::Events,
+    /// The status page's message line: what is typed, to whom, and how the last send went.
+    message: message::MessageLine,
 }
 
 /// What one host's hello and log say, and the requests asked of it that it hasn't answered.
@@ -962,6 +981,8 @@ impl Client {
             asks: BTreeMap::new(),
             catch_up_limit: None,
             status: status::StatusTable::default(),
+            events: events::Events::default(),
+            message: message::MessageLine::default(),
         }
     }
 
@@ -2005,7 +2026,7 @@ impl Client {
         }
     }
 
-    /// Every ask waiting for host `at` lost its answer with its link.
+    /// Every ask waiting for host `at` lost its answer with its link, and so did every prompt of the last message sent.
     fn drop_asks(&mut self, at: &At) {
         let machine = match at {
             At::Local => self.local_label(),
@@ -2018,6 +2039,7 @@ impl Client {
                 }));
             }
         }
+        self.message_dropped(at, &machine);
     }
 
     fn fail(&mut self, why: String) -> Vec<ClientCommand> {
@@ -2152,6 +2174,10 @@ impl Client {
         result: Result<HostResult, WireError>,
     ) -> Vec<ClientCommand> {
         match (method, result) {
+            (Method::SessionPrompt, result) if self.message_asked(id) => {
+                self.message_answered(id, result);
+                Vec::new()
+            }
             (Method::WorkspaceSelect, result) => {
                 let open = self.popup.as_mut().and_then(|p| match p {
                     Popup::Workspace { error, .. } => Some(error),
@@ -2333,13 +2359,19 @@ impl Client {
     /// A log entry from host `at`. One already folded (its seq is at or before the last of its log from that host) is
     /// dropped.
     fn log_entry(&mut self, at: &At, env: &Envelope) -> Vec<ClientCommand> {
-        let Some(feed) = self.feed_mut(at) else {
+        let Some(feed) = self.feed(at) else {
             return Vec::new();
         };
         let log = env.session().cloned();
         if feed.seqs.get(&log).is_some_and(|&last| env.seq() <= last) {
             return Vec::new();
         }
+        let was = env
+            .session()
+            .map(|id| self.events_before(feed.states.get(id), id));
+        let Some(feed) = self.feed_mut(at) else {
+            return Vec::new();
+        };
         feed.seqs.insert(log, env.seq());
         let live = !feed.catching_up();
         // The layout is this machine's host's, recorded in its host log.
@@ -2357,6 +2389,14 @@ impl Client {
             .map(|s| s.id.clone())
             .collect();
         let mut commands = self.refresh();
+        if let (Some(id), Some(was)) = (env.session(), was) {
+            let moved = self
+                .feed(at)
+                .and_then(|f| f.states.get(id))
+                .and_then(|state| events::moved(&was, state));
+            let machine = self.machine_of(at).clone();
+            self.events_after(machine, env, moved, was);
+        }
         commands.extend(self.alerts(at, &wanted));
         if *at == At::Local {
             commands.extend(self.cleanup_closed(env));
@@ -3065,6 +3105,10 @@ impl Client {
             Intent::StatusStep { by, shown } => self.status_step(by, shown),
             Intent::StatusScroll { by, shown } => self.status_scroll_by(by, shown),
             Intent::StatusAttach(session) => self.status_attach(session),
+            Intent::ComposeMessage(on) => self.compose(on),
+            Intent::EditMessage(text) => self.edit_message(text),
+            Intent::MessageTarget(target) => self.set_message_target(target),
+            Intent::SendMessage => self.send_message(),
             Intent::ShowHostWarning => {
                 if let Some(warning) = self.host_warning.clone() {
                     self.set_notice(warning);

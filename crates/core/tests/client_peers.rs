@@ -2028,3 +2028,59 @@ fn without_a_limit_a_peer_catches_up_however_long_it_takes() {
     );
     assert!(!net.c.client().settled());
 }
+
+// ---------- the events feed (T59) ----------
+
+#[test]
+fn a_peers_events_are_in_the_feed_once_even_after_it_is_dropped_and_listed_again() {
+    let mut net = with_peer_session_selected();
+    let from_b = |net: &Machines| {
+        net.c
+            .client()
+            .events()
+            .filter(|e| e.machine == m("m_b"))
+            .count()
+    };
+    let before = from_b(&net);
+    assert!(before > 0, "b1 was made on laptop");
+    relist(&mut net, &[]);
+    relist(&mut net, &[("m_b", "laptop")]);
+    // A fresh fold of laptop: its whole log again.
+    if let Some(peer) = net.peers.iter_mut().find(|(id, ..)| id == "m_b") {
+        peer.2 = 0;
+    }
+    net.reach("m_b");
+    assert!(
+        net.c.client().sessions().iter().any(|s| s.id == sid("b1")),
+        "laptop is listed again"
+    );
+    assert_eq!(from_b(&net), before);
+}
+
+#[test]
+fn a_message_to_a_peers_agent_goes_to_its_host() {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    net.host("m_b")
+        .new_session_with("b1", claude_session_spec());
+    let idle = json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} });
+    net.host("m_b").append(
+        Some("b1"),
+        Source::new(SourceKind::Hook, Some("claude-code".to_owned())),
+        idle,
+    );
+    net.reach("m_b");
+    net.user(Intent::MessageTarget(
+        shepherd_core::client::message::MessageTarget::Machine(m("m_b")),
+    ));
+    net.user(Intent::EditMessage("hello".to_owned()));
+    let sent = net.user(Intent::SendMessage);
+    assert!(!sends_local(&sent), "{sent:?}");
+    let bodies: Vec<_> = peer_requests(&sent, "m_b")
+        .iter()
+        .map(|r| r.body.clone())
+        .collect();
+    assert!(
+        matches!(&bodies[..], [ClientRequest::SessionPrompt(p)] if p.session == sid("b1")),
+        "{bodies:?}"
+    );
+}

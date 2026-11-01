@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/ui/status_feed.rs
+expression: ui.region(message_line(&ui))
+---
+ ❯ [to all on studio (5)]   refused: f36-cleanup-view (wants-user), fix-login (busy) · sent to 1 · skipped: docs-arch (no agent), wire-v2 (exited)   [send]

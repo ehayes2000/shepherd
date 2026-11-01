@@ -14,27 +14,38 @@
 //! - Grouped by state, each group has a header (`NEEDS YOU  3`); grouped by machine, each machine (its name, how it is
 //!   doing and its count).
 //!
-//! The table takes the whole pane for now; the preview (T58) and the events feed and message line (T59) will take its
-//! right part and bottom lines.
+//! - Below the table, a box titled `events` holds the latest events that fit ([`Client::events`]), the newest on its
+//!   last line: how long ago, the machine, the session, what happened and what it said (agents' text, made safe and
+//!   cut at the box). It is shown only while the table keeps [`TABLE_MIN`] lines.
+//! - The page's last line is the message line (T59): `❯`, the target (`[to t28-hello-build]`, `[to all working (3)]`,
+//!   …), what is typed (or, with nothing typed, how the last send went, else a hint) and `[send]`. While it takes the
+//!   keys a reversed cell marks where typing goes.
 //!
-//! [`hit`] reads the same geometry: a session's row ([`Target::StatusRow`]) and the toggle ([`Target::StatusGroupBy`]).
+//! The preview (T58) will take the table's right part.
+//!
+//! [`hit`] reads the same geometry: a session's row ([`Target::StatusRow`]), the toggle ([`Target::StatusGroupBy`]), a
+//! feed line ([`Target::StatusEvent`]), the target ([`Target::StatusTarget`]), `[send]` ([`Target::StatusSend`]) and
+//! the rest of the message line ([`Target::StatusMessage`]).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
 use shepherd_core::acpp::{PrChecks, PrState};
+use shepherd_core::client::events::{EventKind, FeedEvent};
+use shepherd_core::client::message::{MessageTarget, Outcome, Refusal, Report, Skip};
 use shepherd_core::client::panes::{Area, arrange};
 use shepherd_core::client::status::{Group, Grouping, StatusCounts, StatusLine};
 use shepherd_core::client::{Client, ClientSession, MachineGroup, MachineStatus};
 use shepherd_core::config::AgentKind;
 use shepherd_core::layout::{Content, Pane, PaneId, ViewKind};
 use shepherd_core::session::{Activity, SubagentStatus};
+use shepherd_core::wire::Busy;
 
 use crate::draw::{self, shown};
 use crate::layout::Target;
 use crate::sidebar::{glyph, machine_status, pr_label};
-use crate::width::{columns, cut};
+use crate::width::{columns, cut, cut_left};
 use crate::{machine, panes};
 
 const SELECTED_BG: Color = Color::DarkGray;
@@ -48,7 +59,28 @@ struct Geometry {
     header: Rect,
     /// The table's box, when there is room for one.
     table: Option<Table>,
+    /// The events feed's box, below the table, when there is room for it and a table.
+    events: Option<Rect>,
+    /// The message line, the page's last, when there is room for it and a table.
+    message: Option<Message>,
 }
+
+/// The message line's parts.
+struct Message {
+    line: Rect,
+    /// The target (`[to …]`).
+    target: Rect,
+    /// What is typed, or the hint or last report while nothing is.
+    field: Rect,
+    /// `[send]`, when it fits.
+    send: Option<Rect>,
+}
+
+/// The events feed's box is at most this tall, borders included.
+const EVENTS_MAX: u16 = 9;
+/// The table's box keeps at least this many lines (six of its own) when the events feed is shown.
+const TABLE_MIN: u16 = 9;
+const SEND: &str = "[send]";
 
 struct Table {
     frame: Rect,
@@ -58,23 +90,72 @@ struct Table {
     lines: Rect,
 }
 
-fn geometry(area: Rect) -> Geometry {
+/// The page in `area`, top to bottom: the line of counts, the table, the events feed (a third of what the table and
+/// it share, at most [`EVENTS_MAX`], and only while the table keeps [`TABLE_MIN`]) and the message line. A window too
+/// small for a table has only the counts.
+fn geometry(client: &Client, area: Rect) -> Geometry {
     let header = Rect::new(area.x, area.y, area.width, area.height.min(1));
-    let table = (area.height >= 4 && area.width >= 12).then(|| {
-        let frame = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
-        let inner = Rect::new(frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2);
-        Table {
-            frame,
-            names: Rect::new(inner.x, inner.y, inner.width, 1),
-            lines: Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1),
-        }
+    let mut geometry = Geometry {
+        header,
+        table: None,
+        events: None,
+        message: None,
+    };
+    if area.height < 4 || area.width < 12 {
+        return geometry;
+    }
+    let mut rest = area.height - 1;
+    if area.height >= 9 && area.width >= 24 {
+        rest -= 1;
+        geometry.message = Some(message_parts(
+            client,
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        ));
+    }
+    let events = (rest / 3).min(EVENTS_MAX);
+    let events = if events >= 3 && rest - events >= TABLE_MIN {
+        events
+    } else {
+        0
+    };
+    let frame = Rect::new(area.x, area.y + 1, area.width, rest - events);
+    if events > 0 {
+        geometry.events = Some(Rect::new(area.x, frame.bottom(), area.width, events));
+    }
+    let inner = Rect::new(frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2);
+    geometry.table = Some(Table {
+        frame,
+        names: Rect::new(inner.x, inner.y, inner.width, 1),
+        lines: Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1),
     });
-    Geometry { header, table }
+    geometry
+}
+
+/// Where the message line's parts are on `line`: `❯ `, the target, a blank, the field, a blank and `[send]` at the
+/// right, if it fits after a field of a few columns.
+fn message_parts(client: &Client, line: Rect) -> Message {
+    let start = line.x + 3;
+    let label = target_label(client);
+    let room = line.right().saturating_sub(start);
+    let width = u16::try_from(columns(&label)).unwrap_or(u16::MAX).min(room);
+    let target = Rect::new(start, line.y, width, 1);
+    let send_width = u16::try_from(columns(SEND)).unwrap_or(0);
+    let send_x = line.right().saturating_sub(send_width + 1);
+    let field_x = target.right() + 1;
+    let send = (send_x >= field_x + 6).then(|| Rect::new(send_x, line.y, send_width, 1));
+    let field_end = send.map_or(line.right(), |s| s.x.saturating_sub(1));
+    let field = Rect::new(field_x, line.y, field_end.saturating_sub(field_x), 1);
+    Message {
+        line,
+        target,
+        field,
+        send,
+    }
 }
 
 /// How many of the table's lines a status page in `area` shows at once.
-fn shown_in(area: Rect) -> usize {
-    geometry(area)
+fn shown_in(client: &Client, area: Rect) -> usize {
+    geometry(client, area)
         .table
         .map_or(0, |t| usize::from(t.lines.height))
 }
@@ -116,8 +197,29 @@ fn visible<'a>(client: &'a Client, table: &Table) -> Vec<(StatusLine<'a>, Rect)>
 /// What is under cell `col`, `row` of a status page drawn in pane `pane` at `area`.
 pub(crate) fn hit(client: &Client, pane: PaneId, area: Rect, col: u16, row: u16) -> Option<Target> {
     let at = Position::new(col, row);
-    let table = geometry(area).table?;
+    let geometry = geometry(client, area);
+    let table = geometry.table?;
     let shown = usize::from(table.lines.height);
+    if let Some(message) = geometry.message.filter(|m| m.line.contains(at)) {
+        if message.target.contains(at) {
+            let next = client.next_message_target();
+            return Some(Target::StatusTarget { pane, next });
+        }
+        if message.send.is_some_and(|s| s.contains(at)) {
+            return Some(Target::StatusSend { pane });
+        }
+        return Some(Target::StatusMessage { pane });
+    }
+    if let Some(events) = geometry.events.filter(|e| e.contains(at)) {
+        return feed_lines(client, events)
+            .into_iter()
+            .find(|(_, line)| line.contains(at))
+            .map(|(event, _)| Target::StatusEvent {
+                pane,
+                session: event.session.clone(),
+                shown,
+            });
+    }
     if toggle(client, &table).is_some_and(|t| t.contains(at)) {
         return Some(Target::StatusGroupBy {
             pane,
@@ -175,7 +277,7 @@ pub(crate) fn focused(client: &Client) -> bool {
 
 /// How many lines the focused pane's status table shows at once.
 pub(crate) fn focused_shown(client: &Client) -> usize {
-    focused_area(client).map_or(0, shown_in)
+    focused_area(client).map_or(0, |area| shown_in(client, area))
 }
 
 /// The status page drawn in pane `pane` at `area` under cell `col`, `row` of the pane area `pane_area`, with how many
@@ -188,7 +290,7 @@ pub(crate) fn under(client: &Client, pane_area: Rect, col: u16, row: u16) -> Opt
         .filter(|p| p.content == Content::View(ViewKind::Status))
         .filter_map(|p| p.terminal().map(panes::rect))
         .find(|area| area.contains(Position::new(col, row)))
-        .map(shown_in)
+        .map(|area| shown_in(client, area))
 }
 
 // ---------- drawing ----------
@@ -199,11 +301,17 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let geometry = geometry(area);
+    let geometry = geometry(client, area);
     render_counts(&client.status_counts(), geometry.header, buf);
     let Some(table) = geometry.table else {
         return;
     };
+    if let Some(events) = geometry.events {
+        render_events(client, events, buf);
+    }
+    if let Some(message) = &geometry.message {
+        render_message(client, message, buf);
+    }
     let border = Style::new().fg(Color::DarkGray);
     draw::render(Block::bordered().border_style(border), table.frame, buf);
     let title = shown(&format!(" {TITLE} "));
@@ -557,4 +665,287 @@ fn render_row(
     if client.offline(&session.id) {
         buf.set_style(line, Style::new().add_modifier(Modifier::DIM));
     }
+}
+
+// ---------- the events feed ----------
+
+/// The feed's latest events that fit inside its box `frame`, each with its line: the newest on the last line.
+fn feed_lines(client: &Client, frame: Rect) -> Vec<(&FeedEvent, Rect)> {
+    let inner = Rect::new(
+        frame.x + 1,
+        frame.y + 1,
+        frame.width.saturating_sub(2),
+        frame.height.saturating_sub(2),
+    );
+    let shown = usize::from(inner.height);
+    let count = client.events().len();
+    let rows = inner.rows().skip(shown.saturating_sub(count));
+    client
+        .events()
+        .skip(count.saturating_sub(shown))
+        .zip(rows)
+        .collect()
+}
+
+const AGE_WIDTH: u16 = 6;
+const EVENT_MACHINE_WIDTH: u16 = 12;
+const EVENT_NAME_MIN: u16 = 8;
+const EVENT_NAME_MAX: u16 = 22;
+const EVENT_KIND_WIDTH: u16 = 11;
+/// The feed's lines are this wide at least to have a machine column.
+const EVENT_MACHINE_FROM: u16 = 70;
+
+fn render_events(client: &Client, frame: Rect, buf: &mut Buffer) {
+    let border = Style::new().fg(Color::DarkGray);
+    draw::render(Block::bordered().border_style(border), frame, buf);
+    let title_style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    draw::set(
+        buf,
+        frame.x + 1,
+        frame.y,
+        &shown(" events "),
+        usize::from(frame.width.saturating_sub(3)),
+        title_style,
+    );
+    let gray = Style::new().fg(Color::Gray);
+    let dim = gray.add_modifier(Modifier::DIM);
+    for (event, line) in feed_lines(client, frame) {
+        let (glyph, label, color) = event_label(&event.kind);
+        // The session's current name while it is listed, else the one it had.
+        let name = client
+            .sessions()
+            .iter()
+            .find(|s| s.id == event.session)
+            .map_or(event.name.as_str(), |s| s.name.as_str());
+        let age = event
+            .age(client)
+            .map(|age| age_label(age.as_secs()))
+            .unwrap_or_default();
+        let machine_width = match line.width >= EVENT_MACHINE_FROM {
+            true => EVENT_MACHINE_WIDTH,
+            false => 0,
+        };
+        let machine_label = cut(
+            client.machine_label(&event.machine),
+            usize::from(EVENT_MACHINE_WIDTH - 1),
+        );
+        let name_width = (line.width / 4).clamp(EVENT_NAME_MIN, EVENT_NAME_MAX);
+        let columns = [
+            (AGE_WIDTH, format!("{age:>4}"), dim),
+            (
+                machine_width,
+                machine_label,
+                machine::style(client, &event.machine),
+            ),
+            (name_width, name.to_owned(), Style::new()),
+            (2, glyph.to_owned(), Style::new().fg(color)),
+            (EVENT_KIND_WIDTH, label.to_owned(), Style::new().fg(color)),
+        ];
+        let mut x = 1;
+        for (width, text, style) in columns {
+            cell(buf, line, (x, width), &text, style);
+            x += width;
+        }
+        let rest = line.width.saturating_sub(x) + 1;
+        cell(buf, line, (x, rest), &event_detail(&event.kind), gray);
+    }
+}
+
+/// How old an event `secs` seconds old is, in its largest whole unit: `12s`, `3m`, `2h` or `4d`.
+fn age_label(secs: i64) -> String {
+    let secs = secs.max(0);
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+/// An event's glyph, what it is called, and its color.
+fn event_label(kind: &EventKind) -> (&'static str, &'static str, Color) {
+    match kind {
+        EventKind::Created => ("+", "created", Color::Gray),
+        EventKind::Started { .. } => ("●", "started", Color::Green),
+        EventKind::Asked { .. } => ("▲", "asked", Color::Yellow),
+        EventKind::Answered => ("●", "answered", Color::Green),
+        EventKind::Prompted { .. } => ("❯", "prompted", Color::Cyan),
+        EventKind::Finished => ("○", "finished", Color::Gray),
+        EventKind::Exited { .. } => ("✕", "exited", Color::Red),
+        EventKind::Pr { pr } => match pr.as_ref().map(|p| (&p.state, &p.checks)) {
+            Some((PrState::Open, PrChecks::Passing)) => ("✓", "PR", Color::Green),
+            Some((PrState::Open, PrChecks::Failing)) => ("✗", "PR", Color::Red),
+            Some((PrState::Open, PrChecks::Pending)) => ("…", "PR", Color::Yellow),
+            _ => ("○", "PR", Color::Gray),
+        },
+        EventKind::Closed => ("✕", "closed", Color::Gray),
+    }
+}
+
+/// What an event says beyond its kind: agents' and other clients' text, made safe when drawn.
+fn event_detail(kind: &EventKind) -> String {
+    match kind {
+        EventKind::Created | EventKind::Answered | EventKind::Finished | EventKind::Closed => {
+            String::new()
+        }
+        EventKind::Started { agent } => agent.clone(),
+        EventKind::Asked { text: Some(text) } => text.clone(),
+        EventKind::Asked { text: None } => "a question".to_owned(),
+        // `by` is the asking client's claim: a label, nothing more.
+        EventKind::Prompted { text, by } => format!("by {by}: {text}"),
+        EventKind::Exited { code: Some(code) } => format!("code {code}"),
+        EventKind::Exited { code: None } => String::new(),
+        EventKind::Pr { pr: None } => "no PR".to_owned(),
+        EventKind::Pr { pr: Some(pr) } => {
+            let state = match &pr.state {
+                PrState::Open => "open",
+                PrState::Closed => "closed",
+                PrState::Merged => "merged",
+                PrState::Other(other) => other,
+            };
+            let checks = match &pr.checks {
+                PrChecks::None => "no checks",
+                PrChecks::Pending => "checks pending",
+                PrChecks::Passing => "checks passing",
+                PrChecks::Failing => "checks failing",
+                PrChecks::Other(other) => other,
+            };
+            format!("#{} {state} · {checks}", pr.number)
+        }
+    }
+}
+
+// ---------- the message line ----------
+
+/// What the target says: `[to <name>]` for the selected session, else the group and how many it has now.
+fn target_label(client: &Client) -> String {
+    let count = client.message_recipients().len();
+    let to = match client.message_target() {
+        MessageTarget::Selected => {
+            let name = client
+                .status_selected()
+                .and_then(|id| client.sessions().iter().find(|s| &s.id == id))
+                .map_or("nobody".to_owned(), |s| cut(&s.name, 24));
+            format!("to {name}")
+        }
+        MessageTarget::Working => format!("to all working ({count})"),
+        MessageTarget::Idle => format!("to all idle ({count})"),
+        MessageTarget::Machine(machine) => {
+            let name = cut(client.machine_label(machine), 16);
+            format!("to all on {name} ({count})")
+        }
+    };
+    format!("[{to}]")
+}
+
+fn render_message(client: &Client, message: &Message, buf: &mut Buffer) {
+    let line = message.line;
+    let prompt = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    draw::set(buf, line.x + 1, line.y, &shown("❯"), 1, prompt);
+    let target = message.target;
+    draw::set_cut(
+        buf,
+        target.x,
+        target.y,
+        &shown(&target_label(client)),
+        usize::from(target.width),
+        Style::new().fg(Color::Blue),
+    );
+    if let Some(send) = message.send {
+        let style = Style::new().fg(Color::Cyan);
+        draw::set(
+            buf,
+            send.x,
+            send.y,
+            &shown(SEND),
+            usize::from(send.width),
+            style,
+        );
+    }
+    let field = message.field;
+    let room = usize::from(field.width);
+    if room == 0 {
+        return;
+    }
+    let cursor = Style::new().add_modifier(Modifier::REVERSED);
+    let text = client.message_text();
+    if !text.is_empty() {
+        let typed = cut_left(text, room.saturating_sub(usize::from(client.composing())));
+        let (end, _) = draw::set(buf, field.x, field.y, &shown(&typed), room, Style::new());
+        if client.composing() && end < field.right() {
+            buf.set_style(Rect::new(end, field.y, 1, 1), cursor);
+        }
+        return;
+    }
+    let mut x = field.x;
+    if client.composing() {
+        buf.set_style(Rect::new(x, field.y, 1, 1), cursor);
+        x += 2;
+    }
+    let (hint, style) = match client.message_report() {
+        Some(report) => report_line(report),
+        None => (
+            "click to message · tab: widen the target".to_owned(),
+            Style::new().fg(Color::Gray).add_modifier(Modifier::DIM),
+        ),
+    };
+    let room = usize::from(field.right().saturating_sub(x));
+    draw::set_cut(buf, x, field.y, &shown(&hint), room, style);
+}
+
+/// How the last send went, in a line: who refused it and why, how many it is being and was sent to, then who was
+/// skipped and why.
+fn report_line(report: &Report) -> (String, Style) {
+    if report.deliveries.is_empty() {
+        return (
+            "no one to message".to_owned(),
+            Style::new().fg(Color::Yellow),
+        );
+    }
+    let mut sent = 0;
+    let mut sending = 0;
+    let mut refused = Vec::new();
+    let mut skipped = Vec::new();
+    for delivery in &report.deliveries {
+        match &delivery.outcome {
+            Outcome::Sending => sending += 1,
+            Outcome::Sent => sent += 1,
+            Outcome::Refused(why) => {
+                let why = match why {
+                    Refusal::Busy(Busy::Running) => "busy",
+                    Refusal::Busy(Busy::WantsUser) => "wants-user",
+                    Refusal::Other(why) => why,
+                };
+                refused.push(format!("{} ({why})", delivery.name));
+            }
+            Outcome::Skipped(why) => {
+                let why = match why {
+                    Skip::Exited => "exited",
+                    Skip::NoAgent => "no agent",
+                    Skip::Offline => "offline",
+                };
+                skipped.push(format!("{} ({why})", delivery.name));
+            }
+        }
+    }
+    // Who refused first: it is what the user has to act on, and the line is cut at its end.
+    let mut parts = Vec::new();
+    if !refused.is_empty() {
+        parts.push(format!("refused: {}", refused.join(", ")));
+    }
+    if sending > 0 {
+        parts.push(format!("sending to {sending}…"));
+    }
+    if sent > 0 || (sending == 0 && refused.is_empty()) {
+        parts.push(format!("sent to {sent}"));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("skipped: {}", skipped.join(", ")));
+    }
+    let style = if refused.is_empty() {
+        Style::new().fg(Color::Gray)
+    } else {
+        Style::new().fg(Color::Yellow)
+    };
+    (parts.join(" · "), style)
 }
