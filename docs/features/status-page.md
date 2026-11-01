@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T57 | Status table | done | 27c7f26 | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
-| T58 | Preview and answer in place | building | task/t58-preview-answer |  |  |
+| T58 | Preview and answer in place | fixing | task/t58-preview-answer |  | built; PM: preview must show at the mock's 120 cols (table gives up columns) |
 | T59 | Events feed and message line | done | b87adf5 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Specs
