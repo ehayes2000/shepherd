@@ -10,13 +10,18 @@ use shepherd_term::{self as term, Cell, Screen, Underline, Width};
 ///
 /// A session's terminal is drawn cell by cell as its emulator left it, not through [`crate::draw`]: showing the
 /// program's own output faithfully is the point of the pane, and the emulator has already consumed its controls.
-#[allow(clippy::disallowed_methods)]
 pub fn render_screen(screen: &Screen, area: Rect, buf: &mut Buffer) {
+    render_rows(screen, 0, area, buf);
+}
+
+/// Draws the screen's rows from `first` on into `area`, as [`render_screen`] draws them from the top.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn render_rows(screen: &Screen, first: u16, area: Rect, buf: &mut Buffer) {
     let area = area.intersection(buf.area);
     let (cols, rows) = screen.size();
     let width = cols.min(area.width);
-    for row in 0..rows.min(area.height) {
-        let y = area.y + row;
+    for row in first..rows.min(first.saturating_add(area.height)) {
+        let y = area.y + (row - first);
         for (col, cell) in screen.row(row).take(usize::from(width)).enumerate() {
             let x = area.x + col as u16;
             let style = style(&cell);
@@ -100,4 +105,21 @@ fn color(color: term::Color) -> Color {
         term::Color::Indexed(n) => Color::Indexed(n),
         term::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+/// The lowest row of the screen that shows anything: the cursor's while it is visible, or one with a visible char.
+/// Zero for a blank screen.
+pub(crate) fn last_used_row(screen: &Screen) -> u16 {
+    let (_, rows) = screen.size();
+    let cursor = screen.cursor();
+    let cursor_row = if cursor.visible { cursor.row } else { 0 };
+    let drawn = (0..rows)
+        .rev()
+        .find(|&row| {
+            screen
+                .row(row)
+                .any(|cell| !cell.ch.is_whitespace() && !cell.ch.is_control())
+        })
+        .unwrap_or(0);
+    drawn.max(cursor_row)
 }

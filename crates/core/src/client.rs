@@ -81,11 +81,12 @@
 //! focuses a pane showing it. `ctrl-b s` ([`Intent::OpenStatus`]) selects the page showing it, or asks for one.
 //! Below the table (T59), [`events`] is the feed of what happens in sessions across every host, and [`message`] the
 //! message line, which prompts the table's selected agent or every eligible agent of a group, `by: client`, and keeps
-//! how that went.
+//! how that went. Beside the table (T58), the preview answers the selected agent's question in place ([`answer`]).
 //!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
+pub mod answer;
 pub mod automation;
 pub mod cleanup;
 pub mod events;
@@ -398,6 +399,14 @@ pub enum Intent {
     /// Send the message line's text to its target (`⏎`, or its send button): a prompt to each eligible session, `by:
     /// client`. Blank text sends nothing.
     SendMessage,
+    /// Answer question `asked` (its `_shepherd/agent/asked` entry's seq) of session `session` with `choice`, from the
+    /// status page's preview (a click on its button, or `y`/`a`/`n` or an option's number): sent `by: client`, unless
+    /// that question is no longer pending or doesn't take `choice`, which the preview then says.
+    StatusAnswer {
+        session: SessionId,
+        asked: Seq,
+        choice: crate::acpp::Choice,
+    },
     /// Detach. Sessions keep running on the host.
     Quit,
 }
@@ -764,6 +773,8 @@ pub struct Client {
     events: events::Events,
     /// The status page's message line: what is typed, to whom, and how the last send went.
     message: message::MessageLine,
+    /// How the last answer from the status page's preview went.
+    answer: Option<answer::AnswerReport>,
 }
 
 /// What one host's hello and log say, and the requests asked of it that it hasn't answered.
@@ -983,6 +994,7 @@ impl Client {
             status: status::StatusTable::default(),
             events: events::Events::default(),
             message: message::MessageLine::default(),
+            answer: None,
         }
     }
 
@@ -2026,7 +2038,8 @@ impl Client {
         }
     }
 
-    /// Every ask waiting for host `at` lost its answer with its link, and so did every prompt of the last message sent.
+    /// Every ask waiting for host `at` lost its answer with its link, and so did every prompt of the last message sent
+    /// and the last answer from the preview.
     fn drop_asks(&mut self, at: &At) {
         let machine = match at {
             At::Local => self.local_label(),
@@ -2040,6 +2053,7 @@ impl Client {
             }
         }
         self.message_dropped(at, &machine);
+        self.answer_dropped(at, &machine);
     }
 
     fn fail(&mut self, why: String) -> Vec<ClientCommand> {
@@ -2176,6 +2190,10 @@ impl Client {
         match (method, result) {
             (Method::SessionPrompt, result) if self.message_asked(id) => {
                 self.message_answered(id, result);
+                Vec::new()
+            }
+            (Method::SessionAnswer, result) if self.answer_asked(id) => {
+                self.answer_answered(result);
                 Vec::new()
             }
             (Method::WorkspaceSelect, result) => {
@@ -3109,6 +3127,11 @@ impl Client {
             Intent::EditMessage(text) => self.edit_message(text),
             Intent::MessageTarget(target) => self.set_message_target(target),
             Intent::SendMessage => self.send_message(),
+            Intent::StatusAnswer {
+                session,
+                asked,
+                choice,
+            } => self.status_answer(session, asked, choice),
             Intent::ShowHostWarning => {
                 if let Some(warning) = self.host_warning.clone() {
                     self.set_notice(warning);

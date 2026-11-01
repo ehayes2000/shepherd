@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
+use shepherd_core::acpp::{Choice, Seq};
 use shepherd_core::client::message::MessageTarget;
 use shepherd_core::client::panes::Divider;
 use shepherd_core::client::status::Grouping;
@@ -150,6 +151,16 @@ pub enum Target {
     StatusMessage { pane: PaneId },
     /// The status page's `[send]` in pane `pane`: sends the message line's text to its target.
     StatusSend { pane: PaneId },
+    /// A button of the status page's preview, in pane `pane`, answering question `asked` of session `session` with
+    /// `choice`. Only an answer the host would accept has one.
+    StatusAnswer {
+        pane: PaneId,
+        session: SessionId,
+        asked: Seq,
+        choice: Choice,
+    },
+    /// The status page's preview's `[⏎ attach]`, in pane `pane`: attaches session `session`.
+    StatusPreviewAttach { pane: PaneId, session: SessionId },
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

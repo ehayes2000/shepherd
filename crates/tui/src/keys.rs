@@ -16,10 +16,14 @@
 //! One key can mean more than one intent (a command also returns keys to the terminal), so these return a list, to
 //! be handled in order.
 
+use std::num::NonZeroU32;
+
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
+use shepherd_core::acpp::Choice;
+use shepherd_core::client::answer::Answers;
 use shepherd_core::client::panes::Divider;
 use shepherd_core::client::{Cell, Client, Focus, Intent, Popup};
 use shepherd_core::layout::{Content, LayoutOp};
@@ -358,6 +362,20 @@ fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
             vec![Intent::FocusPane(pane), Intent::ComposeMessage(true)]
         }
         Target::StatusSend { pane } => vec![Intent::FocusPane(pane), Intent::SendMessage],
+        Target::StatusAnswer {
+            pane,
+            session,
+            asked,
+            choice,
+        } => vec![
+            Intent::FocusPane(pane),
+            Intent::StatusAnswer {
+                session,
+                asked,
+                choice,
+            },
+        ],
+        Target::StatusPreviewAttach { session, .. } => vec![Intent::StatusAttach(session)],
     }
 }
 
@@ -411,8 +429,9 @@ fn command(key: &KeyEvent, client: &Client, modes: &Modes) -> Option<Intent> {
 
 /// A key while the focused pane shows the status page: `tab` widens the message line's target. While the message line
 /// takes the keys (it was clicked), keys edit it, `⏎` sends it and `esc` gives the keys back to the table. Otherwise
-/// `g` switches the grouping, `↑`/`↓` (or `k`/`j`) and page up and down move the table's selection, and `⏎` attaches
-/// it. Other keys do nothing: there is no session to type into.
+/// `g` switches the grouping, `↑`/`↓` (or `k`/`j`) and page up and down move the table's selection, `⏎` attaches
+/// it, and `y`/`a`/`n` (or an option's number) answer what the preview shows it asks. Other keys do nothing: the
+/// preview is read-only, so no key reaches a session from here.
 fn status_key(key: &KeyEvent, client: &Client) -> Option<Intent> {
     if key.code == KeyCode::Tab && key.modifiers.is_empty() {
         return Some(Intent::MessageTarget(client.next_message_target()));
@@ -443,8 +462,37 @@ fn status_key(key: &KeyEvent, client: &Client) -> Option<Intent> {
         KeyCode::PageDown => step(page),
         KeyCode::PageUp => step(-page),
         KeyCode::Enter => Some(Intent::StatusAttach(client.status_selected()?.clone())),
+        KeyCode::Char(c) => status_answer_key(c, client),
         _ => None,
     }
+}
+
+/// `y`, `a` or `n` (or an option's number) while the status table's selected session is asked something the preview
+/// can answer: that answer, to that question. A refused one is still asked for, so the preview says why.
+fn status_answer_key(c: char, client: &Client) -> Option<Intent> {
+    let choice = match c {
+        'y' => Choice::Yes,
+        'a' => Choice::Always,
+        'n' => Choice::No,
+        '1'..='9' => Choice::Option(NonZeroU32::new(c.to_digit(10)?)?),
+        _ => return None,
+    };
+    let asked = client.status_asked()?;
+    let Answers::Open {
+        asked: seq,
+        buttons,
+    } = &asked.answers
+    else {
+        return None;
+    };
+    buttons
+        .iter()
+        .any(|b| b.choice == choice)
+        .then(|| Intent::StatusAnswer {
+            session: asked.session.clone(),
+            asked: *seq,
+            choice,
+        })
 }
 
 fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {

@@ -21,17 +21,28 @@
 //!   …), what is typed (or, with nothing typed, how the last send went, else a hint) and `[send]`. While it takes the
 //!   keys a reversed cell marks where typing goes.
 //!
-//! The preview (T58) will take the table's right part.
+//! - The preview (T58) takes the table's right part, while the table keeps [`TABLE_KEEP`] columns and the box is
+//!   [`PREVIEW_MIN_HEIGHT`] lines tall: a box titled with the selected session's name (its machine at the right) showing
+//!   the bottom of its live screen (the client's emulator for it, read-only: nothing typed or clicked here reaches
+//!   it). While its agent asks something ([`Client::status_asked`]), below the screen: what it asks (made safe and cut),
+//!   a button for each answer the host would accept (`[y yes] [a always] [n no]`, or `[1 <option>] … [n no]`; one it
+//!   would refuse is drawn dim, without brackets, and a note says why), or, for a question it can't answer from here,
+//!   a note to answer it in its pane. `[⏎ attach]` always ends the buttons, and the last answer's outcome
+//!   ([`Client::answer_report`]) shows on the note line. The preview goes first when the pane is narrow or short.
 //!
 //! [`hit`] reads the same geometry: a session's row ([`Target::StatusRow`]), the toggle ([`Target::StatusGroupBy`]), a
-//! feed line ([`Target::StatusEvent`]), the target ([`Target::StatusTarget`]), `[send]` ([`Target::StatusSend`]) and
-//! the rest of the message line ([`Target::StatusMessage`]).
+//! feed line ([`Target::StatusEvent`]), the target ([`Target::StatusTarget`]), `[send]` ([`Target::StatusSend`]),
+//! the rest of the message line ([`Target::StatusMessage`]), and the preview's buttons ([`Target::StatusAnswer`],
+//! [`Target::StatusPreviewAttach`]); the rest of the preview is the pane ([`Target::Pane`]), never its session.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
-use shepherd_core::acpp::{PrChecks, PrState};
+use shepherd_core::acpp::{Choice, PrChecks, PrState, Seq};
+use shepherd_core::client::answer::{
+    AnswerOutcome, AnswerRefusal, AnswerReport, Answers, Asked, Unanswerable,
+};
 use shepherd_core::client::events::{EventKind, FeedEvent};
 use shepherd_core::client::message::{MessageTarget, Outcome, Refusal, Report, Skip};
 use shepherd_core::client::panes::{Area, arrange};
@@ -42,6 +53,7 @@ use shepherd_core::layout::{Content, Pane, PaneId, ViewKind};
 use shepherd_core::session::{Activity, SubagentStatus};
 use shepherd_core::wire::Busy;
 
+use crate::Screens;
 use crate::draw::{self, shown};
 use crate::layout::Target;
 use crate::sidebar::{glyph, machine_status, pr_label};
@@ -63,6 +75,8 @@ struct Geometry {
     events: Option<Rect>,
     /// The message line, the page's last, when there is room for it and a table.
     message: Option<Message>,
+    /// The preview's box, right of the table, when there is room for it.
+    preview: Option<Rect>,
 }
 
 /// The message line's parts.
@@ -102,6 +116,7 @@ fn geometry(client: &Client, area: Rect) -> Geometry {
         table: None,
         events: None,
         message: None,
+        preview: None,
     };
     if area.height < 4 || area.width < 12 {
         return geometry;
@@ -124,6 +139,8 @@ fn geometry(client: &Client, area: Rect) -> Geometry {
     if events > 0 {
         geometry.events = Some(Rect::new(area.x, frame.bottom(), area.width, events));
     }
+    let (frame, preview) = split_preview(client, frame);
+    geometry.preview = preview;
     let inner = Rect::new(frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2);
     geometry.table = Some(Table {
         frame,
@@ -202,6 +219,26 @@ pub(crate) fn hit(client: &Client, pane: PaneId, area: Rect, col: u16, row: u16)
     let geometry = geometry(client, area);
     let table = geometry.table?;
     let shown = usize::from(table.lines.height);
+    if let Some(frame) = geometry.preview.filter(|p| p.contains(at)) {
+        let found = preview(client, frame).and_then(|p| {
+            p.buttons
+                .into_iter()
+                .find(|b| b.area.contains(at))
+                .and_then(|b| match b.target? {
+                    Press::Answer { asked, choice } => Some(Target::StatusAnswer {
+                        pane,
+                        session: p.session.id.clone(),
+                        asked,
+                        choice,
+                    }),
+                    Press::Attach => Some(Target::StatusPreviewAttach {
+                        pane,
+                        session: p.session.id.clone(),
+                    }),
+                })
+        });
+        return Some(found.unwrap_or(Target::Pane(pane)));
+    }
     if let Some(message) = geometry.message.filter(|m| m.line.contains(at)) {
         if message.target.contains(at) {
             let next = client.next_message_target();
@@ -297,8 +334,8 @@ pub(crate) fn under(client: &Client, pane_area: Rect, col: u16, row: u16) -> Opt
 
 // ---------- drawing ----------
 
-/// Draws the status page in `area`.
-pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) {
+/// Draws the status page in `area`, the preview from `screens`.
+pub(crate) fn render(client: &Client, screens: &Screens, area: Rect, buf: &mut Buffer) {
     let area = area.intersection(buf.area);
     if area.width == 0 || area.height == 0 {
         return;
@@ -313,6 +350,9 @@ pub(crate) fn render(client: &Client, area: Rect, buf: &mut Buffer) {
     }
     if let Some(message) = &geometry.message {
         render_message(client, message, buf);
+    }
+    if let Some(frame) = geometry.preview {
+        render_preview(client, screens, frame, buf);
     }
     let border = Style::new().fg(Color::DarkGray);
     draw::render(Block::bordered().border_style(border), table.frame, buf);
@@ -952,4 +992,316 @@ fn report_line(report: &Report) -> (String, Style) {
         Style::new().fg(Color::Yellow)
     };
     (parts.join(" · "), style)
+}
+
+// ---------- the preview ----------
+
+/// The table keeps at least this many columns, borders included, beside the preview.
+const TABLE_KEEP: u16 = 64;
+/// The preview's narrowest width, borders included.
+const PREVIEW_MIN: u16 = 36;
+/// The preview is shown only in a box at least this tall, borders included.
+const PREVIEW_MIN_HEIGHT: u16 = 8;
+/// The most lines the preview's buttons take.
+const BUTTON_LINES: usize = 2;
+/// The most columns of an option's text on its button.
+const OPTION_MAX: usize = 20;
+const ATTACH: &str = "[⏎ attach]";
+
+/// The table's box `frame` less the preview's part, and the preview's box: two fifths of it, but leaving the table
+/// [`TABLE_KEEP`] columns. No preview with nothing selected, or when it doesn't fit.
+fn split_preview(client: &Client, frame: Rect) -> (Rect, Option<Rect>) {
+    let fits = frame.width >= TABLE_KEEP + PREVIEW_MIN && frame.height >= PREVIEW_MIN_HEIGHT;
+    if !fits || client.status_selected().is_none() {
+        return (frame, None);
+    }
+    let width = (frame.width / 5 * 2)
+        .min(frame.width - TABLE_KEEP)
+        .max(PREVIEW_MIN);
+    let table = Rect {
+        width: frame.width - width,
+        ..frame
+    };
+    let preview = Rect::new(table.right(), frame.y, width, frame.height);
+    (table, Some(preview))
+}
+
+/// What a preview button does when clicked.
+#[derive(Debug, Clone, Copy)]
+enum Press {
+    Answer { asked: Seq, choice: Choice },
+    Attach,
+}
+
+struct Button {
+    area: Rect,
+    label: String,
+    style: Style,
+    /// `None` for an answer the host would refuse: drawn, not clickable.
+    target: Option<Press>,
+}
+
+/// The preview's parts in its box.
+struct Preview<'a> {
+    session: &'a ClientSession,
+    /// Where the session's screen is drawn.
+    screen: Rect,
+    /// The line between the screen and what is below it.
+    rule: Rect,
+    /// What the agent asks (raw), and its line.
+    question: Option<(Rect, String)>,
+    buttons: Vec<Button>,
+    /// A note: the last answer's outcome, why an answer is refused, or why the question can't be answered here.
+    note: Option<(Rect, String, Style)>,
+}
+
+/// The key that answers `choice`, as its button says.
+fn choice_key(choice: Choice) -> String {
+    match choice {
+        Choice::Yes => "y".to_owned(),
+        Choice::Always => "a".to_owned(),
+        Choice::No => "n".to_owned(),
+        Choice::Option(n) => n.to_string(),
+    }
+}
+
+/// A label, the style it is drawn in, and what clicking it does.
+type Item = (String, Style, Option<Press>);
+
+/// The buttons (and the note) for what `session`'s agent asks, `[⏎ attach]` last; and the seq of the question they
+/// answer, if they do.
+fn answer_items(
+    client: &Client,
+    session: &ClientSession,
+    asked: Option<&Asked<'_>>,
+) -> (Vec<Item>, Option<(String, Style)>, Option<Seq>) {
+    let cyan = Style::new().fg(Color::Cyan);
+    let dim = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
+    let mut items = Vec::new();
+    let mut note = None;
+    let mut pending = None;
+    match asked.map(|a| &a.answers) {
+        Some(Answers::Open {
+            asked: seq,
+            buttons,
+        }) => {
+            pending = Some(*seq);
+            for button in buttons {
+                let text = cut(shown(button.label).as_str(), OPTION_MAX);
+                let key = choice_key(button.choice);
+                match &button.refused {
+                    None => {
+                        let press = Press::Answer {
+                            asked: *seq,
+                            choice: button.choice,
+                        };
+                        items.push((format!("[{key} {text}]"), cyan, Some(press)));
+                    }
+                    Some(why) => {
+                        items.push((format!("{key} {text}"), dim, None));
+                        note.get_or_insert((format!("{text}: {why}"), dim));
+                    }
+                }
+            }
+        }
+        Some(Answers::Unanswerable(why)) => {
+            let why = match why {
+                Unanswerable::Offline => format!(
+                    "{} can't be reached now",
+                    client.machine_label(&session.machine)
+                ),
+                Unanswerable::InPane => "attach to answer it in its pane".to_owned(),
+            };
+            note = Some((why, Style::new().fg(Color::Yellow)));
+        }
+        None => {}
+    }
+    items.push((ATTACH.to_owned(), cyan, Some(Press::Attach)));
+    (items, note, pending)
+}
+
+/// The preview of the table's selected session in box `frame`.
+fn preview(client: &Client, frame: Rect) -> Option<Preview<'_>> {
+    let selected = client.status_selected()?;
+    let session = client.sessions().iter().find(|s| &s.id == selected)?;
+    let inner = Rect::new(
+        frame.x + 1,
+        frame.y + 1,
+        frame.width.saturating_sub(2),
+        frame.height.saturating_sub(2),
+    );
+    let asked = client.asked_of(&session.id);
+    let (items, mut note, pending) = answer_items(client, session, asked.as_ref());
+    if let Some(report) = client
+        .answer_report()
+        .filter(|r| r.session == session.id && pending.is_none_or(|seq| seq == r.asked))
+    {
+        note = Some(report_note(report));
+    }
+    // The buttons, flowed onto at most [`BUTTON_LINES`] lines; what doesn't fit is left out.
+    let mut placed: Vec<(u16, u16, Item)> = Vec::new();
+    let (mut line, mut x) = (0u16, 0u16);
+    for (label, style, target) in items {
+        let room = inner.width.saturating_sub(1);
+        let label = cut(&label, usize::from(room));
+        let width = u16::try_from(columns(&label)).unwrap_or(u16::MAX);
+        if x > 0 && x.saturating_add(width) > room {
+            line += 1;
+            x = 0;
+        }
+        if usize::from(line) >= BUTTON_LINES {
+            break;
+        }
+        placed.push((line, x, (label, style, target)));
+        x = x.saturating_add(width + 1);
+    }
+    let lines = placed.last().map_or(0, |(l, ..)| l + 1);
+    let below = 1 + u16::from(asked.is_some()) + lines + u16::from(note.is_some());
+    let below = below.min(inner.height);
+    let screen = Rect::new(inner.x, inner.y, inner.width, inner.height - below);
+    let row = |n: u16| Rect::new(inner.x, screen.bottom() + n, inner.width, 1);
+    // What is below the rule is inset a column from the border.
+    let text_row = |n: u16| {
+        let at = row(n);
+        Rect::new(at.x + 1, at.y, at.width.saturating_sub(1), 1)
+    };
+    let mut next = 1;
+    let question = asked.as_ref().map(|a| {
+        let text = a.text.unwrap_or("it asks something").to_owned();
+        next += 1;
+        (text_row(next - 1), text)
+    });
+    let buttons = placed
+        .into_iter()
+        .map(|(line, x, (label, style, target))| {
+            let width = u16::try_from(columns(&label)).unwrap_or(u16::MAX);
+            let at = text_row(next + line);
+            Button {
+                area: Rect::new(at.x + x, at.y, width, 1),
+                label,
+                style,
+                target,
+            }
+        })
+        .collect();
+    next += lines;
+    let note = note.map(|(text, style)| (text_row(next), text, style));
+    Some(Preview {
+        session,
+        screen,
+        rule: row(0),
+        question,
+        buttons,
+        note,
+    })
+}
+
+/// How the last answer went, for the note line.
+fn report_note(report: &AnswerReport) -> (String, Style) {
+    let choice = report.choice;
+    match &report.outcome {
+        AnswerOutcome::Sending => (format!("answering {choice}…"), Style::new().fg(Color::Gray)),
+        AnswerOutcome::Answered => (format!("answered {choice}"), Style::new().fg(Color::Green)),
+        AnswerOutcome::Refused(why) => {
+            let why = match why {
+                AnswerRefusal::AlreadyAnswered => "it was already answered".to_owned(),
+                AnswerRefusal::NotOffered(why) | AnswerRefusal::Other(why) => why.clone(),
+            };
+            (
+                format!("{choice} refused: {why}"),
+                Style::new().fg(Color::Yellow),
+            )
+        }
+    }
+}
+
+fn render_preview(client: &Client, screens: &Screens, frame: Rect, buf: &mut Buffer) {
+    let Some(preview) = preview(client, frame) else {
+        return;
+    };
+    let session = preview.session;
+    let border = Style::new().fg(Color::DarkGray);
+    draw::render(Block::bordered().border_style(border), frame, buf);
+    let machine_label = cut(client.machine_label(&session.machine), 16);
+    let machine_width = u16::try_from(columns(&machine_label)).unwrap_or(0);
+    let machine_x = frame.right().saturating_sub(machine_width + 2);
+    let title_room = usize::from(machine_x.saturating_sub(frame.x + 2));
+    let title = format!(" {} ", shown(&session.name).as_str());
+    let title_style = Style::new().add_modifier(Modifier::BOLD);
+    draw::set_cut(
+        buf,
+        frame.x + 1,
+        frame.y,
+        &shown(&title),
+        title_room,
+        title_style,
+    );
+    if machine_x > frame.x + 4 {
+        let style = machine::style(client, &session.machine);
+        let width = usize::from(machine_width);
+        draw::set(
+            buf,
+            machine_x,
+            frame.y,
+            &shown(&machine_label),
+            width,
+            style,
+        );
+    }
+    let area = preview.screen;
+    if area.height > 0 {
+        match screens.get(&session.id) {
+            Some(screen) => {
+                let first = (crate::screen::last_used_row(screen) + 1).saturating_sub(area.height);
+                crate::screen::render_rows(screen, first, area, buf);
+                if client.offline(&session.id) {
+                    buf.set_style(area, Style::new().add_modifier(Modifier::DIM));
+                }
+            }
+            None => {
+                let gray = Style::new().fg(Color::Gray).add_modifier(Modifier::DIM);
+                let room = usize::from(area.width.saturating_sub(1));
+                draw::set_cut(buf, area.x + 1, area.y, &shown("no output yet"), room, gray);
+            }
+        }
+    }
+    let rule = preview.rule;
+    let line = "─".repeat(usize::from(rule.width));
+    draw::set(
+        buf,
+        rule.x,
+        rule.y,
+        &shown(&line),
+        usize::from(rule.width),
+        border,
+    );
+    if let Some((line, text)) = &preview.question {
+        let style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        draw::set(buf, line.x, line.y, &shown("▲"), 1, style);
+        let room = usize::from(line.width.saturating_sub(2));
+        let text_style = Style::new().fg(Color::Yellow);
+        draw::set_cut(buf, line.x + 2, line.y, &shown(text), room, text_style);
+    }
+    for button in &preview.buttons {
+        let area = button.area;
+        let width = usize::from(area.width);
+        draw::set(
+            buf,
+            area.x,
+            area.y,
+            &shown(&button.label),
+            width,
+            button.style,
+        );
+    }
+    if let Some((line, text, style)) = &preview.note {
+        draw::set_cut(
+            buf,
+            line.x,
+            line.y,
+            &shown(text),
+            usize::from(line.width),
+            *style,
+        );
+    }
 }
