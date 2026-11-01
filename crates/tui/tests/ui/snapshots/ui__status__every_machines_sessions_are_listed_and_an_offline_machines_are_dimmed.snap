@@ -4,18 +4,18 @@ expression: ui.region(pane(&ui))
 ---
  1   status  +
  ▲ 0 need you   ● 3 working   ○ 0 idle   ✕ 0 exited   ↳ 0 subagents   3 machines · 2 online
-┌ agents ────────────────────────────────────────────────────────────────────────[g: by state]─┐
-│   NAME                      AGENT   MACHINE    SUB  DOING                          PR        │
-│ studio  this machine  · 1                                                                    │
-│ ◌ api                       shell   studio     —    starting                       —         │
-│ laptop  connected  · 1                                                                       │
-│ ◌ train                     shell   laptop     —    starting                       —         │
-│ tower  offline: cannot reach tower  · 1                                                      │
-│ ◌ build                     shell   tower      —    tower offline                  —         │
-│                                                                                              │
-│                                                                                              │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ agents ──────────────────────────────────[g: by state]─┐┌ api ────────────────────────studio─┐
+│   NAME              MACHINE    DOING         PR        ││ no output yet                      │
+│ studio  this machine  · 1                              ││                                    │
+│ ◌ api               studio     starting      —         ││                                    │
+│ laptop  connected  · 1                                 ││                                    │
+│ ◌ train             laptop     starting      —         ││                                    │
+│ tower  offline: cannot reach tower  · 1                ││                                    │
+│ ◌ build             tower      tower offline —         ││                                    │
+│                                                        ││                                    │
+│                                                        ││────────────────────────────────────│
+│                                                        ││ [⏎ attach]                         │
+└────────────────────────────────────────────────────────┘└────────────────────────────────────┘
 ┌ events ──────────────────────────────────────────────────────────────────────────────────────┐
 │       studio      api                   + created                                            │
 │       laptop      train                 + created                                            │

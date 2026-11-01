@@ -207,7 +207,8 @@ fn the_header_counts_each_group() {
 
 #[test]
 fn a_row_shows_agent_machine_subagents_doing_and_pr() {
-    let ui = status_page(120, 30);
+    // Wide enough for every column beside the preview (T58), which narrows the table in a 120-column window.
+    let ui = status_page(200, 30);
     let row = row_of(&ui, "f36-cleanup-view");
     let text = ui.region(row);
     for part in ["●", "claude", "studio", "↳2", "Edit cleanup.rs", "#417 …"] {

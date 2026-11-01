@@ -5,19 +5,19 @@ expression: ui.region(pane(&ui))
  1   status  +
  ▲ 1 need you   ● 2 working   ○ 1 idle   ✕ 1 exited   ↳ 2 subagents   1 machine · 1 online
 ┌ agents ────────────────────────────────────────────────────────[g: by machine]─┐┌ t28-hello-build ────────────────────────────studio─┐
-│   NAME               AGENT   MACHINE    SUB  DOING                   PR        ││Bash command                                        │
+│   NAME                   AGENT   MACHINE    SUB  DOING               PR        ││Bash command                                        │
 │ NEEDS YOU  1                                                                   ││                                                    │
-│ ▲ t28-hello-build    claude  studio     —    asks: Bash(cargo test)  #416 ✗    ││  cargo test                                        │
+│ ▲ t28-hello-build        claude  studio     —    asks: Bash(cargo t… #416 ✗    ││  cargo test                                        │
 │                                                                                ││                                                    │
 │ WORKING  2                                                                     ││Do you want to proceed?                             │
-│ ● docs-arch          shell   studio     —    working                 —         ││                                                    │
-│ ● f36-cleanup-view   claude  studio     ↳2   Edit cleanup.rs         #417 …    ││                                                    │
+│ ● docs-arch              shell   studio     —    working             —         ││                                                    │
+│ ● f36-cleanup-view       claude  studio     ↳2   Edit cleanup.rs     #417 …    ││                                                    │
 │                                                                                ││                                                    │
 │ IDLE  1                                                                        ││                                                    │
-│ ○ fix-login          claude  studio     —    at its prompt           #409 ✓    ││                                                    │
+│ ○ fix-login              claude  studio     —    at its prompt       #409 ✓    ││                                                    │
 │                                                                                ││                                                    │
 │ EXITED  1                                                                      ││                                                    │
-│ ✕ wire-v2            claude  studio     —    exited                  —         ││                                                    │
+│ ✕ wire-v2                claude  studio     —    exited              —         ││                                                    │
 │                                                                                ││                                                    │
 │                                                                                ││                                                    │
 │                                                                                ││                                                    │

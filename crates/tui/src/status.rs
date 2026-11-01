@@ -378,7 +378,12 @@ pub(crate) fn render(client: &Client, screens: &Screens, area: Rect, buf: &mut B
             Style::new().fg(Color::Gray),
         );
     }
-    let cols = Columns::fit(table.lines.width);
+    // Beside the preview, names stay readable: columns go first.
+    let name_min = match geometry.preview {
+        Some(_) => NAME_BESIDE_PREVIEW,
+        None => NAME_MIN,
+    };
+    let cols = Columns::fit(table.lines.width, name_min);
     render_names(&cols, table.names, buf);
     let selected = client.status_selected();
     for (line, at) in visible(client, &table) {
@@ -454,19 +459,22 @@ const MACHINE_WIDTH: u16 = 11;
 const SUB_WIDTH: u16 = 5;
 const PR_WIDTH: u16 = 10;
 const NAME_MIN: u16 = 8;
+/// The narrowest name column beside the preview: the table leaves out other columns before cutting names shorter.
+const NAME_BESIDE_PREVIEW: u16 = 16;
 const NAME_MAX: u16 = 26;
 const DOING_MIN: u16 = 12;
 
 impl Columns {
-    /// The columns of a table `width` wide: the glyph and the name always, then each other column while it fits.
-    fn fit(width: u16) -> Self {
+    /// The columns of a table `width` wide: the glyph and the name (`name_min` columns at least) always, then each
+    /// other column while it fits.
+    fn fit(width: u16, name_min: u16) -> Self {
         // The optional columns, in the order they are left out when they don't all fit.
         const OPTIONAL: [u16; 5] = [SUB_WIDTH, AGENT_WIDTH, PR_WIDTH, MACHINE_WIDTH, DOING_MIN];
         let [sub, agent, pr, machine, doing] = [0, 1, 2, 3, 4];
         let mut on = [true; 5];
         let room = width.saturating_sub(3);
         let need = |on: &[bool; 5]| {
-            NAME_MIN
+            name_min
                 + OPTIONAL
                     .iter()
                     .zip(on)
@@ -481,7 +489,7 @@ impl Columns {
         }
         let spare = room.saturating_sub(need(&on));
         let name_extra = if on[doing] {
-            (spare / 2).min(NAME_MAX - NAME_MIN)
+            (spare / 2).min(NAME_MAX.saturating_sub(name_min))
         } else {
             spare
         };
@@ -493,7 +501,7 @@ impl Columns {
                 at
             })
         };
-        let name = place(true, NAME_MIN + name_extra).unwrap_or((3, 0));
+        let name = place(true, name_min + name_extra).unwrap_or((3, 0));
         let agent = place(on[agent], AGENT_WIDTH);
         let machine = place(on[machine], MACHINE_WIDTH);
         let sub = place(on[sub], SUB_WIDTH);
@@ -996,10 +1004,12 @@ fn report_line(report: &Report) -> (String, Style) {
 
 // ---------- the preview ----------
 
-/// The table keeps at least this many columns, borders included, beside the preview.
-const TABLE_KEEP: u16 = 64;
+/// The table keeps at least this many columns, borders included, beside the preview: the glyph, a short name, the
+/// machine and what it is doing. Narrowed to make room for the preview, the table leaves out columns as it does in any
+/// narrow pane ([`Columns::fit`]: the subagents first, then the agent, …) and cuts names with `…`.
+const TABLE_KEEP: u16 = 40;
 /// The preview's narrowest width, borders included.
-const PREVIEW_MIN: u16 = 36;
+const PREVIEW_MIN: u16 = 32;
 /// The preview is shown only in a box at least this tall, borders included.
 const PREVIEW_MIN_HEIGHT: u16 = 8;
 /// The most lines the preview's buttons take.

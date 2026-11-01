@@ -342,10 +342,39 @@ fn the_preview_is_read_only() {
 }
 
 #[test]
+fn a_120_column_window_shows_the_preview_beside_a_narrowed_table() {
+    for rows in [30, 36] {
+        let ui = status_page(120, rows);
+        ui.assert_contains("[⏎ attach]");
+        // The table gives up columns, the subagents and the agent first, and keeps whole names.
+        let area = table(&ui);
+        for name in ["f36-cleanup-view", "t28-hello-build", "fix-login"] {
+            assert!(!ui.find_in(area, name).is_empty(), "{name} at 120x{rows}");
+        }
+        for kept in ["MACHINE", "DOING", "PR"] {
+            assert!(!ui.find_in(area, kept).is_empty(), "{kept} at 120x{rows}");
+        }
+        assert!(ui.find_in(area, "SUB").is_empty() && ui.find_in(area, "AGENT").is_empty());
+    }
+}
+
+#[test]
+fn the_page_at_120x36_matches_the_mock() {
+    let mut ui = status_page(120, 36);
+    ui.pty("s4", b"Bash command\r\n\r\n  cargo test -p shepherd-core wire\r\n\r\nDo you want to proceed?\r\n");
+    t28_asks(&mut ui, "Bash");
+    insta::assert_snapshot!(ui.region(pane(&ui)));
+}
+
+#[test]
 fn a_narrow_pane_drops_the_preview_before_the_table() {
-    let mut ui = status_page(120, 30);
+    // Even the narrowed table wouldn't fit beside the preview.
+    let mut ui = status_page(80, 24);
     ui.assert_lacks("[⏎ attach]");
-    assert!(!ui.find_in(table(&ui), "f36-cleanup-view").is_empty());
+    assert!(
+        !ui.find_in(table(&ui), "AGENT").is_empty(),
+        "the table keeps its columns"
+    );
     // A window too short for the preview's lines keeps the table whole.
     ui.resize(160, 9);
     assert!(!ui.find_in(table(&ui), "t28-hello-build").is_empty());
