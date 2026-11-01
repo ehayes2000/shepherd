@@ -1,4 +1,4 @@
-//! `shepherd sessions` and `shepherd new` (T46) across machines, end to end on fakes: the commands drive a real
+//! `shepherd sessions`, `shepherd new` (T46) and `shepherd ui` (T50) across machines, end to end on fakes: the commands drive a real
 //! client runtime on machine A's host, which trusts B ("laptop") and reaches it through a tunnel, with both hosts'
 //! runtimes on all-fake ports. The built binary's own tests are in `sessions_cli.rs`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd::cli::prompt::Prompt;
 use shepherd::cli::sessions::{New, new, sessions};
+use shepherd::cli::ui::{Screenshot, Ui, prepare, screenshot, ui};
 use shepherd::cli::{CliError, Drive, WaitError, target};
 use shepherd::client::{ClientError, ClientRuntime, Connector};
 use shepherd_core::acpp::{
@@ -23,6 +24,7 @@ use shepherd_core::client::automation::SessionStatus;
 use shepherd_core::client::{AskId, Client, MachineStatus};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::layout::{Content, Pane, PaneId, SplitDir};
 use shepherd_core::ports::{EventLog, Link, LinkEvent, LinkEventSink, LogId, Reply};
 use shepherd_core::wire::{
     ClientMessage, ClientRequest, CloseWorktree, Hello, HookFrame, HostResponse, PROTOCOL_VERSION,
@@ -204,12 +206,13 @@ impl World {
             .log(a_log)
             .worktrees(worktrees)
             .program(CLAUDE, agent.program())
-            .program(SHELL, agent.shell())
+            .program(SHELL, painter("on testbox", agent.shell()))
             .start();
         let b = HostHarness::builder()
             .machines(machines.clone())
             .machine_key(KEY_B)
             .env(env)
+            .program(SHELL, painter("on laptop", echo_shell()))
             .start();
         if b_lets_a_in {
             machines.trust(&b.machine(), &a_id);
@@ -225,12 +228,15 @@ impl World {
             net.connect(sink).map_err(|e| e.to_string())
         });
         // Set up as `shepherd`'s own commands set up theirs.
-        let client = shepherd::cli::started(ClientRuntime::new(
+        let mut client = ClientRuntime::new(
             MachineId::new("m_cli"),
             connect,
             FakeHostLauncher::new(),
             clock,
-        ));
+        );
+        // As `shepherd ui screenshot` makes it.
+        prepare(&mut client);
+        let client = shepherd::cli::started(client);
         let hooks = a.connect();
         Self {
             _tmp: tmp,
@@ -431,6 +437,10 @@ impl Drive for World {
         self.client.client()
     }
 
+    fn screens(&self) -> &shepherd_tui::Screens {
+        self.client.screens()
+    }
+
     fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
         self.client.ask(machine, request)
     }
@@ -459,6 +469,32 @@ impl Drive for World {
         }
         Err(WaitError::TimedOut)
     }
+}
+
+/// `inner`, which also prints `<label> first line`, a right-to-left override and `!`, and a line too long for a narrow
+/// pane when it starts. Resized, it redraws its whole terminal: `<label> row 01` on each row but the last, and there
+/// `wide xxx…x edge` across it, the cursor after it.
+fn painter(label: &'static str, inner: Program) -> Program {
+    Arc::new(move |input, p| {
+        if input == ProgramInput::Resized {
+            let size = p.size();
+            let mut screen = "\x1b[H\x1b[2J".to_owned();
+            for row in 1..size.rows {
+                screen.push_str(&format!("{label} row {row:02}\r\n"));
+            }
+            let xs = "x".repeat(usize::from(size.cols).saturating_sub(10));
+            screen.push_str(&format!("wide {xs}edge"));
+            p.print(screen);
+            return;
+        }
+        let start = input == ProgramInput::Start;
+        inner(input, p);
+        if start {
+            p.print(format!(
+                "{label} first line\u{202e}!\r\nthis line is long enough to run past the edge of a narrow pane without stopping\r\n"
+            ));
+        }
+    })
 }
 
 /// Selects `app` as `host`'s workspace, as a client started there does with its hello.
@@ -1033,4 +1069,184 @@ fn a_session_with_no_agent_is_never_prompted() {
         "{err:?}"
     );
     assert!(w.prompted().is_empty());
+}
+
+// ---- shepherd ui (T50) ----
+
+impl World {
+    /// What `shepherd ui <op> --json` prints, or why it failed.
+    fn ui_json(&mut self, op: Ui) -> Result<Value, String> {
+        let mut out = Vec::new();
+        ui(self, &op, true, &mut out)?;
+        Ok(serde_json::from_slice(&out).unwrap())
+    }
+
+    /// What `shepherd ui screenshot` prints.
+    fn screenshot(&mut self, shot: &Screenshot) -> String {
+        let mut out = Vec::new();
+        screenshot(self, shot, false, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Starts a session called `name` on A, running in a directory of its own (no worktree); its id.
+    fn running_on_a(&mut self, name: &str) -> SessionId {
+        let made = self
+            .new_json(New {
+                cwd: Some(self.here().to_str().unwrap().to_owned()),
+                name: Some(name.into()),
+                ..New::default()
+            })
+            .unwrap();
+        SessionId::new(made["session"]["id"].as_str().unwrap())
+    }
+}
+
+/// What pane `pane` of machine A's host's layout shows.
+fn shown(w: &World, pane: u64) -> Content {
+    match w.a.host().layout().pane(PaneId::new(pane)) {
+        Some(Pane::Leaf { content, .. }) => content.clone(),
+        other => panic!("pane {pane} is {other:?}"),
+    }
+}
+
+#[test]
+fn ui_put_pins_a_peers_session_with_its_machine_and_this_machines_without() {
+    let mut w = World::new();
+    let mine = session_on(&mut w.a, "mine");
+    let theirs = session_on(&mut w.b, "theirs");
+
+    let put = w
+        .ui_json(Ui::Put {
+            pane: PaneId::new(2),
+            what: "theirs".into(),
+        })
+        .unwrap();
+    let content = &put["layout"]["pages"][0]["root"]["content"];
+    assert_eq!(content["id"], theirs.as_str());
+    assert_eq!(content["name"], "theirs");
+    assert_eq!(content["machine"], "laptop");
+    assert_eq!(content["machine_id"], w.b.machine().as_str());
+    assert_eq!(shown(&w, 2), Content::peer_session(w.b.machine(), theirs));
+
+    let split = w
+        .ui_json(Ui::Split {
+            pane: PaneId::new(2),
+            dir: SplitDir::Vertical,
+            ratio: None,
+            session: Some("mine".into()),
+        })
+        .unwrap();
+    let b = split["layout"]["pages"][0]["root"]["b"]["id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(shown(&w, b), Content::session(mine));
+    assert_eq!(
+        split["layout"]["pages"][0]["root"]["b"]["content"]["machine"],
+        "testbox"
+    );
+}
+
+#[test]
+fn ui_screenshot_draws_each_panes_session_a_peers_too_and_resizes_none() {
+    let mut w = World::new();
+    let theirs = session_on(&mut w.b, "theirs");
+    let mine = w.running_on_a("mine");
+    w.ui_json(Ui::Split {
+        pane: PaneId::new(2),
+        dir: SplitDir::Horizontal,
+        ratio: None,
+        session: Some("theirs".into()),
+    })
+    .unwrap();
+    let sizes = |w: &World| {
+        (
+            w.a.runtime().pty().size(&mine),
+            w.b.runtime().pty().size(&theirs),
+        )
+    };
+    let before = sizes(&w);
+
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: None,
+    });
+    let lines: Vec<&str> = shot.lines().collect();
+    assert_eq!(lines.len(), 12, "{shot}");
+    // The selection's pane shows the first session listed (this machine's), the other the peer's.
+    assert!(shot.contains("on testbox first line"), "{shot}");
+    assert!(shot.contains("on laptop first line"), "{shot}");
+    // What the session drew is shown display-safe: its right-to-left override is dropped.
+    assert!(
+        shot.contains("first line!") && !shot.contains('\u{202e}'),
+        "{shot}"
+    );
+    // A line wider than its pane is cut, not rewrapped.
+    assert!(shot.contains("this line is long"), "{shot}");
+    assert!(!shot.contains("without stopping"), "{shot}");
+    assert_eq!(sizes(&w), before);
+}
+
+#[test]
+fn ui_screenshot_of_another_page_leaves_the_hosts_shown_page_alone() {
+    let mut w = World::new();
+    session_on(&mut w.b, "theirs");
+    w.running_on_a("mine");
+    let made = w
+        .ui_json(Ui::PageNew {
+            name: Some("remote".into()),
+        })
+        .unwrap();
+    let page = made["layout"]["current"].as_u64().unwrap();
+    let pane = made["layout"]["pages"][1]["root"]["id"].as_u64().unwrap();
+    w.ui_json(Ui::Put {
+        pane: PaneId::new(pane),
+        what: "theirs".into(),
+    })
+    .unwrap();
+    w.ui_json(Ui::PageSelect { page: "1".into() }).unwrap();
+
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: Some(page.to_string()),
+    });
+    // Page 1 shows the selection, this machine's session; the page drawn, the peer's alone.
+    assert!(shot.contains("on laptop first line"), "{shot}");
+    assert!(!shot.contains("on testbox first line"), "{shot}");
+    assert_eq!(w.a.host().layout().current().get(), 1);
+    assert_eq!(w.client.client().host_layout().current().get(), 1);
+}
+
+#[test]
+fn ui_screenshot_cuts_a_terminal_bigger_than_its_pane_keeping_the_cursor_row() {
+    let mut w = World::new();
+    let theirs = session_on(&mut w.b, "theirs");
+    // A window on B made its terminal bigger than the 80x24 a session starts at.
+    let mut window = w.b.connect();
+    window.resize(&theirs, 150, 40);
+    w.b.step();
+    window.close();
+    w.b.step();
+    w.ui_json(Ui::Put {
+        pane: PaneId::new(2),
+        what: "theirs".into(),
+    })
+    .unwrap();
+
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: None,
+    });
+    let lines: Vec<&str> = shot.lines().collect();
+    // The pane (76x12, right of the sidebar) shows the terminal's last 12 rows, down to the cursor's: rows 29 to 39
+    // and the wide line, each where the session drew it.
+    assert!(lines[0].contains("on laptop row 29"), "{shot}");
+    assert!(lines[10].contains("on laptop row 39"), "{shot}");
+    assert!(lines[11].contains("wide xxxx"), "{shot}");
+    assert!(!shot.contains("row 28"), "{shot}");
+    // Cut at the pane's edge, not wrapped at 80 columns or the pane's width.
+    assert!(!shot.contains("edge"), "{shot}");
+    assert_eq!(lines.len(), 12, "{shot}");
 }

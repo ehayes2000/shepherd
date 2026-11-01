@@ -43,6 +43,10 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Some("ui") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::cli::ui::main(&args)
+        }
         Some(command @ ("pair" | "join" | "peers" | "unpair")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::peers::main(command, &args)

@@ -1,5 +1,5 @@
-//! The command-line client for scripts and agents (T46, decision 0022): `shepherd sessions`, `shepherd new`, and the
-//! session commands built on them. `docs/cli.md` documents each command and its `--json` shape.
+//! The command-line client for scripts and agents (T46, decision 0022): `shepherd sessions`, `shepherd new`, the
+//! session commands built on them, and `shepherd ui` (T50). `docs/cli.md` documents each command and its `--json` shape.
 //!
 //! A command is a short-lived client of the local host (launching it if none is running), over the same link and
 //! tunnels as the TUI: it runs the client's own core ([`Client`]) headless through a [`Drive`], so it folds the same
@@ -9,6 +9,7 @@
 
 pub mod prompt;
 pub mod sessions;
+pub mod ui;
 
 use std::fmt;
 use std::io::Write;
@@ -21,6 +22,7 @@ use shepherd_core::display::display_safe;
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{HostLauncher, Link, LinkEventSink};
 use shepherd_core::wire::{ClientRequest, HostResult};
+use shepherd_tui::Screens;
 
 use crate::client::{ClientError, ClientRuntime, SocketRuntime, socket_runtime};
 
@@ -107,6 +109,9 @@ impl From<WaitError> for CliError {
 pub trait Drive {
     fn client(&self) -> &Client;
 
+    /// Each session's terminal, as the host's output has drawn it.
+    fn screens(&self) -> &Screens;
+
     /// Asks `machine`'s host (this machine's for `None`) `request`. Read the answer with [`Client::answer`].
     fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId;
 
@@ -128,6 +133,10 @@ where
 {
     fn client(&self) -> &Client {
         ClientRuntime::client(self)
+    }
+
+    fn screens(&self) -> &Screens {
+        ClientRuntime::screens(self)
     }
 
     fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {

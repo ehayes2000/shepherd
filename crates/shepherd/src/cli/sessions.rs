@@ -332,11 +332,15 @@ mod tests {
     use crate::cli::WaitError;
 
     /// A client fed from a [`ClientDriver`]'s host: every entry is delivered before each check.
-    struct Fed(ClientDriver);
+    struct Fed(ClientDriver, shepherd_tui::Screens);
 
     impl Drive for Fed {
         fn client(&self) -> &Client {
             self.0.client()
+        }
+
+        fn screens(&self) -> &shepherd_tui::Screens {
+            &self.1
         }
 
         fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
@@ -395,7 +399,7 @@ mod tests {
         host.append(Some("s1"), shepherd.clone(), pr("open", "passing"));
         host.append(Some("s2"), shepherd, pr("draft", "flaky"));
         c.sync();
-        Fed(c)
+        Fed(c, shepherd_tui::Screens::new())
     }
 
     fn listed(drive: &mut Fed) -> Value {

@@ -1,8 +1,8 @@
 # Shepherd from the command line
 
-Commands for scripts and agents (decision 0022): see every session, start one, and (in later tasks) prompt, answer and
-arrange them. Each command is a short-lived client of this machine's host (started if it isn't running), and reaches
-the paired machines through it, as the TUI does.
+Commands for scripts and agents (decision 0022): see every session, start one, prompt them, arrange the screen and see
+it drawn, and (in later tasks) answer them. Each command is a short-lived client of this machine's host (started if it
+isn't running), and reaches the paired machines through it, as the TUI does.
 
 ```
 shepherd sessions                                                        [--json]
@@ -10,6 +10,15 @@ shepherd new [--profile P] [--machine M] [--cwd DIR] [--name N]          [--json
 shepherd prompt <session> <text | -> [--wait] [--queue] [--timeout T]    [--json]
 shepherd reply <session>                                                 [--json]
 shepherd wait <session> [--timeout T]                                    [--json]
+shepherd ui get                                                          [--json]
+shepherd ui page new [NAME]                                              [--json]
+shepherd ui page select|close <page>                                     [--json]
+shepherd ui page rename <page> <name>                                    [--json]
+shepherd ui split <pane> right|down [--ratio R] [--session S]            [--json]
+shepherd ui put <pane> <session|view>                                    [--json]
+shepherd ui close <pane>                                                 [--json]
+shepherd ui ratio <pane> R                                               [--json]
+shepherd ui screenshot [--size WxH] [--page P]                           [--json]
 ```
 
 - Human output is display-safe (control characters in names, branches and paths are dropped). `--json` output is one
@@ -80,6 +89,44 @@ Prints the session's agent's last reply, without prompting it, or `<name> has no
 
 Waits until the session's agent is at its prompt, waits on the user, or exits, and prints its status
 (`wants-user: <what it asked>` when it asked something).
+
+## `shepherd ui`
+
+The screen's arrangement (decision 0022): pages of split panes, owned by this machine's host and shown by every
+window on it, each at its own size. `ui get` prints it; every other `ui` command but `screenshot` applies one change
+through the host and prints the layout the host answers with. A change the host refuses (an unknown pane, a pane that
+isn't split, a page name that is blank or too long, too many pages or panes) is the error, and changes nothing.
+
+- `<pane>` is a pane's id, as `ui get` prints it. `<page>` is a page's id, or its name when no page has that id and
+  exactly one has that name (default page names are numbers, so an id wins).
+- `page new` adds a page after the others, with one empty pane, and shows it; unnamed, it is numbered. `page select`
+  shows a page; `page close` closes it and everything on it (closing the last page leaves a fresh one).
+- `split` divides a pane in two: it stays as the first half (`a`, left or top), taking `R` of the space (0.5 by
+  default), and the new second half (`b`) shows `--session S`, or nothing. `ratio` sets a split's `R`. A ratio is a
+  fraction from 0 to 1; the host keeps it within 0.05..0.95.
+- `put` shows something in a pane that isn't split: `empty`, `selected` (each window's own sidebar selection, what the
+  default layout's pane shows), a view (`status`, `machines`, `pm-panel`, `cleanup`, `archive`), or else a session by
+  [id or name](#naming-sessions-and-machines). A view's name wins over a session's: name such a session by its id.
+- A session is pinned for every window. One on a paired machine is pinned with its machine.
+- `close` closes a pane and everything in it: its sibling takes its place. Closing a page's last pane leaves one empty
+  pane.
+
+The human form is one line per page, `page <id>: <name>` (`page <id> (shown): <name>` for the shown one), and under it
+its panes, indented by depth: `split <id> right|down <R>`, then its two halves; `pane <id>: <content>`, where content is
+`empty`, `selected`, `view <name>` or `session <name> (<id>) on <machine>`.
+
+### `shepherd ui screenshot`
+
+Draws the window a user would see at `--size` (120x40 by default; each from 1 up to 1000x500), with the TUI's own
+renderer, headless, and prints it as text, one line per row without trailing blanks, display-safe. It shows the shown
+page, or `--page P` instead (the host's shown page stays as it is). It changes nothing: no session is resized.
+
+- The sidebar is a newly opened window's: it selects the first session it lists (this machine's newest). A
+  `selected` pane shows that session.
+- Each session's terminal is the host's current snapshot of it, at its own size, cut to the pane: rows from the top
+  as a terminal made shorter cuts them (the cursor's row stays in sight), columns from the right, never rewrapped. A
+  terminal over 400x200 isn't shown whole. A session that has printed nothing, or has exited, shows what the TUI shows
+  for it.
 
 ## Shapes
 
@@ -163,3 +210,60 @@ This machine first, then the paired machines by name; sessions newest first.
                                              // what it is yet)
 }
 ```
+
+### Layout
+
+Pages in page-bar order; `current` is the shown page's id. Ids are whole numbers, unique among pages and panes.
+
+```json
+{ "current": 1, "pages": [ Page, … ] }
+```
+
+Page: `{ "id": 1, "name": "1", "root": Pane }`.
+
+Pane, one of:
+
+```json
+{ "kind": "split", "id": 3, "dir": "right" | "down", "ratio": 0.5, "a": Pane, "b": Pane }
+{ "kind": "leaf", "id": 2, "content": Content }
+```
+
+`right`: `a` on the left, `b` on the right. `down`: `a` above, `b` below. `ratio` is `a`'s share, 0.05..0.95.
+
+Content, one of:
+
+```json
+{ "kind": "empty" }
+{ "kind": "selected" }                     // each window's own sidebar selection
+{ "kind": "session", "id": "s_01jbx…", "name": "api" | null, "machine": "studio", "machine_id": "<machine id>" }
+{ "kind": "view", "view": "status" | "machines" | "pm-panel" | "cleanup" | "archive" | "<a view this build doesn't know>" }
+```
+
+A session's `name` is `null` when it isn't listed (its machine can't be reached). `machine` and `machine_id` name the machine whose host
+runs it; for one of this machine's own they are this machine's, or `""` (empty) if its host hasn't said which machine it
+is, which a command that has reached it never sees.
+
+### `ui … --json`
+
+Every `ui` command but `screenshot`:
+
+```json
+{ "layout": Layout }
+```
+
+### `ui screenshot --json`
+
+```json
+{
+  "cols": 120,
+  "rows": 40,
+  "page": 1,                               // the page drawn
+  "panes": [                               // each pane of it, where it is drawn on the window, its border included
+    { "id": 2, "content": Content, "selected": true, "x": 24, "y": 0, "cols": 96, "rows": 40 }
+  ],
+  "lines": [ "…", … ]                      // the screen, one string per row, as the human form prints it
+}
+```
+
+A pane's `content` is what it shows: for a pane showing the selection (`selected: true`), the session selected (or
+`empty` with none).

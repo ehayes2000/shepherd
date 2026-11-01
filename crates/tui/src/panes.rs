@@ -21,7 +21,7 @@ use shepherd_core::client::panes::{Area, Arrangement, PanePlace, arrange};
 use shepherd_core::client::{Client, MachineStatus};
 use shepherd_core::display::DisplayText;
 use shepherd_core::ids::{MachineId, SessionId};
-use shepherd_core::layout::{Content, ViewKind};
+use shepherd_core::layout::{Content, Layout, Pane, PaneId, ViewKind};
 
 use crate::Screens;
 use crate::draw::{self, shown};
@@ -59,9 +59,9 @@ pub(crate) fn arranged(client: &Client, pane: Rect) -> Arrangement {
     arrange(&client.host_layout(), area(pane))
 }
 
-/// The page bar's controls: each page drawn whole (its name, and whether it is the current one), then `+` if it fits.
-fn page_bar(client: &Client, bar: Rect) -> Vec<(Rect, Target, DisplayText, bool)> {
-    let layout = client.host_layout();
+/// The page bar's controls: each page of `layout` drawn whole (its name, and whether it is the current one), then `+`
+/// if it fits.
+fn page_bar(layout: &Layout, bar: Rect) -> Vec<(Rect, Target, DisplayText, bool)> {
     let mut controls = Vec::new();
     let mut x = bar.x;
     let room = |x: u16, width: usize| usize::from(bar.right().saturating_sub(x)) >= width;
@@ -121,7 +121,7 @@ pub(crate) fn hit(client: &Client, pane: Rect, col: u16, row: u16) -> Option<Tar
     if let Some(bar) = arranged.page_bar.map(rect)
         && bar.contains(at)
     {
-        return page_bar(client, bar)
+        return page_bar(&client.host_layout(), bar)
             .into_iter()
             .find(|(area, ..)| area.contains(at))
             .map(|(_, target, ..)| target);
@@ -147,11 +147,18 @@ pub(crate) fn hit(client: &Client, pane: Rect, col: u16, row: u16) -> Option<Tar
     Some(Target::Pane(place.pane))
 }
 
-/// Draws the page bar and the current page's panes in the pane area `pane`.
-pub(crate) fn render(client: &Client, screens: &Screens, pane: Rect, buf: &mut Buffer) {
-    let arranged = arranged(client, pane);
+/// Draws `layout`'s page bar and current page's panes in the pane area `pane`: the host's layout, or one a caller
+/// draws instead ([`crate::render_page`]).
+pub(crate) fn render(
+    client: &Client,
+    screens: &Screens,
+    layout: &Layout,
+    pane: Rect,
+    buf: &mut Buffer,
+) {
+    let arranged = arrange(layout, area(pane));
     if let Some(bar) = arranged.page_bar.map(rect) {
-        for (area, _, label, current) in page_bar(client, bar) {
+        for (area, _, label, current) in page_bar(layout, bar) {
             let style = if current {
                 Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
@@ -160,9 +167,25 @@ pub(crate) fn render(client: &Client, screens: &Screens, pane: Rect, buf: &mut B
             draw::set(buf, area.x, area.y, &label, usize::from(area.width), style);
         }
     }
-    let focused = client.focused_pane();
+    let focused = focused_on(layout, client.focused_pane());
     for place in &arranged.panes {
         render_pane(client, screens, place, place.pane == focused, buf);
+    }
+}
+
+/// The pane of `layout`'s current page that is focused: `focused` if it is one of its panes that isn't split, else its
+/// first, as the client decides it for the host's layout.
+fn focused_on(layout: &Layout, focused: PaneId) -> PaneId {
+    fn first(pane: &Pane) -> PaneId {
+        match pane {
+            Pane::Leaf { id, .. } => *id,
+            Pane::Split { a, .. } => first(a),
+        }
+    }
+    let root = &layout.current_page().root;
+    match root.find(focused) {
+        Some(Pane::Leaf { id, .. }) => *id,
+        _ => first(root),
     }
 }
 

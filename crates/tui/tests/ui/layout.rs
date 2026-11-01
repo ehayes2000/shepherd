@@ -103,6 +103,47 @@ fn two_pages() {
 }
 
 #[test]
+fn render_page_draws_another_page_of_the_layout_and_leaves_the_shown_one_alone() {
+    let mut ui = Ui::with_sessions(&["fix-login", "api"], 80, 10);
+    ui.host_layout(LayoutOp::PageNew {
+        name: Some("review".into()),
+        content: Content::session(sid("s1")),
+    });
+    let review = ui.client().host_layout().current();
+    ui.host_layout(LayoutOp::PageSelect {
+        page: ui.client().host_layout().pages()[0].id,
+    });
+    ui.pty("s1", b"in fix-login").pty("s2", b"in api");
+    ui.assert_contains("in api").assert_lacks("in fix-login");
+
+    let layout = ui.client().host_layout();
+    ui.draw_page(&layout, review);
+    ui.assert_contains("in fix-login").assert_lacks("in api");
+    // The page bar shows the page drawn as the current one.
+    let at = ui.at("review");
+    assert!(
+        ui.buffer()[(at.x, at.y)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "{}",
+        ui.screen()
+    );
+    // Nothing changed: the host's shown page is still the first, as the next draw shows.
+    assert_ne!(ui.client().host_layout().current(), review);
+    ui.pty("s2", b"!");
+    ui.assert_contains("in api!");
+}
+
+#[test]
+fn render_page_of_a_page_the_layout_lacks_draws_its_shown_page() {
+    let mut ui = Ui::with_sessions(&["fix-login", "api"], 80, 10);
+    ui.pty("s2", b"in api");
+    let layout = ui.client().host_layout();
+    ui.draw_page(&layout, shepherd_core::layout::PageId::new(999));
+    ui.assert_contains("in api");
+}
+
+#[test]
 fn a_three_way_split() {
     let ui = three_way(100, 16);
     insta::assert_snapshot!(ui.screen());
