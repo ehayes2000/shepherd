@@ -20,8 +20,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F52 | Peer conn hardening after the tunnel | done | cc35bba | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
 | T62 | Machine colors | done | 8719d79 | 1 | APPROVE; rebased over T48 |
-| T63 | Flat sidebar by default; group by machine on demand | todo |  |  |  |
-| T64 | Machines panel | todo |  |  |  |
+| T63 | Flat sidebar by default; group by machine on demand | building | task/t63-flat-sidebar |  |  |
+| T64 | Machines panel | building | task/t64-machines-panel |  | blocked→decided: built_at commit time for staleness (0018 amendment) |
 | T65 | New session: machine first, then agent | todo |  |  |  |
 
 ## Specs

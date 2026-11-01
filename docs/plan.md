@@ -14,7 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T60 Project manager session and page | [project-manager](features/project-manager.md) | fixing | task/t60-pm-session @ 960014c | 1 | round 1 CHANGES (Codex review): lost PM start sticks; local filter, newest-exited untested; e2e-script finding overruled (T44) |
+| T63 Flat sidebar by default; group by machine on demand | [multi-machine](features/multi-machine.md) | building | task/t63-flat-sidebar |  |  |
+| T64 Machines panel | [multi-machine](features/multi-machine.md) | building | task/t64-machines-panel |  | blocked→decided: built_at commit time for staleness (0018 amendment) |
+| T60 Project manager session and page | [project-manager](features/project-manager.md) | merging | task/t60-pm-session @ 960014c | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Ready to start
 
@@ -29,8 +31,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
-| T63 Flat sidebar by default; group by machine on demand | [multi-machine](features/multi-machine.md) | todo | T32b, T62 |
-| T64 Machines panel | [multi-machine](features/multi-machine.md) | todo | T32b, T62, T49 |
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
