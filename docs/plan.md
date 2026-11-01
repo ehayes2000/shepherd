@@ -14,8 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T53 Shepherd MCP server for agents | [automation](features/automation.md) | merging | task/t53-mcp-server @ 3f97c12 | 1 | round 1 fixed as asked (mutations shown); merging |
-| T58 Preview and answer in place | [status-page](features/status-page.md) | review | task/t58-preview-answer @ a9254d4 |  | built; preview at 120 cols (table drops SUB, AGENT) |
+| T60 Project manager session and page | [project-manager](features/project-manager.md) | building | task/t60-pm-session |  |  |
+| T58 Preview and answer in place | [status-page](features/status-page.md) | fixing | task/t58-preview-answer @ a9254d4 | 1 | round 1 CHANGES: stale-with-newer-pending and offline guards untested; + minors |
 
 ## Ready to start
 
@@ -46,7 +46,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 8 | 1 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 9 | 0 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |

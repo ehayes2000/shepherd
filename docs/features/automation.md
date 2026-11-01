@@ -22,7 +22,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T50 | `shepherd ui` CLI and screenshots | done | 3efa8cc | 2 | round 2 APPROVE; focused_on dup → F56 |
 | T51 | Answer an agent's pending question | done | d8692d3 | 3 | round 3 fixed as asked (agent_id linking; 3 tests, each mutation-proven); merging |
 | T52 | Read a session's screen as text | done | b455f98 | 1 | round 1 fixed (concealed blanked, repro test failed first); merged without a 2nd review |
-| T53 | Shepherd MCP server for agents | merging | task/t53-mcp-server @ 3f97c12 | 1 | round 1 fixed as asked (mutations shown); merging |
+| T53 | Shepherd MCP server for agents | done | 8483464 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Specs
 
