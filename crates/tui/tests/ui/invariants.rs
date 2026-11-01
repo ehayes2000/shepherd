@@ -16,7 +16,8 @@
 //!   regroups it), the selected session's row is visible; while its message line takes the keys, keys type instead;
 //! - a line of a status page's events feed hits a session the feed has an event of;
 //! - a status page's preview button that answers hits the question its session is asked now, with an answer the host
-//!   would accept; and no step types into a session while the focused pane shows a status page.
+//!   would accept; and no key, paste, click or wheel step types into a session while the focused pane shows a status
+//!   page.
 //!
 //! Seeded and bounded by count (cases x steps), not time. A failure prints its seed and its (shrunk) steps. Run another
 //! seed with `PROPTEST_RNG_SEED=<n> cargo test -p shepherd-tui --test ui invariants`.
@@ -851,12 +852,22 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
     };
     run.check().map_err(|why| fail(&run, "the start", why))?;
     for (i, step) in case.steps.iter().enumerate() {
-        // A key, a paste or a click on a status page in the focused pane, with no popup and the keys not prefixed.
+        // A key, a paste, a click or the wheel while the focused pane shows a status page, with no popup and the keys
+        // not prefixed: none reaches a session (a click elsewhere focuses another pane first, without typing).
         let client = run.ui.client();
         let on_status = client.popup().is_none()
             && client.focus() == Focus::Terminal
             && run.status_focused()
-            && matches!(step, Step::Key(_) | Step::Type(_) | Step::Paste(_));
+            && matches!(
+                step,
+                Step::Key(_)
+                    | Step::Type(_)
+                    | Step::Paste(_)
+                    | Step::Click(_)
+                    | Step::RightClick(_)
+                    | Step::ClickAt(..)
+                    | Step::Scroll(..)
+            );
         let typed = run.typed();
         run.apply(step);
         let after = format!("step {i} ({step:?})");

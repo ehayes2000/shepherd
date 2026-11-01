@@ -257,6 +257,15 @@ impl Ui {
             .retain(|id, _| sessions.iter().any(|s| &s.id == id));
     }
 
+    /// Any other event for the client (a peer's link dropping, the host's link dropping), as the runtime feeds it, then
+    /// a redraw.
+    pub fn client_event(&mut self, event: ClientEvent) -> &mut Self {
+        let commands = self.driver.handle(event);
+        self.sent.extend(commands);
+        self.draw();
+        self
+    }
+
     /// The runtime's regular tick, at `at` (an RFC 3339 instant), then a redraw.
     pub fn tick(&mut self, at: &str) -> &mut Self {
         let at = shepherd_testkit::builders::ts(at);

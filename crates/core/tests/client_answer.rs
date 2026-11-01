@@ -10,7 +10,7 @@ use shepherd_core::client::answer::{AnswerOutcome, AnswerRefusal, Answers, Unans
 use shepherd_core::client::{ClientCommand, ClientEvent, Intent};
 use shepherd_core::ids::SessionId;
 use shepherd_core::wire::{ClientRequest, SessionAnswer, Status, WireError};
-use shepherd_testkit::builders::{ClientDriver, claude_session_spec, requests};
+use shepherd_testkit::builders::{ClientDriver, claude_session_spec, requests, shell_session_spec};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id)
@@ -290,5 +290,109 @@ fn a_dropped_link_refuses_an_unanswered_answer() {
     assert!(matches!(
         outcome(&c),
         Some(AnswerOutcome::Refused(AnswerRefusal::Other(why))) if why.contains("dropped")
+    ));
+}
+
+/// The user answers `session`'s open question in the pane, its turn ends, and it starts another.
+fn moves_on(c: &mut ClientDriver, session: &str) {
+    hook(
+        c,
+        session,
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} }),
+    );
+    c.host().user_prompt(session, "next");
+    c.sync();
+}
+
+#[test]
+fn an_answer_to_an_earlier_question_never_lands_on_the_next() {
+    let mut c = agents(&["s1"]);
+    asks_permission(&mut c, "s1", "Edit");
+    let first = asked_seq(&c, "s1");
+    moves_on(&mut c, "s1");
+    asks_question(&mut c, "s1", &["h3", "shepherd/1"]);
+    let second = asked_seq(&c, "s1");
+    assert_ne!(first, second);
+    assert!(matches!(
+        c.client().status_asked().map(|a| a.answers),
+        Some(Answers::Open { asked, .. }) if asked == second
+    ));
+    let sent = c.user(Intent::StatusAnswer {
+        session: sid("s1"),
+        asked: first,
+        choice: Choice::No,
+    });
+    assert!(answers_sent(&sent).is_empty());
+    assert_eq!(
+        outcome(&c),
+        Some(AnswerOutcome::Refused(AnswerRefusal::AlreadyAnswered))
+    );
+}
+
+#[test]
+fn a_question_on_a_host_that_cannot_be_reached_is_unanswerable() {
+    let mut c = agents(&["s1"]);
+    asks_permission(&mut c, "s1", "Edit");
+    let asked = asked_seq(&c, "s1");
+    c.handle(ClientEvent::Disconnected);
+    assert!(matches!(
+        c.client().status_asked().map(|a| a.answers),
+        Some(Answers::Unanswerable(Unanswerable::Offline))
+    ));
+    let sent = c.user(Intent::StatusAnswer {
+        session: sid("s1"),
+        asked,
+        choice: Choice::Yes,
+    });
+    assert!(answers_sent(&sent).is_empty());
+    assert!(matches!(
+        outcome(&c),
+        Some(AnswerOutcome::Refused(AnswerRefusal::Other(why))) if why.contains("can't be reached")
+    ));
+}
+
+#[test]
+fn an_answer_racing_the_user_typing_in_the_pane_says_so() {
+    let mut c = agents(&["s1"]);
+    asks_permission(&mut c, "s1", "Edit");
+    let asked = asked_seq(&c, "s1");
+    c.host().append(
+        Some("s1"),
+        Source::new(SourceKind::Shepherd, None),
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/session/answered", "params": { "by": "client" } }),
+    );
+    c.sync();
+    let sent = c.user(Intent::StatusAnswer {
+        session: sid("s1"),
+        asked,
+        choice: Choice::Yes,
+    });
+    assert!(answers_sent(&sent).is_empty());
+    assert_eq!(
+        outcome(&c),
+        Some(AnswerOutcome::Refused(AnswerRefusal::InPane))
+    );
+}
+
+#[test]
+fn an_exited_sessions_question_is_not_shown() {
+    let mut c = agents(&["s1"]);
+    asks_permission(&mut c, "s1", "Edit");
+    c.host().pty_exited("s1", Some(1));
+    c.sync();
+    assert!(c.client().status_asked().is_none());
+}
+
+#[test]
+fn a_session_running_no_agent_offers_no_buttons() {
+    let mut c = ClientDriver::new();
+    c.connect();
+    c.host().new_session_with("sh", shell_session_spec());
+    c.host().user_prompt("sh", "work");
+    c.sync();
+    asks_permission(&mut c, "sh", "Edit");
+    assert!(matches!(
+        c.client().status_asked().map(|a| a.answers),
+        Some(Answers::Unanswerable(Unanswerable::InPane))
     ));
 }

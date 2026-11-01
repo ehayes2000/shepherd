@@ -410,7 +410,7 @@ fn hostile_names_are_drawn_display_safe() {
 
 // ---------- machines ----------
 
-fn peer(c: &mut ClientDriver, machine: &str, event: PeerEvent) -> Vec<ClientCommand> {
+pub(crate) fn peer(c: &mut ClientDriver, machine: &str, event: PeerEvent) -> Vec<ClientCommand> {
     c.handle(ClientEvent::Peer {
         machine: MachineId::new(machine),
         event,
@@ -441,7 +441,7 @@ fn answer_peer(
 }
 
 /// Reaches peer `machine`, whose host's log is `host`'s.
-fn reach(c: &mut ClientDriver, machine: &str, host: &HostDriver) {
+pub(crate) fn reach(c: &mut ClientDriver, machine: &str, host: &HostDriver) {
     let tunnel = peer(
         c,
         machine,

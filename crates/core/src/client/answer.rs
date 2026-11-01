@@ -11,7 +11,8 @@
 //!
 //! The last answer is kept as an [`AnswerReport`]: sent, answered, or refused and why. An answer to a question no longer
 //! pending is refused here, asking nothing ([`AnswerRefusal::AlreadyAnswered`]), as is one the host refuses as nothing
-//! asked. The report is this window's own.
+//! asked; one to a question the user is answering in the pane meanwhile is refused as [`AnswerRefusal::InPane`]. The
+//! report is this window's own.
 
 use super::{At, Client, ClientCommand, refusal};
 use crate::acpp::{AgentAsked, BlockKind, Choice, PromptBy, RequestId, Seq};
@@ -87,6 +88,9 @@ pub enum AnswerOutcome {
 pub enum AnswerRefusal {
     /// The question was answered (or moved on from) before this answer.
     AlreadyAnswered,
+    /// The question is being answered in the session's pane (the user typed into it), or isn't shepherd's to answer
+    /// for another reason: attach to answer it.
+    InPane,
     /// The question doesn't take this answer, and why.
     NotOffered(String),
     /// The host's reason, or that its machine can't be reached or its link dropped before it answered.
@@ -108,7 +112,7 @@ impl Client {
     pub fn asked_of<'a>(&'a self, session: &SessionId) -> Option<Asked<'a>> {
         let listed = self.sessions.iter().find(|s| &s.id == session)?;
         let state = self.state(session)?;
-        if listed.exited || !state.wants_user() {
+        if !state.wants_user() {
             return None;
         }
         let home = self.home(session);
@@ -173,6 +177,7 @@ impl Client {
                     "{machine} can't be reached now"
                 )))
             }
+            Some(Answers::Unanswerable(Unanswerable::InPane)) => Some(AnswerRefusal::InPane),
             _ => Some(AnswerRefusal::AlreadyAnswered),
         };
         let mut report = AnswerReport {

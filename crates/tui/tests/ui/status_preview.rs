@@ -6,15 +6,17 @@ use std::num::NonZeroU32;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
-use shepherd_core::acpp::{Choice, PromptBy};
-use shepherd_core::client::ClientCommand;
+use shepherd_core::acpp::{Choice, PromptBy, Source, SourceKind};
+use shepherd_core::client::{ClientCommand, ClientEvent, PeerEvent};
+use shepherd_core::ids::MachineId;
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, Method, SessionAnswer, Status, WireError,
 };
+use shepherd_testkit::builders::{ClientDriver, HostDriver, claude_session_spec};
 use shepherd_tui::Target;
 
 use crate::harness::Ui;
-use crate::status::{hook, pane, sid, status_page, table};
+use crate::status::{hook, open_status, pane, reach, sid, status_page, table};
 
 /// The team's page in a window wide enough for the preview.
 fn wide() -> Ui {
@@ -259,6 +261,10 @@ fn a_question_shows_its_options_as_buttons() {
     for button in ["[1 h3]", "[2 shepherd/1]", "[n no]"] {
         assert!(!ui.find_in(area, button).is_empty(), "{button} missing");
     }
+    // `y` isn't an answer a question takes: nothing is sent, and nothing is said.
+    ui.key(KeyCode::Char('y'));
+    assert!(answers(&ui).is_empty());
+    assert!(ui.client().answer_report().is_none());
     ui.key(KeyCode::Char('2'));
     let two = Choice::Option(NonZeroU32::new(2).unwrap_or_else(|| panic!("2")));
     assert_eq!(answers(&ui).last().map(|a| a.choice), Some(two));
@@ -381,4 +387,85 @@ fn a_narrow_pane_drops_the_preview_before_the_table() {
     ui.assert_lacks("[⏎ attach]");
     ui.resize(160, 40);
     ui.assert_contains("[⏎ attach]");
+}
+
+#[test]
+fn an_answers_note_shows_only_for_its_session() {
+    let mut ui = wide();
+    t28_asks(&mut ui, "Edit");
+    ui.click_in(preview(&ui, "t28-hello-build"), "[y yes]");
+    assert!(
+        ui.region(preview(&ui, "t28-hello-build"))
+            .contains("answering yes…")
+    );
+    let at = ui.at_in(table(&ui), "fix-login");
+    ui.click_at(at.x, at.y);
+    ui.assert_lacks("answering yes…");
+}
+
+#[test]
+fn a_page_with_no_sessions_keeps_the_table_full_width() {
+    let mut driver = ClientDriver::new();
+    driver.connect_named("studio");
+    let mut ui = Ui::new(driver, 160, 40);
+    open_status(&mut ui);
+    // The table's box spans the pane: its inside is the pane less a border column each side.
+    assert_eq!(table(&ui).width, pane(&ui).width - 2, "{}", ui.screen());
+    ui.assert_lacks("[⏎ attach]");
+}
+
+#[test]
+fn a_question_on_a_machine_that_cannot_be_reached_has_no_buttons() {
+    let mut c = ClientDriver::new();
+    let subscribe = c.connect_named("studio");
+    c.sync();
+    let caught_up = c.answer(&subscribe, Ok(json!({})));
+    c.answer(
+        &caught_up,
+        Ok(json!({ "peers": [{ "id": "m_tower", "name": "tower" }] })),
+    );
+    let mut host = HostDriver::new();
+    host.stamp_machine("m_tower");
+    host.new_session_with("far", claude_session_spec());
+    host.rename("far", "far");
+    host.user_prompt("far", "work");
+    let source = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    host.append(
+        Some("far"),
+        source.clone(),
+        json!({ "jsonrpc": "2.0", "id": 9, "method": "session/request_permission",
+            "params": { "sessionId": "a1", "toolCall": { "toolCallId": "t9", "title": "Edit(x)" }, "options": [] } }),
+    );
+    host.append(
+        Some("far"),
+        source,
+        json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/asked",
+            "params": { "kind": "permission", "text": "Edit: x", "tool": "Edit" } }),
+    );
+    reach(&mut c, "m_tower", &host);
+    let mut ui = Ui::new(c, 160, 40);
+    open_status(&mut ui);
+    // Reachable: it can be answered.
+    assert!(
+        !ui.find_in(preview(&ui, "far"), "[y yes]").is_empty(),
+        "{}",
+        ui.screen()
+    );
+    ui.client_event(ClientEvent::Peer {
+        machine: MachineId::new("m_tower"),
+        event: PeerEvent::Disconnected,
+    });
+    let area = preview(&ui, "far");
+    assert!(
+        ui.find_in(area, "[y yes]").is_empty(),
+        "{}",
+        ui.region(area)
+    );
+    assert!(
+        ui.region(area).contains("tower can't be reached now"),
+        "{}",
+        ui.region(area)
+    );
+    ui.key(KeyCode::Char('y'));
+    assert!(answers(&ui).is_empty());
 }

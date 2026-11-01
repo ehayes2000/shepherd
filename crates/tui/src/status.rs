@@ -1215,6 +1215,7 @@ fn report_note(report: &AnswerReport) -> (String, Style) {
         AnswerOutcome::Refused(why) => {
             let why = match why {
                 AnswerRefusal::AlreadyAnswered => "it was already answered".to_owned(),
+                AnswerRefusal::InPane => "it is being answered in its pane; attach".to_owned(),
                 AnswerRefusal::NotOffered(why) | AnswerRefusal::Other(why) => why.clone(),
             };
             (
