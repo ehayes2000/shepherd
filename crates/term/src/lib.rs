@@ -189,6 +189,24 @@ impl Screen {
         Some(convert::cell(cell))
     }
 
+    /// How many lines scrolled off the top of the screen are kept above it (at most 1000). The alt screen keeps none.
+    pub fn scrollback(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    /// The cells of the scrollback line `back` lines above the top row (1 is the line just above it), left to right.
+    /// Empty for 0 or past [`Screen::scrollback`].
+    pub fn scrollback_row(&self, back: usize) -> impl Iterator<Item = Cell<'_>> {
+        let line = match back {
+            1.. if back <= self.scrollback() => i32::try_from(back).ok().map(|b| Line(-b)),
+            _ => None,
+        };
+        let grid = self.term.grid();
+        line.into_iter()
+            .flat_map(move |line| (0..grid.columns()).map(move |col| (line, col)))
+            .map(move |(line, col)| convert::cell(&grid[Point::new(line, Column(col))]))
+    }
+
     /// `Some` while output is held by an open synchronized update. See [`SyncHold`].
     pub fn sync_hold(&self) -> Option<SyncHold> {
         self.parser.sync_timeout().hold()

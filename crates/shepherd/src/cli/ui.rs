@@ -13,10 +13,10 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use serde::Serialize;
 use shepherd_core::client::Client;
 use shepherd_core::client::panes::{Area, arrange};
-use shepherd_core::display::display_safe;
 use shepherd_core::layout::{
     Content, Layout, LayoutOp, Page, PageId, Pane, PaneId, Ratio, SplitDir, ViewKind,
 };
@@ -25,6 +25,7 @@ use shepherd_term::{MAX_COLS, MAX_ROWS, Screen};
 use shepherd_tui::Screens;
 
 use crate::client::ClientRuntime;
+use crate::screen_text::row_text;
 use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEventSink};
 
 use super::{Args, Drive, request, safe, settle, target, write, write_json};
@@ -612,21 +613,16 @@ fn fitted(screens: &Screens, arranged: &shepherd_core::client::panes::Arrangemen
     fitted
 }
 
-/// The text of each row of `buf`, display-safe, without trailing blanks. The cell a wide character covers is skipped.
+/// The text of each row of `buf`, as [`row_text`] reads a row: display-safe, without trailing blanks, the cell a wide
+/// character covers skipped, a concealed (`HIDDEN`) cell blank.
 fn lines_of(buf: &Buffer) -> Vec<String> {
     (buf.area.top()..buf.area.bottom())
         .map(|y| {
-            let mut line = String::new();
-            let mut skip: u16 = 0;
-            for x in buf.area.left()..buf.area.right() {
+            row_text((buf.area.left()..buf.area.right()).map(|x| {
                 let cell = &buf[(x, y)];
-                if skip == 0 {
-                    let symbol = display_safe(cell.symbol(), 1).into_string();
-                    line.push_str(if symbol.is_empty() { " " } else { &symbol });
-                }
-                skip = skip.max(cell.cell_width()).saturating_sub(1);
-            }
-            line.trim_end().to_owned()
+                let hidden = cell.modifier.contains(Modifier::HIDDEN);
+                (cell.symbol(), cell.cell_width(), hidden)
+            }))
         })
         .collect()
 }

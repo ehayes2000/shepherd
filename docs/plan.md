@@ -16,7 +16,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ e766620 | 1 | round 1 CHANGES: question id; overlapping dialogs make it unanswerable; Codex n/d and always variants; shared status type |
 | T52 Read a session's screen as text | [automation](features/automation.md) | merging | task/t52-screen-text @ b0be39b | 1 | round 1 fixed (concealed blanked, repro test failed first); merged without a 2nd review |
-| T57 Status table | [status-page](features/status-page.md) | review | task/t57-status-table @ 10a2eab |  | built; help popup clipped at 80x24 (PM: must fit or scroll) |
+| T57 Status table | [status-page](features/status-page.md) | fixing | task/t57-status-table @ 10a2eab | 1 | round 1 CHANGES: help clipped at 80x24; attach paths (pinned, resize, current page first) untested |
 
 ## Ready to start
 

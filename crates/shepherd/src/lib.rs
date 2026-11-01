@@ -9,6 +9,7 @@ pub mod hook;
 pub mod host;
 pub mod peers;
 pub mod screen_guard;
+pub mod screen_text;
 pub mod terminal;
 
 /// The most grapheme clusters [`stderr_safe`] keeps of one line.

@@ -133,9 +133,9 @@ use crate::ports::worktrees::{
 };
 use crate::session::SessionState;
 use crate::wire::{
-    Busy, CleanupInfo, CloseWorktree, HostResult, InputKind, ReplyInfo, SessionNewOk,
-    SessionReplyOk, WireError, WorktreeCleanupOk, WorktreeInfo, WorktreeListOk, WorktreeRemoveOk,
-    WorktreeStatusOk,
+    Busy, CleanupInfo, CloseWorktree, HostResult, InputKind, ReplyInfo, SCREEN_LINES_MAX,
+    SessionNewOk, SessionReplyOk, WireError, WorktreeCleanupOk, WorktreeInfo, WorktreeListOk,
+    WorktreeRemoveOk, WorktreeStatusOk,
 };
 
 use self::capture::{AfterCapture, CaptureJob};
@@ -469,6 +469,13 @@ pub enum HostEvent {
         reply: ReplyTo,
         result: Result<Option<Reply>, TranscriptError>,
     },
+    /// A client asked what a session's terminal shows, with up to `lines` lines of scrollback
+    /// (`_shepherd/session/screen`).
+    ReadScreen {
+        reply: ReplyTo,
+        session: SessionId,
+        lines: Option<u32>,
+    },
     /// A client asked for the screen layout (`_shepherd/ui/get`).
     UiGet { reply: ReplyTo },
     /// A client asked to change the screen layout by `op` (`_shepherd/ui/apply`).
@@ -525,6 +532,13 @@ pub enum HostCommand {
     ReadReply {
         reply: ReplyTo,
         job: ReplyJob,
+    },
+    /// Answer `reply` with what running session `session`'s terminal shows, as text, from the runtime's emulator
+    /// screen, with up to `scrollback` lines of scrollback (never more than [`SCREEN_LINES_MAX`]).
+    ReadScreen {
+        reply: ReplyTo,
+        session: SessionId,
+        scrollback: u32,
     },
     /// Answer the client request `to`.
     Reply {
@@ -1384,6 +1398,11 @@ impl Host {
                     ))),
                 },
             }],
+            HostEvent::ReadScreen {
+                reply,
+                session,
+                lines,
+            } => self.read_screen(reply, session, lines),
             HostEvent::UiGet { reply } => vec![HostCommand::Reply {
                 to: reply,
                 result: Ok(HostResult::Layout(self.layout())),
@@ -1479,6 +1498,27 @@ impl Host {
             },
             ack(reply),
         ]
+    }
+
+    /// Reads what open session `session`'s terminal shows, if it has one: only a running session does.
+    fn read_screen(
+        &self,
+        reply: ReplyTo,
+        session: SessionId,
+        lines: Option<u32>,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.open(&session) else {
+            return vec![unknown_session(reply, session)];
+        };
+        if entry.phase != Phase::Running {
+            let why = format!("{session} isn't running: it has no screen");
+            return vec![reply_err(reply, WireError::InvalidParams(why))];
+        }
+        vec![HostCommand::ReadScreen {
+            reply,
+            session,
+            scrollback: lines.unwrap_or(0).min(SCREEN_LINES_MAX),
+        }]
     }
 
     /// Reads open session `session`'s agent's last reply from the transcript its hooks named; none while they haven't

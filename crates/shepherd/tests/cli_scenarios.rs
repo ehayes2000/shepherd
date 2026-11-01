@@ -1250,3 +1250,125 @@ fn ui_screenshot_cuts_a_terminal_bigger_than_its_pane_keeping_the_cursor_row() {
     assert!(!shot.contains("edge"), "{shot}");
     assert_eq!(lines.len(), 12, "{shot}");
 }
+
+/// What `shepherd screen` prints (`--json` with `json`), or why it failed.
+fn screen_out(
+    w: &mut World,
+    session: &str,
+    lines: Option<u32>,
+    json: bool,
+) -> Result<String, CliError> {
+    let mut out = Vec::new();
+    shepherd::cli::screen::screen(w, session, lines, json, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+fn screen_json(w: &mut World, session: &str, lines: Option<u32>) -> Value {
+    serde_json::from_str(&screen_out(w, session, lines, true).unwrap()).unwrap()
+}
+
+/// A shell session named `name` on A, running in `app` (so at once, with no worktree to wait for), with what it
+/// printed when it started reset away (scrollback too), so its screen starts blank.
+fn shell_session(w: &mut World, name: &str) -> SessionId {
+    let made = w
+        .new_json(New {
+            cwd: Some("app".into()),
+            name: Some(name.into()),
+            ..New::default()
+        })
+        .unwrap();
+    let id = SessionId::new(made["session"]["id"].as_str().unwrap());
+    type_into(w, &id, b"\x1bc");
+    id
+}
+
+/// Types `bytes` into session `id` on A, whose echoing shell prints them back.
+fn type_into(w: &mut World, id: &SessionId, bytes: &[u8]) {
+    w.hooks.input(id, bytes);
+    w.a.step();
+}
+
+#[test]
+fn screen_shows_what_a_session_printed_as_text_without_its_control_sequences() {
+    let mut w = World::new();
+    let id = shell_session(&mut w, "plain");
+    type_into(
+        &mut w,
+        &id,
+        "\x1b[1;31mred\x1b[0m 漢字 done\r\n$ ".as_bytes(),
+    );
+    let shown = screen_json(&mut w, "plain", None);
+    assert_eq!(shown["session"], id.as_str());
+    assert_eq!(
+        (shown["cols"].as_u64(), shown["rows"].as_u64()),
+        (Some(80), Some(24))
+    );
+    assert_eq!(shown["scrollback"], 0);
+    assert_eq!(shown["truncated"], false);
+    let lines = shown["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 24);
+    assert_eq!(lines[0], "red 漢字 done");
+    assert_eq!(lines[1], "$");
+    // For a human: the rows, without the blank ones below the last drawn.
+    assert_eq!(
+        screen_out(&mut w, "plain", None, false).unwrap(),
+        "red 漢字 done\n$\n"
+    );
+}
+
+#[test]
+fn screen_with_lines_adds_that_much_scrollback_above_the_screen() {
+    let mut w = World::new();
+    let id = shell_session(&mut w, "plain");
+    let printed: String = (1..=30).map(|n| format!("line {n}\r\n")).collect();
+    type_into(&mut w, &id, printed.as_bytes());
+    // 31 lines (the last one empty) on 24 rows: lines 1 to 7 scrolled off.
+    let shown = screen_json(&mut w, "plain", Some(5));
+    assert_eq!(shown["scrollback"], 5);
+    let lines = shown["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 29);
+    assert_eq!(lines[0], "line 3");
+    assert_eq!(lines[5], "line 8");
+    let shown = screen_json(&mut w, "plain", Some(100));
+    assert_eq!(shown["scrollback"], 7);
+    assert_eq!(shown["lines"][0], "line 1");
+}
+
+#[test]
+fn screen_reads_a_peers_session_from_its_host() {
+    let mut w = World::new();
+    session_on(&mut w.b, "remote");
+    let shown = screen_json(&mut w, "remote", None);
+    assert_eq!(shown["rows"], 24);
+    assert_eq!(shown["lines"].as_array().unwrap().len(), 24);
+}
+
+#[test]
+fn screen_of_a_session_that_exited_is_refused_saying_so() {
+    let mut w = World::new();
+    let id = shell_session(&mut w, "plain");
+    assert_eq!(screen_json(&mut w, "plain", None)["rows"], 24);
+    type_into(&mut w, &id, b"exit\r");
+    let err = screen_out(&mut w, "plain", None, true).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("isn't running")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn ui_screenshot_and_screen_leave_out_concealed_text() {
+    let mut w = World::new();
+    let id = shell_session(&mut w, "plain");
+    type_into(&mut w, &id, b"pw: \x1b[8msecret\x1b[0m ok\r\n");
+    // Asking the host waits for its answer, and the output it sent before it reaches the client first.
+    let shown = screen_json(&mut w, "plain", None);
+    assert_eq!(shown["lines"][0], "pw:        ok");
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: None,
+    });
+    assert!(shot.contains("pw:") && shot.contains("ok"), "{shot}");
+    assert!(!shot.contains("secret"), "{shot}");
+}

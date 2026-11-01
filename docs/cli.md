@@ -19,6 +19,7 @@ shepherd ui put <pane> <session|view>                                    [--json
 shepherd ui close <pane>                                                 [--json]
 shepherd ui ratio <pane> R                                               [--json]
 shepherd ui screenshot [--size WxH] [--page P]                           [--json]
+shepherd screen <session> [--lines N]                                    [--json]
 ```
 
 - Human output is display-safe (control characters in names, branches and paths are dropped). `--json` output is one
@@ -118,8 +119,9 @@ its panes, indented by depth: `split <id> right|down <R>`, then its two halves; 
 ### `shepherd ui screenshot`
 
 Draws the window a user would see at `--size` (120x40 by default; each from 1 up to 1000x500), with the TUI's own
-renderer, headless, and prints it as text, one line per row without trailing blanks, display-safe. It shows the shown
-page, or `--page P` instead (the host's shown page stays as it is). It changes nothing: no session is resized.
+renderer, headless, and prints it as text, one line per row without trailing blanks, display-safe, concealed text
+(SGR 8) blank. It shows the shown page, or `--page P` instead (the host's shown page stays as it is). It changes
+nothing: no session is resized.
 
 - The sidebar is a newly opened window's: it selects the first session it lists (this machine's newest). A
   `selected` pane shows that session.
@@ -127,6 +129,21 @@ page, or `--page P` instead (the host's shown page stays as it is). It changes n
   as a terminal made shorter cuts them (the cursor's row stays in sight), columns from the right, never rewrapped. A
   terminal over 400x200 isn't shown whole. A session that has printed nothing, or has exited, shows what the TUI shows
   for it.
+
+## `shepherd screen`
+
+Prints what the session's terminal shows now, as text, the way a user would read it: its host reads it from its own
+terminal emulator, at the session's own size, so colours and other control sequences are gone, a wide character is
+one character (never followed by a blank for the cell it covers), concealed text (SGR 8) is blank, and each line is
+display-safe and has no trailing blanks. `--lines N` adds up to `N` lines of scrollback above the screen (none on an
+agent's full-screen view, which keeps none). The human form leaves out the blank rows below the last one drawn;
+`--json` gives every row.
+
+Bounded, so asking can't make a host build a huge answer: at most 1000 lines of scrollback (as many as the host keeps;
+asking for more gives what there is), and at most 1 MiB of text, past which the oldest lines are left out
+(`truncated: true`). Reading a screen is allowed to paired machines, as reading a reply is: they already see the
+session's screen when they show it. A session that isn't running (it exited, or its worktree is still being made) is
+refused.
 
 ## Shapes
 
@@ -267,3 +284,17 @@ Every `ui` command but `screenshot`:
 
 A pane's `content` is what it shows: for a pane showing the selection (`selected: true`), the session selected (or
 `empty` with none).
+
+### `screen --json`
+
+```json
+{
+  "session": "s_01jbx…",
+  "cols": 80,                              // the session's terminal size
+  "rows": 24,
+  "scrollback": 3,                         // how many of `lines` are scrollback, before the screen's rows
+  "lines": ["…", …],                       // scrollback (oldest first), then every row of the screen, top to bottom
+  "truncated": false                       // past 1 MiB of text the oldest lines are left out, so `lines` may
+                                           // start below the screen's top row
+}
+```

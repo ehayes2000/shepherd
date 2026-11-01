@@ -8,6 +8,7 @@
 //! ([`target`]). Human output is display-safe; errors go to stderr.
 
 pub mod prompt;
+pub mod screen;
 pub mod sessions;
 pub mod ui;
 

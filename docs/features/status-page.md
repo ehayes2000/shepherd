@@ -12,7 +12,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T57 | Status table | review | task/t57-status-table @ 10a2eab |  | built; help popup clipped at 80x24 (PM: must fit or scroll) |
+| T57 | Status table | fixing | task/t57-status-table @ 10a2eab | 1 | round 1 CHANGES: help clipped at 80x24; attach paths (pinned, resize, current page first) untested |
 | T58 | Preview and answer in place | todo |  |  |  |
 | T59 | Events feed and message line | todo |  |  |  |
 
