@@ -33,6 +33,7 @@ macro_rules! peers_contract {
             unbinding_drops_every_connection,
             dialling_a_machine_nobody_knows_fails,
             dialling_a_machine_this_one_does_not_trust_fails_without_a_word_to_it,
+            a_connected_machine_reports_how_its_connection_goes,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -46,44 +47,84 @@ macro_rules! peers_contract {
 }
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
-    PeersEventSink,
+    ConnectError, JoinError, LinkKind, PairTicket, PairToken, PairingError, PairingId, PeerPath,
+    Peers, PeersEvent, PeersEventSink,
 };
 
 /// How long a case waits for an event: a liveness bound for real endpoints on localhost, never a measurement.
 pub const EVENT_LIMIT: Duration = Duration::from_secs(20);
 
-/// A sink that forwards events to an mpsc channel. Send errors (receiver gone) are ignored.
-pub struct ChannelSink(pub Sender<PeersEvent>);
+/// A sink that forwards events to mpsc channels: [`PeersEvent::Path`] reports to the second, every other event to the
+/// first, so a case about connections isn't interleaved with paths (which a real link reports whenever its round-trip
+/// time moves). Both share one numbering, in the order the port sent them, so a case can still tell a path from before
+/// its `Connected` or after its `Disconnected`. Send errors (receiver gone) are ignored.
+pub struct ChannelSink {
+    events: Sender<EventReport>,
+    paths: Sender<PathReport>,
+    next: Mutex<u64>,
+}
 
 impl PeersEventSink for ChannelSink {
     fn send(&self, event: PeersEvent) {
-        let _ = self.0.send(event);
+        // Numbered and sent under one lock, so the numbers follow the order of the sends.
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        *next += 1;
+        let n = *next;
+        match event {
+            PeersEvent::Path { peer, path } => {
+                let _ = self.paths.send((n, peer, path));
+            }
+            event => {
+                let _ = self.events.send((n, event));
+            }
+        }
     }
 }
 
-/// A new sink and the receiving end of its events.
-pub fn channel() -> (Arc<dyn PeersEventSink>, Receiver<PeersEvent>) {
-    let (tx, rx) = mpsc::channel();
-    (Arc::new(ChannelSink(tx)), rx)
+/// A [`PeersEvent::Path`] report, as (its number among the port's events, peer, path).
+pub type PathReport = (u64, MachineId, PeerPath);
+
+/// Any other event, with its number among the port's events.
+pub type EventReport = (u64, PeersEvent);
+
+/// A new sink, the receiving end of its events (numbered), and that of its paths.
+pub fn channel() -> (
+    Arc<dyn PeersEventSink>,
+    Receiver<EventReport>,
+    Receiver<PathReport>,
+) {
+    let (events, rx) = mpsc::channel();
+    let (paths, paths_rx) = mpsc::channel();
+    let sink = ChannelSink {
+        events,
+        paths,
+        next: Mutex::new(0),
+    };
+    (Arc::new(sink), rx, paths_rx)
 }
 
-/// One machine: its port, its id, and what its port reports.
+/// One machine: its port, its id, and what its port reports: its paths apart from every other event.
 pub struct Machine<P> {
     pub peers: P,
     pub id: MachineId,
-    pub events: Receiver<PeersEvent>,
+    pub events: Receiver<EventReport>,
+    pub paths: Receiver<PathReport>,
 }
 
 impl<P> Machine<P> {
     /// The next event, waiting up to [`EVENT_LIMIT`].
     pub fn next(&self) -> PeersEvent {
+        self.next_numbered().1
+    }
+
+    /// The next event and its number among everything the port sent, waiting up to [`EVENT_LIMIT`].
+    pub fn next_numbered(&self) -> EventReport {
         self.events
             .recv_timeout(EVENT_LIMIT)
             .unwrap_or_else(|e| panic!("{}: no event within {EVENT_LIMIT:?}: {e}", self.id))
@@ -91,7 +132,20 @@ impl<P> Machine<P> {
 
     /// Every event already reported and not read yet.
     pub fn pending(&self) -> Vec<PeersEvent> {
-        self.events.try_iter().collect()
+        self.events.try_iter().map(|(_, event)| event).collect()
+    }
+
+    /// The next path reported, as (peer, path), waiting up to [`EVENT_LIMIT`].
+    pub fn next_path(&self) -> (MachineId, PeerPath) {
+        let (_, peer, path) = self.next_path_numbered();
+        (peer, path)
+    }
+
+    /// The next path reported, with its number, waiting up to [`EVENT_LIMIT`].
+    pub fn next_path_numbered(&self) -> PathReport {
+        self.paths
+            .recv_timeout(EVENT_LIMIT)
+            .unwrap_or_else(|e| panic!("{}: no path within {EVENT_LIMIT:?}: {e}", self.id))
     }
 }
 
@@ -435,4 +489,36 @@ pub fn dialling_a_machine_this_one_does_not_trust_fails_without_a_word_to_it<F: 
         }
     );
     assert_eq!(a.pending(), vec![]);
+}
+
+/// Once connected, each end says how its connection with the other goes, after its `Connected` and never after its
+/// `Disconnected`. Between machines on one network (the fake's, or localhost with relays off) that is direct. Its
+/// round-trip time is a measurement, not asserted.
+pub fn a_connected_machine_reports_how_its_connection_goes<F: PeersFixture>(f: &mut F) {
+    let mut a = bound(f);
+    let mut b = bound(f);
+    pair(&mut a, &mut b);
+    b.peers.connect(&a.id);
+    let (b_up, up) = b.next_numbered();
+    assert_eq!(up, PeersEvent::Connected { peer: a.id.clone() });
+    let (a_up, up) = a.next_numbered();
+    assert_eq!(up, PeersEvent::Connected { peer: b.id.clone() });
+    let (at, peer, path) = b.next_path_numbered();
+    assert_eq!((peer, path.kind), (a.id.clone(), LinkKind::Direct));
+    assert!(at > b_up, "a path only after its Connected");
+    let (at, peer, path) = a.next_path_numbered();
+    assert_eq!((peer, path.kind), (b.id.clone(), LinkKind::Direct));
+    assert!(at > a_up, "a path only after its Connected");
+
+    trusting(&mut a, &[]);
+    let (a_gone, gone) = a.next_numbered();
+    assert_eq!(gone, PeersEvent::Disconnected { peer: b.id.clone() });
+    let (b_gone, gone) = b.next_numbered();
+    assert_eq!(gone, PeersEvent::Disconnected { peer: a.id.clone() });
+    // Whatever paths were reported by now came before each end's Disconnected.
+    let before = |m: &Machine<F::Peers>, gone: u64| m.paths.try_iter().all(|(at, ..)| at < gone);
+    assert!(
+        before(&a, a_gone) && before(&b, b_gone),
+        "no path after its Disconnected"
+    );
 }

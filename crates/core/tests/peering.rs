@@ -2,6 +2,7 @@
 //! `peer/removed`), when the endpoint is bound, and how a pairing or a join runs and ends.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use shepherd_core::acpp::{
@@ -14,8 +15,8 @@ use shepherd_core::host::peering::{
 use shepherd_core::host::{HostCommand, ReplyTo};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, DisconnectReason, JoinError, PairTicket, PairToken, PairingError, PairingId,
-    PeersEvent,
+    ConnectError, DisconnectReason, JoinError, LinkKind, PairTicket, PairToken, PairingError,
+    PairingId, PeerPath, PeersEvent,
 };
 use shepherd_core::wire::{HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError};
 use shepherd_testkit::builders::HostDriver;
@@ -63,6 +64,24 @@ fn info(id: &str, name: &str, connected: bool) -> PeerInfo {
         id: m(id),
         name: name.into(),
         connected,
+        link: None,
+        rtt_ms: None,
+    }
+}
+
+/// [`info`] of a connected peer whose connection goes over `kind` with a round trip of `rtt_ms`.
+fn linked(id: &str, name: &str, kind: LinkKind, rtt_ms: u64) -> PeerInfo {
+    PeerInfo {
+        link: Some(kind),
+        rtt_ms: Some(rtt_ms),
+        ..info(id, name, true)
+    }
+}
+
+fn path(kind: LinkKind, rtt_ms: u64) -> PeerPath {
+    PeerPath {
+        kind,
+        rtt: Duration::from_millis(rtt_ms),
     }
 }
 
@@ -792,6 +811,116 @@ fn the_list_is_by_name_and_says_which_peers_are_connected() {
     );
     d.peers(PeersEvent::Disconnected { peer: m("cc") });
     assert_eq!(d.list()[1], info("cc", "tower", false));
+}
+
+// ---------- paths (T32b) ----------
+
+#[test]
+fn a_connected_peers_path_is_listed_and_told_to_clients_as_it_changes() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    let relayed = d.peers(PeersEvent::Path {
+        peer: m("bb"),
+        path: path(LinkKind::Relayed, 86),
+    });
+    let relayed_info = linked("bb", "laptop", LinkKind::Relayed, 86);
+    assert_eq!(
+        relayed,
+        vec![HostCommand::PeerChanged(relayed_info.clone())]
+    );
+    assert_eq!(d.list(), vec![relayed_info]);
+    // Hole punching worked.
+    let direct = d.peers(PeersEvent::Path {
+        peer: m("bb"),
+        path: path(LinkKind::Direct, 4),
+    });
+    let direct_info = linked("bb", "laptop", LinkKind::Direct, 4);
+    assert_eq!(direct, vec![HostCommand::PeerChanged(direct_info.clone())]);
+    assert_eq!(d.list(), vec![direct_info]);
+}
+
+#[test]
+fn the_same_path_again_tells_nobody() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    let event = PeersEvent::Path {
+        peer: m("bb"),
+        path: path(LinkKind::Direct, 4),
+    };
+    d.peers(event.clone());
+    assert_eq!(d.peers(event), vec![]);
+}
+
+#[test]
+fn a_path_of_a_peer_not_connected_is_ignored_and_a_disconnected_peer_lists_none() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    let early = d.peers(PeersEvent::Path {
+        peer: m("bb"),
+        path: path(LinkKind::Relayed, 86),
+    });
+    assert_eq!(early, vec![]);
+    assert_eq!(d.list(), vec![info("bb", "laptop", false)]);
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    d.peers(PeersEvent::Path {
+        peer: m("bb"),
+        path: path(LinkKind::Relayed, 86),
+    });
+    assert_eq!(
+        d.peers(PeersEvent::Disconnected { peer: m("bb") }),
+        vec![HostCommand::PeerChanged(info("bb", "laptop", false))],
+        "clients told the path hear it is gone"
+    );
+    assert_eq!(d.list(), vec![info("bb", "laptop", false)]);
+    // Connected again: no path until the port says.
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.list(), vec![info("bb", "laptop", true)]);
+}
+
+/// `peer`, connected, goes over `path`.
+fn connected_over(d: &mut Driver, id: &str, path: PeerPath) {
+    d.peers(PeersEvent::Connected { peer: m(id) });
+    d.peers(PeersEvent::Path { peer: m(id), path });
+}
+
+#[test]
+fn unpairing_a_peer_answers_and_forgets_its_path() {
+    let mut d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
+    d.peering.sync();
+    connected_over(&mut d, "bb", path(LinkKind::Relayed, 86));
+    let to = d.reply_to();
+    let commands = d.handle(PeeringEvent::Remove {
+        reply: to,
+        peer: "laptop".into(),
+    });
+    assert!(
+        commands.contains(&reply(
+            to,
+            HostResult::PeerRemove(info("bb", "laptop", false))
+        )),
+        "the answer has no link: {commands:?}"
+    );
+    // Paired again and connected: no path until the port says.
+    d.record(ShepherdFrame::PeerTrusted(PeerTrusted {
+        node: m("bb"),
+        name: "laptop".into(),
+    }));
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.list()[0], info("bb", "laptop", true));
+}
+
+#[test]
+fn going_offline_forgets_every_path() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    connected_over(&mut d, "bb", path(LinkKind::Relayed, 86));
+    d.peering.suspend();
+    d.peering.resume();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.list(), vec![info("bb", "laptop", true)]);
 }
 
 #[test]

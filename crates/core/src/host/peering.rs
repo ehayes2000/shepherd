@@ -32,6 +32,10 @@
 //! ([`Peering::tunnel_failed`]). Pairing, trust and updating the host are this machine's own clients' too: another
 //! machine's conn is refused them ([`refused_to_peers`]).
 //!
+//! Paths (T32b): the port says how each connected peer's connection goes ([`PeersEvent::Path`]: direct or relayed,
+//! and its round-trip time). The peer list carries the latest, and each change is told to the clients that listed the
+//! peers ([`HostCommand::PeerChanged`]). How often it changes is the port's bound ([`PATH_SAMPLE`]).
+//!
 //! Swapping (decision 0018): the host goes offline before the exec ([`Peering::suspend`]), so peers see it go at once,
 //! and comes back online if the exec fails ([`Peering::resume`]).
 //!
@@ -48,8 +52,11 @@ use super::{HostCommand, ReplyTo, append_host};
 use crate::acpp::{Envelope, Frame, PeerRemoved, PeerTrusted, ShepherdFrame, Timestamp};
 use crate::ids::MachineId;
 use crate::machine::{UNNAMED, peer_name};
+#[cfg(doc)]
+use crate::ports::PATH_SAMPLE;
 use crate::ports::{
-    ConnectError, DisconnectReason, MAX_OPEN_PER_PEER, PairTicket, PairToken, PairingId, PeersEvent,
+    ConnectError, DisconnectReason, MAX_OPEN_PER_PEER, PairTicket, PairToken, PairingId, PeerPath,
+    PeersEvent,
 };
 use crate::wire::{
     ClientRequest, HostResult, PairOutcome, PairStartOk, PeerInfo, PeerListOk, WireError,
@@ -123,6 +130,8 @@ pub struct Peering {
     joins: BTreeMap<PairingId, ReplyTo>,
     /// Trusted machines with a connection now.
     connected: BTreeSet<MachineId>,
+    /// The path each connected machine's connection takes, once the port said.
+    paths: BTreeMap<MachineId, PeerPath>,
     /// The port was last asked to bind (true) or unbind.
     bound: bool,
     /// The trusted set the port was last given (it starts with none).
@@ -170,6 +179,7 @@ impl Peering {
             ShepherdFrame::PeerRemoved(removed) => {
                 self.trusted.remove(&removed.node);
                 self.connected.remove(&removed.node);
+                self.paths.remove(&removed.node);
                 self.redial.remove(&removed.node);
             }
             ShepherdFrame::MachineRenamed(renamed) => self.name = Some(renamed.name.clone()),
@@ -224,6 +234,7 @@ impl Peering {
         if !self.wanted() && self.bound {
             self.bound = false;
             self.connected.clear();
+            self.paths.clear();
             self.redial.clear();
             out.push(peers(PeersCommand::Unbind));
         }
@@ -447,6 +458,8 @@ impl Peering {
         };
         let removed = PeerInfo {
             connected: false,
+            link: None,
+            rtt_ms: None,
             ..self.info(&id)
         };
         vec![
@@ -497,9 +510,8 @@ impl Peering {
                 }
                 if self.is_pending(id) {
                     let info = PeerInfo {
-                        id: peer.clone(),
                         name: name.clone(),
-                        connected: self.connected.contains(&peer),
+                        ..self.info(&peer)
                     };
                     let outcome = move || match accepted {
                         true => PairOutcome::Paired { peer: info.clone() },
@@ -519,9 +531,8 @@ impl Peering {
                 };
                 let name = peer_name(&name);
                 let info = PeerInfo {
-                    connected: self.connected.contains(&peer),
-                    id: peer.clone(),
                     name: name.clone(),
+                    ..self.info(&peer)
                 };
                 vec![trust(&peer, &name), ok(to, HostResult::PairJoin(info))]
             }
@@ -536,10 +547,24 @@ impl Peering {
                 }
                 Vec::new()
             }
+            PeersEvent::Path { peer, path } => {
+                if !self.connected.contains(&peer)
+                    || self.paths.insert(peer.clone(), path) == Some(path)
+                {
+                    return Vec::new();
+                }
+                vec![HostCommand::PeerChanged(self.info(&peer))]
+            }
             PeersEvent::Disconnected { peer } => {
                 self.connected.remove(&peer);
+                // Clients that were told a path hear it is gone.
+                let told = self.paths.remove(&peer).is_some();
+                let commands = match told {
+                    true => vec![HostCommand::PeerChanged(self.info(&peer))],
+                    false => Vec::new(),
+                };
                 self.redial(peer, 0, at);
-                Vec::new()
+                commands
             }
             PeersEvent::ConnectFailed {
                 peer,
@@ -591,10 +616,13 @@ impl Peering {
     }
 
     fn info(&self, id: &MachineId) -> PeerInfo {
+        let path = self.paths.get(id);
         PeerInfo {
             id: id.clone(),
             name: self.trusted.get(id).cloned().unwrap_or_default(),
             connected: self.connected.contains(id),
+            link: path.map(|p| p.kind),
+            rtt_ms: path.map(|p| u64::try_from(p.rtt.as_millis()).unwrap_or(u64::MAX)),
         }
     }
 }

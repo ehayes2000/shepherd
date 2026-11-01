@@ -205,6 +205,45 @@ fn sidebar_grouped_by_machine() {
     insta::assert_debug_snapshot!(buffer(&c, WINDOW));
 }
 
+/// This machine's host says how its connection with `machine` goes (T32b).
+fn linked(c: &mut ClientDriver, machine: &str, link: &str, rtt_ms: u64) {
+    let info = serde_json::from_value(json!({
+        "id": machine, "name": "laptop", "connected": true, "link": link, "rtt_ms": rtt_ms
+    }))
+    .unwrap_or_else(|e| panic!("{e}"));
+    c.handle(ClientEvent::Host(HostMessage::Notification(
+        HostNotification::PeerChanged(info),
+    )));
+}
+
+/// The text on header line 2 of the machine whose name starts at `name`.
+fn header_status(buf: &Buffer, name: &str) -> String {
+    let p = at(buf, name);
+    (p.x..buf.area.width.saturating_sub(1))
+        .map(|x| buf[(x, p.y + 1)].symbol())
+        .collect::<String>()
+        .trim_end()
+        .trim_end_matches('│')
+        .trim_end()
+        .to_owned()
+}
+
+#[test]
+fn sidebar_header_says_a_peer_is_relayed_and_its_round_trip() {
+    let mut c = three_machines(WINDOW);
+    linked(&mut c, "m_laptop", "relay", 86);
+    insta::assert_debug_snapshot!(buffer(&c, WINDOW));
+}
+
+#[test]
+fn a_link_that_turns_direct_updates_the_header() {
+    let mut c = three_machines(WINDOW);
+    linked(&mut c, "m_laptop", "relay", 86);
+    assert_eq!(header_status(&buffer(&c, WINDOW), "laptop"), "relay · 86ms");
+    linked(&mut c, "m_laptop", "direct", 4);
+    assert_eq!(header_status(&buffer(&c, WINDOW), "laptop"), "direct · 4ms");
+}
+
 #[test]
 fn an_unreachable_machines_group_is_dimmed() {
     let c = three_machines(WINDOW);

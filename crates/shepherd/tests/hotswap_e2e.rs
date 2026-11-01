@@ -201,6 +201,8 @@ impl Client {
                     HostMessage::Notification(HostNotification::PtyOutput(o)) => {
                         seen.output.extend(o.bytes)
                     }
+                    // This host has no peers.
+                    HostMessage::Notification(HostNotification::PeerChanged(_)) => {}
                 },
                 Ok(None) => seen.closed = true,
                 Err(_) => panic!("nothing more from the host within {LIVENESS:?}"),

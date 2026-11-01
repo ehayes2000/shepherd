@@ -34,6 +34,7 @@ use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Layout, LayoutOp};
 use crate::machine::MachineColor;
+use crate::ports::LinkKind;
 use crate::ports::worktrees::WorktreeStatus;
 
 /// The client↔host protocol version this code speaks. Exchanged in `_shepherd/hello`.
@@ -587,6 +588,13 @@ pub struct PeerInfo {
     /// The host has a connection with it now.
     #[serde(default)]
     pub connected: bool,
+    /// How that connection goes now (T32b), once the host knows. A host older than links leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkKind>,
+    /// That connection's round-trip time in whole milliseconds, once the host knows. A host older than links leaves it
+    /// out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u64>,
 }
 
 /// Bytes typed into a session's PTY. `data` is base64 on the wire.
@@ -993,6 +1001,9 @@ pub enum HostNotification {
     LogEntry(Box<LogEntry>),
     /// `_shepherd/pty/output`: bytes a session's PTY wrote. Never logged.
     PtyOutput(PtyOutput),
+    /// `_shepherd/peer/changed` (T32b): what the host knows of a trusted machine changed (how its connection goes), to
+    /// the clients that listed the peers (`_shepherd/peer/list`). A client older than it skips it.
+    PeerChanged(PeerInfo),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1010,12 +1021,14 @@ pub struct PtyOutput {
 
 const LOG_ENTRY: &str = "_shepherd/log/entry";
 const PTY_OUTPUT: &str = "_shepherd/pty/output";
+const PEER_CHANGED: &str = "_shepherd/peer/changed";
 
 impl HostNotification {
     pub fn method(&self) -> &'static str {
         match self {
             Self::LogEntry(_) => LOG_ENTRY,
             Self::PtyOutput(_) => PTY_OUTPUT,
+            Self::PeerChanged(_) => PEER_CHANGED,
         }
     }
 }
@@ -1175,6 +1188,7 @@ pub fn encode_host_notification(note: &HostNotification) -> Vec<u8> {
     let params = match note {
         HostNotification::LogEntry(p) => json(p),
         HostNotification::PtyOutput(p) => json(p),
+        HostNotification::PeerChanged(p) => json(p),
     };
     let mut obj = jsonrpc_object();
     obj.insert("method".to_owned(), note.method().into());
@@ -1225,6 +1239,7 @@ impl HostNotification {
         match method {
             LOG_ENTRY => p(method, params).map(Self::LogEntry),
             PTY_OUTPUT => p(method, params).map(Self::PtyOutput),
+            PEER_CHANGED => p(method, params).map(Self::PeerChanged),
             other => Err(DecodeError::UnknownMethod(other.to_owned())),
         }
     }

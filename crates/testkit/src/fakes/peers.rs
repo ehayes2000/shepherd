@@ -5,16 +5,21 @@
 //!
 //! Events are sent synchronously, from inside the call that caused them, while the network's lock is held, so sinks
 //! must not call back into a port. [`FakePeers::fail_next_bind`] makes the next bind fail.
+//!
+//! Paths (T32b): two machines that connect report the path between them right after [`PeersEvent::Connected`]:
+//! [`DEFAULT_PATH`] unless the test set another with [`FakePeerNet::set_path`], which also stands in for the path
+//! changing (relayed to direct once hole punching works, or a new round-trip time) while they are connected.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use serde_json::json;
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
-    PeersEventSink, TOKEN_LEN,
+    ConnectError, JoinError, LinkKind, PairTicket, PairToken, PairingError, PairingId, PeerPath,
+    Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
 };
 
 use crate::contracts::peers::{Machine, PeersFixture, channel};
@@ -37,9 +42,17 @@ impl Node {
     }
 }
 
+/// The path between two machines on the network until a test sets another: direct, as on one LAN.
+pub const DEFAULT_PATH: PeerPath = PeerPath {
+    kind: LinkKind::Direct,
+    rtt: Duration::from_millis(1),
+};
+
 #[derive(Default)]
 struct Net {
     nodes: BTreeMap<MachineId, Node>,
+    /// The path between two machines, by the pair (lower id first), where a test set one.
+    paths: BTreeMap<(MachineId, MachineId), PeerPath>,
 }
 
 impl Net {
@@ -53,6 +66,19 @@ impl Net {
         self.nodes[from].known.contains(to) && self.nodes.get(to).is_some_and(|n| n.bound)
     }
 
+    fn path(&self, a: &MachineId, b: &MachineId) -> PeerPath {
+        self.paths.get(&ends(a, b)).copied().unwrap_or(DEFAULT_PATH)
+    }
+
+    /// Tells `to` the path its connection with `peer` takes now.
+    fn tell_path(&mut self, to: &MachineId, peer: &MachineId) {
+        let path = self.path(to, peer);
+        self.node(to).send(PeersEvent::Path {
+            peer: peer.clone(),
+            path,
+        });
+    }
+
     /// Drops the connection between `a` and `b`, if any: both ends hear it.
     fn disconnect(&mut self, a: &MachineId, b: &MachineId) {
         if self.node(a).connected.remove(b) {
@@ -63,6 +89,14 @@ impl Net {
             self.node(b)
                 .send(PeersEvent::Disconnected { peer: a.clone() });
         }
+    }
+}
+
+/// The key for the pair `a`, `b`, whichever way round.
+fn ends(a: &MachineId, b: &MachineId) -> (MachineId, MachineId) {
+    match a <= b {
+        true => (a.clone(), b.clone()),
+        false => (b.clone(), a.clone()),
     }
 }
 
@@ -133,6 +167,22 @@ impl FakePeerNet {
         self.lock().node(id).bound
     }
 
+    /// The path between machines `a` and `b` is `path` from now on. While they are connected, each end hears it at once
+    /// (if it changed).
+    pub fn set_path(&self, a: &MachineId, b: &MachineId, path: PeerPath) {
+        let mut net = self.lock();
+        let before = net.paths.insert(ends(a, b), path);
+        if before.unwrap_or(DEFAULT_PATH) == path {
+            return;
+        }
+        if net.nodes.get(a).is_some_and(|n| n.connected.contains(b)) {
+            net.tell_path(a, b);
+        }
+        if net.nodes.get(b).is_some_and(|n| n.connected.contains(a)) {
+            net.tell_path(b, a);
+        }
+    }
+
     /// Whether machine `id` has a pairing open now.
     pub fn is_pairing(&self, id: &MachineId) -> bool {
         self.lock().node(id).pending.is_some()
@@ -145,11 +195,12 @@ impl PeersFixture for FakePeerNet {
     fn machine(&mut self) -> Machine<FakePeers> {
         let n = NEXT_MACHINE.fetch_add(1, Ordering::Relaxed);
         let id = MachineId::new(format!("{n:064x}"));
-        let (sink, events) = channel();
+        let (sink, events, paths) = channel();
         Machine {
             peers: self.peers(id.clone(), sink),
             id,
             events,
+            paths,
         }
     }
 
@@ -310,10 +361,12 @@ impl Peers for FakePeers {
             remote.send(PeersEvent::Connected {
                 peer: self.id.clone(),
             });
+            net.tell_path(peer, &self.id);
         }
         let local = net.node(&self.id);
         if local.connected.insert(peer.clone()) {
             local.send(PeersEvent::Connected { peer: peer.clone() });
+            net.tell_path(&self.id, peer);
         }
     }
 }
@@ -331,7 +384,72 @@ mod tests {
     use shepherd_core::ports::{Peers, PeersEvent};
 
     use super::*;
-    use crate::contracts::peers::PeersFixture;
+    use crate::contracts::peers::{Machine, PeersFixture};
+
+    /// Two bound machines, each trusting the other, connected; their opening paths read.
+    fn connected(net: &mut FakePeerNet) -> (Machine<FakePeers>, Machine<FakePeers>) {
+        let mut a = net.machine();
+        let mut b = net.machine();
+        a.peers.bind();
+        b.peers.bind();
+        a.peers.set_trusted(&BTreeSet::from([b.id.clone()]));
+        b.peers.set_trusted(&BTreeSet::from([a.id.clone()]));
+        FakePeerNet::introduce(net, &b.id, &a.id);
+        b.peers.connect(&a.id);
+        assert!(matches!(b.next(), PeersEvent::Connected { .. }));
+        assert!(matches!(a.next(), PeersEvent::Connected { .. }));
+        assert_eq!(b.next_path(), (a.id.clone(), DEFAULT_PATH));
+        assert_eq!(a.next_path(), (b.id.clone(), DEFAULT_PATH));
+        (a, b)
+    }
+
+    #[test]
+    fn a_path_that_changes_while_connected_is_reported_at_both_ends() {
+        let mut net = FakePeerNet::new();
+        let (a, b) = connected(&mut net);
+        let relayed = PeerPath {
+            kind: LinkKind::Relayed,
+            rtt: Duration::from_millis(86),
+        };
+        net.set_path(&a.id, &b.id, relayed);
+        assert_eq!(a.next_path(), (b.id.clone(), relayed));
+        assert_eq!(b.next_path(), (a.id.clone(), relayed));
+        // Hole punching worked.
+        let direct = PeerPath {
+            kind: LinkKind::Direct,
+            rtt: Duration::from_millis(4),
+        };
+        net.set_path(&b.id, &a.id, direct);
+        assert_eq!(a.next_path(), (b.id.clone(), direct));
+        assert_eq!(b.next_path(), (a.id.clone(), direct));
+        // The same path again is no change.
+        net.set_path(&a.id, &b.id, direct);
+        assert!(a.paths.try_recv().is_err() && b.paths.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_path_set_before_connecting_is_the_one_reported_on_connecting() {
+        let mut net = FakePeerNet::new();
+        let mut a = net.machine();
+        let mut b = net.machine();
+        let relayed = PeerPath {
+            kind: LinkKind::Relayed,
+            rtt: Duration::from_millis(86),
+        };
+        net.set_path(&a.id, &b.id, relayed);
+        assert!(
+            a.paths.try_recv().is_err(),
+            "not connected: nothing to report"
+        );
+        a.peers.bind();
+        b.peers.bind();
+        a.peers.set_trusted(&BTreeSet::from([b.id.clone()]));
+        b.peers.set_trusted(&BTreeSet::from([a.id.clone()]));
+        FakePeerNet::introduce(&net, &b.id, &a.id);
+        b.peers.connect(&a.id);
+        assert_eq!(b.next_path(), (a.id.clone(), relayed));
+        assert_eq!(a.next_path(), (b.id.clone(), relayed));
+    }
 
     #[test]
     fn a_bind_set_to_fail_fails_once_and_leaves_the_machine_unbound() {

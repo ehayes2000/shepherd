@@ -12,6 +12,7 @@ use shepherd_core::client::{
 use shepherd_core::config::WorkspaceHooks;
 use shepherd_core::host::HostEvent;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::ports::LinkKind;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::wire::{
     BuildId, CloseWorktree, ExeDigest, HostMessage, HostNotification, HostResult, LogEntry,
@@ -95,6 +96,27 @@ impl Machines {
             json!({ "notify": { "bell": false } }),
             peers,
         )
+    }
+
+    /// [`Machines::new`], the local host's peer list answered with `list` as given (one entry per peer).
+    fn from_peer_list(list: &[Value]) -> (Self, Vec<ClientCommand>) {
+        let mut c = ClientDriver::new();
+        c.handle(ClientEvent::Start);
+        let hello = c.handle(ClientEvent::Connected { at: at(0) });
+        let answer = json!({ "version": PROTOCOL_VERSION, "machine": "m_test", "name": "studio" });
+        let subscribe = c.answer(&hello, Ok(answer));
+        let caught_up = c.answer(&subscribe, Ok(json!({})));
+        let dialled = c.answer(&caught_up, Ok(json!({ "peers": list })));
+        let peers = list
+            .iter()
+            .map(|p| {
+                let id = p["id"].as_str().unwrap_or_default().to_owned();
+                let mut host = HostDriver::new();
+                host.stamp_machine(&id);
+                (id, host, 0)
+            })
+            .collect();
+        (Self { c, peers }, dialled)
     }
 
     /// [`Machines::new`], driving `c`, whose local host's hello answer also says `extra`.
@@ -243,6 +265,98 @@ impl Machines {
     fn user(&mut self, intent: Intent) -> Vec<ClientCommand> {
         self.c.user(intent)
     }
+}
+
+// ---------- links (T32b) ----------
+
+/// The link and round-trip time on `machine`'s header.
+fn header_link(net: &Machines, machine: &str) -> Option<(Option<LinkKind>, Option<u64>)> {
+    net.c.client().sidebar().iter().find_map(|e| match e {
+        SidebarEntry::Machine(g) if g.id == m(machine) => Some((g.link, g.rtt_ms)),
+        _ => None,
+    })
+}
+
+/// This machine's host tells the client what changed of a peer.
+fn peer_changed(info: Value) -> ClientEvent {
+    let info = serde_json::from_value(info).unwrap_or_else(|e| panic!("{e}"));
+    ClientEvent::Host(HostMessage::Notification(HostNotification::PeerChanged(
+        info,
+    )))
+}
+
+#[test]
+fn a_peers_link_from_the_list_is_on_its_machine_header() {
+    let (mut net, _) = Machines::from_peer_list(&[json!({
+        "id": "m_b", "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86
+    })]);
+    net.reach("m_b");
+    assert_eq!(
+        header_link(&net, "m_b"),
+        Some((Some(LinkKind::Relayed), Some(86)))
+    );
+}
+
+#[test]
+fn a_peer_listed_again_without_a_link_shows_none() {
+    let (mut net, _) = Machines::from_peer_list(&[json!({
+        "id": "m_b", "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86
+    })]);
+    net.reach("m_b");
+    relist(&mut net, &[("m_b", "laptop")]);
+    assert_eq!(header_link(&net, "m_b"), Some((None, None)));
+}
+
+#[test]
+fn a_link_that_changes_updates_the_machine_header() {
+    let mut net = Machines::connected(&[("m_b", "laptop"), ("m_c", "tower")]);
+    assert_eq!(
+        header_link(&net, "m_b"),
+        Some((None, None)),
+        "not known yet"
+    );
+    net.handle(peer_changed(json!({
+        "id": "m_b", "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86
+    })));
+    assert_eq!(
+        header_link(&net, "m_b"),
+        Some((Some(LinkKind::Relayed), Some(86)))
+    );
+    // Hole punching worked.
+    net.handle(peer_changed(json!({
+        "id": "m_b", "name": "laptop", "connected": true, "link": "direct", "rtt_ms": 4
+    })));
+    assert_eq!(
+        header_link(&net, "m_b"),
+        Some((Some(LinkKind::Direct), Some(4)))
+    );
+    assert_eq!(header_link(&net, "m_c"), Some((None, None)));
+    // Its connection went: no link.
+    net.handle(peer_changed(
+        json!({ "id": "m_b", "name": "laptop", "connected": false }),
+    ));
+    assert_eq!(header_link(&net, "m_b"), Some((None, None)));
+}
+
+#[test]
+fn a_peer_changed_from_a_peers_host_or_of_an_unknown_machine_changes_nothing() {
+    let mut net = Machines::connected(&[("m_b", "laptop")]);
+    let info = serde_json::from_value(
+        json!({ "id": "m_b", "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86 }),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    net.handle(peer(
+        "m_b",
+        PeerEvent::Host(HostMessage::Notification(HostNotification::PeerChanged(
+            info,
+        ))),
+    ));
+    assert_eq!(header_link(&net, "m_b"), Some((None, None)));
+    let sent = net.handle(peer_changed(
+        json!({ "id": "m_x", "name": "stranger", "connected": true, "link": "direct" }),
+    ));
+    assert_eq!(sent, vec![]);
+    assert_eq!(net.sidebar().len(), 2, "no header for a machine not listed");
 }
 
 // ---------- finding and reaching the peers ----------
@@ -1683,6 +1797,45 @@ fn a_switcher_on_a_machine_no_longer_trusted_goes_back_to_this_machine() {
     relist(&mut net, &[]);
     assert_eq!(net.c.client().popup_machine(), Some(&m("m_test")));
     assert_eq!(paths(net.c.client().workspaces()), ["/here/app"]);
+    assert_eq!(
+        net.c.client().notice(),
+        Some("laptop is no longer a trusted machine")
+    );
+}
+
+#[test]
+fn dropping_another_peer_leaves_a_popup_on_a_trusted_one_alone_and_says_nothing() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    relist(&mut net, &[("m_b", "laptop")]);
+    assert_eq!(net.c.client().popup(), Some(&Popup::PickProfile));
+    assert_eq!(net.c.client().popup_machine(), Some(&m("m_b")));
+    assert_eq!(net.c.client().notice(), None);
+}
+
+#[test]
+fn a_switcher_put_back_on_this_machine_scrolls_to_the_top() {
+    let mut net = three_machines_in_workspaces();
+    net.user(Intent::SelectSession(sid("b1")));
+    net.user(Intent::BeginWorkspace);
+    net.user(Intent::ScrollSwitcher { by: 1, shown: 1 });
+    assert_eq!(net.c.client().switcher_scroll(), 1);
+    relist(&mut net, &[]);
+    assert_eq!(net.c.client().switcher_scroll(), 0);
+}
+
+#[test]
+fn a_new_session_popup_put_back_on_this_machine_scrolls_its_profiles_to_the_top() {
+    let mut net = three_machines();
+    net.user(Intent::SelectSession(sid("a1")));
+    net.user(Intent::BeginNewSession);
+    net.user(Intent::PickMachine(m("m_b")));
+    net.user(Intent::ScrollPicker { by: 1, shown: 1 });
+    assert_eq!(net.c.client().picker_scroll(), 1);
+    relist(&mut net, &[("m_c", "tower")]);
+    assert_eq!(net.c.client().picker_scroll(), 0);
 }
 
 #[test]

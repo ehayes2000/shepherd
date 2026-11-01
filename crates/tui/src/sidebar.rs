@@ -15,7 +15,8 @@
 //! yellow bar on its left edge.
 //! While there are peers (T31b), the list is grouped by machine ([`Client::sidebar`]): each group starts with a
 //! two-line header, `≡` and the machine's name in its color, then how it is doing (`this machine`, `connected`,
-//! `connecting…`, `offline: <why>`). A click on it means that machine ([`Target::Machine`]). A peer that can't be
+//! `connecting…`, `offline: <why>`); a connected peer whose link this machine's host reported says how it goes instead
+//! of `connected` (T32b: `direct · 4ms`, `relay · 86ms`). A click on it means that machine ([`Target::Machine`]). A peer that can't be
 //! reached now has its header and its last-known sessions dimmed. Collapsed, a header is just its `≡`.
 //! The newest session is at the top (of each group). The list starts at the client's [`Client::sidebar_scroll`], which keeps the
 //! selected session visible when the selection changes and follows the wheel otherwise. The last line is a footer:
@@ -55,6 +56,7 @@ use shepherd_core::client::{
     Client, ClientSession, Connection, Focus, MachineGroup, MachineStatus, SidebarEntry,
 };
 use shepherd_core::display::DisplayText;
+use shepherd_core::ports::LinkKind;
 use shepherd_core::session::{Activity, Subagent, SubagentStatus};
 
 use crate::draw::{self, shown};
@@ -469,11 +471,23 @@ pub(crate) fn visible_rows<'a>(
 pub(crate) fn machine_status(group: &MachineGroup) -> String {
     match (&group.status, group.local) {
         (MachineStatus::Connected, true) => THIS_MACHINE.to_owned(),
-        (MachineStatus::Connected, false) => "connected".to_owned(),
+        (MachineStatus::Connected, false) => match (group.link, group.rtt_ms) {
+            (None, _) => "connected".to_owned(),
+            (Some(link), None) => link_label(link).to_owned(),
+            (Some(link), Some(ms)) => format!("{} · {ms}ms", link_label(link)),
+        },
         (MachineStatus::Connecting, _) => "connecting…".to_owned(),
         (MachineStatus::Offline(Some(why)), _) => format!("offline: {why}"),
         (MachineStatus::Offline(None), _) => "offline".to_owned(),
         (MachineStatus::Incompatible, _) => "another protocol version".to_owned(),
+    }
+}
+
+/// How a peer's link reads on its header (T32b): the mock's `direct · 4ms` and `relay · 86ms`.
+fn link_label(link: LinkKind) -> &'static str {
+    match link {
+        LinkKind::Direct => "direct",
+        LinkKind::Relayed => "relay",
     }
 }
 

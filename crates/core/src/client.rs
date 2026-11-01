@@ -105,6 +105,7 @@ use crate::host::{Host, ResumeUnavailable};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Content, Layout, LayoutOp, Pane, PaneId, SplitDir};
 use crate::machine::MachineColor;
+use crate::ports::LinkKind;
 use crate::ports::pty::PtySize;
 use crate::ports::worktrees::WorktreeStatus;
 use crate::session::{Activity, SessionState, Subagent, SubagentStatus};
@@ -630,6 +631,10 @@ pub struct MachineGroup {
     /// It is this machine.
     pub local: bool,
     pub status: MachineStatus,
+    /// How this machine's host's connection with it goes (T32b), as that host last said: a peer's only.
+    pub link: Option<LinkKind>,
+    /// That connection's round-trip time in whole milliseconds, as this machine's host last said: a peer's only.
+    pub rtt_ms: Option<u64>,
 }
 
 /// How the client is doing with a machine's host.
@@ -820,6 +825,10 @@ struct Peer {
     incompatible: bool,
     /// When the conn now Ready opened: its catch-up is due by [`Client::with_catch_up_limit`] after it.
     opened: Option<jiff::Timestamp>,
+    /// How this machine's host's connection with it goes, and its round-trip time, as that host last said
+    /// (`_shepherd/peer/list`, `_shepherd/peer/changed`).
+    kind: Option<LinkKind>,
+    rtt_ms: Option<u64>,
 }
 
 impl Peer {
@@ -832,7 +841,15 @@ impl Peer {
             why: None,
             incompatible: false,
             opened: None,
+            kind: None,
+            rtt_ms: None,
         }
+    }
+
+    /// How this machine's host says its connection with the peer goes now.
+    fn set_path(&mut self, info: &PeerInfo) {
+        self.kind = info.link;
+        self.rtt_ms = info.rtt_ms;
     }
 
     fn status(&self) -> MachineStatus {
@@ -1118,6 +1135,8 @@ impl Client {
             id,
             local: true,
             status,
+            link: None,
+            rtt_ms: None,
         }];
         machines.extend(
             self.peer_order()
@@ -1127,6 +1146,8 @@ impl Client {
                     name: peer.name.clone(),
                     local: false,
                     status: peer.status(),
+                    link: peer.kind,
+                    rtt_ms: peer.rtt_ms,
                 }),
         );
         machines
@@ -1500,6 +1521,15 @@ impl Client {
             }
             // PTY output feeds the runtime's screens. It changes nothing here.
             HostMessage::Notification(HostNotification::PtyOutput(_)) => Vec::new(),
+            HostMessage::Notification(HostNotification::PeerChanged(info)) => {
+                // Only this machine's host speaks for its own links, and only of the peers it listed.
+                if at == At::Local
+                    && let Some(peer) = self.peers.get_mut(&info.id)
+                {
+                    peer.set_path(&info);
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1647,9 +1677,14 @@ impl Client {
         }
         for info in listed {
             match self.peers.get_mut(&info.id) {
-                Some(peer) => peer.name = info.name,
+                Some(peer) => {
+                    peer.set_path(&info);
+                    peer.name = info.name;
+                }
                 None => {
-                    self.peers.insert(info.id.clone(), Peer::new(info.name));
+                    let mut peer = Peer::new(info.name.clone());
+                    peer.set_path(&info);
+                    self.peers.insert(info.id.clone(), peer);
                     commands.push(ClientCommand::ConnectPeer(info.id));
                 }
             }

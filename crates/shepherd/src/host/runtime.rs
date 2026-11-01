@@ -80,6 +80,7 @@
 //!   with a fresh token from `Env::pair_token` for a pairing, and so do the `Peers` port's events. After each batch of
 //!   its commands, its `sync` pushes what the batch changed (the trusted set, binding). Its deadline (a pairing's expiry)
 //!   is serviced like the others. Shutting down unbinds, and so does a swap before the exec (a failed exec binds again).
+//!   How a peer's connection goes (T32b) is told to each conn that listed the peers, as `_shepherd/peer/changed`.
 //! - **Tunnels** (T31a, decision 0019). A conn from one of this machine's clients whose first request is
 //!   `_shepherd/tunnel` (core's [`Peering::tunnel`] decides) gets a conn [opened](Link::open) to that machine's host,
 //!   and from then on the two are spliced: each line read from one is sent to the other unchanged. The tunnel request
@@ -137,8 +138,8 @@ use shepherd_core::ports::{
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
-    HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SCREEN_TEXT_MAX,
-    SessionNew, SubscribeFrom, UiApply, UpgradeAnswer, WireError,
+    HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PeerInfo, PtyOutput,
+    SCREEN_TEXT_MAX, SessionNew, SubscribeFrom, UiApply, UpgradeAnswer, WireError,
 };
 use shepherd_term::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Screen};
 
@@ -440,6 +441,8 @@ struct ConnState {
     sub: Option<Subscription>,
     /// A line came from it: a tunnel request now isn't its first.
     spoke: bool,
+    /// It listed the peers (`_shepherd/peer/list`), so it is told what changes of them (T32b).
+    lists_peers: bool,
 }
 
 /// One end of a tunnel (see the module docs).
@@ -1357,6 +1360,7 @@ impl<
                 }
                 HostCommand::Reply { to, result } => self.reply(to, result),
                 HostCommand::Peers(command) => self.call_peers(command),
+                HostCommand::PeerChanged(info) => self.peer_changed(info),
                 HostCommand::CheckPr {
                     session,
                     repo,
@@ -2143,6 +2147,20 @@ impl<
             .map(|deadline| self.env.instant() + until(&at, deadline));
     }
 
+    /// Tells each conn that listed the peers what changed of one (`_shepherd/peer/changed`).
+    fn peer_changed(&mut self, info: PeerInfo) {
+        let line = notification_line(&HostNotification::PeerChanged(info));
+        let to: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.lists_peers)
+            .map(|(&conn, _)| conn)
+            .collect();
+        for conn in to {
+            self.send(conn, &line);
+        }
+    }
+
     /// One call to the `Peers` port, which never blocks.
     fn call_peers(&mut self, command: PeersCommand) {
         match command {
@@ -2392,6 +2410,9 @@ impl<
                 self.peering(PeeringEvent::Join { reply, ticket });
             }
             ClientRequest::PeerList(_) => {
+                if let Some(state) = self.conns.get_mut(&conn) {
+                    state.lists_peers = true;
+                }
                 let reply = self.reply_to(conn, id);
                 self.peering(PeeringEvent::List { reply });
             }
