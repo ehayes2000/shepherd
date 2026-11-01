@@ -14,8 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T51 Answer an agent's pending question | [automation](features/automation.md) | review | task/t51-answer @ e766620 |  | built; no question id on answer (PM: add optional asked seq); Claude always=Shift+Tab unverified (T44) |
-| T52 Read a session's screen as text | [automation](features/automation.md) | building | task/t52-screen-text |  |  |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ e766620 | 1 | round 1 CHANGES: question id; overlapping dialogs make it unanswerable; Codex n/d and always variants; shared status type |
+| T52 Read a session's screen as text | [automation](features/automation.md) | merging | task/t52-screen-text @ b0be39b | 1 | round 1 fixed (concealed blanked, repro test failed first); merged without a 2nd review |
+| T57 Status table | [status-page](features/status-page.md) | review | task/t57-status-table @ 10a2eab |  | built; help popup clipped at 80x24 (PM: must fit or scroll) |
 
 ## Ready to start
 
@@ -34,7 +35,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
-| T57 Status table | [status-page](features/status-page.md) | todo | T49 |
 | T56 Read a subagent's transcript | [subagents](features/subagents.md) | todo | T55, T47 |
 | F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
