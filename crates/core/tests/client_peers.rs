@@ -24,7 +24,9 @@ use shepherd_core::wire::{
     Request, SessionClose, SessionInput, SessionRename, SessionResize, Subscribe, SubscribeFrom,
     Tunnel, WireError, WorktreeCheck,
 };
-use shepherd_testkit::builders::{ClientDriver, HostDriver, claude_session_spec, requests, ts};
+use shepherd_testkit::builders::{
+    ClientDriver, HostDriver, claude_session_spec, pm_session_spec, requests, ts,
+};
 
 fn m(id: &str) -> MachineId {
     MachineId::new(id)
@@ -2160,4 +2162,28 @@ fn a_peer_no_longer_listed_refuses_the_prompts_it_hadnt_answered() {
     message(&mut net, MessageTarget::Machine(m("m_b")), "hello");
     relist(&mut net, &[]);
     assert!(refused_as_dropped(&net), "{:?}", outcomes(&net));
+}
+
+#[test]
+fn a_peers_pm_session_is_never_this_machines_pm() {
+    let mut net = Machines::connected(&[("m_b", "bench")]);
+    net.host("m_b").new_session_with("pb", pm_session_spec());
+    net.sync("m_b");
+    assert!(net.c.client().sessions().iter().any(|s| s.id == sid("pb")));
+    assert_eq!(net.c.client().pm_session(), None);
+    // Opening the project manager starts one here instead of showing the peer's.
+    let commands = net.c.user(Intent::OpenPm);
+    let starts: Vec<&SessionNew> = requests(&commands)
+        .into_iter()
+        .filter_map(|r| match &r.body {
+            ClientRequest::SessionNew(new) => Some(new),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 1, "{commands:?}");
+    assert_eq!(starts[0].profile.as_deref(), Some("pm"));
+    assert!(
+        peer_requests(&commands, "m_b").is_empty(),
+        "nothing goes to the peer: {commands:?}"
+    );
 }

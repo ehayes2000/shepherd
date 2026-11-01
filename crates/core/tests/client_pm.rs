@@ -3,12 +3,12 @@
 //! the existing one by the profile its `session/created` recorded.
 
 use serde_json::json;
-use shepherd_core::client::{Cell, ClientCommand, Intent, PaneMenuItem};
+use shepherd_core::client::{Cell, ClientCommand, ClientEvent, Intent, PaneMenuItem};
 use shepherd_core::config::PM_PROFILE;
 use shepherd_core::ids::SessionId;
 use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
-use shepherd_core::wire::{ClientRequest, SessionNew, UiApply, WireError};
-use shepherd_testkit::builders::{ClientDriver, HostDriver, pm_session_spec, requests};
+use shepherd_core::wire::{ClientRequest, PROTOCOL_VERSION, SessionNew, UiApply, WireError};
+use shepherd_testkit::builders::{ClientDriver, HostDriver, pm_session_spec, requests, ts};
 
 fn sid(s: &str) -> SessionId {
     SessionId::new(s)
@@ -260,4 +260,36 @@ fn the_pane_menu_opens_the_project_manager() {
     let commands = c.user(Intent::PaneMenuChoose(PaneMenuItem::ProjectManager));
     assert_eq!(ui_ops(&commands), [pm_page("pm1")]);
     assert_eq!(c.client().popup(), None);
+}
+
+#[test]
+fn with_several_exited_pms_the_newest_is_the_pm() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    for id in ["pm1", "pm2", "pm3"] {
+        new_pm(c.host(), id);
+        c.host().pty_exited(id, Some(0));
+    }
+    c.sync();
+    assert_eq!(c.client().pm_session(), Some(&sid("pm3")));
+    assert_eq!(ui_ops(&c.user(Intent::OpenPm)), [pm_page("pm3")]);
+}
+
+#[test]
+fn a_pm_start_lost_with_the_connection_is_asked_again_after_reconnecting() {
+    let mut c = ClientDriver::with_sessions(&["s1"]);
+    assert_eq!(new_sessions(&c.user(Intent::OpenPm)).len(), 1);
+    // The link drops before the host answers: the request went with it.
+    assert_eq!(
+        c.handle(ClientEvent::Disconnected),
+        [ClientCommand::Connect]
+    );
+    let hello = c.handle(ClientEvent::Connected {
+        at: ts("2026-10-29T12:00:01.000Z"),
+    });
+    c.answer(
+        &hello,
+        Ok(json!({ "version": PROTOCOL_VERSION, "machine": "m_test" })),
+    );
+    let again = c.user(Intent::OpenPm);
+    assert_eq!(new_sessions(&again).len(), 1, "{again:?}");
 }

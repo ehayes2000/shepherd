@@ -1963,6 +1963,8 @@ impl Client {
         error: &str,
     ) -> Vec<ClientCommand> {
         self.local.pending.clear();
+        // A PM start asked for on the lost link went with it: a later open asks again.
+        self.pm_wanted = None;
         if attempt >= MAX_CONNECT_ATTEMPTS {
             return self.fail(format!(
                 "could not connect to the shepherd host after {attempt} attempts: {error}. \
@@ -1990,6 +1992,7 @@ impl Client {
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
                 self.local.pending.clear();
+                self.pm_wanted = None;
                 self.drop_asks(&At::Local);
                 // Only an accepted update outlives its link: the drop is the host re-executing.
                 let dropped = self.upgrade.take_if(|u| u.phase != UpgradePhase::Accepted);
