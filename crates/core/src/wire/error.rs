@@ -82,28 +82,36 @@ struct BusyData {
     status: Busy,
 }
 
-/// What a session is doing, as `docs/cli.md` spells a session's status.
+/// What a session is doing, as `docs/cli.md` spells a session's status. Scripts see it as
+/// [`SessionStatus`](crate::client::automation::SessionStatus), which also says how it is worked out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
-    /// The agent is in a turn, or still starting.
+    /// Its process runs and isn't known to be waiting: the agent is in a turn, still starting, or it runs no agent.
     Running,
     /// The agent is at its prompt with nothing to do.
     Idle,
-    /// The agent is waiting on the user.
+    /// The agent is waiting on the user: it asked permission or a question.
     WantsUser,
-    /// The session's process ended.
+    /// Its process ended, or it never started.
     Exited,
 }
 
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl Status {
+    /// How `docs/cli.md` spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::Running => "running",
             Self::Idle => "idle",
             Self::WantsUser => "wants-user",
             Self::Exited => "exited",
-        })
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

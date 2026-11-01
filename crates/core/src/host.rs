@@ -116,7 +116,7 @@ use serde_json::Value;
 use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
     AgentExited, AgentStarted, Choice, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr,
-    PromptBy, SessionAnswered, SessionClosed, SessionCreated, SessionFailed, SessionPrompted,
+    PromptBy, Seq, SessionAnswered, SessionClosed, SessionCreated, SessionFailed, SessionPrompted,
     SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, UiLayout, WorkspaceSelected,
     WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
 };
@@ -132,7 +132,7 @@ use crate::ports::worktrees::{
     BaseSpec, BaseUsed, BranchName, CommitHash, Created, RepoRef, Worktree, WorktreeError,
     WorktreeName, WorktreePath, WorktreeStatus,
 };
-use crate::session::{Activity, SessionState};
+use crate::session::SessionState;
 use crate::wire::{
     Busy, CleanupInfo, CloseWorktree, HostResult, InputKind, ReplyInfo, SCREEN_LINES_MAX,
     SessionNewOk, SessionReplyOk, Status, WireError, WorktreeCleanupOk, WorktreeInfo,
@@ -465,6 +465,8 @@ pub enum HostEvent {
         reply: ReplyTo,
         session: SessionId,
         choice: Choice,
+        /// The question meant: its `agent/asked` entry's seq. Refused unless that one is pending.
+        asked: Option<Seq>,
         by: PromptBy,
     },
     /// A client asked for a session's agent's last reply, written at or after `since` (`_shepherd/session/reply`).
@@ -741,19 +743,10 @@ struct Entry {
 }
 
 impl Entry {
-    /// What it is doing, as `docs/cli.md` spells a session's status.
+    /// What it is doing, as `docs/cli.md` spells a session's status, and as a client listing it would say.
     fn status(&self) -> Status {
-        if self.phase != Phase::Running || matches!(self.state.activity(), Activity::Exited { .. })
-        {
-            return Status::Exited;
-        }
-        if self.state.wants_user() {
-            Status::WantsUser
-        } else if self.state.at_prompt() {
-            Status::Idle
-        } else {
-            Status::Running
-        }
+        let exited = matches!(self.phase, Phase::Exited | Phase::Failed(_));
+        Status::of_state(exited, &self.state)
     }
 
     /// Its worktree, if it has one closing could remove: made (its post-create hooks may still be running).
@@ -1420,8 +1413,9 @@ impl Host {
                 reply,
                 session,
                 choice,
+                asked,
                 by,
-            } => self.answer(reply, session, choice, by),
+            } => self.answer(reply, session, choice, asked, by),
             HostEvent::ReadReply {
                 reply,
                 session,
@@ -1506,6 +1500,7 @@ impl Host {
         reply: ReplyTo,
         session: SessionId,
         choice: Choice,
+        meant: Option<Seq>,
         by: PromptBy,
     ) -> Vec<HostCommand> {
         let Some(entry) = self.open(&session) else {
@@ -1518,10 +1513,11 @@ impl Host {
             let why = format!("{session} runs no agent: there is nothing to answer");
             return vec![reply_err(reply, WireError::InvalidParams(why))];
         };
-        let question = entry
-            .state
-            .question()
-            .filter(|_| entry.phase == Phase::Running);
+        // No PTY to type into before it runs; and an answer that names its question answers only that one.
+        let question = entry.state.question().filter(|_| {
+            entry.phase == Phase::Running
+                && meant.is_none_or(|seq| entry.state.question_seq() == Some(seq))
+        });
         let Some(asked) = question else {
             let status = entry.status();
             return vec![reply_err(

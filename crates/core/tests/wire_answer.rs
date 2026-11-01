@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 
 use serde_json::{Value, json};
-use shepherd_core::acpp::{Choice, PromptBy, RequestId};
+use shepherd_core::acpp::{Choice, PromptBy, RequestId, Seq};
 use shepherd_core::ids::SessionId;
 use shepherd_core::wire::{
     ClientMessage, ClientRequest, HostMessage, HostResponse, HostResult, Method, Request,
@@ -42,12 +42,13 @@ fn an_answer_names_its_session_a_word_or_an_options_number_and_who_asked() {
         let wire = round_trip(ClientRequest::SessionAnswer(SessionAnswer {
             session: SessionId::new("s_1"),
             choice,
+            asked: Some(Seq::new(7)),
             by: Some(PromptBy::Cli),
         }));
         assert_eq!(wire["method"], "_shepherd/session/answer");
         assert_eq!(
             wire["params"],
-            json!({ "session": "s_1", "choice": sent, "by": "cli" })
+            json!({ "session": "s_1", "choice": sent, "asked": 7, "by": "cli" })
         );
     }
     let Ok(ClientMessage::Request(req)) = decoded(json!({ "session": "s_1", "choice": "no" }))
@@ -57,7 +58,7 @@ fn an_answer_names_its_session_a_word_or_an_options_number_and_who_asked() {
     let ClientRequest::SessionAnswer(answer) = req.body else {
         panic!("not an answer");
     };
-    assert_eq!(answer.by, None);
+    assert_eq!((answer.by, answer.asked), (None, None));
 }
 
 #[test]

@@ -22,12 +22,14 @@ fn asked(
     text: String,
     choices: Option<Vec<String>>,
     subagent: Option<&str>,
+    tool: Option<&str>,
 ) -> crate::acpp::Frame {
     crate::acpp::ShepherdFrame::AgentAsked(crate::acpp::AgentAsked {
         kind,
         text,
         choices,
         subagent: subagent.map(str::to_owned),
+        tool: tool.map(str::to_owned),
     })
     .to_frame()
 }

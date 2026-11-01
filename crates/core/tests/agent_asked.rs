@@ -92,12 +92,13 @@ impl Run {
     }
 }
 
-fn permission(text: &str, subagent: Option<&str>) -> AgentAsked {
+fn permission(text: &str, tool: Option<&str>) -> AgentAsked {
     AgentAsked {
         kind: BlockKind::Permission,
         text: text.to_owned(),
         choices: None,
-        subagent: subagent.map(str::to_owned),
+        subagent: None,
+        tool: tool.map(str::to_owned),
     }
 }
 
@@ -107,6 +108,7 @@ fn framework(subagent: Option<&str>) -> AgentAsked {
         text: "Which framework?".to_owned(),
         choices: Some(vec!["React".to_owned(), "Vue".to_owned()]),
         subagent: subagent.map(str::to_owned),
+        tool: Some("AskUserQuestion".to_owned()),
     }
 }
 
@@ -147,8 +149,11 @@ fn a_claude_permission_request_records_what_it_asks_after_the_request() {
             Some("_shepherd/agent/asked")
         ]
     );
-    assert_eq!(run.asked(), [permission("Bash: npm test", None)]);
-    assert_eq!(run.question(), Some(&permission("Bash: npm test", None)));
+    assert_eq!(run.asked(), [permission("Bash: npm test", Some("Bash"))]);
+    assert_eq!(
+        run.question(),
+        Some(&permission("Bash: npm test", Some("Bash")))
+    );
     assert!(matches!(
         run.state.activity(),
         Activity::NeedsPermission { .. }
@@ -239,8 +244,11 @@ fn a_codex_permission_request_records_what_it_asks() {
     let mut run = Run::new(AgentKind::Codex);
     run.hooks(vec![cx!("UserPromptSubmit"), cx!("PreToolUse.Bash")]);
     run.hook(cx!("PermissionRequest.Bash"));
-    assert_eq!(run.asked(), [permission("Bash: cargo test", None)]);
-    assert_eq!(run.question(), Some(&permission("Bash: cargo test", None)));
+    assert_eq!(run.asked(), [permission("Bash: cargo test", Some("Bash"))]);
+    assert_eq!(
+        run.question(),
+        Some(&permission("Bash: cargo test", Some("Bash")))
+    );
 
     let mut run = Run::new(AgentKind::Codex);
     run.hooks(vec![
@@ -332,7 +340,7 @@ fn an_asked_frame_with_nothing_waiting_and_no_turn_is_ignored() {
 fn asked_and_answered_round_trip_through_the_log() {
     for frame in [
         ShepherdFrame::AgentAsked(framework(Some("agent-1"))),
-        ShepherdFrame::AgentAsked(permission("Bash: ls", None)),
+        ShepherdFrame::AgentAsked(permission("Bash: ls", Some("Bash"))),
         answered(Some(Choice::Always)),
         answered(Some(Choice::Option(std::num::NonZeroU32::MIN))),
         answered(None),
@@ -357,4 +365,86 @@ fn asked_and_answered_round_trip_through_the_log() {
         answered(None).to_frame().raw()["params"],
         json!({ "by": "cli" })
     );
+}
+
+#[test]
+fn the_question_is_named_by_its_asked_entrys_seq() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![cc!("UserPromptSubmit"), cc!("PreToolUse.Bash")]);
+    run.hook(cc!("PermissionRequest.Bash"));
+    // The hook's frames are the request, then `agent/asked`: the log's last entry.
+    let last = run.log.next_seq().get() - 1;
+    assert_eq!(run.state.question_seq().map(|s| s.get()), Some(last));
+    run.host(answered(Some(Choice::Yes)));
+    assert_eq!(run.state.question_seq(), None);
+}
+
+/// Claude Code queues dialogs and keeps showing the first: a second one while one is up makes the session
+/// unanswerable (it still wants the user) until the agent's activity shows each closed.
+#[test]
+fn a_dialog_opened_while_another_is_up_leaves_nothing_answerable_until_both_close() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    assert!(run.question().is_some());
+    // The user moves around the Bash dialog; then the subagent asks too.
+    run.host(answered(None));
+    run.hooks(vec![
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+
+    // Without the user's typing, the second dialog alone does it.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+    // The subagent's tool runs: its dialog closed, but the Bash one may still be up.
+    run.hook(cc!("PostToolUse.Grep.subagent"));
+    assert_eq!(run.question(), None);
+    // Bash's own activity shows that one closed too; the next dialog is answerable again.
+    run.hooks(vec![cc!("PostToolUse.Bash"), cc!("PreToolUse.Read")]);
+    run.hook(with(
+        cc!("PermissionRequest.Bash"),
+        "tool_input",
+        json!({ "file_path": "/Users/dev/app/src/math.ts" }),
+    ));
+    assert!(run.question().is_some());
+}
+
+#[test]
+fn a_question_while_a_permission_is_up_is_queued_behind_it() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+        cc!("PreToolUse.AskUserQuestion.subagent"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn a_stray_question_outside_a_turn_is_ignored() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![cc!("UserPromptSubmit"), cc!("Stop")]);
+    run.host(ShepherdFrame::AgentAsked(framework(None)));
+    assert_eq!(run.question(), None);
+    assert_eq!(run.state.activity(), &Activity::Idle);
+    assert!(!run.state.wants_user());
 }

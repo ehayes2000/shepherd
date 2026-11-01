@@ -456,6 +456,26 @@ fn a_question_dialog_is_watched_like_a_permission_dialog() {
 }
 
 #[test]
+fn a_new_question_after_the_user_typed_needs_its_own_answer() {
+    // The user typed into the first dialog; then the agent asks again: that typing answered the old one, not this.
+    let asked = |text: &str| {
+        shepherd(
+            "_shepherd/agent/asked",
+            json!({ "kind": "permission", "text": text }),
+        )
+    };
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(500, permission(2, "t1"));
+    d.append(500, asked("Bash: one"));
+    d.input(900);
+    d.append(950, asked("Bash: two"));
+    d.output(1000);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+}
+
+#[test]
 fn an_answer_with_no_redraw_after_it_stays_put() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));

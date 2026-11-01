@@ -6,22 +6,27 @@ use std::fmt;
 
 use super::{Client, ClientSession, MachineGroup};
 use crate::ids::{MachineId, SessionId};
-use crate::session::Activity;
+use crate::session::{Activity, SessionState};
 
-/// What a session is doing, as a script sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStatus {
-    /// Its process runs and isn't known to be waiting: the agent is in a turn, still starting, or it runs no agent.
-    Running,
-    /// The agent is at its prompt with nothing to do.
-    Idle,
-    /// The agent is waiting on the user: it asked permission or a question.
-    WantsUser,
-    /// Its process ended, or it never started.
-    Exited,
-}
+/// What a session is doing, as a script sees it: the one status type, shared with the wire (`wire::Status`).
+pub use crate::wire::Status as SessionStatus;
 
 impl SessionStatus {
+    /// What a session whose log folds to `state` is doing, given whether its process has `exited` (or never
+    /// started): exited, else waiting on the user (it or a subagent asked), else idle at its prompt
+    /// ([`SessionState::at_prompt`]), else running. The host answers with this.
+    pub fn of_state(exited: bool, state: &SessionState) -> Self {
+        if exited || matches!(state.activity(), Activity::Exited { .. }) {
+            Self::Exited
+        } else if state.wants_user() {
+            Self::WantsUser
+        } else if state.at_prompt() {
+            Self::Idle
+        } else {
+            Self::Running
+        }
+    }
+
     pub fn of(session: &ClientSession) -> Self {
         if session.exited {
             return Self::Exited;
@@ -38,23 +43,9 @@ impl SessionStatus {
     /// waiting on the user wants the user too, and an agent which reported its start and hasn't had a turn yet is at
     /// its prompt, so idle ([`crate::session::SessionState::at_prompt`]).
     pub fn in_client(client: &Client, session: &ClientSession) -> Self {
-        let status = Self::of(session);
-        let state = client.state(&session.id);
-        match status {
-            Self::Exited => Self::Exited,
-            _ if state.is_some_and(|s| s.wants_user()) => Self::WantsUser,
-            Self::Running if state.is_some_and(|s| s.at_prompt()) => Self::Idle,
-            other => other,
-        }
-    }
-
-    /// How `docs/cli.md` spells it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Idle => "idle",
-            Self::WantsUser => "wants-user",
-            Self::Exited => "exited",
+        match client.state(&session.id) {
+            Some(state) => Self::of_state(session.exited, state),
+            None => Self::of(session),
         }
     }
 }

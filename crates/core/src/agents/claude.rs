@@ -372,7 +372,7 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     if name == QUESTION_TOOL {
         // The question's dialog is up: the permission notification that follows it is not another question.
         let text = question(input).unwrap_or_else(|| tool_title(name, input));
-        let frame = super::asked(BlockKind::Question, text, choices(input), agent);
+        let frame = super::asked(BlockKind::Question, text, choices(input), agent, Some(name));
         out.push((Dir::Internal, frame));
         state.permission_open = true;
     }
@@ -440,7 +440,10 @@ fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
                 .block(agent, hook.str("agent_type"), kind.clone(), text.clone());
         out.extend(frame.map(|f| (Dir::Internal, f)));
     }
-    out.push((Dir::Internal, super::asked(kind, text, choices, agent)));
+    out.push((
+        Dir::Internal,
+        super::asked(kind, text, choices, agent, hook.str("tool_name")),
+    ));
     Some(out)
 }
 
@@ -496,7 +499,7 @@ fn notification(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
                 .to_owned();
             let tool = state.tools.last().map(|t| t.id.clone());
             let mut out = permission(state, hook, tool, &title)?;
-            let frame = super::asked(BlockKind::Permission, title, None, None);
+            let frame = super::asked(BlockKind::Permission, title, None, None, None);
             out.push((Dir::Internal, frame));
             Some(out)
         }

@@ -539,6 +539,10 @@ pub struct SessionReply {
 pub struct SessionAnswer {
     pub session: SessionId,
     pub choice: Choice,
+    /// The question being answered: the seq of its `_shepherd/agent/asked` entry in the session's log. When given, the
+    /// answer is refused unless that question is the one pending, so it never lands on a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<Seq>,
     /// Who asked. A client that doesn't say is recorded as `client`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<PromptBy>,

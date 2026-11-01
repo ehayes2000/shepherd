@@ -3,12 +3,13 @@
 //! otherwise, including once the user has answered in the pane. Through the public `shepherd_core::host` API.
 
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use shepherd_core::acpp::{Choice, Frame, PromptBy, SessionAnswered, ShepherdFrame};
+use shepherd_core::acpp::{Choice, Frame, PromptBy, Seq, SessionAnswered, ShepherdFrame};
 use shepherd_core::agents::Translators;
 use shepherd_core::config::AgentKind;
-use shepherd_core::host::{HostCommand, HostEvent, ReplyTo};
+use shepherd_core::host::{HostCommand, HostEvent, ReplyTo, WorkspaceAsk};
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::SpawnSpec;
 use shepherd_core::wire::{HostResult, InputKind, Status, WireError};
@@ -91,9 +92,37 @@ impl Agent {
             reply,
             session: sid("s1"),
             choice,
+            asked: None,
             by: PromptBy::Cli,
         });
         (reply, commands)
+    }
+
+    /// An answer naming the question it means, by its `agent/asked` entry's seq.
+    fn answer_to(&mut self, asked: Seq, choice: Choice) -> (ReplyTo, Vec<HostCommand>) {
+        let reply = self.host.reply_to();
+        let commands = self.host.handle(HostEvent::Answer {
+            reply,
+            session: sid("s1"),
+            choice,
+            asked: Some(asked),
+            by: PromptBy::Cli,
+        });
+        (reply, commands)
+    }
+
+    /// The seq of the latest `agent/asked` entry in `s1`'s log.
+    fn last_asked(&self) -> Seq {
+        self.host
+            .log()
+            .iter()
+            .rev()
+            .find(|e| {
+                matches!(e.frame(), Frame::Shepherd(m)
+                    if matches!(m.body(), ShepherdFrame::AgentAsked(_)))
+            })
+            .map(|e| e.seq())
+            .unwrap_or_else(|| panic!("nothing was asked"))
     }
 
     fn input(&mut self, bytes: &[u8], kind: InputKind) -> Vec<HostCommand> {
@@ -185,7 +214,6 @@ fn codex_permission() -> Agent {
 fn a_claude_permission_is_answered_with_its_dialogs_own_keys() {
     for (choice, keys) in [
         (Choice::Yes, b"\r".to_vec()),
-        (Choice::Always, b"\x1b[Z".to_vec()),
         (Choice::No, b"\x1b".to_vec()),
     ] {
         let mut agent = claude_permission();
@@ -214,22 +242,174 @@ fn a_claude_permission_is_answered_with_its_dialogs_own_keys() {
     }
 }
 
+/// Session `s1`'s agent asking permission for `tool`: the fixture's request, renamed.
+fn permission_for(mut agent: Agent, request: Value, tool: &str) -> Agent {
+    agent.hooks(vec![with(request, "tool_name", json!(tool))]);
+    agent
+}
+
+fn with(mut payload: Value, key: &str, value: Value) -> Value {
+    payload[key] = value;
+    payload
+}
+
+fn claude_asking_for(tool: &str) -> Agent {
+    let mut agent = Agent::claude();
+    agent.hooks(vec![cc!("SessionStart.startup"), cc!("UserPromptSubmit")]);
+    permission_for(agent, cc!("PermissionRequest.Bash"), tool)
+}
+
+fn codex_asking_for(tool: &str) -> Agent {
+    let mut agent = Agent::codex();
+    agent.hooks(vec![cx!("SessionStart.startup"), cx!("UserPromptSubmit")]);
+    permission_for(agent, cx!("PermissionRequest.Bash"), tool)
+}
+
+/// What answering `agent` with `choice` typed, or `None` if it was refused as a choice it doesn't take.
+fn typed(mut agent: Agent, choice: Choice) -> Option<Vec<Vec<u8>>> {
+    let (reply, commands) = agent.answer(choice);
+    match result(&commands, reply) {
+        Some(Ok(HostResult::Ack)) => Some(written(&commands)),
+        Some(Err(WireError::InvalidParams(_))) => {
+            assert!(written(&commands).is_empty(), "{commands:?}");
+            assert!(agent.answers().is_empty());
+            None
+        }
+        other => panic!("{choice}: {other:?}"),
+    }
+}
+
 #[test]
-fn a_codex_approval_is_answered_with_its_overlays_own_keys() {
-    for (choice, keys) in [
-        (Choice::Yes, b"y".to_vec()),
-        (Choice::Always, b"a".to_vec()),
-        (Choice::No, b"n".to_vec()),
-    ] {
-        let mut agent = codex_permission();
-        let (reply, commands) = agent.answer(choice);
+fn claude_code_is_answered_always_only_on_a_prompt_that_offers_it() {
+    // A file prompt offers allowing it for the rest of the session: Shift+Tab picks that.
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
         assert_eq!(
-            result(&commands, reply),
-            Some(&Ok(HostResult::Ack)),
+            typed(claude_asking_for(tool), Choice::Always),
+            Some(vec![b"\x1b[Z".to_vec()]),
+            "{tool}"
+        );
+    }
+    // A Bash prompt doesn't, nor does one the hooks didn't name.
+    assert_eq!(typed(claude_permission(), Choice::Always), None);
+    let mut agent = Agent::claude();
+    agent.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("Notification.permission_prompt"),
+    ]);
+    assert_eq!(typed(agent, Choice::Always), None);
+}
+
+#[test]
+fn a_codex_approval_is_answered_with_its_overlays_own_keys_for_that_kind_of_request() {
+    // A command: approve, or deny ("No, continue without running it"), never Cancel's `n`; whether it offers
+    // "for this session" isn't in the hook, so always is refused.
+    assert_eq!(
+        typed(codex_permission(), Choice::Yes),
+        Some(vec![b"y".to_vec()])
+    );
+    assert_eq!(
+        typed(codex_permission(), Choice::No),
+        Some(vec![b"d".to_vec()])
+    );
+    assert_eq!(typed(codex_permission(), Choice::Always), None);
+    // A patch's three options are fixed.
+    for (choice, key) in [(Choice::Yes, "y"), (Choice::Always, "a"), (Choice::No, "n")] {
+        assert_eq!(
+            typed(codex_asking_for("apply_patch"), choice),
+            Some(vec![key.as_bytes().to_vec()]),
             "{choice}"
         );
-        assert_eq!(written(&commands), [keys], "{choice}");
     }
+    // Anything else: only yes is known.
+    let other = "mcp__docs__search";
+    assert_eq!(
+        typed(codex_asking_for(other), Choice::Yes),
+        Some(vec![b"y".to_vec()])
+    );
+    assert_eq!(typed(codex_asking_for(other), Choice::Always), None);
+    assert_eq!(typed(codex_asking_for(other), Choice::No), None);
+}
+
+#[test]
+fn an_answer_naming_its_question_answers_only_that_one() {
+    let mut agent = Agent::claude();
+    agent.hooks(vec![
+        cc!("SessionStart.startup"),
+        cc!("UserPromptSubmit"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    let first = agent.last_asked();
+    // The user answers it in the pane and the agent moves on to another question.
+    agent.hooks(vec![cc!("PreToolUse.Read"), cc!("PermissionRequest.Bash")]);
+    let second = agent.last_asked();
+    assert_ne!(first, second);
+    let (reply, commands) = agent.answer_to(first, Choice::Yes);
+    assert_eq!(
+        result(&commands, reply),
+        Some(&nothing_asked(Status::WantsUser))
+    );
+    assert!(written(&commands).is_empty());
+    assert!(agent.answers().is_empty());
+    // Naming the pending one answers it.
+    let (reply, commands) = agent.answer_to(second, Choice::Yes);
+    assert_eq!(result(&commands, reply), Some(&Ok(HostResult::Ack)));
+    assert_eq!(written(&commands), [b"\r".to_vec()]);
+}
+
+#[test]
+fn a_dialog_queued_behind_another_is_never_answered_into_the_first() {
+    // Claude Code shows the Bash dialog, where the user moved; the subagent's request queues behind it.
+    let mut agent = Agent::claude();
+    agent.hooks(vec![
+        cc!("SessionStart.startup"),
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    agent.input(b"\x1b[B", InputKind::Keys);
+    agent.hooks(vec![
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+    ]);
+    let (reply, commands) = agent.answer(Choice::Yes);
+    assert_eq!(
+        result(&commands, reply),
+        Some(&nothing_asked(Status::WantsUser))
+    );
+    assert!(written(&commands).is_empty());
+    // Naming the subagent's question doesn't get past it either.
+    let queued = agent.last_asked();
+    let (_, commands) = agent.answer_to(queued, Choice::Yes);
+    assert!(written(&commands).is_empty());
+}
+
+#[test]
+fn a_session_without_its_pty_yet_is_never_typed_into() {
+    // Still waiting for its worktree: frames that say it asked can't be answered into a PTY it doesn't have.
+    let mut host = HostDriver::new();
+    let ask = WorkspaceAsk::Select(host.reply_to());
+    host.handle(HostEvent::WorkspaceProbed {
+        ask,
+        repo: Ok(PathBuf::from("/src/app")),
+    });
+    host.new_session_with("s1", claude_session_spec());
+    let mut agent = Agent {
+        host,
+        agent: AgentKind::ClaudeCode,
+        translators: Translators::new(),
+    };
+    agent.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    let (reply, commands) = agent.answer(Choice::Yes);
+    assert_eq!(
+        result(&commands, reply),
+        Some(&nothing_asked(Status::WantsUser))
+    );
+    assert!(written(&commands).is_empty());
 }
 
 #[test]
@@ -418,6 +598,7 @@ fn a_session_without_an_agent_or_unknown_is_refused() {
         reply,
         session: sid("sh"),
         choice: Choice::Yes,
+        asked: None,
         by: PromptBy::Cli,
     });
     assert!(matches!(
@@ -429,6 +610,7 @@ fn a_session_without_an_agent_or_unknown_is_refused() {
         reply,
         session: sid("nope"),
         choice: Choice::Yes,
+        asked: None,
         by: PromptBy::Cli,
     });
     assert!(matches!(

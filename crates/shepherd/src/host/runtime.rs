@@ -2418,6 +2418,7 @@ impl<
                     reply,
                     session: answer.session,
                     choice: answer.choice,
+                    asked: answer.asked,
                     by: answer.by.unwrap_or(PromptBy::Client),
                 });
             }

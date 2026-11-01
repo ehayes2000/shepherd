@@ -502,7 +502,13 @@ fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
             .block(agent, hook.str("agent_type"), kind, text.clone());
         out.extend(frame.map(|f| (Dir::Internal, f)));
     }
-    let asked = super::asked(BlockKind::Permission, text, None, agent);
+    let asked = super::asked(
+        BlockKind::Permission,
+        text,
+        None,
+        agent,
+        hook.str("tool_name"),
+    );
     out.push((Dir::Internal, asked));
     Some(out)
 }

@@ -310,6 +310,10 @@ pub struct AgentAsked {
     /// The subagent that asked, by the agent's id for it, when a subagent did: its dialog is in the parent's TUI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<String>,
+    /// The tool it asks about, as the hook named it (`Bash`, `Edit`, `apply_patch`, `AskUserQuestion`, …): it says
+    /// which of the agent's dialogs is up, and so which answers it offers. Absent when the hook didn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 /// The agent's pending question was answered (T51): the host typed `choice` for it on behalf of `by`

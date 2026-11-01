@@ -1401,10 +1401,55 @@ fn ui_screenshot_and_screen_leave_out_concealed_text() {
 
 /// What `shepherd answer --json` prints, or why it failed.
 fn answer_json(w: &mut World, session: &str, choice: &str) -> Result<Value, CliError> {
+    answer_to_json(w, session, choice, None)
+}
+
+/// What `shepherd answer --json [--asked SEQ]` prints, or why it failed.
+fn answer_to_json(
+    w: &mut World,
+    session: &str,
+    choice: &str,
+    asked: Option<Seq>,
+) -> Result<Value, CliError> {
     let mut out = Vec::new();
-    let choice = choice.parse().unwrap();
-    shepherd::cli::answer::answer(w, session, choice, true, &mut out)?;
+    let answer = shepherd::cli::answer::Answer {
+        session: session.to_owned(),
+        choice: choice.parse().unwrap(),
+        asked,
+    };
+    shepherd::cli::answer::answer(w, &answer, true, &mut out)?;
     Ok(serde_json::from_slice(&out).unwrap())
+}
+
+impl World {
+    /// The seq of the latest `agent/asked` entry in session `id`'s log on A.
+    fn asked_seq(&self, id: &str) -> Seq {
+        self.a
+            .log()
+            .read(LogId::Session(SessionId::new(id)), Seq::ZERO)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| {
+                matches!(e.frame(), Frame::Shepherd(m)
+                    if matches!(m.body(), ShepherdFrame::AgentAsked(_)))
+            })
+            .map(|e| e.seq())
+            .expect("the agent asked")
+    }
+}
+
+#[test]
+fn an_answer_naming_a_question_no_longer_pending_is_refused_never_typed() {
+    let mut w = World::new();
+    let id = asking(&mut w);
+    let stale = Seq::new(w.asked_seq(&id).get() - 1);
+    let err = answer_to_json(&mut w, "worker", "yes", Some(stale)).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("nothing to answer (wants-user)")),
+        "{err:?}"
+    );
+    assert!(w.answered.is_empty());
 }
 
 /// Session `worker`'s agent, prompted, asking permission to use Bash: the client has seen it want the user.
@@ -1435,10 +1480,12 @@ fn status_of(w: &World, id: &str) -> Option<SessionStatus> {
 fn an_agents_question_is_answered_from_the_cli_and_it_works_on() {
     let mut w = World::new();
     let id = asking(&mut w);
+    let asked = w.asked_seq(&id);
     let answered = answer_json(&mut w, "worker", "yes").unwrap();
+    // It named the question it answered: the `agent/asked` entry this client folded.
     assert_eq!(
         answered,
-        json!({ "session": id, "choice": "yes", "asked": "Bash" })
+        json!({ "session": id, "choice": "yes", "asked": "Bash", "question": asked.get() })
     );
     // Claude Code's own key for yes, typed once into its dialog.
     assert_eq!(w.answered, [(id.clone(), b"\r".to_vec())]);
