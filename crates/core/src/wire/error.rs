@@ -14,6 +14,7 @@ pub mod code {
     pub const INTERNAL_ERROR: i64 = -32603;
     pub const VERSION_MISMATCH: i64 = 1000;
     pub const UNKNOWN_SESSION: i64 = 1001;
+    pub const SESSION_BUSY: i64 = 1002;
 }
 
 /// A request failed. On the wire: `{ code, message, data? }`, with the variant's fields in `data`.
@@ -34,6 +35,9 @@ pub enum WireError {
     VersionMismatch { host: u32, client: u32 },
     #[error("unknown session {session}")]
     UnknownSession { session: SessionId },
+    /// The session's agent isn't at its prompt, so it wasn't typed into.
+    #[error("{session} is busy ({status})")]
+    SessionBusy { session: SessionId, status: Busy },
     /// A code this version doesn't know, kept as received.
     #[error("error {code}: {message}")]
     Other {
@@ -47,6 +51,31 @@ pub enum WireError {
 struct VersionData {
     host: u32,
     client: u32,
+}
+
+/// What a busy session is doing, as `docs/cli.md` spells a session's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Busy {
+    /// The agent is in a turn, or still starting.
+    Running,
+    /// The agent is waiting on the user: it asked permission or a question.
+    WantsUser,
+}
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Running => "running",
+            Self::WantsUser => "wants-user",
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct BusyData {
+    session: SessionId,
+    status: Busy,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +93,7 @@ impl WireError {
             Self::Internal(_) => code::INTERNAL_ERROR,
             Self::VersionMismatch { .. } => code::VERSION_MISMATCH,
             Self::UnknownSession { .. } => code::UNKNOWN_SESSION,
+            Self::SessionBusy { .. } => code::SESSION_BUSY,
             Self::Other { code, .. } => *code,
         }
     }
@@ -82,6 +112,10 @@ impl WireError {
             })),
             Self::UnknownSession { session } => Some(super::message::json(&SessionData {
                 session: session.clone(),
+            })),
+            Self::SessionBusy { session, status } => Some(super::message::json(&BusyData {
+                session: session.clone(),
+                status: *status,
             })),
             Self::Other { data, .. } => data.as_deref().cloned(),
         };
@@ -125,6 +159,13 @@ impl WireError {
                 .clone()
                 .and_then(|d| serde_json::from_value::<SessionData>(d).ok())
                 .map(|d| Self::UnknownSession { session: d.session }),
+            code::SESSION_BUSY => data
+                .clone()
+                .and_then(|d| serde_json::from_value::<BusyData>(d).ok())
+                .map(|d| Self::SessionBusy {
+                    session: d.session,
+                    status: d.status,
+                }),
             _ => None,
         };
         Some(typed.unwrap_or(Self::Other {

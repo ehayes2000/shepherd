@@ -43,7 +43,7 @@ impl SessionJson {
             machine: client.machine_label(&s.machine).to_owned(),
             machine_id: s.machine.to_string(),
             agent: s.agent.map(|a| a.as_str()),
-            status: SessionStatus::of(s).as_str(),
+            status: SessionStatus::in_client(client, s).as_str(),
             workspace: s.workspace.as_deref().map(lossy),
             worktree: s.worktree.as_deref().map(lossy),
             branch: s.branch.clone(),
@@ -178,7 +178,7 @@ fn session_line(client: &Client, s: &ClientSession) -> String {
         "{}  {}  {}  {}  {}  {}  {}  {}",
         safe(s.id.as_str()),
         safe(&s.name),
-        SessionStatus::of(s).as_str(),
+        SessionStatus::in_client(client, s).as_str(),
         s.agent.map_or("-", |a| a.as_str()),
         safe(client.machine_label(&s.machine)),
         dash(s.branch.clone()),
@@ -329,6 +329,7 @@ mod tests {
     use shepherd_testkit::builders::{ClientDriver, claude_session_spec, shell_session_spec, ts};
 
     use super::*;
+    use crate::cli::WaitError;
 
     /// A client fed from a [`ClientDriver`]'s host: every entry is delivered before each check.
     struct Fed(ClientDriver);
@@ -352,12 +353,12 @@ mod tests {
             &mut self,
             done: &mut dyn FnMut(&Client) -> bool,
             _: Duration,
-        ) -> Result<(), String> {
+        ) -> Result<(), WaitError> {
             self.0.sync();
             if done(self.0.client()) {
                 Ok(())
             } else {
-                Err("not done".to_owned())
+                Err(WaitError::Failed("not done".to_owned()))
             }
         }
     }

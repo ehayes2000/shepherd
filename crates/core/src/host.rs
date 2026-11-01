@@ -101,6 +101,7 @@ pub mod launch;
 pub mod naming;
 pub mod peering;
 pub mod pr;
+pub mod prompt;
 pub mod quiet;
 pub mod sizes;
 pub mod upgrade;
@@ -113,9 +114,10 @@ use serde_json::Value;
 
 use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
-    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr, SessionClosed,
-    SessionCreated, SessionFailed, SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp,
-    UiLayout, WorkspaceSelected, WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
+    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr, PromptBy,
+    SessionClosed, SessionCreated, SessionFailed, SessionPrompted, SessionRenamed, ShepherdFrame,
+    Source, SourceKind, Timestamp, UiLayout, WorkspaceSelected, WorktreeCreated, WorktreeHook,
+    WorktreeRemoved, WorktreeRemoving,
 };
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
@@ -124,16 +126,20 @@ use crate::layout::{Layout, LayoutOp};
 use crate::ports::archive::{ArchiveError, CaptureReason};
 use crate::ports::commands::{CommandError, CommandExit, CommandOutput, CommandSpec, OUTPUT_TAIL};
 use crate::ports::pty::{PtySize, SpawnSpec};
+use crate::ports::transcripts::{Reply, TranscriptError, TurnMarker};
 use crate::ports::worktrees::{
     BaseSpec, BaseUsed, BranchName, CommitHash, Created, RepoRef, Worktree, WorktreeError,
     WorktreeName, WorktreePath, WorktreeStatus,
 };
+use crate::session::SessionState;
 use crate::wire::{
-    CleanupInfo, CloseWorktree, HostResult, InputKind, SessionNewOk, WireError, WorktreeCleanupOk,
-    WorktreeInfo, WorktreeListOk, WorktreeRemoveOk, WorktreeStatusOk,
+    Busy, CleanupInfo, CloseWorktree, HostResult, InputKind, ReplyInfo, SessionNewOk,
+    SessionReplyOk, WireError, WorktreeCleanupOk, WorktreeInfo, WorktreeListOk, WorktreeRemoveOk,
+    WorktreeStatusOk,
 };
 
 use self::capture::{AfterCapture, CaptureJob};
+use self::prompt::ReplyJob;
 
 /// Identifies the client request a [`HostCommand::Reply`] answers. Opaque to core: the runtime assigns one to each
 /// request it turns into a [`HostEvent`], and maps it back to the connection and JSON-RPC id when it replies.
@@ -444,6 +450,25 @@ pub enum HostEvent {
         exists: bool,
         note: Option<String>,
     },
+    /// A client asked to type `text` into a session's agent as one prompt (`_shepherd/session/prompt`), on behalf of
+    /// `by`.
+    Prompt {
+        reply: ReplyTo,
+        session: SessionId,
+        text: String,
+        by: PromptBy,
+    },
+    /// A client asked for a session's agent's last reply, written at or after `since` (`_shepherd/session/reply`).
+    ReadReply {
+        reply: ReplyTo,
+        session: SessionId,
+        since: Option<TurnMarker>,
+    },
+    /// The answer to a [`HostCommand::ReadReply`], with the `reply` it carried.
+    ReplyRead {
+        reply: ReplyTo,
+        result: Result<Option<Reply>, TranscriptError>,
+    },
     /// A client asked for the screen layout (`_shepherd/ui/get`).
     UiGet { reply: ReplyTo },
     /// A client asked to change the screen layout by `op` (`_shepherd/ui/apply`).
@@ -494,6 +519,12 @@ pub enum HostCommand {
     Capture {
         captures: Vec<CaptureJob>,
         then: AfterCapture,
+    },
+    /// Read the reply `job` names with the `Transcripts` port, and feed it back as [`HostEvent::ReplyRead`] with the
+    /// same `reply`. Runs off the runtime thread, like [`HostCommand::ProbeWorkspace`].
+    ReadReply {
+        reply: ReplyTo,
+        job: ReplyJob,
     },
     /// Answer the client request `to`.
     Reply {
@@ -682,6 +713,8 @@ struct Entry {
     exited_at: Option<Timestamp>,
     /// The commit its worktree's branch started at, from `worktree/created`.
     base: Option<CommitHash>,
+    /// Its log folded as [`SessionState`]: whether its agent is at its prompt.
+    state: SessionState,
 }
 
 impl Entry {
@@ -1322,6 +1355,35 @@ impl Host {
                     name,
                 }))],
             },
+            HostEvent::Prompt {
+                reply,
+                session,
+                text,
+                by,
+            } => self.prompt(reply, session, &text, by),
+            HostEvent::ReadReply {
+                reply,
+                session,
+                since,
+            } => self.read_reply(reply, session, since),
+            HostEvent::ReplyRead { reply, result } => vec![HostCommand::Reply {
+                to: reply,
+                result: match result {
+                    Ok(read) => Ok(HostResult::SessionReply(SessionReplyOk {
+                        reply: read.map(|r| ReplyInfo {
+                            text: r.text,
+                            at: r.at,
+                        }),
+                    })),
+                    // A transcript the agent named but never wrote (it exited first, say) holds no reply.
+                    Err(TranscriptError::Missing(_)) => {
+                        Ok(HostResult::SessionReply(SessionReplyOk { reply: None }))
+                    }
+                    Err(error) => Err(WireError::InvalidParams(format!(
+                        "can't read the agent's reply: {error}"
+                    ))),
+                },
+            }],
             HostEvent::UiGet { reply } => vec![HostCommand::Reply {
                 to: reply,
                 result: Ok(HostResult::Layout(self.layout())),
@@ -1367,6 +1429,96 @@ impl Host {
                 sessions.chain(orphans).collect()
             }
         }
+    }
+
+    /// Types `text` into open session `session`'s agent as one prompt ([`prompt`]), recording it first, if the agent is
+    /// at its prompt; otherwise refuses it, typing nothing.
+    fn prompt(
+        &self,
+        reply: ReplyTo,
+        session: SessionId,
+        text: &str,
+        by: PromptBy,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.open(&session) else {
+            return vec![unknown_session(reply, session)];
+        };
+        let refuse = |why: String| vec![reply_err(reply, WireError::InvalidParams(why))];
+        if !matches!(entry.agent, Some(AgentKind::ClaudeCode | AgentKind::Codex)) {
+            return refuse(format!(
+                "{session} runs no agent: there is nothing to prompt"
+            ));
+        }
+        if entry.phase != Phase::Running {
+            return refuse(format!("{session} isn't running"));
+        }
+        if !entry.state.at_prompt() {
+            let status = match entry.state.wants_user() {
+                true => Busy::WantsUser,
+                false => Busy::Running,
+            };
+            return vec![reply_err(reply, WireError::SessionBusy { session, status })];
+        }
+        let typed = prompt::typed(text);
+        if typed.is_empty() {
+            return refuse("the prompt has nothing to type".to_owned());
+        }
+        let [paste, submit] = prompt::keystrokes(&typed);
+        let prompted = ShepherdFrame::SessionPrompted(SessionPrompted { text: typed, by });
+        vec![
+            append(&session, prompted),
+            HostCommand::WritePty {
+                session: session.clone(),
+                bytes: paste,
+                kind: InputKind::Paste,
+            },
+            HostCommand::WritePty {
+                session,
+                bytes: submit,
+                kind: InputKind::Keys,
+            },
+            ack(reply),
+        ]
+    }
+
+    /// Reads open session `session`'s agent's last reply from the transcript its hooks named; none while they haven't
+    /// named one.
+    fn read_reply(
+        &self,
+        reply: ReplyTo,
+        session: SessionId,
+        since: Option<TurnMarker>,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.open(&session) else {
+            return vec![unknown_session(reply, session)];
+        };
+        let Some(agent) = entry
+            .agent
+            .filter(|a| matches!(a, AgentKind::ClaudeCode | AgentKind::Codex))
+        else {
+            let why = format!("{session} runs no agent: it has no replies");
+            return vec![reply_err(reply, WireError::InvalidParams(why))];
+        };
+        let cwd = entry
+            .cwd
+            .clone()
+            .or_else(|| entry.worktree.as_ref().map(|(path, _)| path.clone()));
+        let (Some(transcript_path), Some(cwd)) = (entry.transcript_path.clone(), cwd) else {
+            return vec![HostCommand::Reply {
+                to: reply,
+                result: Ok(HostResult::SessionReply(SessionReplyOk { reply: None })),
+            }];
+        };
+        vec![HostCommand::ReadReply {
+            reply,
+            job: ReplyJob {
+                agent,
+                transcript_path,
+                since,
+                profile: entry.profile.clone(),
+                cwd,
+            },
+        }]
     }
 
     /// Closes open session `session`: kills its PTY (or cancels the create of a worktree still being made, whose
@@ -1861,6 +2013,9 @@ impl Host {
     /// the shell ran, and the shell is still running. Likewise only the host's own `agent/started` (a resume) marks
     /// it running again. An `agent/started` from any source records its agent session id.
     pub fn apply(&mut self, env: &Envelope) {
+        if let Some(entry) = env.session().and_then(|id| self.sessions.get_mut(id)) {
+            entry.state.apply(env);
+        }
         let message = match env.frame() {
             Frame::Shepherd(message) => message,
             Frame::Acp(message) => {
@@ -1939,6 +2094,7 @@ impl Host {
                     pr: None,
                     exited_at: None,
                     base: None,
+                    state: SessionState::default(),
                 };
                 self.sessions.insert(id.clone(), entry);
             }

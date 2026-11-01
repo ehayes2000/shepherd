@@ -16,6 +16,7 @@ use shepherd_archive as archive;
 use shepherd_core::config::AgentKind;
 use shepherd_core::ports::{
     Archive, ArchiveError, ArchivedSession, CaptureReason, CaptureRequest, CommitHash, PatchId,
+    Reply, ReplyRequest, TranscriptError, Transcripts,
 };
 
 /// The archive under a root (`~/.shepherd/archive` in production).
@@ -159,6 +160,47 @@ impl Archive for ShepherdArchive {
                 )))
             }
             Err(e) => Err(failed(e)),
+        }
+    }
+}
+
+/// The `Transcripts` port on the `shepherd-archive` crate (T47): an agent's reply, read through the same path checks
+/// as a capture. A path the crate refuses (outside the agent's own place, a symlink, past its limit) or an agent kind
+/// that keeps no transcript is [`TranscriptError::Refused`]; a transcript that isn't there (nor its agent home) is
+/// [`TranscriptError::Missing`]; any other failure to read it is [`TranscriptError::Failed`]. Calls block; the host
+/// makes them on a worker thread.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShepherdTranscripts;
+
+impl Transcripts for ShepherdTranscripts {
+    fn last_reply(&self, req: &ReplyRequest) -> Result<Option<Reply>, TranscriptError> {
+        let agent = agent(req.agent).map_err(|e| TranscriptError::Refused(e.to_string()))?;
+        let query = archive::ReplyQuery {
+            agent,
+            agent_home: &req.agent_home,
+            transcript_path: &req.transcript_path,
+            since: req.since.map(|marker| marker.at),
+            limits: archive::CaptureLimits::default(),
+        };
+        match archive::last_reply(&query) {
+            Ok(reply) => Ok(reply.map(|r| Reply {
+                text: r.text,
+                at: r.at,
+            })),
+            // As for a capture: whether it is there at all is asked of the filesystem, never read from the text.
+            Err(archive::CaptureError::Io { path, message })
+                if absent(&req.transcript_path) && absent(&path) =>
+            {
+                Err(TranscriptError::Missing(format!(
+                    "{} doesn't exist ({}: {message})",
+                    req.transcript_path.display(),
+                    path.display()
+                )))
+            }
+            Err(archive::CaptureError::Io { path, message }) => Err(TranscriptError::Failed(
+                format!("{}: {message}", path.display()),
+            )),
+            Err(refusal) => Err(TranscriptError::Refused(refusal.to_string())),
         }
     }
 }

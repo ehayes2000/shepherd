@@ -47,6 +47,9 @@
 //!   reads the transcript as it is when it starts; past the cap the oldest is dropped). Shutting down waits for captures running (within
 //!   [`CREATE_CLEANUP_GRACE`]) and drops their answers: a removal that would follow is left to the next start, which keeps the worktree. An upgrade waits
 //!   for them too (`Busy`).
+//! - **Replies** (T47). Core's [`HostCommand::ReadReply`]s run on the `Transcripts` port's [`Worker`], each with its
+//!   agent's home as its session was launched (like a capture's), and the answer comes back as
+//!   [`RuntimeEvent::Transcripts`] for core to answer the client with.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -106,7 +109,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use shepherd_core::acpp::{
-    Envelope, Frame, FrameDraft, RequestId, Seq, ShepherdFrame, SourceKind, Stamp, Timestamp,
+    Envelope, Frame, FrameDraft, PromptBy, RequestId, Seq, ShepherdFrame, SourceKind, Stamp,
+    Timestamp,
 };
 use shepherd_core::agents::{CarriedTranslators, Translators};
 use shepherd_core::config::{AgentKind, Config, WorkspaceHooks};
@@ -126,8 +130,8 @@ use shepherd_core::ports::{
     Archive, ArchiveError, CLOSE_FLUSH, CaptureReason, CommandError, Commands, ConnId,
     DisconnectReason, EventLog, FlushOutcome, Forge, ForgeError, Link, LinkEvent, LinkEventSink,
     LogError, LogId, MAX_QUEUED, PairTicket, Peers, PeersEvent, PeersEventSink, PtyError, PtyEvent,
-    PtyEventSink, PtyHandoff, PtySize, RepoRef, RunId, WorktreeError, WorktreeName, WorktreePath,
-    Worktrees,
+    PtyEventSink, PtyHandoff, PtySize, ReplyRequest, RepoRef, RunId, TranscriptError, Transcripts,
+    TurnMarker, WorktreeError, WorktreeName, WorktreePath, Worktrees,
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
@@ -210,6 +214,8 @@ pub enum RuntimeEvent {
     Forge(PrEvent),
     /// The answer to a capture (`Archive` and `Worktrees` calls) that ran on its worker thread.
     Archive(Archived),
+    /// The answer to a `Transcripts` call (a reply read) that ran on its worker thread, for core.
+    Transcripts(HostEvent),
     /// SIGTERM or SIGINT: kill the PTYs, record their exits, close the links, stop.
     Shutdown,
     /// How the upgrade preflight (`<shepherd> handoff-check`) ended.
@@ -522,7 +528,7 @@ struct Deadline {
 }
 
 /// The host daemon's loop, generic over its ports so scenario tests run it on fakes.
-pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A> {
+pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A, T> {
     host: Host,
     pty: P,
     worktrees: Worker<W>,
@@ -544,6 +550,10 @@ pub struct HostRuntime<P: PtyHandoff, W, C, F, L, E, V, N, A> {
     archive: Worker<A, Archived>,
     /// `Archive` calls (captures) submitted and not yet answered.
     capture_calls: usize,
+    /// Reads of agents' replies.
+    transcripts: Worker<T>,
+    /// `Transcripts` calls submitted and not yet answered.
+    reply_calls: usize,
     /// Turn ends' captures waiting for the worker, by session (see [`HostRuntime::capture`]).
     waiting_turn_ends: WaitingTurnEnds,
     /// Sessions already logged as running outside a git repo, so unarchivable: said once per session, not every turn.
@@ -615,18 +625,19 @@ impl<
     V: Env,
     N: Peers,
     A: Archive + Send + Sync + 'static,
-> HostRuntime<P, W, C, F, L, E, V, N, A>
+    T: Transcripts + Send + Sync + 'static,
+> HostRuntime<P, W, C, F, L, E, V, N, A, T>
 {
     /// Rebuilds the host state by folding every log, then records an exit for every session that was still
     /// running: PTYs never survive a host restart. `tx` and `rx` are the channel the ports' sinks feed. `worktrees`,
-    /// `commands`, `forge` and `archive` each move to a worker thread of their own.
+    /// `commands`, `forge`, `archive` and `transcripts` each move to a worker thread of their own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         pty: P,
         worktrees: W,
         commands: C,
         forge: F,
-        archive: A,
+        (archive, transcripts): (A, T),
         link: L,
         peers: N,
         log: E,
@@ -636,7 +647,15 @@ impl<
         rx: RuntimeRx,
     ) -> Result<Self, StartError> {
         let ports = (
-            pty, worktrees, commands, forge, archive, link, peers, log, env,
+            pty,
+            worktrees,
+            commands,
+            forge,
+            (archive, transcripts),
+            link,
+            peers,
+            log,
+            env,
         );
         Self::start_with(ports, settings, tx, rx, Adoption::default())
     }
@@ -651,7 +670,7 @@ impl<
         worktrees: W,
         commands: C,
         forge: F,
-        archive: A,
+        (archive, transcripts): (A, T),
         link: L,
         peers: N,
         log: E,
@@ -662,19 +681,27 @@ impl<
         adoption: Adoption,
     ) -> Result<Self, StartError> {
         let ports = (
-            pty, worktrees, commands, forge, archive, link, peers, log, env,
+            pty,
+            worktrees,
+            commands,
+            forge,
+            (archive, transcripts),
+            link,
+            peers,
+            log,
+            env,
         );
         Self::start_with(ports, settings, tx, rx, adoption)
     }
 
     #[allow(clippy::type_complexity)]
     fn start_with(
-        (pty, worktrees, commands, forge, archive, link, peers, log, env): (
+        (pty, worktrees, commands, forge, (archive, transcripts), link, peers, log, env): (
             P,
             W,
             C,
             F,
-            A,
+            (A, T),
             L,
             N,
             E,
@@ -705,6 +732,13 @@ impl<
             .map_err(StartError::Worker)?;
         let archive = Worker::spawn("archive", archive, tx.clone(), RuntimeEvent::Archive)
             .map_err(StartError::Worker)?;
+        let transcripts = Worker::spawn(
+            "transcripts",
+            transcripts,
+            tx.clone(),
+            RuntimeEvent::Transcripts,
+        )
+        .map_err(StartError::Worker)?;
         let machine = settings.machine.clone();
         let mut runtime = Self {
             host,
@@ -719,6 +753,8 @@ impl<
             forge_calls: 0,
             archive,
             capture_calls: 0,
+            transcripts,
+            reply_calls: 0,
             waiting_turn_ends: Arc::default(),
             outside_repo: HashSet::new(),
             link,
@@ -1012,7 +1048,7 @@ impl<
         handled
     }
 
-    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees`, `Commands` or `Forge` call is still unanswered, waits for
+    /// [`HostRuntime::run_until_idle`], and then, while a `Worktrees`, `Commands`, `Forge`, `Archive` or `Transcripts` call is still unanswered, waits for
     /// the next event and goes on. For tests. `limit` bounds each wait, for liveness; false if one ran out.
     pub fn run_until_settled(&mut self, limit: Duration) -> bool {
         loop {
@@ -1021,7 +1057,8 @@ impl<
                 + self.hooks.len()
                 + self.cleanup_hooks.len()
                 + self.forge_calls
-                + self.capture_calls;
+                + self.capture_calls
+                + self.reply_calls;
             if calls == 0 && !self.preflighting || self.finished {
                 return true;
             }
@@ -1182,6 +1219,12 @@ impl<
                 }
                 self.dispatch(event);
             }
+            RuntimeEvent::Transcripts(answer) => {
+                self.reply_calls = self.reply_calls.saturating_sub(1);
+                if self.shutdown_by.is_none() {
+                    self.dispatch(answer);
+                }
+            }
             RuntimeEvent::Shutdown => self.start_shutdown(),
             RuntimeEvent::Preflighted(preflight) => {
                 self.preflighting = false;
@@ -1331,6 +1374,37 @@ impl<
                     if let Err(unanswered) = self.forge.submit(call, panicked) {
                         tracing::error!("the forge thread is gone");
                         self.tx.send(RuntimeEvent::Forge(*unanswered));
+                    }
+                }
+                HostCommand::ReadReply { reply, job } => {
+                    let panicked = HostEvent::ReplyRead {
+                        reply,
+                        result: Err(TranscriptError::Failed(
+                            "reading the transcript failed unexpectedly".into(),
+                        )),
+                    };
+                    let Some(agent_home) =
+                        self.launched_home(job.agent, job.profile.as_deref(), &job.cwd)
+                    else {
+                        follow_up.push_back(panicked);
+                        continue;
+                    };
+                    let request = ReplyRequest {
+                        agent: job.agent,
+                        agent_home,
+                        transcript_path: job.transcript_path,
+                        since: job.since,
+                    };
+                    let call = move |transcripts: &T| HostEvent::ReplyRead {
+                        reply,
+                        result: transcripts.last_reply(&request),
+                    };
+                    match self.transcripts.submit(call, panicked) {
+                        Ok(()) => self.reply_calls += 1,
+                        Err(unanswered) => {
+                            tracing::error!("the transcripts thread is gone");
+                            follow_up.push_back(*unanswered);
+                        }
                     }
                 }
                 HostCommand::ProbeWorkspace { ask, path } => {
@@ -1751,15 +1825,22 @@ impl<
     /// Where `job`'s agent keeps its transcripts: under the home its profile's env gives it (the env it was launched
     /// with), else the host's. A session whose profile isn't recorded, or is no longer in the config, gets the host's.
     fn agent_home(&self, job: &CaptureJob) -> Option<PathBuf> {
+        self.launched_home(job.agent, job.profile.as_deref(), job.cwd.as_path())
+    }
+
+    /// Where an `agent` started with profile `profile` in `cwd` keeps its transcripts: under the home that profile's
+    /// env gives it, else the host's.
+    fn launched_home(
+        &self,
+        agent: AgentKind,
+        profile: Option<&str>,
+        cwd: &Path,
+    ) -> Option<PathBuf> {
         let none = BTreeMap::new();
-        let env = job
-            .profile
-            .as_deref()
+        let env = profile
             .and_then(|name| self.settings.config.profile(name))
             .map_or(&none, |profile| &profile.env);
-        self.settings
-            .agent_homes
-            .launched_with(job.agent, env, job.cwd.as_path())
+        self.settings.agent_homes.launched_with(agent, env, cwd)
     }
 
     /// A new id for a hook of `session`, and the name of the thread it runs on.
@@ -2301,6 +2382,23 @@ impl<
                 });
             }
             ClientRequest::Tunnel(tunnel) => self.tunnel(conn, id, tunnel.machine, first),
+            ClientRequest::SessionPrompt(prompt) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::Prompt {
+                    reply,
+                    session: prompt.session,
+                    text: prompt.text,
+                    by: prompt.by.unwrap_or(PromptBy::Client),
+                });
+            }
+            ClientRequest::SessionReply(asked) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::ReadReply {
+                    reply,
+                    session: asked.session,
+                    since: asked.since.map(|at| TurnMarker { at }),
+                });
+            }
             ClientRequest::UiGet(_) => {
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::UiGet { reply });

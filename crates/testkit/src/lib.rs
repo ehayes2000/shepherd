@@ -757,6 +757,7 @@ pub mod contracts {
     pub mod peers;
     pub mod pty;
     pub mod pty_handoff;
+    pub mod transcripts;
     pub mod worktrees;
 }
 
@@ -775,5 +776,6 @@ pub mod fakes {
     pub mod link;
     pub mod peers;
     pub mod pty;
+    pub mod transcripts;
     pub mod worktrees;
 }

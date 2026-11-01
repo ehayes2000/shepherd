@@ -40,6 +40,7 @@ use shepherd_testkit::fakes::identity::FakeIdentity;
 use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::peers::{FakePeerNet, FakePeers};
 use shepherd_testkit::fakes::pty::{FakePty, FakePtyToken, ProgramInput, ScriptedProcess};
+use shepherd_testkit::fakes::transcripts::FakeTranscripts;
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 
 /// The login shell the harness's config resolves the `shell` profile to.
@@ -244,6 +245,7 @@ pub type Runtime = HostRuntime<
     TestEnv,
     FakePeers,
     FakeArchive,
+    FakeTranscripts,
 >;
 
 /// A host's links on fakes: listening on `net` for local clients, and as `machine` on `machines` for other machines,
@@ -276,6 +278,7 @@ pub struct HarnessBuilder {
     commands: FakeCommands,
     forge: FakeForge,
     archive: FakeArchive,
+    transcripts: FakeTranscripts,
     preflight: Option<PreflightRunner>,
     peers: FakePeerNet,
     machines: FakeNetwork,
@@ -369,6 +372,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Uses `transcripts` (a handle on shared fake state, e.g. with replies written) instead of an empty fake.
+    pub fn transcripts(mut self, transcripts: FakeTranscripts) -> Self {
+        self.transcripts = transcripts;
+        self
+    }
+
     pub fn start(self) -> HostHarness {
         let HarnessBuilder {
             programs,
@@ -380,6 +389,7 @@ impl HarnessBuilder {
             commands,
             forge,
             archive,
+            transcripts,
             build,
             preflight,
             peers,
@@ -404,6 +414,7 @@ impl HarnessBuilder {
                 commands.clone(),
                 forge.clone(),
                 archive.clone(),
+                transcripts.clone(),
             ),
             log,
             env.clone(),
@@ -420,6 +431,7 @@ impl HarnessBuilder {
             commands,
             forge,
             archive,
+            transcripts,
             env,
             settings,
             stopped: None,
@@ -498,6 +510,7 @@ pub fn runtime_with<E: EventLog>(
     TestEnv,
     FakePeers,
     FakeArchive,
+    FakeTranscripts,
 > {
     runtime_with_sinks(net, programs, log, env, link_sink, |sink| sink)
 }
@@ -520,6 +533,7 @@ pub fn runtime_with_sinks<E: EventLog>(
     TestEnv,
     FakePeers,
     FakeArchive,
+    FakeTranscripts,
 > {
     let settings = settings(shell_default_config(), NO_RUN_ROOT.into());
     let workers = (
@@ -527,6 +541,7 @@ pub fn runtime_with_sinks<E: EventLog>(
         FakeCommands::new(),
         FakeForge::new(),
         FakeArchive::new(),
+        FakeTranscripts::new(),
     );
     let sinks = (link_sink, pty_sink);
     runtime_in(
@@ -541,8 +556,14 @@ pub fn runtime_with_sinks<E: EventLog>(
     )
 }
 
-/// The ports that run on worker threads: `Worktrees`, `Commands`, `Forge` and `Archive`.
-type WorkerPorts = (FakeWorktrees, FakeCommands, FakeForge, FakeArchive);
+/// The ports that run on worker threads: `Worktrees`, `Commands`, `Forge`, `Archive` and `Transcripts`.
+type WorkerPorts = (
+    FakeWorktrees,
+    FakeCommands,
+    FakeForge,
+    FakeArchive,
+    FakeTranscripts,
+);
 
 /// The link's and the PTY's event sink wrappers.
 type Sinks<FL, FP> = (FL, FP);
@@ -551,7 +572,7 @@ type Sinks<FL, FP> = (FL, FP);
 fn runtime_in<E: EventLog, FL, FP>(
     net: &FakeNetwork,
     programs: &[(String, Program)],
-    (worktrees, commands, forge, archive): WorkerPorts,
+    (worktrees, commands, forge, archive, transcripts): WorkerPorts,
     log: E,
     env: TestEnv,
     (link_sink, pty_sink): Sinks<FL, FP>,
@@ -567,6 +588,7 @@ fn runtime_in<E: EventLog, FL, FP>(
     TestEnv,
     FakePeers,
     FakeArchive,
+    FakeTranscripts,
 >
 where
     FL: FnOnce(Arc<dyn LinkEventSink>) -> Arc<dyn LinkEventSink>,
@@ -581,7 +603,18 @@ where
     let link = links(net, machines, &settings.machine, link_sink(tx.link_sink()));
     let peers = peer_net.peers(settings.machine.clone(), tx.peers_sink());
     HostRuntime::start(
-        pty, worktrees, commands, forge, archive, link, peers, log, env, settings, tx, rx,
+        pty,
+        worktrees,
+        commands,
+        forge,
+        (archive, transcripts),
+        link,
+        peers,
+        log,
+        env,
+        settings,
+        tx,
+        rx,
     )
     .expect("host runtime starts")
 }
@@ -600,6 +633,7 @@ pub struct HostHarness {
     commands: FakeCommands,
     forge: FakeForge,
     archive: FakeArchive,
+    transcripts: FakeTranscripts,
     env: TestEnv,
     settings: RuntimeSettings,
     /// The log of a host [`HostHarness::stop`]ped, for [`HostHarness::restart`].
@@ -621,6 +655,7 @@ impl HostHarness {
             commands: FakeCommands::new(),
             forge: FakeForge::new(),
             archive: FakeArchive::new(),
+            transcripts: FakeTranscripts::new(),
             preflight: None,
             peers: FakePeerNet::new(),
             machines: FakeNetwork::new(),
@@ -727,6 +762,11 @@ impl HostHarness {
         &self.archive
     }
 
+    /// The harness's fake `Transcripts` (shared state), e.g. to write the replies an agent gives.
+    pub fn transcripts(&self) -> &FakeTranscripts {
+        &self.transcripts
+    }
+
     /// Completes the swap an accepted upgrade made ready, as the exec would: `tamper` sees the plan first (e.g. to
     /// spoil a token), then a new runtime adopts it on the same log and network, with a fresh fake PTY.
     pub fn swap(&mut self, tamper: impl FnOnce(&mut SwapPlan<FakePtyToken>)) {
@@ -756,7 +796,7 @@ impl HostHarness {
             self.worktrees.clone(),
             self.commands.clone(),
             self.forge.clone(),
-            self.archive.clone(),
+            (self.archive.clone(), self.transcripts.clone()),
             link,
             peers,
             log,
@@ -789,6 +829,7 @@ impl HostHarness {
                 self.commands.clone(),
                 self.forge.clone(),
                 self.archive.clone(),
+                self.transcripts.clone(),
             ),
             log,
             self.env.clone(),

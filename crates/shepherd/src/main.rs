@@ -24,6 +24,25 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::cli::sessions::new_main(&args)
         }
+        Some(command @ ("prompt" | "reply" | "wait")) => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let result = match command {
+                "prompt" => shepherd::cli::prompt::prompt_main(&args),
+                "reply" => shepherd::cli::prompt::reply_main(&args),
+                _ => shepherd::cli::prompt::wait_main(&args),
+            };
+            return match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "shepherd: {}",
+                        shepherd::stderr_safe(error.why())
+                    );
+                    ExitCode::from(error.exit_code())
+                }
+            };
+        }
         Some(command @ ("pair" | "join" | "peers" | "unpair")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::peers::main(command, &args)

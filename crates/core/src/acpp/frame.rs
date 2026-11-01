@@ -388,7 +388,7 @@ pub enum Correlated {
 /// synthesized `session/prompt` is `to_agent` and its response is `from_agent`; a synthesized
 /// `session/request_permission` is `from_agent` and its response is `to_agent`. A response with the same `dir`
 /// as its request never correlates. `internal` requests correlate with `internal` responses.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingRequests {
     pending: BTreeMap<(String, RequestId), String>,
 }

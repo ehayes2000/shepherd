@@ -114,6 +114,9 @@ pub enum CaptureError {
         agent: AgentKind,
         session: AgentSessionId,
     },
+    /// The path is under the agent home but not where that agent keeps any session's transcript.
+    #[error("{path} is not where {agent} keeps a transcript")]
+    NotATranscript { path: PathBuf, agent: AgentKind },
     #[error("{0} is a symlink; refusing to follow it")]
     Symlink(PathBuf),
     #[error("{0} is the wrong kind of file")]
@@ -169,14 +172,7 @@ pub(crate) fn read_transcripts(
             session: session.clone(),
         });
     }
-    let (main, main_file) = match agent {
-        AgentKind::Claude => {
-            let meta = walk(&home, &parts)?;
-            let main = home.join(&rel);
-            (main.clone(), OnDisk::Plain(main, meta))
-        }
-        AgentKind::Codex => codex_rollout(&home, &parts)?,
-    };
+    let (main, main_file) = choose_main(agent, &home, &rel, &parts)?;
     let mut budget = Budget {
         left: limits.max_bytes,
         max: limits.max_bytes,
@@ -198,19 +194,7 @@ pub(crate) fn read_transcripts(
         AgentKind::Claude => FileRole::Main,
         AgentKind::Codex => FileRole::Rollout,
     };
-    let content = match budget.read_on_disk(&main_file) {
-        // Codex compressed the rollout after it was chosen and before it was opened (it writes the `.zst`, then
-        // removes the plain file): choose again, once, rather than call a conversation that is there missing.
-        Err(CaptureError::Io { .. })
-            if agent == AgentKind::Codex
-                && matches!(main_file, OnDisk::Plain(..))
-                && is_absent(&main) =>
-        {
-            let (_, again) = codex_rollout(&home, &parts)?;
-            budget.read_on_disk(&again)?
-        }
-        read => read?,
-    };
+    let content = read_main(agent, &home, &parts, &main, &main_file, &mut budget)?;
     let mut out = vec![Captured {
         role,
         content,
@@ -224,6 +208,88 @@ pub(crate) fn read_transcripts(
         });
     }
     Ok(out)
+}
+
+/// Reads the main transcript `agent` keeps at `transcript_path` (the hook payload's) under `home`, whichever of its
+/// sessions it is: checked as [`read_transcripts`] checks it, within `limits`. No subagent transcripts.
+pub(crate) fn read_main_transcript(
+    agent: AgentKind,
+    home: &Path,
+    transcript_path: &Path,
+    limits: CaptureLimits,
+) -> Result<Vec<u8>, CaptureError> {
+    let (home, rel) = below_home(home, transcript_path)?;
+    let parts: Vec<&OsStr> = rel.iter().collect();
+    let session = session_named(agent, &parts).filter(|s| in_agent_layout(agent, s, &parts));
+    if session.is_none() {
+        return Err(CaptureError::NotATranscript {
+            path: transcript_path.to_path_buf(),
+            agent,
+        });
+    }
+    let (main, main_file) = choose_main(agent, &home, &rel, &parts)?;
+    let read = AtomicU64::new(0);
+    let mut budget = Budget {
+        left: limits.max_bytes,
+        max: limits.max_bytes,
+        read: &read,
+        #[cfg(feature = "fault-injection-pause-before-transcript-open")]
+        pause: false,
+    };
+    read_main(agent, &home, &parts, &main, &main_file, &mut budget)
+}
+
+/// The agent session whose transcript the file at `parts` (below the home) would be, by its name: Claude Code's
+/// `<session>.jsonl`, Codex's rollout name. `None` for a name that names none.
+fn session_named(agent: AgentKind, parts: &[&OsStr]) -> Option<AgentSessionId> {
+    let name = parts.last()?;
+    let session = match agent {
+        AgentKind::Claude => name.to_str()?.strip_suffix(".jsonl")?,
+        AgentKind::Codex => rollout_thread(plain_rollout_name(name))?,
+    };
+    session.parse().ok()
+}
+
+/// The main transcript's path at `home/rel` (whose components are `parts`), and the file holding it, each component
+/// checked: for Codex, the plain rollout or its compressed `.zst`.
+fn choose_main(
+    agent: AgentKind,
+    home: &Path,
+    rel: &Path,
+    parts: &[&OsStr],
+) -> Result<(PathBuf, OnDisk), CaptureError> {
+    match agent {
+        AgentKind::Claude => {
+            let meta = walk(home, parts)?;
+            let main = home.join(rel);
+            Ok((main.clone(), OnDisk::Plain(main, meta)))
+        }
+        AgentKind::Codex => codex_rollout(home, parts),
+    }
+}
+
+/// Reads the main transcript `main_file` (chosen as `main`) within `budget`.
+fn read_main(
+    agent: AgentKind,
+    home: &Path,
+    parts: &[&OsStr],
+    main: &Path,
+    main_file: &OnDisk,
+    budget: &mut Budget<'_>,
+) -> Result<Vec<u8>, CaptureError> {
+    match budget.read_on_disk(main_file) {
+        // Codex compressed the rollout after it was chosen and before it was opened (it writes the `.zst`, then
+        // removes the plain file): choose again, once, rather than call a conversation that is there missing.
+        Err(CaptureError::Io { .. })
+            if agent == AgentKind::Codex
+                && matches!(main_file, OnDisk::Plain(..))
+                && is_absent(main) =>
+        {
+            let (_, again) = codex_rollout(home, parts)?;
+            budget.read_on_disk(&again)
+        }
+        read => read,
+    }
 }
 
 /// The canonical `home`, and `path` relative to it: only normal components, at least one.

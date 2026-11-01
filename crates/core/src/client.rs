@@ -1114,6 +1114,15 @@ impl Client {
         }
     }
 
+    /// Listed session `session`'s log, folded: whether its agent is at its prompt, and what it was last told. `None`
+    /// for a session that isn't listed, or whose log has no entry yet.
+    pub fn state(&self, session: &SessionId) -> Option<&SessionState> {
+        self.homes
+            .get(session)
+            .and_then(|at| self.feed(at))
+            .and_then(|feed| feed.states.get(session))
+    }
+
     pub fn selected(&self) -> Option<&SessionId> {
         self.selected.as_ref()
     }

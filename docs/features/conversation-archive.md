@@ -215,6 +215,12 @@ acceptance:
 - From T54: add a subagent round for both agents (start, permission block, finish, a background subagent outliving the
   parent's turn) to re-record `crates/core/tests/fixtures/{claude,codex}` subagent fixtures, and settle whether the Agent
   tool's PreToolUse always precedes SubagentStart.
+- From T47: a prompt round trip for both agents through a real host (`shepherd new --profile claude|codex`, then
+  `shepherd prompt <session> "<two-line prompt>" --wait --json`): the agent submits the whole paste as one prompt
+  (both lines, nothing left in its input box) on the one Enter the host types after it, including right after the agent
+  starts (prompted as soon as its `SessionStart` hook arrives); the printed reply is its last message; a prompt that
+  needs a permission returns `wants-user`. Re-record `crates/archive/tests/fixtures/reply/` from those transcripts
+  (Claude Code's one-line-per-content-block layout, Codex's `response_item` messages).
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get

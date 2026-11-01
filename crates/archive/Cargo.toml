@@ -28,6 +28,8 @@ rusqlite.workspace = true
 jiff.workspace = true
 percent-encoding.workspace = true
 thiserror.workspace = true
+# Reading transcripts for an agent's reply (T47).
+serde_json.workspace = true
 
 [dev-dependencies]
 # The crate's own tests turn the fault injection on; normal builds of anything that depends on it never do.
@@ -38,8 +40,6 @@ shepherd-archive = { path = ".", features = [
   "fault-injection-pause-before-restore-publish",
 ] }
 tempfile.workspace = true
-# Tests only: reading the hook payload fixtures.
-serde_json.workspace = true
 # Tests only: a child process sets a strict umask to prove created modes are exact.
 libc.workspace = true
 

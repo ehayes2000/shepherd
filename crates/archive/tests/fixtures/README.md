@@ -21,6 +21,15 @@ is gone, and `codex/hooks/*`, which name the plain path, are its payloads.
 
 Capture treats transcript content as opaque bytes, so only the layout and the payload fields are load-bearing.
 
+## `reply/claude/`, `reply/codex/`: reply fixtures (PROVISIONAL, T47)
+
+Hand-built like the capture fixtures, for reading an agent's last reply (`src/reply.rs`): one session each, two turns
+(`What is in the repo?`, then a two-line prompt). Claude Code's second answer is one message (`msg_01REPLY0003`)
+written as three lines, one per content block (thinking, then two texts), followed by a subagent's line
+(`isSidechain`), an assistant line with no `timestamp`, a `summary` line and a line cut off mid-write; Codex's is a `response_item` message with two
+`output_text` blocks, repeated by `event_msg` lines (`agent_message`, `task_complete`). Inferred, like the capture
+fixtures' lines: the one-line-per-content-block layout and the `response_item` message shape. T44 re-records them.
+
 ### Sources
 
 - Claude Code hooks reference: <https://code.claude.com/docs/en/hooks>, read 2026-10-30. Every hook's input has
