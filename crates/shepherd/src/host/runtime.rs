@@ -50,6 +50,8 @@
 //! - **Replies** (T47). Core's [`HostCommand::ReadReply`]s run on the `Transcripts` port's [`Worker`], each with its
 //!   agent's home as its session was launched (like a capture's), and the answer comes back as
 //!   [`RuntimeEvent::Transcripts`] for core to answer the client with.
+//! - **Screens as text** (T52). Core's [`HostCommand::ReadScreen`] is answered at once from the session's screen
+//!   ([`screen_text`]), at most [`SCREEN_TEXT_MAX`] bytes of it.
 //! - **Run files.** A new session's launch (`launch::plan`, from its profile) may come with files, e.g. Claude
 //!   Code's generated settings. They are written into the session's run directory just before its PTY is spawned
 //!   (a failure to write them fails the spawn), and the directory is removed when its PTY's exit or its
@@ -135,8 +137,8 @@ use shepherd_core::ports::{
 };
 use shepherd_core::wire::{
     self, BuildId, ClientMessage, ClientNotification, ClientRequest, ExeDigest, HookFrame,
-    HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SessionNew,
-    SubscribeFrom, UiApply, UpgradeAnswer, WireError,
+    HostNotification, HostResponse, HostResult, HostUpgrade, LogEntry, PtyOutput, SCREEN_TEXT_MAX,
+    SessionNew, SubscribeFrom, UiApply, UpgradeAnswer, WireError,
 };
 use shepherd_term::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Screen};
 
@@ -145,6 +147,7 @@ use super::run_files;
 use super::worker::Worker;
 use crate::build::InstalledExe;
 use crate::screen_guard;
+use crate::screen_text::screen_text;
 
 /// The size a session's PTY starts at when no size is known for it: its `session/new` gave none and no client has
 /// resized it (see [`Sizes`]).
@@ -1407,6 +1410,24 @@ impl<
                         }
                     }
                 }
+                HostCommand::ReadScreen {
+                    reply,
+                    session,
+                    scrollback,
+                } => {
+                    let result = match self.screens.get(&session) {
+                        Some(screen) => Ok(HostResult::SessionScreen(screen_text(
+                            screen,
+                            scrollback,
+                            SCREEN_TEXT_MAX,
+                        ))),
+                        // Its PTY exited and core hasn't been told yet.
+                        None => Err(WireError::InvalidParams(format!(
+                            "{session} isn't running: it has no screen"
+                        ))),
+                    };
+                    self.reply(reply, result);
+                }
                 HostCommand::ProbeWorkspace { ask, path } => {
                     let panicked = HostEvent::WorkspaceProbed {
                         ask,
@@ -2397,6 +2418,14 @@ impl<
                     reply,
                     session: asked.session,
                     since: asked.since.map(|at| TurnMarker { at }),
+                });
+            }
+            ClientRequest::SessionScreen(asked) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::ReadScreen {
+                    reply,
+                    session: asked.session,
+                    lines: asked.lines,
                 });
             }
             ClientRequest::UiGet(_) => {

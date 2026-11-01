@@ -477,3 +477,45 @@ fn popping_many_kitty_entries_frees_as_many_slots() {
     let mut screen = screen_with(10, 3, &bytes);
     assert_eq!(screen.take_replies(), b"\x1b[?7u");
 }
+
+/// The text of scrollback line `back` (1: just above the screen).
+fn scrollback_text(screen: &Screen, back: usize) -> String {
+    let line: String = screen
+        .scrollback_row(back)
+        .filter(|c| c.width != Width::Spacer)
+        .map(|c| c.ch)
+        .collect();
+    line.trim_end().to_owned()
+}
+
+#[test]
+fn lines_scrolled_off_the_top_are_kept_as_scrollback_newest_first() {
+    let screen = screen_with(10, 2, b"one\r\ntwo\r\nthree\r\nfour");
+    assert_eq!(text(&screen), ["three", "four"]);
+    assert_eq!(screen.scrollback(), 2);
+    assert_eq!(scrollback_text(&screen, 1), "two");
+    assert_eq!(scrollback_text(&screen, 2), "one");
+    assert_eq!(screen.scrollback_row(1).count(), 10);
+    assert_eq!(screen.scrollback_row(0).count(), 0);
+    assert_eq!(screen.scrollback_row(3).count(), 0);
+}
+
+#[test]
+fn scrollback_keeps_wide_characters_and_their_spacers() {
+    let screen = screen_with(10, 1, "漢字\r\nnext".as_bytes());
+    let widths: Vec<Width> = screen.scrollback_row(1).take(4).map(|c| c.width).collect();
+    assert_eq!(
+        widths,
+        [Width::Wide, Width::Spacer, Width::Wide, Width::Spacer]
+    );
+    assert_eq!(scrollback_text(&screen, 1), "漢字");
+}
+
+#[test]
+fn the_alt_screen_has_no_scrollback() {
+    let mut screen = screen_with(10, 1, b"one\r\ntwo");
+    assert_eq!(screen.scrollback(), 1);
+    screen.feed(b"\x1b[?1049hagent\r\nmore");
+    assert_eq!(screen.scrollback(), 0);
+    assert_eq!(screen.scrollback_row(1).count(), 0);
+}

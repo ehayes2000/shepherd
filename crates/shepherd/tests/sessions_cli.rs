@@ -1,6 +1,7 @@
-//! `shepherd sessions` and `shepherd new` (T46) with the built binary, against a real host (shell sessions only, no
-//! agent) in a temp `HOME`, never the real `~/.shepherd`. Each command runs in a directory that is no git repo, so the
-//! host selects no workspace and makes no worktree. Peers and worktrees are covered in-process (`cli_scenarios.rs`).
+//! `shepherd sessions` and `shepherd new` (T46), and `shepherd screen` (T52), with the built binary, against a real
+//! host (shell sessions only, no agent) in a temp `HOME`, never the real `~/.shepherd`. Each command runs in a
+//! directory that is no git repo, so the host selects no workspace and makes no worktree. Peers and worktrees are
+//! covered in-process (`cli_scenarios.rs`).
 //! Timeouts are liveness bounds only.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -291,6 +292,36 @@ fn names_are_printed_display_safe() {
 }
 
 #[test]
+fn screen_json_answers_with_a_running_shells_screen_at_its_size() {
+    let running = start_host();
+    let cwd = running.dir("project");
+    running.ok(&["new", "--cwd", &cwd, "--name", "worker"]);
+    let shown = running.json(&["screen", "worker", "--lines", "10", "--json"]);
+    assert_eq!(
+        keys(&shown),
+        [
+            "cols",
+            "lines",
+            "rows",
+            "scrollback",
+            "session",
+            "truncated"
+        ]
+    );
+    assert_eq!(
+        (shown["cols"].as_u64(), shown["rows"].as_u64()),
+        (Some(80), Some(24))
+    );
+    assert_eq!(shown["truncated"], false);
+    let lines = shown["lines"].as_array().unwrap();
+    let scrollback = usize::try_from(shown["scrollback"].as_u64().unwrap()).unwrap();
+    assert_eq!(lines.len(), scrollback + 24, "{shown}");
+    assert!(scrollback <= 10, "{shown}");
+    let stderr = running.fails(&["screen", "nobody"]);
+    assert!(stderr.contains("nobody"), "{stderr}");
+}
+
+#[test]
 fn bad_arguments_fail_with_the_usage() {
     let running = start_host();
     for args in [
@@ -298,6 +329,9 @@ fn bad_arguments_fail_with_the_usage() {
         &["sessions", "extra"],
         &["new", "--profile"],
         &["new", "positional"],
+        &["screen"],
+        &["screen", "a", "b"],
+        &["screen", "a", "--lines"],
     ] {
         let stderr = running.fails(args);
         assert!(stderr.contains("usage: shepherd"), "{args:?}: {stderr}");

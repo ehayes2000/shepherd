@@ -65,10 +65,11 @@ pub enum Method {
     UiApply,
     SessionPrompt,
     SessionReply,
+    SessionScreen,
 }
 
 impl Method {
-    pub const ALL: [Method; 23] = [
+    pub const ALL: [Method; 24] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -92,6 +93,7 @@ impl Method {
         Self::UiApply,
         Self::SessionPrompt,
         Self::SessionReply,
+        Self::SessionScreen,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -119,6 +121,7 @@ impl Method {
             Self::UiApply => "_shepherd/ui/apply",
             Self::SessionPrompt => "_shepherd/session/prompt",
             Self::SessionReply => "_shepherd/session/reply",
+            Self::SessionScreen => "_shepherd/session/screen",
         }
     }
 
@@ -159,6 +162,7 @@ pub enum ClientRequest {
     UiApply(UiApply),
     SessionPrompt(SessionPrompt),
     SessionReply(SessionReply),
+    SessionScreen(SessionScreen),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -540,6 +544,40 @@ pub struct ReplyInfo {
     pub at: Option<jiff::Timestamp>,
 }
 
+/// The most scrollback lines `_shepherd/session/screen` answers with, whatever it asks for: as many as the host's
+/// emulator keeps.
+pub const SCREEN_LINES_MAX: u32 = 1000;
+/// The most bytes of text in an answer to `_shepherd/session/screen`. Past it the oldest lines are left out.
+pub const SCREEN_TEXT_MAX: usize = 1024 * 1024;
+
+/// `_shepherd/session/screen`: what a running session's terminal shows now, as text, from the host's own emulator at
+/// the session's size, with up to `lines` lines of scrollback above it (at most [`SCREEN_LINES_MAX`]). Answered with
+/// [`SessionScreenOk`], [`WireError::UnknownSession`], or [`WireError::InvalidParams`] for a session that isn't running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionScreen {
+    pub session: SessionId,
+    /// Scrollback lines wanted above the screen. None by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u32>,
+}
+
+/// The host's answer to `_shepherd/session/screen`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionScreenOk {
+    /// The session's terminal size.
+    pub cols: u16,
+    pub rows: u16,
+    /// How many of `lines` are scrollback, before the screen's rows.
+    pub scrollback: u32,
+    /// Scrollback (oldest first), then each row of the screen, top to bottom: display-safe text without trailing
+    /// blanks. A wide character is one char, never followed by a blank for the cell it covers.
+    pub lines: Vec<String>,
+    /// The answer would have been over [`SCREEN_TEXT_MAX`] bytes: its oldest lines are left out (so `lines` may start
+    /// below the screen's top row).
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// A trusted machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -652,6 +690,7 @@ impl ClientRequest {
             Self::UiApply(_) => Method::UiApply,
             Self::SessionPrompt(_) => Method::SessionPrompt,
             Self::SessionReply(_) => Method::SessionReply,
+            Self::SessionScreen(_) => Method::SessionScreen,
         }
     }
 
@@ -680,6 +719,7 @@ impl ClientRequest {
             Self::UiApply(p) => json(p),
             Self::SessionPrompt(p) => json(p),
             Self::SessionReply(p) => json(p),
+            Self::SessionScreen(p) => json(p),
         }
     }
 
@@ -710,6 +750,7 @@ impl ClientRequest {
             Method::UiApply => Self::UiApply(invalid_params(params)?),
             Method::SessionPrompt => Self::SessionPrompt(invalid_params(params)?),
             Method::SessionReply => Self::SessionReply(invalid_params(params)?),
+            Method::SessionScreen => Self::SessionScreen(invalid_params(params)?),
         })
     }
 }
@@ -863,6 +904,7 @@ pub enum HostResult {
     /// The layout, for `_shepherd/ui/get` and `_shepherd/ui/apply`.
     Layout(Layout),
     SessionReply(SessionReplyOk),
+    SessionScreen(SessionScreenOk),
     /// The request was accepted and has nothing to return. `{}` on the wire.
     Ack,
 }
@@ -884,6 +926,7 @@ impl HostResult {
             Self::PeerRemove(r) => json(r),
             Self::Layout(r) => json(r),
             Self::SessionReply(r) => json(r),
+            Self::SessionScreen(r) => json(r),
             Self::Ack => Value::Object(Map::new()),
         }
     }
@@ -904,6 +947,7 @@ impl HostResult {
             Method::PeerRemove => Self::PeerRemove(serde_json::from_value(result)?),
             Method::UiGet | Method::UiApply => Self::Layout(serde_json::from_value(result)?),
             Method::SessionReply => Self::SessionReply(serde_json::from_value(result)?),
+            Method::SessionScreen => Self::SessionScreen(serde_json::from_value(result)?),
             _ => Self::Ack,
         })
     }

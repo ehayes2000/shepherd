@@ -296,6 +296,12 @@ fn pairing_trust_and_updates_are_refused_to_other_machines_and_nothing_else_is()
         refused_to_peers(&ClientRequest::WorktreeList(WorktreeList {})),
         None
     );
+    // Reading a session's screen is a read, like its reply: a trusted peer already sees the screen when it subscribes.
+    let screen = ClientRequest::SessionScreen(shepherd_core::wire::SessionScreen {
+        session: shepherd_core::ids::SessionId::new("s1"),
+        lines: None,
+    });
+    assert_eq!(refused_to_peers(&screen), None);
 }
 
 /// A join whose client went with the swap is forgotten: if the swap fails, its late answer trusts nobody and answers
