@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Source, SourceKind};
+use shepherd_core::client::Intent;
 use shepherd_core::ids::SessionId;
 use shepherd_tui::Target;
 use shepherd_tui::layout::layout;
@@ -158,11 +159,45 @@ fn a_blocked_subagent_turns_its_sessions_glyph_yellow_collapsed_or_not() {
     let (x, y) = glyph_at(&ui);
     assert_eq!(ui.buffer()[(x, y)].symbol(), "▲");
     assert_eq!(ui.buffer()[(x, y)].fg, Color::Yellow);
+    // The badge turns yellow too, from cyan.
+    let badge = ui.at("▸4");
+    assert_eq!(ui.buffer()[(badge.x, badge.y)].fg, Color::Yellow);
     insta::assert_snapshot!("a_blocked_subagent_collapsed", ui.region(sidebar(&ui)));
     ui.click("▸4");
     let (x, y) = glyph_at(&ui);
     assert_eq!(ui.buffer()[(x, y)].symbol(), "▲");
     insta::assert_snapshot!("a_blocked_subagent_expanded", ui.region(sidebar(&ui)));
+}
+
+#[test]
+fn a_badge_without_a_blocked_subagent_is_cyan() {
+    let ui = pm_with_a_team(80, 14);
+    let badge = ui.at("▸4");
+    assert_eq!(ui.buffer()[(badge.x, badge.y)].fg, Color::Cyan);
+}
+
+#[test]
+fn in_the_narrow_sidebar_the_glyph_and_the_branch_toggle_the_tree() {
+    let mut ui = pm_with_a_team(40, 14);
+    // pm is the top session: its glyph is the first `●` in the glyph column.
+    let glyph = ui.find_in(sidebar(&ui), "●")[0];
+    assert_eq!(
+        ui.hit_at(glyph.x, glyph.y),
+        Some(Target::Subagents(sid("s2")))
+    );
+    ui.click_at(glyph.x, glyph.y);
+    assert!(ui.client().expanded(&sid("s2")));
+    let branch = ui.at_in(sidebar(&ui), "└");
+    assert_eq!(
+        ui.hit_at(branch.x, branch.y),
+        Some(Target::Subagents(sid("s2")))
+    );
+    ui.click_at(branch.x, branch.y);
+    assert!(!ui.client().expanded(&sid("s2")));
+    // The row's other cells still select it.
+    ui.user(Intent::SelectSession(sid("s1")));
+    ui.click_at(glyph.x, glyph.y + 1);
+    assert_eq!(ui.client().selected(), Some(&sid("s2")));
 }
 
 #[test]
@@ -222,6 +257,26 @@ fn a_tree_taller_than_the_sidebar_keeps_the_selection_visible() {
     ui.assert_contains("├ ● builder  task 0")
         .assert_lacks("task 11")
         .assert_lacks("one");
+}
+
+#[test]
+fn subagents_starting_above_the_selection_keep_it_visible() {
+    let mut ui = pm_with_a_team(80, 16);
+    ui.click("▸4");
+    ui.click("docs");
+    for i in 5..=11 {
+        started(
+            &mut ui,
+            "s2",
+            &format!("a{i}"),
+            "builder",
+            &format!("task {i}"),
+        );
+        let visible = sidebar(&ui)
+            .positions()
+            .any(|p| ui.hit_at(p.x, p.y) == Some(Target::Session(sid("s1"))));
+        assert!(visible, "docs is out of view after a{i}:\n{}", ui.screen());
+    }
 }
 
 #[test]

@@ -2362,7 +2362,14 @@ impl Client {
     /// Rebuilds the list from the folds, keeps the selection valid, and selects a session the user created.
     fn refresh(&mut self) -> Vec<ClientCommand> {
         let old_index = self.selected_index();
+        let tree_above = self.tree_above_selection();
+        let in_view = self.selection_in_view();
         self.rebuild();
+        // Subagents come and go far more often than sessions: a tree above the selection that changed size moves it,
+        // so it is scrolled back into view, unless the wheel had already left it.
+        if in_view && self.tree_above_selection() != tree_above {
+            self.scroll_to_selected();
+        }
         let homes = &self.homes;
         self.seen.retain(|id, _| homes.contains_key(id));
         // A popup about a session that's gone has nothing left to act on.
@@ -2482,6 +2489,27 @@ impl Client {
         self.sidebar()
             .iter()
             .position(|e| matches!(e, SidebarEntry::Session(s) if &s.id == id))
+    }
+
+    /// How many subagent entries the sidebar lists above the selected session.
+    fn tree_above_selection(&self) -> usize {
+        let Some(id) = &self.selected else {
+            return 0;
+        };
+        self.sidebar()
+            .iter()
+            .take_while(|e| !matches!(e, SidebarEntry::Session(s) if &s.id == id))
+            .filter(|e| matches!(e, SidebarEntry::Subagent { .. }))
+            .count()
+    }
+
+    /// Whether the selected session is among the entries the sidebar shows from its scroll, once its height is known.
+    fn selection_in_view(&self) -> bool {
+        let (Some(index), Some(rows)) = (self.selected_entry(), self.sidebar_rows) else {
+            return false;
+        };
+        let first = self.sidebar_scroll();
+        (first..first + rows).contains(&index)
     }
 
     /// How many entries the sidebar lists: the sessions, a header per machine while there are peers, and the

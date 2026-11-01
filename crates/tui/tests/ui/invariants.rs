@@ -5,9 +5,10 @@
 //!
 //! - every button drawn whole is hittable: a click on its first cell finds a control, not nothing, the popup's body,
 //!   the backdrop or the terminal, and a subagent badge (`▸N` / `▾N`) finds its session's badge;
+//! - in the narrow sidebar, the glyph of a session with subagents and each subagent's branch toggle its tree;
 //! - the selected session's row stays visible: unless the user has wheeled the list (or the host has listed a new
-//!   session, or changed an expanded subagent tree, above it) since the selection or the window last changed, some cell of the sidebar hits it (while no
-//!   popup covers it and the sidebar has room for a row);
+//!   session above it) since the selection or the window last changed, some cell of the sidebar hits it (while no
+//!   popup covers it and the sidebar has room for a row), however the subagent trees above it change;
 //! - the focused pane is a pane of the current page, and the session it shows (if it has room for a terminal) was last
 //!   sized by this window to exactly that terminal.
 //!
@@ -312,17 +313,14 @@ impl Run {
         format!("a{}", which % self.subagents.max(1) + 1)
     }
 
-    /// Appends a subagent (or turn) frame to session `id`'s log as a hook would. An expanded tree that changes moves
-    /// the rows below it, which the client doesn't scroll back to the selection (like a new session above it).
+    /// Appends a subagent (or turn) frame to session `id`'s log as a hook would. An expanded tree above the selection
+    /// that changes size moves it, and the client scrolls it back into view, so this never unfits the list.
     fn subagent_frame(&mut self, id: &str, method: &str, params: serde_json::Value) {
         let frame = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         let source = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
         self.ui.on_host(|h| {
             h.append(Some(id), source, frame);
         });
-        if self.ui.client().expanded(&SessionId::new(id)) {
-            self.unfitted = true;
-        }
     }
 
     /// What `step` asks of the host's layout, on the panes and pages it has now.
@@ -389,6 +387,7 @@ impl Run {
     /// The invariants, or what broke them.
     fn check(&self) -> Result<(), String> {
         self.buttons_are_hittable()?;
+        self.narrow_trees_toggle()?;
         self.selection_is_visible()?;
         self.focused_pane_is_sized()
     }
@@ -434,6 +433,40 @@ impl Run {
                 "the focused session {session} was last sized {given:?}, not to its pane's {wanted:?}"
             )),
         }
+    }
+
+    /// In the narrow sidebar, which has no badges, the glyph of a session with subagents and the branch of each
+    /// subagent's line toggle the tree.
+    fn narrow_trees_toggle(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        let layout = layout(self.ui.window());
+        if !layout.collapsed || client.popup().is_some() || layout.sidebar.width < 3 {
+            return Ok(());
+        }
+        let x = layout.sidebar.x;
+        for y in layout.sidebar.top()..layout.sidebar.bottom() {
+            let branch = matches!(self.ui.buffer()[(x, y)].symbol(), "├" | "└");
+            if branch && !matches!(self.ui.hit_at(x, y), Some(Target::Subagents(_))) {
+                return Err(format!(
+                    "the branch at ({x}, {y}) hits {:?}",
+                    self.ui.hit_at(x, y)
+                ));
+            }
+            let glyph = !self.ui.buffer()[(x + 1, y)].symbol().trim().is_empty();
+            if let (true, Some(Target::Session(id))) = (glyph, self.ui.hit_at(x + 1, y)) {
+                let has_tree = client
+                    .sessions()
+                    .iter()
+                    .any(|s| s.id == id && !s.subagents.is_empty());
+                if has_tree {
+                    return Err(format!(
+                        "the glyph of {id}, which has subagents, at ({}, {y}) only selects it",
+                        x + 1
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn buttons_are_hittable(&self) -> Result<(), String> {

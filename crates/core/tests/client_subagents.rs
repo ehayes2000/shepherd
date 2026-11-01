@@ -206,3 +206,56 @@ fn a_closed_session_forgets_its_tree() {
     driver.sync();
     assert!(!driver.client().expanded(&sid("s1")));
 }
+
+/// Whether session `id`'s entry is among the `rows` the sidebar shows from its scroll.
+fn in_view(driver: &ClientDriver, id: &str, rows: usize) -> bool {
+    let at = driver
+        .client()
+        .sidebar()
+        .iter()
+        .position(|e| matches!(e, SidebarEntry::Session(s) if s.id == sid(id)))
+        .unwrap_or_else(|| panic!("{id} is listed"));
+    let first = driver.client().sidebar_scroll();
+    (first..first + rows).contains(&at)
+}
+
+#[test]
+fn a_tree_growing_above_the_selection_keeps_the_selection_in_view() {
+    let mut driver = working(&["s1", "s2"]);
+    driver.user(Intent::SelectSession(sid("s1")));
+    driver.user(Intent::SidebarRows(4));
+    started(&mut driver, "s2", "a0", "builder", "t");
+    driver.user(Intent::ToggleSubagents(sid("s2")));
+    for i in 1..11 {
+        started(&mut driver, "s2", &format!("a{i}"), "builder", "t");
+        assert!(in_view(&driver, "s1", 4), "after {i}: {:?}", rows(&driver));
+    }
+}
+
+#[test]
+fn a_tree_shrinking_above_the_selection_keeps_the_selection_in_view() {
+    let mut driver = working(&["s1", "s2"]);
+    driver.user(Intent::SidebarRows(4));
+    for i in 0..10 {
+        started(&mut driver, "s2", &format!("a{i}"), "builder", "t");
+    }
+    driver.user(Intent::ToggleSubagents(sid("s2")));
+    driver.user(Intent::SelectSession(sid("s1")));
+    assert!(in_view(&driver, "s1", 4));
+    idle(&mut driver, "s2");
+    assert!(in_view(&driver, "s1", 4), "{:?}", rows(&driver));
+}
+
+#[test]
+fn a_tree_changing_leaves_a_list_wheeled_off_the_selection_alone() {
+    let mut driver = working(&["s1", "s2", "s3"]);
+    driver.user(Intent::SelectSession(sid("s1")));
+    driver.user(Intent::SidebarRows(2));
+    started(&mut driver, "s2", "a0", "builder", "t");
+    driver.user(Intent::ToggleSubagents(sid("s2")));
+    // The wheel takes the list to its top, away from s1 at the bottom.
+    driver.user(Intent::ScrollSidebar(-10));
+    assert!(!in_view(&driver, "s1", 2));
+    started(&mut driver, "s2", "a1", "builder", "t");
+    assert_eq!(driver.client().sidebar_scroll(), 0);
+}

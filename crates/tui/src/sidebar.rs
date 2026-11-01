@@ -37,8 +37,9 @@
 //!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⊞` (layout), `⏏`
 //! (detach) and `?` buttons on the last three lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
-//! a right click opens the row's menu, which has Close. Nor a badge: an expanded tree's lines are
-//! the branch, in the attention column, and the subagent's glyph.
+//! a right click opens the row's menu, which has Close. Nor a badge: a click on the glyph of a session
+//! with subagents expands or collapses its tree, whose lines are the branch, in the attention column (a click there
+//! collapses it), and the subagent's glyph.
 //!
 //! [`crate::hit`] reads the same geometry ([`search_field`], [`workspace_button`], [`new_session_button`], [`visible_rows`],
 //! [`close_button`], [`footer_buttons`]) that drawing uses.
@@ -172,6 +173,32 @@ pub(crate) fn subagent_badge(
         return Rect::default();
     }
     Rect::new(x, row.y, width, 1)
+}
+
+/// What a click on to expand or collapse the tree of `session`, drawn on `row`: its badge, or in the collapsed sidebar
+/// (which has no room for one) its glyph. None without subagents.
+pub(crate) fn tree_toggle(
+    client: &Client,
+    layout: &Layout,
+    session: &ClientSession,
+    row: Rect,
+) -> Rect {
+    if !layout.collapsed {
+        return subagent_badge(client, layout, session, row);
+    }
+    if session.subagents.is_empty() || row.width < 2 || row.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(row.x + 1, row.y, 1, 1)
+}
+
+/// In the collapsed sidebar, where the branch of a subagent's `line` is: the attention column, which a click on
+/// collapses the tree. None in the full sidebar, where the whole line means the subagent.
+pub(crate) fn branch_toggle(layout: &Layout, line: Rect) -> Rect {
+    if !layout.collapsed || line.width == 0 || line.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(line.x, line.y, 1, 1)
 }
 
 /// What marks a machine's header, in the glyph column.

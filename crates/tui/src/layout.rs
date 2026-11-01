@@ -67,7 +67,8 @@ pub enum Target {
     Machine(MachineId),
     /// The `×` at the right of a session's row.
     CloseSession(SessionId),
-    /// A session's subagent badge (`▸N` / `▾N`): expands or collapses its tree.
+    /// A session's subagent badge (`▸N` / `▾N`), or in the narrow sidebar its glyph or a subagent's branch: expands or
+    /// collapses its tree.
     Subagents(SessionId),
     /// A subagent's line in an expanded tree.
     Subagent { session: SessionId, id: String },
@@ -166,6 +167,9 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
         SidebarEntry::Subagent {
             parent, subagent, ..
         } => {
+            if sidebar::branch_toggle(layout, line).contains(at) {
+                return Some(Target::Subagents(parent.clone()));
+            }
             return Some(Target::Subagent {
                 session: parent.clone(),
                 id: subagent.id().to_owned(),
@@ -176,7 +180,7 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     if sidebar::close_button(layout, line).contains(at) {
         return Some(Target::CloseSession(id));
     }
-    if sidebar::subagent_badge(client, layout, session, line).contains(at) {
+    if sidebar::tree_toggle(client, layout, session, line).contains(at) {
         return Some(Target::Subagents(id));
     }
     Some(Target::Session(id))
