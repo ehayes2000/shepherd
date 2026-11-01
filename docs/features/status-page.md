@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T57 | Status table | done | 27c7f26 | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
-| T58 | Preview and answer in place | fixing | task/t58-preview-answer @ a9254d4 | 1 | round 1 CHANGES: stale-with-newer-pending and offline guards untested; + minors |
+| T58 | Preview and answer in place | merging | task/t58-preview-answer @ a9254d4 | 1 | round 1 fixed as asked (mutations shown); merging |
 | T59 | Events feed and message line | done | b87adf5 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Specs

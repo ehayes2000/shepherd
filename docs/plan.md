@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T60 Project manager session and page | [project-manager](features/project-manager.md) | building | task/t60-pm-session |  |  |
-| T58 Preview and answer in place | [status-page](features/status-page.md) | fixing | task/t58-preview-answer @ a9254d4 | 1 | round 1 CHANGES: stale-with-newer-pending and offline guards untested; + minors |
+| T58 Preview and answer in place | [status-page](features/status-page.md) | merging | task/t58-preview-answer @ a9254d4 | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Ready to start
 
