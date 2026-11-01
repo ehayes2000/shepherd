@@ -7,26 +7,25 @@
 //! snapshot of it shows it now. It sends nothing that changes anything: no session is resized, the shown page stays.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
 use serde::Serialize;
-use shepherd_core::acpp::{
-    Dir, EntryId, FrameDraft, Seq, ShepherdFrame, Source, SourceKind, Stamp, Timestamp, UiLayout,
-};
+use shepherd_core::client::Client;
 use shepherd_core::client::panes::{Area, arrange};
-use shepherd_core::client::{Client, ClientEvent};
 use shepherd_core::display::display_safe;
 use shepherd_core::layout::{
     Content, Layout, LayoutOp, Page, PageId, Pane, PaneId, Ratio, SplitDir, ViewKind,
 };
-use shepherd_core::wire::{
-    ClientRequest, HostMessage, HostNotification, HostResult, LogEntry, UiApply, UiGet,
-};
+use shepherd_core::wire::{ClientRequest, HostResult, UiApply, UiGet};
 use shepherd_term::{MAX_COLS, MAX_ROWS, Screen};
 use shepherd_tui::Screens;
+
+use crate::client::ClientRuntime;
+use shepherd_core::ports::{ConnId, HostLauncher, Link, LinkEventSink};
 
 use super::{Args, Drive, request, safe, settle, target, write, write_json};
 
@@ -476,6 +475,17 @@ fn resolve_page(layout: &Layout, text: &str) -> Result<PageId, String> {
 
 // ---- screenshot ----
 
+/// Readies a client runtime for [`screenshot`], before it starts: each session's terminal is made at [`SNAPSHOT_SIZE`],
+/// so the host's snapshot of it replays whole.
+pub fn prepare<L, C, H>(runtime: &mut ClientRuntime<L, C, H>)
+where
+    L: Link,
+    C: FnMut(Arc<dyn LinkEventSink>) -> Result<(L, ConnId), String>,
+    H: HostLauncher,
+{
+    runtime.set_blank_screen_size(SNAPSHOT_SIZE);
+}
+
 /// `shepherd ui screenshot`: the window a user would see at `shot`'s size, drawn by the TUI from this client's state
 /// (its sidebar selects what a newly opened window does: the first session it lists), as text. A `Selected` pane
 /// shows that session. With `json`, also where each pane is.
@@ -486,14 +496,19 @@ pub fn screenshot(
     out: &mut impl Write,
 ) -> Result<(), String> {
     settle(drive)?;
-    let mut client = drive.client().clone();
-    if let Some(page) = &shot.page {
-        let page = resolve_page(&client.host_layout(), page)?;
-        show_page(&mut client, page)?;
-    }
+    let client = drive.client();
+    let host_layout = client.host_layout();
+    let page = match &shot.page {
+        None => host_layout.current(),
+        Some(page) => resolve_page(&host_layout, page)?,
+    };
+    // The host's layout as the window would show it with `page` selected, and its `Selected` panes as this one does.
+    let drawn = host_layout
+        .apply(&LayoutOp::PageSelect { page }, |_| true)
+        .map_err(|e| e.to_string())?;
     let window = Rect::new(0, 0, shot.cols, shot.rows);
     let pane = shepherd_tui::layout(window).pane;
-    let layout = client.layout();
+    let layout = drawn.resolve_selected(&selected_content(client));
     let arranged = arrange(
         &layout,
         Area {
@@ -507,7 +522,7 @@ pub fn screenshot(
     let mut terminal =
         Terminal::new(TestBackend::new(shot.cols, shot.rows)).map_err(|e| e.to_string())?;
     terminal
-        .draw(|frame| shepherd_tui::render(&client, &screens, frame))
+        .draw(|frame| shepherd_tui::render_page(client, &screens, &host_layout, page, frame))
         .map_err(|e| e.to_string())?;
     let lines = lines_of(terminal.backend().buffer());
     if json {
@@ -519,13 +534,12 @@ pub fn screenshot(
             panes: Vec<PlacedJson>,
             lines: Vec<String>,
         }
-        let host_layout = client.host_layout();
         let panes = arranged
             .panes
             .iter()
             .map(|p| PlacedJson {
                 id: p.pane.get(),
-                content: ContentJson::of(&client, &p.content),
+                content: ContentJson::of(client, &p.content),
                 selected: matches!(
                     host_layout.pane(p.pane),
                     Some(Pane::Leaf {
@@ -554,34 +568,20 @@ pub fn screenshot(
     write(out, &text)
 }
 
-/// Shows `client` (a copy, drawn once and dropped) the host's layout with `page` current, as the host's next layout
-/// entry would: the TUI draws the shown page, and the host's own stays as it is for every window.
-fn show_page(client: &mut Client, page: PageId) -> Result<(), String> {
-    let layout = client
-        .host_layout()
-        .apply(&LayoutOp::PageSelect { page }, |_| true)
-        .map_err(|e| e.to_string())?;
-    let machine = local_machine(client).ok_or("this machine's host hasn't said who it is")?;
-    let now = Timestamp::parse(jiff::Timestamp::now().to_string()).map_err(|e| e.to_string())?;
-    let envelope = FrameDraft::new(
-        ShepherdFrame::UiLayout(UiLayout { layout }).to_frame(),
-        Source::new(SourceKind::Shepherd, None),
-        Dir::Internal,
-        None,
-    )
-    // After every entry the client has: it folds only entries past the last it has.
-    .seal(
-        Seq::new(u64::MAX),
-        Stamp {
-            id: EntryId::new("screenshot"),
-            ts: now,
-            machine,
-        },
-    );
-    client.handle(ClientEvent::Host(HostMessage::Notification(
-        HostNotification::LogEntry(Box::new(LogEntry { envelope })),
-    )));
-    Ok(())
+/// What a pane showing the selection shows in this client: its selected session, pinned to its machine when a peer has
+/// it, or nothing.
+fn selected_content(client: &Client) -> Content {
+    match client.selected() {
+        None => Content::Empty,
+        Some(id) if client.is_home(None, id) => Content::session(id.clone()),
+        Some(id) => client
+            .sessions()
+            .iter()
+            .find(|s| &s.id == id)
+            .map_or(Content::Empty, |s| {
+                Content::peer_session(s.machine.clone(), id.clone())
+            }),
+    }
 }
 
 /// Each session's terminal as a pane showing it draws it: the host's snapshot of it, replayed whole, then cut to the
@@ -740,7 +740,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         Command::Screenshot(shot) => {
             let mut runtime = crate::client::socket_runtime(&crate::peers::socket()?)
                 .map_err(|e| e.to_string())?;
-            runtime.set_blank_screen_size(SNAPSHOT_SIZE);
+            prepare(&mut runtime);
             let mut runtime = super::started(runtime);
             screenshot(&mut runtime, &shot, json, stdout)
         }

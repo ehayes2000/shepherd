@@ -28,7 +28,7 @@ use shepherd_core::acpp::RequestId;
 use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
 use shepherd_core::host::HostCommand;
 use shepherd_core::ids::SessionId;
-use shepherd_core::layout::LayoutOp;
+use shepherd_core::layout::{Layout, LayoutOp, PageId};
 use shepherd_core::wire::{
     ClientMessage, ClientRequest, HostMessage, HostNotification, HostResult, Method, PtyOutput,
     RawResponse, Request, UiApply, WireError,
@@ -36,7 +36,7 @@ use shepherd_core::wire::{
 use shepherd_term::Screen;
 use shepherd_testkit::builders::{ClientDriver, HostDriver};
 use shepherd_tui::{
-    Pointer, Screens, Target, fit_screens, hit, layout, map_event, render, screen_size,
+    Pointer, Screens, Target, fit_screens, hit, layout, map_event, render, render_page, screen_size,
 };
 
 /// A headless window onto a client. See the module docs.
@@ -359,6 +359,16 @@ impl Ui {
             });
         self.answered.push(id.clone());
         self.host(HostMessage::Response(RawResponse { id, result }))
+    }
+
+    /// Draws the window with [`render_page`]: page `page` of `layout` instead of the host's shown page. The next step
+    /// draws with [`render`] again.
+    pub fn draw_page(&mut self, layout: &Layout, page: PageId) -> &mut Self {
+        let (client, screens) = (self.driver.client(), &self.screens);
+        self.terminal
+            .draw(|frame| render_page(client, screens, layout, page, frame))
+            .unwrap_or_else(|e| match e {});
+        self
     }
 
     fn draw(&mut self) {

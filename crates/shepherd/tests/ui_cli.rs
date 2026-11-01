@@ -17,6 +17,8 @@ const SHEPHERD: &str = env!("CARGO_BIN_EXE_shepherd");
 const LIVENESS: Duration = Duration::from_secs(60);
 /// What every session prints when it starts.
 const PAINTED: &str = "hello from the pane";
+/// The line it prints next: two wide (CJK) characters, then text that must stay right after them.
+const WIDE: &str = "漢字|after";
 
 /// The host, stopped when dropped (on failure too): exactly this pid, never by name.
 struct Running {
@@ -43,8 +45,8 @@ impl Drop for Running {
     }
 }
 
-/// Starts `shepherd host` in a fresh temp `HOME` whose default profile is a shell that prints [`PAINTED`] and then
-/// reads its terminal, and waits until it serves (it releases its stderr then).
+/// Starts `shepherd host` in a fresh temp `HOME` whose default profile is a shell that prints [`PAINTED`] and
+/// [`WIDE`] and then reads its terminal, and waits until it serves (it releases its stderr then).
 fn start_host() -> Running {
     // Under /tmp: the socket path must stay under the OS limit.
     let home = tempfile::Builder::new()
@@ -61,7 +63,7 @@ fn start_host() -> Running {
         .unwrap();
     let toml = format!(
         "[defaults]\nagent = \"shell\"\n\n[agents.shell]\ncommand = \"/bin/sh\"\n\
-         args = [\"-c\", \"printf '{PAINTED}\\\\n'; exec cat\"]\n"
+         args = [\"-c\", \"printf '{PAINTED}\\\\n{WIDE}\\\\n'; exec cat\"]\n"
     );
     config.write_all(toml.as_bytes()).unwrap();
     let here = home.path().join("here");
@@ -348,6 +350,10 @@ fn a_screenshot_draws_the_window_with_each_panes_session_as_it_is_now() {
     // The sidebar lists the session, and the one pane (showing the selection) its terminal.
     assert!(shot.contains("worker"), "{shot}");
     assert!(lines[0].contains(PAINTED), "{shot}");
+    // A wide character is printed once, not followed by the cell it covers.
+    assert!(lines[1].contains(WIDE), "{shot}");
+    // Rows are printed without trailing blanks.
+    assert!(lines.iter().all(|l| !l.ends_with(' ')), "{shot:?}");
 
     let json = running.json(&["ui", "screenshot", "--size", "80x12", "--json"]);
     assert_eq!(keys(&json), ["cols", "lines", "page", "panes", "rows"]);
@@ -403,4 +409,51 @@ fn a_screenshot_of_another_page_draws_it_and_leaves_the_shown_page_alone() {
     assert_eq!(panes[1]["content"]["name"], "worker");
     assert_eq!(panes[1]["selected"], false);
     assert_eq!(running.ok(&["ui", "get"]), before);
+}
+
+#[test]
+fn a_page_id_wins_over_another_pages_name() {
+    let running = start_host();
+    running.ok(&["ui", "page", "rename", "1", "main"]);
+    let made = running.json(&["ui", "page", "new", "1", "--json"]);
+    assert_eq!(made["layout"]["pages"][1]["name"], "1");
+    assert_ne!(made["layout"]["current"], 1);
+    let selected = running.json(&["ui", "page", "select", "1", "--json"]);
+    assert_eq!(selected["layout"]["current"], 1);
+    assert_eq!(selected["layout"]["pages"][0]["name"], "main");
+}
+
+#[test]
+fn a_page_name_two_pages_share_fails_listing_both() {
+    let running = start_host();
+    let first = running.json(&["ui", "page", "new", "dup", "--json"]);
+    let second = running.json(&["ui", "page", "new", "dup", "--json"]);
+    let before = running.ok(&["ui", "get"]);
+    let stderr = running.fails(&["ui", "page", "select", "dup"]);
+    assert!(
+        stderr.contains("more than one page is called `dup`"),
+        "{stderr}"
+    );
+    for made in [first, second] {
+        let id = &made["layout"]["current"];
+        assert!(stderr.contains(&format!("{id} (dup)")), "{stderr}");
+    }
+    assert_eq!(running.ok(&["ui", "get"]), before);
+}
+
+#[test]
+fn put_a_views_name_shows_the_view_even_when_a_session_has_that_name() {
+    let running = start_host();
+    let id = running.session("status");
+    let put = running.json(&["ui", "put", "2", "status", "--json"]);
+    assert_eq!(
+        put["layout"]["pages"][0]["root"]["content"],
+        json!({ "kind": "view", "view": "status" })
+    );
+    // By its id, the session.
+    let put = running.json(&["ui", "put", "2", &id, "--json"]);
+    assert_eq!(
+        put["layout"]["pages"][0]["root"]["content"]["name"],
+        "status"
+    );
 }

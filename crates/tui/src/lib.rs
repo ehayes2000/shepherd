@@ -41,6 +41,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::Wrap;
 use shepherd_core::client::{Client, Connection, Focus};
 use shepherd_core::ids::SessionId;
+use shepherd_core::layout::{LayoutOp, PageId};
 use shepherd_core::ports::pty::PtySize;
 use shepherd_term::{CursorShape, Screen};
 
@@ -73,12 +74,8 @@ pub fn fit_screens(client: &Client, screens: &mut Screens) {
 
 /// Draws the whole window.
 pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
+    let popup_cursor = draw_window(client, screens, &client.host_layout(), frame);
     let layout = layout(frame.area());
-    let buf = frame.buffer_mut();
-    sidebar::render(client, &layout, buf);
-    panes::render(client, screens, layout.pane, buf);
-    sidebar::wide_notice(client, &layout, buf);
-    let popup_cursor = popup::render(client, frame.area(), frame.buffer_mut());
     let terminal = panes::focused_terminal(client, layout.pane);
     let cursor = match (client.popup(), cursor_session(client, screens), terminal) {
         (Some(_), ..) => popup_cursor,
@@ -88,6 +85,37 @@ pub fn render(client: &Client, screens: &Screens, frame: &mut Frame) {
     if let Some(at) = cursor {
         frame.set_cursor_position(at);
     }
+}
+
+/// Draws the whole window as [`render`] does, but with page `page` of `layout` in the pane area instead of the host's
+/// shown page: what the window would show were that page selected, for a headless screenshot (T50). Nothing changes,
+/// and no cursor is placed. A page `layout` lacks draws its shown page.
+pub fn render_page(
+    client: &Client,
+    screens: &Screens,
+    layout: &shepherd_core::layout::Layout,
+    page: PageId,
+    frame: &mut Frame,
+) {
+    let shown = layout
+        .apply(&LayoutOp::PageSelect { page }, |_| true)
+        .unwrap_or_else(|_| layout.clone());
+    draw_window(client, screens, &shown, frame);
+}
+
+/// Draws the sidebar, `shown` in the pane area, and any notice or popup. Returns where the popup wants the cursor.
+fn draw_window(
+    client: &Client,
+    screens: &Screens,
+    shown: &shepherd_core::layout::Layout,
+    frame: &mut Frame,
+) -> Option<Position> {
+    let layout = layout(frame.area());
+    let buf = frame.buffer_mut();
+    sidebar::render(client, &layout, buf);
+    panes::render(client, screens, shown, layout.pane, buf);
+    sidebar::wide_notice(client, &layout, buf);
+    popup::render(client, frame.area(), frame.buffer_mut())
 }
 
 /// The session whose cursor [`render`] shows: the focused pane's, while keys go to it and no popup is open.

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd::cli::prompt::Prompt;
 use shepherd::cli::sessions::{New, new, sessions};
-use shepherd::cli::ui::{SNAPSHOT_SIZE, Screenshot, Ui, screenshot, ui};
+use shepherd::cli::ui::{Screenshot, Ui, prepare, screenshot, ui};
 use shepherd::cli::{CliError, Drive, WaitError, target};
 use shepherd::client::{ClientError, ClientRuntime, Connector};
 use shepherd_core::acpp::{
@@ -235,7 +235,7 @@ impl World {
             clock,
         );
         // As `shepherd ui screenshot` makes it.
-        client.set_blank_screen_size(SNAPSHOT_SIZE);
+        prepare(&mut client);
         let client = shepherd::cli::started(client);
         let hooks = a.connect();
         Self {
@@ -472,9 +472,21 @@ impl Drive for World {
 }
 
 /// `inner`, which also prints `<label> first line`, a right-to-left override and `!`, and a line too long for a narrow
-/// pane when it starts.
+/// pane when it starts. Resized, it redraws its whole terminal: `<label> row 01` on each row but the last, and there
+/// `wide xxx…x edge` across it, the cursor after it.
 fn painter(label: &'static str, inner: Program) -> Program {
     Arc::new(move |input, p| {
+        if input == ProgramInput::Resized {
+            let size = p.size();
+            let mut screen = "\x1b[H\x1b[2J".to_owned();
+            for row in 1..size.rows {
+                screen.push_str(&format!("{label} row {row:02}\r\n"));
+            }
+            let xs = "x".repeat(usize::from(size.cols).saturating_sub(10));
+            screen.push_str(&format!("wide {xs}edge"));
+            p.print(screen);
+            return;
+        }
         let start = input == ProgramInput::Start;
         inner(input, p);
         if start {
@@ -1204,4 +1216,37 @@ fn ui_screenshot_of_another_page_leaves_the_hosts_shown_page_alone() {
     assert!(!shot.contains("on testbox first line"), "{shot}");
     assert_eq!(w.a.host().layout().current().get(), 1);
     assert_eq!(w.client.client().host_layout().current().get(), 1);
+}
+
+#[test]
+fn ui_screenshot_cuts_a_terminal_bigger_than_its_pane_keeping_the_cursor_row() {
+    let mut w = World::new();
+    let theirs = session_on(&mut w.b, "theirs");
+    // A window on B made its terminal bigger than the 80x24 a session starts at.
+    let mut window = w.b.connect();
+    window.resize(&theirs, 150, 40);
+    w.b.step();
+    window.close();
+    w.b.step();
+    w.ui_json(Ui::Put {
+        pane: PaneId::new(2),
+        what: "theirs".into(),
+    })
+    .unwrap();
+
+    let shot = w.screenshot(&Screenshot {
+        cols: 100,
+        rows: 12,
+        page: None,
+    });
+    let lines: Vec<&str> = shot.lines().collect();
+    // The pane (76x12, right of the sidebar) shows the terminal's last 12 rows, down to the cursor's: rows 29 to 39
+    // and the wide line, each where the session drew it.
+    assert!(lines[0].contains("on laptop row 29"), "{shot}");
+    assert!(lines[10].contains("on laptop row 39"), "{shot}");
+    assert!(lines[11].contains("wide xxxx"), "{shot}");
+    assert!(!shot.contains("row 28"), "{shot}");
+    // Cut at the pane's edge, not wrapped at 80 columns or the pane's width.
+    assert!(!shot.contains("edge"), "{shot}");
+    assert_eq!(lines.len(), 12, "{shot}");
 }
