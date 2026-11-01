@@ -67,6 +67,10 @@ pub enum Target {
     Machine(MachineId),
     /// The `×` at the right of a session's row.
     CloseSession(SessionId),
+    /// A session's subagent badge (`▸N` / `▾N`): expands or collapses its tree.
+    Subagents(SessionId),
+    /// A subagent's line in an expanded tree.
+    Subagent { session: SessionId, id: String },
     /// The focused pane's terminal (the whole pane area with one pane).
     Terminal,
     /// A pane other than the focused one, or a focused pane's border: a click focuses it.
@@ -156,17 +160,29 @@ pub fn hit(layout: &Layout, client: &Client, col: u16, row: u16) -> Option<Targe
     let (entry, line) = sidebar::visible_rows(client, layout)
         .into_iter()
         .find(|(_, line)| line.contains(at))?;
-    let id = match entry {
-        SidebarEntry::Session(session) => session.id.clone(),
+    let session = match entry {
+        SidebarEntry::Session(session) => session,
         SidebarEntry::Machine(group) => return Some(Target::Machine(group.id)),
+        SidebarEntry::Subagent {
+            parent, subagent, ..
+        } => {
+            return Some(Target::Subagent {
+                session: parent.clone(),
+                id: subagent.id().to_owned(),
+            });
+        }
     };
+    let id = session.id.clone();
     if sidebar::close_button(layout, line).contains(at) {
         return Some(Target::CloseSession(id));
+    }
+    if sidebar::subagent_badge(client, layout, session, line).contains(at) {
+        return Some(Target::Subagents(id));
     }
     Some(Target::Session(id))
 }
 
-/// How many sessions the sidebar shows at once in a `window`, for [`Intent::SidebarRows`].
+/// How many sidebar entries are sure to fit at once in a `window`, for [`Intent::SidebarRows`].
 ///
 /// [`Intent::SidebarRows`]: shepherd_core::client::Intent::SidebarRows
 pub fn sidebar_rows(window: Rect) -> usize {

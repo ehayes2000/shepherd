@@ -26,9 +26,19 @@
 //!
 //! The third line also has `⊞ Layout` at its right, which opens the focused pane's menu.
 //!
+//! A session with subagents has a badge left of its `×`: their count, `▸N` with its tree collapsed, `▾N` expanded (cyan,
+//! yellow while one is blocked on the user). A click on it expands or collapses the tree ([`Target::Subagents`]).
+//! Expanded, each subagent has one line under its session: `├` (`└` for the last), its status glyph (`●` working, `▲`
+//! blocked, `✓` finished), its agent type and its task, both cut to fit. A finished one is dimmed until the parent's
+//! turn ends, when the fold drops it. A blocked subagent also turns its session's glyph `▲`, collapsed or not. A click
+//! on a subagent's line means that subagent ([`Target::Subagent`]). The list counts these lines as entries too, so the
+//! client's scroll covers them; [`capacity`] is how many entries are sure to fit (two-line ones), and as many more as
+//! fit are drawn.
+//!
 //! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⊞` (layout), `⏏`
 //! (detach) and `?` buttons on the last three lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
-//! a right click opens the row's menu, which has Close.
+//! a right click opens the row's menu, which has Close. Nor a badge: an expanded tree's lines are
+//! the branch, in the attention column, and the subagent's glyph.
 //!
 //! [`crate::hit`] reads the same geometry ([`search_field`], [`workspace_button`], [`new_session_button`], [`visible_rows`],
 //! [`close_button`], [`footer_buttons`]) that drawing uses.
@@ -44,7 +54,7 @@ use shepherd_core::client::{
     Client, ClientSession, Connection, Focus, MachineGroup, MachineStatus, SidebarEntry,
 };
 use shepherd_core::display::DisplayText;
-use shepherd_core::session::Activity;
+use shepherd_core::session::{Activity, Subagent, SubagentStatus};
 
 use crate::draw::{self, shown};
 use crate::layout::{Layout, Target};
@@ -54,8 +64,10 @@ use crate::width::columns;
 /// The most lines a notice too long for the footer takes at the bottom of the window.
 const MAX_NOTICE_LINES: u16 = 3;
 
-/// Lines per session.
+/// Lines per session (and per machine header).
 const ROW_HEIGHT: u16 = 2;
+/// Lines per subagent in an expanded tree.
+const SUBAGENT_HEIGHT: u16 = 1;
 /// Lines above the list: the search field, the workspace and `+ New session`.
 const HEADER_HEIGHT: u16 = 3;
 const SELECTED_BG: Color = Color::DarkGray;
@@ -93,6 +105,9 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
     if session.exited {
         return ("✕", Color::Red);
     }
+    if session.subagent_blocked() {
+        return ("▲", Color::Yellow);
+    }
     match session.activity {
         Activity::Starting => ("◌", Color::DarkGray),
         Activity::Working { .. } => ("●", Color::Green),
@@ -102,6 +117,61 @@ pub fn glyph(session: &ClientSession) -> (&'static str, Color) {
         // Not `?`, which is the help button in the collapsed sidebar's glyph column.
         Activity::Unknown => ("·", Color::DarkGray),
     }
+}
+
+/// A subagent's status glyph and its colour.
+fn subagent_glyph(subagent: &Subagent) -> (&'static str, Color) {
+    match subagent.status() {
+        SubagentStatus::Working => ("●", Color::Green),
+        SubagentStatus::Blocked { .. } => ("▲", Color::Yellow),
+        SubagentStatus::Finished => ("✓", Color::DarkGray),
+    }
+}
+
+/// What a subagent's line calls it when the agent gave no type.
+const UNNAMED_SUBAGENT: &str = "subagent";
+/// How many columns a subagent's line gives its agent type, a blank column after it included.
+const AGENT_TYPE_WIDTH: u16 = 9;
+
+/// The badge of a session with subagents: `▸N` collapsed, `▾N` expanded. `None` without subagents.
+fn badge_label(client: &Client, session: &ClientSession) -> Option<String> {
+    let count = session.subagents.len();
+    if count == 0 {
+        return None;
+    }
+    let mark = match client.expanded(&session.id) {
+        true => "▾",
+        false => "▸",
+    };
+    Some(format!("{mark}{count}"))
+}
+
+/// Where the badge of `session`, drawn on `row`, is: left of the close button with a blank column between, starting
+/// at least four columns before it. None in the collapsed sidebar, nor without subagents, nor where the name would get
+/// no room.
+pub(crate) fn subagent_badge(
+    client: &Client,
+    layout: &Layout,
+    session: &ClientSession,
+    row: Rect,
+) -> Rect {
+    let close = close_button(layout, row);
+    let Some(label) = badge_label(client, session) else {
+        return Rect::default();
+    };
+    if close.width == 0 {
+        return Rect::default();
+    }
+    let width = u16::try_from(columns(&label)).unwrap_or(u16::MAX);
+    let x = close
+        .x
+        .saturating_sub(4)
+        .min(close.x.saturating_sub(1 + width));
+    // The glyph, a blank, a column of name and a blank come first.
+    if x < row.x + 5 {
+        return Rect::default();
+    }
+    Rect::new(x, row.y, width, 1)
 }
 
 /// What marks a machine's header, in the glyph column.
@@ -319,27 +389,53 @@ pub(crate) fn capacity(layout: &Layout) -> usize {
     usize::from(list.height / ROW_HEIGHT)
 }
 
-/// Each entry shown (a machine's header or a session) and its two lines, top to bottom, from the client's scroll.
+/// How many lines `entry` takes.
+fn height(entry: &SidebarEntry) -> u16 {
+    match entry {
+        SidebarEntry::Machine(_) | SidebarEntry::Session(_) => ROW_HEIGHT,
+        SidebarEntry::Subagent { .. } => SUBAGENT_HEIGHT,
+    }
+}
+
+/// Each entry shown (a machine's header, a session or a subagent) and its lines, top to bottom, from the client's
+/// scroll: as many as fit whole. When the rest of the list fits with room to spare, entries above the scroll fill
+/// that room, so one-line subagents never leave the list's top hidden for nothing.
 pub(crate) fn visible_rows<'a>(
     client: &'a Client,
     layout: &Layout,
 ) -> Vec<(SidebarEntry<'a>, Rect)> {
     let list = list(layout);
     let visible = capacity(layout);
+    if visible == 0 {
+        return Vec::new();
+    }
     let entries = client.sidebar();
-    let first = client
+    let mut first = client
         .sidebar_scroll()
         .min(entries.len().saturating_sub(visible));
-    entries
-        .into_iter()
-        .skip(first)
-        .take(visible)
-        .zip(0u16..)
-        .map(|(entry, slot)| {
-            let y = list.y + slot * ROW_HEIGHT;
-            (entry, Rect::new(list.x, y, list.width, ROW_HEIGHT))
-        })
-        .collect()
+    let mut tail: usize = entries[first..]
+        .iter()
+        .map(|e| usize::from(height(e)))
+        .sum();
+    while let Some(above) = first.checked_sub(1) {
+        let taller = tail + usize::from(height(&entries[above]));
+        if taller > usize::from(list.height) {
+            break;
+        }
+        tail = taller;
+        first = above;
+    }
+    let mut y = list.y;
+    let mut rows = Vec::new();
+    for entry in entries.into_iter().skip(first) {
+        let height = height(&entry);
+        if y + height > list.bottom() {
+            break;
+        }
+        rows.push((entry, Rect::new(list.x, y, list.width, height)));
+        y += height;
+    }
+    rows
 }
 
 /// What a machine header's second line says.
@@ -471,10 +567,23 @@ fn render_full(client: &Client, layout: &Layout, buf: &mut Buffer) {
             usize::MAX,
             glyph_style,
         );
-        // The name stops a column short of the close button.
-        let name_width = usize::from(line.width.saturating_sub(5));
+        // The name stops a column short of the badge, or of the close button.
+        let badge = subagent_badge(client, layout, session, line);
+        let name_width = match badge.width {
+            0 => usize::from(line.width.saturating_sub(5)),
+            _ => usize::from(badge.x.saturating_sub(line.x + 4)),
+        };
         let name = shown(&session.name);
         draw::set(buf, line.x + 3, line.y, &name, name_width, style);
+        if let Some(label) = badge_label(client, session).filter(|_| badge.width > 0) {
+            let color = match session.subagent_blocked() {
+                true => Color::Yellow,
+                false => Color::Cyan,
+            };
+            let style = Style::new().fg(color).add_modifier(Modifier::BOLD);
+            let width = usize::from(badge.width);
+            draw::set(buf, badge.x, badge.y, &shown(&label), width, style);
+        }
         let close = close_button(layout, line);
         draw::set(
             buf,
@@ -597,6 +706,10 @@ fn rows(
                 render_machine(client, &group, layout, line, buf);
                 continue;
             }
+            SidebarEntry::Subagent { subagent, last, .. } => {
+                render_subagent(subagent, last, layout, line, buf);
+                continue;
+            }
         };
         let is_selected = client.selected() == Some(&session.id);
         if is_selected {
@@ -615,6 +728,58 @@ fn rows(
             }
         }
         draw(session, is_selected, line, buf);
+    }
+}
+
+/// Draws a subagent's line: its branch, glyph, agent type and task (the branch and glyph alone when collapsed).
+fn render_subagent(subagent: &Subagent, last: bool, layout: &Layout, line: Rect, buf: &mut Buffer) {
+    let branch = shown(if last { "└" } else { "├" });
+    let branch_style = Style::new().fg(Color::DarkGray);
+    let (symbol, color) = subagent_glyph(subagent);
+    let glyph_style = Style::new().fg(color);
+    if layout.collapsed {
+        draw::set(buf, line.x, line.y, &branch, 1, branch_style);
+        draw::set(buf, line.x + 1, line.y, &shown(symbol), 1, glyph_style);
+        return;
+    }
+    // Everything stops a column short of the border.
+    let room = |x: u16| usize::from(line.right().saturating_sub(x + 1));
+    draw::set(
+        buf,
+        line.x + 3,
+        line.y,
+        &branch,
+        room(line.x + 3),
+        branch_style,
+    );
+    draw::set(
+        buf,
+        line.x + 5,
+        line.y,
+        &shown(symbol),
+        room(line.x + 5),
+        glyph_style,
+    );
+    let (kind_style, task_style) = match subagent.status() {
+        SubagentStatus::Finished => {
+            let dim = Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+            (dim, dim)
+        }
+        _ => (
+            Style::new().fg(Color::Magenta),
+            Style::new().fg(Color::Gray),
+        ),
+    };
+    let kind = match subagent.agent_type() {
+        "" => UNNAMED_SUBAGENT,
+        kind => kind,
+    };
+    let x = line.x + 7;
+    let kind_width = usize::from(AGENT_TYPE_WIDTH - 1).min(room(x));
+    draw::set_cut(buf, x, line.y, &shown(kind), kind_width, kind_style);
+    if let Some(task) = subagent.task() {
+        let x = x + AGENT_TYPE_WIDTH;
+        draw::set_cut(buf, x, line.y, &shown(task), room(x), task_style);
     }
 }
 

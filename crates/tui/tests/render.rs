@@ -873,6 +873,7 @@ fn status_glyphs_follow_the_documented_table() {
         removing_worktree: false,
         pr: None,
         agent: None,
+        subagents: Vec::new(),
     };
     let table = [
         (Activity::Starting, false, ("◌", Color::DarkGray)),

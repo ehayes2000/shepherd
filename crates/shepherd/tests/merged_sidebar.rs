@@ -262,6 +262,7 @@ impl World {
             .map(|e| match e {
                 SidebarEntry::Machine(g) => format!("# {}", g.name),
                 SidebarEntry::Session(s) => s.name.clone(),
+                SidebarEntry::Subagent { subagent, .. } => format!("  {}", subagent.agent_type()),
             })
             .collect()
     }
