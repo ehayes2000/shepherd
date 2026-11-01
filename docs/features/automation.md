@@ -20,9 +20,9 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
 | T49 | Render pages and split panes | done | 18a0aff | 2 | round 2 APPROVE; footer-height minor → F56 |
 | T50 | `shepherd ui` CLI and screenshots | done | 3efa8cc | 2 | round 2 APPROVE; focused_on dup → F56 |
-| T51 | Answer an agent's pending question | merging | task/t51-answer @ ec3d014 | 3 | round 3 fixed as asked (agent_id linking; 3 tests, each mutation-proven); merging |
+| T51 | Answer an agent's pending question | done | d8692d3 | 3 | round 3 fixed as asked (agent_id linking; 3 tests, each mutation-proven); merging |
 | T52 | Read a session's screen as text | done | b455f98 | 1 | round 1 fixed (concealed blanked, repro test failed first); merged without a 2nd review |
-| T53 | Shepherd MCP server for agents | todo |  |  |  |
+| T53 | Shepherd MCP server for agents | building | task/t53-mcp-server |  |  |
 
 ## Specs
 
