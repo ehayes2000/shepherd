@@ -30,7 +30,7 @@ use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, Pane, PaneId, SplitDir};
 use shepherd_core::ports::Worktrees;
-use shepherd_core::ports::worktrees::WorktreePath;
+use shepherd_core::ports::worktrees::{WorktreeError, WorktreePath};
 use shepherd_core::ports::{EventLog, Link, LinkEvent, LinkEventSink, LogId, Reply};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HookFrame,
@@ -1602,6 +1602,25 @@ fn worktree_exists(w: &World, worktree: &Path) -> bool {
     w.worktrees.status(&WorktreePath::new(worktree)).is_ok()
 }
 
+/// How session `id`'s `session/closed` says closing went: whether its worktree was removed, and why it was kept when
+/// closing tried to remove it (none when the close asked to keep it).
+fn closed(w: &World, id: &SessionId) -> (bool, Option<String>) {
+    w.a.log()
+        .read(LogId::Session(id.clone()), Seq::ZERO)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.frame() {
+            Frame::Shepherd(m) => match m.body() {
+                ShepherdFrame::SessionClosed(c) => {
+                    Some((c.worktree_removed, c.worktree_kept.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the session was closed")
+}
+
 #[test]
 fn stop_closes_a_session_whose_worktree_loses_nothing_and_removes_the_worktree() {
     let mut w = World::new();
@@ -1639,6 +1658,36 @@ fn stop_refuses_a_session_with_unsaved_work_and_force_stops_it_keeping_the_workt
     until_gone(&mut w, &id);
     assert!(w.a.host().sessions().is_empty());
     assert!(worktree_exists(&w, &worktree), "kept");
+    // Kept because the close asked to keep it, not because removing it was tried and refused.
+    assert_eq!(closed(&w, &id), (false, None));
+}
+
+#[test]
+fn stop_refuses_when_the_host_cannot_tell_what_the_worktree_holds_and_force_keeps_it() {
+    let mut w = World::new();
+    let (id, worktree) = worktree_session(&mut w, "api");
+    w.worktrees
+        .fail_status(&worktree, WorktreeError::NoDefaultBranch(worktree.clone()));
+
+    let err = stop_out(&mut w, "api", false, true).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why)
+            if why.contains("can't tell whether api has unsaved work in its worktree")
+                && why.contains("it was not stopped")),
+        "{err:?}"
+    );
+    let _ = w.wait(&mut |_| false, LIVENESS);
+    assert_eq!(w.a.host().sessions().len(), 1, "nothing was closed");
+
+    let stopped: Value =
+        serde_json::from_str(&stop_out(&mut w, "api", true, true).unwrap()).unwrap();
+    assert_eq!(
+        stopped,
+        json!({ "session": id, "worktree": "keep", "unsaved": [] })
+    );
+    until_gone(&mut w, &id);
+    assert!(w.a.host().sessions().is_empty());
+    assert_eq!(closed(&w, &id), (false, None));
 }
 
 // ---------- shepherd mcp (T53) ----------
@@ -1938,6 +1987,23 @@ fn mcp_answers_the_question_status_shows_by_its_seq_recorded_as_by_the_calling_s
     );
     assert_eq!(mcp.world().answered, [(id.clone(), b"\r".to_vec())]);
     assert_eq!(answered_by(&mcp.world()), ["mcp:s_pm"]);
+}
+
+#[test]
+fn mcp_answer_naming_a_question_no_longer_pending_is_a_tool_error_and_types_nothing() {
+    let mut mcp = Mcp::new(World::new());
+    let id = asking(&mut mcp.world());
+    let stale = mcp.world().asked_seq(&id).get() - 1;
+    let why = mcp.fails(
+        "answer",
+        json!({ "session": "worker", "choice": "yes", "asked": stale }),
+    );
+    assert!(
+        why.contains("worker has nothing to answer (wants-user)"),
+        "{why}"
+    );
+    assert!(mcp.world().answered.is_empty());
+    assert!(answered_by(&mcp.world()).is_empty());
 }
 
 #[test]

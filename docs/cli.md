@@ -201,7 +201,7 @@ are neither pushed nor merged. Nothing: the session is closed and the worktree r
 should it have something to lose by then, it is kept). Something, or the host can't tell: nothing is closed, and it is
 refused saying what (`<name> has unsaved work in its worktree (uncommitted changes): it was not stopped; …`). With
 `--force` it is stopped anyway and its worktree **kept**: `stop` never throws work away (the cleanup view can remove
-the worktree later). A session with no worktree (or one still being made) is just closed. It prints `stopped <name>`,
+the worktree later). A session with no worktree (yet) is just closed. It prints `stopped <name>`,
 saying what happens to the worktree, once the host has started closing it; the session leaves the list once its
 worktree is dealt with.
 

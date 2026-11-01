@@ -59,10 +59,7 @@ pub fn stop(
     settle(drive)?;
     let session = target(drive, &stop.session)?;
     let (id, machine, name) = (session.id, session.machine, session.name);
-    if session.removing_worktree {
-        return Err(format!("{} is already stopping", safe(&name)).into());
-    }
-    let plan = if session.worktree.is_none() || session.creating_worktree {
+    let plan = if session.worktree.is_none() {
         Plan::NoWorktree
     } else {
         let check = ClientRequest::WorktreeStatus(WorktreeCheck {
