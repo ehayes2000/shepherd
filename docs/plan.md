@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ e766620 | 1 | round 1 CHANGES: question id; overlapping dialogs make it unanswerable; Codex n/d and always variants; shared status type |
-| T52 Read a session's screen as text | [automation](features/automation.md) | merging | task/t52-screen-text @ b0be39b | 1 | round 1 fixed (concealed blanked, repro test failed first); merged without a 2nd review |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ 26668f8 | 2 | round 2 CHANGES: Codex Bash no → n (Cancel, documented); in_pane carry, same-tool, end_turn clear untested; unknown-tool fail-safe |
 | T57 Status table | [status-page](features/status-page.md) | fixing | task/t57-status-table @ 10a2eab | 1 | round 1 CHANGES: help clipped at 80x24; attach paths (pinned, resize, current page first) untested |
 
 ## Ready to start
@@ -46,7 +45,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 6 | 3 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 7 | 2 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
