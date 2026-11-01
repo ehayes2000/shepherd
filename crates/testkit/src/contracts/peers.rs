@@ -33,6 +33,7 @@ macro_rules! peers_contract {
             unbinding_drops_every_connection,
             dialling_a_machine_nobody_knows_fails,
             dialling_a_machine_this_one_does_not_trust_fails_without_a_word_to_it,
+            a_connected_machine_reports_how_its_connection_goes,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -52,33 +53,51 @@ use std::time::Duration;
 
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
-    PeersEventSink,
+    ConnectError, JoinError, LinkKind, PairTicket, PairToken, PairingError, PairingId, PeerPath,
+    Peers, PeersEvent, PeersEventSink,
 };
 
 /// How long a case waits for an event: a liveness bound for real endpoints on localhost, never a measurement.
 pub const EVENT_LIMIT: Duration = Duration::from_secs(20);
 
-/// A sink that forwards events to an mpsc channel. Send errors (receiver gone) are ignored.
-pub struct ChannelSink(pub Sender<PeersEvent>);
+/// A sink that forwards events to mpsc channels: [`PeersEvent::Path`] reports to the second, every other event to the
+/// first, so a case about connections isn't interleaved with paths (which a real link reports whenever its round-trip
+/// time moves). Send errors (receiver gone) are ignored.
+pub struct ChannelSink(pub Sender<PeersEvent>, pub Sender<PathReport>);
 
 impl PeersEventSink for ChannelSink {
     fn send(&self, event: PeersEvent) {
-        let _ = self.0.send(event);
+        match event {
+            PeersEvent::Path { peer, path } => {
+                let _ = self.1.send((peer, path));
+            }
+            event => {
+                let _ = self.0.send(event);
+            }
+        }
     }
 }
 
-/// A new sink and the receiving end of its events.
-pub fn channel() -> (Arc<dyn PeersEventSink>, Receiver<PeersEvent>) {
+/// A [`PeersEvent::Path`] report, as (peer, path).
+pub type PathReport = (MachineId, PeerPath);
+
+/// A new sink, the receiving end of its events, and that of its paths.
+pub fn channel() -> (
+    Arc<dyn PeersEventSink>,
+    Receiver<PeersEvent>,
+    Receiver<PathReport>,
+) {
     let (tx, rx) = mpsc::channel();
-    (Arc::new(ChannelSink(tx)), rx)
+    let (paths_tx, paths) = mpsc::channel();
+    (Arc::new(ChannelSink(tx, paths_tx)), rx, paths)
 }
 
-/// One machine: its port, its id, and what its port reports.
+/// One machine: its port, its id, and what its port reports: its paths apart from every other event.
 pub struct Machine<P> {
     pub peers: P,
     pub id: MachineId,
     pub events: Receiver<PeersEvent>,
+    pub paths: Receiver<PathReport>,
 }
 
 impl<P> Machine<P> {
@@ -92,6 +111,13 @@ impl<P> Machine<P> {
     /// Every event already reported and not read yet.
     pub fn pending(&self) -> Vec<PeersEvent> {
         self.events.try_iter().collect()
+    }
+
+    /// The next path reported, as (peer, path), waiting up to [`EVENT_LIMIT`].
+    pub fn next_path(&self) -> PathReport {
+        self.paths
+            .recv_timeout(EVENT_LIMIT)
+            .unwrap_or_else(|e| panic!("{}: no path within {EVENT_LIMIT:?}: {e}", self.id))
     }
 }
 
@@ -435,4 +461,19 @@ pub fn dialling_a_machine_this_one_does_not_trust_fails_without_a_word_to_it<F: 
         }
     );
     assert_eq!(a.pending(), vec![]);
+}
+
+/// Once connected, each end says how its connection with the other goes. Between machines on one network (the fake's,
+/// or localhost with relays off) that is direct. Its round-trip time is a measurement, not asserted.
+pub fn a_connected_machine_reports_how_its_connection_goes<F: PeersFixture>(f: &mut F) {
+    let mut a = bound(f);
+    let mut b = bound(f);
+    pair(&mut a, &mut b);
+    b.peers.connect(&a.id);
+    assert_eq!(b.next(), PeersEvent::Connected { peer: a.id.clone() });
+    assert_eq!(a.next(), PeersEvent::Connected { peer: b.id.clone() });
+    let (peer, path) = b.next_path();
+    assert_eq!((peer, path.kind), (a.id.clone(), LinkKind::Direct));
+    let (peer, path) = a.next_path();
+    assert_eq!((peer, path.kind), (b.id.clone(), LinkKind::Direct));
 }

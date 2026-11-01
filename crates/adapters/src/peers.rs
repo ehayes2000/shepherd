@@ -16,6 +16,12 @@
 //! - **Pairing.** The joiner opens one stream and sends `{token, name, addr}` as JSON; the inviter takes the open pairing
 //!   (so it is used up whatever the token), compares the token in constant time ([`subtle`]), reports the attempt, and
 //!   then either answers `{name}` or closes with [`REFUSED`]. Each side keeps the other's address.
+//! - **Paths** (T32b). Each held link connection is looked at on [`PATH_SAMPLE`] ticks from when it is held until it
+//!   closes, through iroh's `Connection::paths()`: the path it has selected for sending is relayed
+//!   (`Path::is_relay`) or direct (`Path::is_ip`), with that path's round-trip estimate (`Path::rtt`). It is reported
+//!   ([`PeersEvent::Path`]) when it differs from the last one reported, its time rounded to whole milliseconds, and
+//!   only for the peer's first held connection (the one [`PeersEvent::Connected`] announced). So a kind change shows
+//!   within one tick, and a jittery round trip costs at most one event per peer per tick.
 //! - **Tickets** are [`iroh_tickets`] of kind `shepherd`: postcard of the inviter's address (its relay URL and at most
 //!   [`TICKET_IPS`] LAN addresses), its name and the token, in base32.
 //! - **Addresses** learned from pairing go into a `MemoryLookup`, and into the last-address cache
@@ -43,8 +49,9 @@ use iroh_tickets::{ParseError, Ticket};
 use serde::{Deserialize, Serialize};
 use shepherd_core::ids::MachineId;
 use shepherd_core::ports::{
-    ConnectError, DisconnectReason, JoinError, LinkEventSink, MAX_OPEN_PER_PEER, PairTicket,
-    PairToken, PairingError, PairingId, Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
+    ConnectError, DisconnectReason, JoinError, LinkEventSink, LinkKind, MAX_OPEN_PER_PEER,
+    PATH_SAMPLE, PairTicket, PairToken, PairingError, PairingId, PeerPath, Peers, PeersEvent,
+    PeersEventSink, TOKEN_LEN,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -266,12 +273,23 @@ impl Shared {
         }
         let shared = self.clone();
         let accepting = conn.clone();
+        let watched = conn.clone();
         tokio::spawn(async move {
             conn.closed().await;
             shared.release(peer, &conn);
         });
         tokio::spawn(accept_streams(accepting, self.clone()));
+        tokio::spawn(watch_path(watched, self.clone()));
         true
+    }
+
+    /// Whether `conn` is the first connection held with `peer`: the one whose path is reported.
+    fn is_first(&self, peer: EndpointId, conn: &Connection) -> bool {
+        self.state()
+            .conns
+            .get(&peer)
+            .and_then(|held| held.first())
+            .is_some_and(|first| first.stable_id() == conn.stable_id())
     }
 
     /// `conn` with `peer` closed: the last one gone announces it, unless it was dropped on purpose already.
@@ -865,6 +883,49 @@ async fn open(endpoint: Endpoint, shared: Arc<Shared>, node: EndpointId, opening
     }
 }
 
+/// Reports the path `conn`, a held link connection, takes (see the module docs), until it closes.
+async fn watch_path(conn: Connection, shared: Arc<Shared>) {
+    let peer = conn.remote_id();
+    let mut last = None;
+    let mut ticks = tokio::time::interval(PATH_SAMPLE);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = conn.closed() => return,
+            _ = ticks.tick() => {}
+        }
+        let Some(path) = selected_path(&conn) else {
+            continue;
+        };
+        if last == Some(path) || !shared.is_first(peer, &conn) {
+            continue;
+        }
+        last = Some(path);
+        shared.send(PeersEvent::Path {
+            peer: machine(peer),
+            path,
+        });
+    }
+}
+
+/// The path `conn` sends on now, its round trip rounded to whole milliseconds; `None` while it has selected none (or
+/// one neither relayed nor direct).
+fn selected_path(conn: &Connection) -> Option<PeerPath> {
+    let paths = conn.paths();
+    let selected = paths.iter().find(|p| p.is_selected())?;
+    let kind = match (selected.is_relay(), selected.is_ip()) {
+        (true, _) => LinkKind::Relayed,
+        (false, true) => LinkKind::Direct,
+        (false, false) => return None,
+    };
+    let rtt = selected.rtt();
+    let ms = u64::try_from((rtt + Duration::from_micros(500)).as_millis()).unwrap_or(u64::MAX);
+    Some(PeerPath {
+        kind,
+        rtt: Duration::from_millis(ms),
+    })
+}
+
 /// Takes the streams `peer` opens on `conn`, a held connection, into the link (if one was made), until it closes.
 async fn accept_streams(conn: Connection, shared: Arc<Shared>) {
     let peer = machine(conn.remote_id());
@@ -957,12 +1018,13 @@ mod tests {
         fn machine(&mut self) -> Machine<IrohPeers> {
             let root = self.root();
             let key = KeyFileIdentity::new(&root).load_or_create().unwrap();
-            let (sink, events) = channel();
+            let (sink, events, paths) = channel();
             let cache = Some(IrohPeers::cache_in(&root));
             Machine {
                 id: key.machine_id(),
                 peers: IrohPeers::new(Some(&key), Discovery::Local, cache, sink).unwrap(),
                 events,
+                paths,
             }
         }
 
@@ -978,12 +1040,13 @@ mod tests {
         /// A machine whose key and cache are in `root`, made if missing: the same machine every time.
         fn machine_at(&mut self, root: &Path) -> Machine<IrohPeers> {
             let key = KeyFileIdentity::new(root).load_or_create().unwrap();
-            let (sink, events) = channel();
+            let (sink, events, paths) = channel();
             let cache = Some(IrohPeers::cache_in(root));
             Machine {
                 id: key.machine_id(),
                 peers: IrohPeers::new(Some(&key), Discovery::Local, cache, sink).unwrap(),
                 events,
+                paths,
             }
         }
     }
@@ -1084,11 +1147,12 @@ mod tests {
         let cache = IrohPeers::cache_in(&root);
         std::fs::write(&cache, b"not json").unwrap();
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let (sink, events) = channel();
+        let (sink, events, paths) = channel();
         let mut machine = Machine {
             id: key.machine_id(),
             peers: IrohPeers::new(Some(&key), Discovery::Local, Some(cache), sink).unwrap(),
             events,
+            paths,
         };
         machine.peers.bind();
         machine
@@ -1099,11 +1163,12 @@ mod tests {
 
     #[test]
     fn a_port_without_a_key_never_binds() {
-        let (sink, events) = channel();
+        let (sink, events, paths) = channel();
         let mut machine = Machine {
             id: MachineId::new("none"),
             peers: IrohPeers::new(None, Discovery::Local, None, sink).unwrap(),
             events,
+            paths,
         };
         machine.peers.bind();
         assert!(matches!(machine.next(), PeersEvent::BindFailed { .. }));

@@ -611,7 +611,7 @@ mod tests {
 
         fn node_in(root: PathBuf) -> Node {
             let key = KeyFileIdentity::new(&root).load_or_create().unwrap();
-            let (sink, _events) = channel();
+            let (sink, _events, _paths) = channel();
             let mut peers = IrohPeers::new(Some(&key), Discovery::Local, None, sink).unwrap();
             peers.bind();
             Node {

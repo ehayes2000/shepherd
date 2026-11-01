@@ -494,6 +494,9 @@ pub enum HostCommand {
     Append(Box<FrameDraft>),
     /// A call to the `Peers` port, decided by [`peering::Peering`].
     Peers(peering::PeersCommand),
+    /// Tell each client that listed the peers (`_shepherd/peer/list`) what changed of one
+    /// (`_shepherd/peer/changed`), decided by [`peering::Peering`].
+    PeerChanged(crate::wire::PeerInfo),
     SpawnPty {
         session: SessionId,
         spec: SpawnSpec,

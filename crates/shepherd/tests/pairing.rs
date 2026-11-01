@@ -10,8 +10,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Envelope, Frame, Seq, ShepherdFrame};
 use shepherd_core::config::{RawConfig, RawMachine};
-use shepherd_core::ports::{EventLog, LogId};
-use shepherd_core::wire::{ClientRequest, PairJoin, PairStart, PairWait, PeerList, PeerRemove};
+use shepherd_core::ports::{EventLog, LinkKind, LogId, PeerPath};
+use shepherd_core::wire::{
+    ClientRequest, HostMessage, HostNotification, PairJoin, PairStart, PairWait, PeerList,
+    PeerRemove,
+};
 use shepherd_testkit::fakes::peers::FakePeerNet;
 use support::*;
 
@@ -138,7 +141,83 @@ fn pairing_trusts_each_machine_on_the_other_and_they_find_each_other_after_a_res
     a.step();
     assert_eq!(
         response(&client.take(), &list),
-        Ok(json!({ "peers": [{ "id": id_b.as_str(), "name": "laptop", "connected": true }] }))
+        Ok(
+            json!({ "peers": [{ "id": id_b.as_str(), "name": "laptop", "connected": true, "link": "direct", "rtt_ms": 1 }] })
+        )
+    );
+}
+
+/// Two hosts that paired, A restarted and connected to B.
+fn connected_pair(net: &FakePeerNet) -> (HostHarness, HostHarness) {
+    let mut a = host(net, KEY_A, "office");
+    let mut b = host(net, KEY_B, "laptop");
+    let mut pair = a.connect();
+    let start = pair.request(ClientRequest::PairStart(PairStart {}));
+    a.step();
+    let ticket = response(&pair.take(), &start).expect("started")["ticket"]
+        .as_str()
+        .expect("ticket")
+        .to_owned();
+    let mut join = b.connect();
+    let joined = join.request(ClientRequest::PairJoin(PairJoin { ticket }));
+    settle(&mut a, &mut b);
+    response(&join.take(), &joined).expect("joined");
+    a.restart();
+    settle(&mut a, &mut b);
+    (a, b)
+}
+
+/// The `_shepherd/peer/changed` notifications among `msgs`, as JSON.
+fn peer_changes(msgs: &[HostMessage]) -> Vec<Value> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            HostMessage::Notification(HostNotification::PeerChanged(info)) => {
+                Some(serde_json::to_value(info).expect("info"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// T32b: the link to a peer turns direct once hole punching works, and a client that listed the peers hears of it.
+#[test]
+fn a_peers_link_that_changes_is_told_to_the_clients_that_listed_the_peers() {
+    let net = FakePeerNet::new();
+    let (mut a, b) = connected_pair(&net);
+    let (id_a, id_b) = (a.machine(), b.machine());
+    let relayed = PeerPath {
+        kind: LinkKind::Relayed,
+        rtt: Duration::from_millis(86),
+    };
+    net.set_path(&id_a, &id_b, relayed);
+    let mut client = a.connect();
+    let list = client.request(ClientRequest::PeerList(PeerList {}));
+    let mut other = a.connect();
+    a.step();
+    assert_eq!(
+        response(&client.take(), &list).expect("list")["peers"][0],
+        json!({ "id": id_b.as_str(), "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86 })
+    );
+
+    net.set_path(
+        &id_a,
+        &id_b,
+        PeerPath {
+            kind: LinkKind::Direct,
+            rtt: Duration::from_millis(4),
+        },
+    );
+    a.step();
+    assert_eq!(
+        peer_changes(&client.take()),
+        [
+            json!({ "id": id_b.as_str(), "name": "laptop", "connected": true, "link": "direct", "rtt_ms": 4 })
+        ]
+    );
+    assert_eq!(
+        peer_changes(&other.take()),
+        Vec::<Value>::new(),
+        "it never listed them"
     );
 }
 

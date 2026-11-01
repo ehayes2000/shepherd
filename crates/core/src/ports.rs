@@ -28,8 +28,8 @@ pub use link::{
     MAX_OPEN_PER_PEER, MAX_QUEUED,
 };
 pub use peers::{
-    ConnectError, JoinError, PairTicket, PairToken, PairingError, PairingId, Peers, PeersEvent,
-    PeersEventSink, TOKEN_LEN,
+    ConnectError, JoinError, LinkKind, PATH_SAMPLE, PairTicket, PairToken, PairingError, PairingId,
+    PeerPath, Peers, PeersEvent, PeersEventSink, TOKEN_LEN,
 };
 pub use pty::{
     MAX_OUTPUT_CHUNK, OUTPUT_CREDIT, Pty, PtyError, PtyEvent, PtyEventSink, PtyHandoff, PtySize,

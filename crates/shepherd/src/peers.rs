@@ -299,6 +299,8 @@ mod tests {
 
     fn peer(name: &str, id: &str, connected: bool) -> PeerInfo {
         PeerInfo {
+            link: None,
+            rtt_ms: None,
             id: MachineId::new(id),
             name: name.into(),
             connected,

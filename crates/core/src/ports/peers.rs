@@ -16,11 +16,39 @@
 //!   its token matches or not ([`PeersEvent::PairRequested`]), so a ticket can't be guessed at. Tokens are compared
 //!   in constant time.
 //! - Names a peer sends are its own claim, untrusted text: core makes them display-safe before recording them.
+//! - Each connected peer's path is reported ([`PeersEvent::Path`], T32b): soon after [`PeersEvent::Connected`], then
+//!   whenever its kind changes (relayed to direct once hole punching works) or its round-trip time, in whole
+//!   milliseconds, does. An implementation may look at the path only every [`PATH_SAMPLE`], and never more often than
+//!   that for the time alone, so a jittery link reports at most one change per peer per sample.
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::ids::MachineId;
+
+/// How often an implementation looks at a connected peer's round-trip time, at most: the bound on how many
+/// [`PeersEvent::Path`] events a jittery link causes.
+pub const PATH_SAMPLE: Duration = Duration::from_secs(2);
+
+/// How a connection with a peer goes: straight to it, or through a relay server (decision 0019: relayed typing costs
+/// about 26 ms more per keystroke).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkKind {
+    Direct,
+    #[serde(rename = "relay")]
+    Relayed,
+}
+
+/// The path a connection with a peer takes now: its kind, and its round-trip time, in whole milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerPath {
+    pub kind: LinkKind,
+    pub rtt: Duration,
+}
 
 /// How many bytes a [`PairToken`] has.
 pub const TOKEN_LEN: usize = 16;
@@ -110,6 +138,9 @@ pub enum PeersEvent {
         peer: MachineId,
         error: ConnectError,
     },
+    /// `peer`'s connection (the one [`PeersEvent::Connected`] announced) now goes over `path`: sent once after it
+    /// connected, then on each change (see the module docs).
+    Path { peer: MachineId, path: PeerPath },
     /// `peer`'s last connection is gone: it closed, went away, was untrusted, or the endpoint was unbound.
     Disconnected { peer: MachineId },
     /// `peer`, a machine outside the trusted set, tried to connect and was refused.
