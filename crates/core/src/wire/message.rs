@@ -29,7 +29,7 @@ use super::WireError;
 use super::base64::serde_bytes;
 use super::build::{BuildId, ExeDigest};
 use super::codec::frame;
-use crate::acpp::{Envelope, PromptBy, RequestId, Seq, Timestamp};
+use crate::acpp::{Choice, Envelope, PromptBy, RequestId, Seq, Timestamp};
 use crate::config::{AgentKind, Config};
 use crate::ids::{MachineId, SessionId};
 use crate::layout::{Layout, LayoutOp};
@@ -67,10 +67,11 @@ pub enum Method {
     SessionPrompt,
     SessionReply,
     SessionScreen,
+    SessionAnswer,
 }
 
 impl Method {
-    pub const ALL: [Method; 24] = [
+    pub const ALL: [Method; 25] = [
         Self::Hello,
         Self::SessionNew,
         Self::SessionRename,
@@ -95,6 +96,7 @@ impl Method {
         Self::SessionPrompt,
         Self::SessionReply,
         Self::SessionScreen,
+        Self::SessionAnswer,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -123,6 +125,7 @@ impl Method {
             Self::SessionPrompt => "_shepherd/session/prompt",
             Self::SessionReply => "_shepherd/session/reply",
             Self::SessionScreen => "_shepherd/session/screen",
+            Self::SessionAnswer => "_shepherd/session/answer",
         }
     }
 
@@ -164,6 +167,7 @@ pub enum ClientRequest {
     SessionPrompt(SessionPrompt),
     SessionReply(SessionReply),
     SessionScreen(SessionScreen),
+    SessionAnswer(SessionAnswer),
 }
 
 /// A fire-and-forget message from a client. Never answered, see the module docs.
@@ -528,6 +532,23 @@ pub struct SessionReply {
     pub since: Option<jiff::Timestamp>,
 }
 
+/// `_shepherd/session/answer`: answer the question the session's agent is blocked on (`_shepherd/agent/asked`) by
+/// typing the agent's own keys for `choice` (T51), recorded as `_shepherd/session/answered`. Answered with an ack once
+/// typed; refused, typing nothing, with [`WireError::NothingAsked`] (and the session's status) while no question
+/// shepherd may answer is pending, or with [`WireError::InvalidParams`] for a choice that question doesn't take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAnswer {
+    pub session: SessionId,
+    pub choice: Choice,
+    /// The question being answered: the seq of its `_shepherd/agent/asked` entry in the session's log. When given, the
+    /// answer is refused unless that question is the one pending, so it never lands on a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<Seq>,
+    /// Who asked. A client that doesn't say is recorded as `client`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<PromptBy>,
+}
+
 /// The host's answer to `_shepherd/session/reply`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionReplyOk {
@@ -699,6 +720,7 @@ impl ClientRequest {
             Self::SessionPrompt(_) => Method::SessionPrompt,
             Self::SessionReply(_) => Method::SessionReply,
             Self::SessionScreen(_) => Method::SessionScreen,
+            Self::SessionAnswer(_) => Method::SessionAnswer,
         }
     }
 
@@ -728,6 +750,7 @@ impl ClientRequest {
             Self::SessionPrompt(p) => json(p),
             Self::SessionReply(p) => json(p),
             Self::SessionScreen(p) => json(p),
+            Self::SessionAnswer(p) => json(p),
         }
     }
 
@@ -759,6 +782,7 @@ impl ClientRequest {
             Method::SessionPrompt => Self::SessionPrompt(invalid_params(params)?),
             Method::SessionReply => Self::SessionReply(invalid_params(params)?),
             Method::SessionScreen => Self::SessionScreen(invalid_params(params)?),
+            Method::SessionAnswer => Self::SessionAnswer(invalid_params(params)?),
         })
     }
 }

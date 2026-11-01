@@ -15,6 +15,7 @@ pub mod code {
     pub const VERSION_MISMATCH: i64 = 1000;
     pub const UNKNOWN_SESSION: i64 = 1001;
     pub const SESSION_BUSY: i64 = 1002;
+    pub const NOTHING_ASKED: i64 = 1003;
 }
 
 /// A request failed. On the wire: `{ code, message, data? }`, with the variant's fields in `data`.
@@ -38,6 +39,9 @@ pub enum WireError {
     /// The session's agent isn't at its prompt, so it wasn't typed into.
     #[error("{session} is busy ({status})")]
     SessionBusy { session: SessionId, status: Busy },
+    /// The session's agent isn't blocked on a question shepherd may answer, so nothing was typed.
+    #[error("{session} has nothing to answer ({status})")]
+    NothingAsked { session: SessionId, status: Status },
     /// A code this version doesn't know, kept as received.
     #[error("error {code}: {message}")]
     Other {
@@ -78,6 +82,45 @@ struct BusyData {
     status: Busy,
 }
 
+/// What a session is doing, as `docs/cli.md` spells a session's status. Scripts see it as
+/// [`SessionStatus`](crate::client::automation::SessionStatus), which also says how it is worked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Status {
+    /// Its process runs and isn't known to be waiting: the agent is in a turn, still starting, or it runs no agent.
+    Running,
+    /// The agent is at its prompt with nothing to do.
+    Idle,
+    /// The agent is waiting on the user: it asked permission or a question.
+    WantsUser,
+    /// Its process ended, or it never started.
+    Exited,
+}
+
+impl Status {
+    /// How `docs/cli.md` spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::WantsUser => "wants-user",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StatusData {
+    session: SessionId,
+    status: Status,
+}
+
 #[derive(Serialize, Deserialize)]
 struct SessionData {
     session: SessionId,
@@ -94,6 +137,7 @@ impl WireError {
             Self::VersionMismatch { .. } => code::VERSION_MISMATCH,
             Self::UnknownSession { .. } => code::UNKNOWN_SESSION,
             Self::SessionBusy { .. } => code::SESSION_BUSY,
+            Self::NothingAsked { .. } => code::NOTHING_ASKED,
             Self::Other { code, .. } => *code,
         }
     }
@@ -114,6 +158,10 @@ impl WireError {
                 session: session.clone(),
             })),
             Self::SessionBusy { session, status } => Some(super::message::json(&BusyData {
+                session: session.clone(),
+                status: *status,
+            })),
+            Self::NothingAsked { session, status } => Some(super::message::json(&StatusData {
                 session: session.clone(),
                 status: *status,
             })),
@@ -163,6 +211,13 @@ impl WireError {
                 .clone()
                 .and_then(|d| serde_json::from_value::<BusyData>(d).ok())
                 .map(|d| Self::SessionBusy {
+                    session: d.session,
+                    status: d.status,
+                }),
+            code::NOTHING_ASKED => data
+                .clone()
+                .and_then(|d| serde_json::from_value::<StatusData>(d).ok())
+                .map(|d| Self::NothingAsked {
                     session: d.session,
                     status: d.status,
                 }),

@@ -735,7 +735,8 @@ fn a_block_from_a_subagent_the_session_lost_track_of_brings_it_back() {
         sub.status(),
         &blocked_status(BlockKind::Permission, "Grep: factorial")
     );
-    assert!(run.state.attention(Seq::new(seq.get() - 1)));
+    // The hook ends with the block and then `agent/asked`: seen up to the frame before the block, it wants the user.
+    assert!(run.state.attention(Seq::new(seq.get() - 2)));
 }
 
 // ---------- Claude Code: attention ----------

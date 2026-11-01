@@ -27,8 +27,9 @@ use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, Pane, PaneId, SplitDir};
 use shepherd_core::ports::{EventLog, Link, LinkEvent, LinkEventSink, LogId, Reply};
 use shepherd_core::wire::{
-    ClientMessage, ClientRequest, CloseWorktree, Hello, HookFrame, HostResponse, PROTOCOL_VERSION,
-    SessionClose, SessionPrompt, SessionRename, WireError, decode_client_message, encode_response,
+    ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HookFrame,
+    HostResponse, InputKind, PROTOCOL_VERSION, SessionClose, SessionInput, SessionPrompt,
+    SessionRename, WireError, decode_client_message, encode_response,
 };
 use shepherd_testkit::builders::HostDriver;
 use shepherd_testkit::fakes::event_log::FakeEventLog;
@@ -179,6 +180,13 @@ struct World {
     working: Option<(String, String, u32)>,
     /// Every prompt the fake agent was submitted, as its input box got it.
     submitted: Vec<String>,
+    /// The tool each session's agent is asking permission for, with its dialog up.
+    asking: BTreeMap<String, &'static str>,
+    /// The keys each dialog was answered with, by session, in order.
+    answered: Vec<(String, Vec<u8>)>,
+    /// Whether an answered dialog's tool then starts (its `PreToolUse` hook); off, its hooks stay silent, as a long
+    /// tool's do until it finishes.
+    answer_hooks: bool,
 }
 
 impl World {
@@ -251,6 +259,9 @@ impl World {
             typing: BTreeMap::new(),
             working: None,
             submitted: Vec::new(),
+            asking: BTreeMap::new(),
+            answered: Vec::new(),
+            answer_hooks: true,
         }
     }
 
@@ -320,6 +331,16 @@ impl World {
                     });
                     self.hook(&session, payload);
                 }
+                // A key into an open permission dialog answers it.
+                Seen::Typed(session, bytes) if self.asking.contains_key(&session) => {
+                    let tool = self.asking.remove(&session).unwrap_or_default();
+                    self.answered.push((session.clone(), bytes));
+                    if self.answer_hooks {
+                        let started = json!({ "hook_event_name": "PreToolUse", "tool_name": tool,
+                                              "tool_use_id": "toolu_answered", "tool_input": {} });
+                        self.hook(&session, started);
+                    }
+                }
                 Seen::Typed(session, bytes) => {
                     let typed = self.typing.entry(session.clone()).or_default();
                     typed.extend_from_slice(&bytes);
@@ -336,10 +357,13 @@ impl World {
                     );
                     match self.answers.pop_front().unwrap_or(Answer::Reply) {
                         Answer::Reply => self.finish(&session, &prompt),
-                        Answer::Ask(tool) => self.hook(
-                            &session,
-                            json!({ "hook_event_name": "PermissionRequest", "tool_name": tool }),
-                        ),
+                        Answer::Ask(tool) => {
+                            self.asking.insert(session.clone(), tool);
+                            self.hook(
+                                &session,
+                                json!({ "hook_event_name": "PermissionRequest", "tool_name": tool }),
+                            )
+                        }
                         Answer::Silent => {}
                         Answer::Slow(rounds) => self.working = Some((session, prompt, rounds)),
                         Answer::Quiet => {
@@ -1371,4 +1395,156 @@ fn ui_screenshot_and_screen_leave_out_concealed_text() {
     });
     assert!(shot.contains("pw:") && shot.contains("ok"), "{shot}");
     assert!(!shot.contains("secret"), "{shot}");
+}
+
+// ---------- answer (T51) ----------
+
+/// What `shepherd answer --json` prints, or why it failed.
+fn answer_json(w: &mut World, session: &str, choice: &str) -> Result<Value, CliError> {
+    answer_to_json(w, session, choice, None)
+}
+
+/// What `shepherd answer --json [--asked SEQ]` prints, or why it failed.
+fn answer_to_json(
+    w: &mut World,
+    session: &str,
+    choice: &str,
+    asked: Option<Seq>,
+) -> Result<Value, CliError> {
+    let mut out = Vec::new();
+    let answer = shepherd::cli::answer::Answer {
+        session: session.to_owned(),
+        choice: choice.parse().unwrap(),
+        asked,
+    };
+    shepherd::cli::answer::answer(w, &answer, true, &mut out)?;
+    Ok(serde_json::from_slice(&out).unwrap())
+}
+
+impl World {
+    /// The seq of the latest `agent/asked` entry in session `id`'s log on A.
+    fn asked_seq(&self, id: &str) -> Seq {
+        self.a
+            .log()
+            .read(LogId::Session(SessionId::new(id)), Seq::ZERO)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| {
+                matches!(e.frame(), Frame::Shepherd(m)
+                    if matches!(m.body(), ShepherdFrame::AgentAsked(_)))
+            })
+            .map(|e| e.seq())
+            .expect("the agent asked")
+    }
+}
+
+#[test]
+fn an_answer_naming_a_question_no_longer_pending_is_refused_never_typed() {
+    let mut w = World::new();
+    let id = asking(&mut w);
+    let stale = Seq::new(w.asked_seq(&id).get() - 1);
+    let err = answer_to_json(&mut w, "worker", "yes", Some(stale)).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("nothing to answer (wants-user)")),
+        "{err:?}"
+    );
+    assert!(w.answered.is_empty());
+}
+
+/// Session `worker`'s agent, prompted, asking permission to use Bash: the client has seen it want the user.
+fn asking(w: &mut World) -> String {
+    let id = w.agent_session("worker");
+    w.answers.push_back(Answer::Ask("Bash"));
+    let asked = w
+        .prompt_json(Prompt {
+            wait: true,
+            ..prompt_of("worker", "delete the logs")
+        })
+        .unwrap();
+    assert_eq!(asked["status"], "wants-user", "{asked}");
+    id
+}
+
+fn status_of(w: &World, id: &str) -> Option<SessionStatus> {
+    let client = w.client.client();
+    let session = SessionId::new(id);
+    client
+        .sessions()
+        .iter()
+        .find(|s| s.id == session)
+        .map(|s| SessionStatus::in_client(client, s))
+}
+
+#[test]
+fn an_agents_question_is_answered_from_the_cli_and_it_works_on() {
+    let mut w = World::new();
+    let id = asking(&mut w);
+    let asked = w.asked_seq(&id);
+    let answered = answer_json(&mut w, "worker", "yes").unwrap();
+    // It named the question it answered: the `agent/asked` entry this client folded.
+    assert_eq!(
+        answered,
+        json!({ "session": id, "choice": "yes", "asked": "Bash", "question": asked.get() })
+    );
+    // Claude Code's own key for yes, typed once into its dialog.
+    assert_eq!(w.answered, [(id.clone(), b"\r".to_vec())]);
+    let session = SessionId::new(&id);
+    w.wait(
+        &mut |c| {
+            c.sessions()
+                .iter()
+                .find(|s| s.id == session)
+                .is_some_and(|s| SessionStatus::in_client(c, s) == SessionStatus::Running)
+        },
+        LIVENESS,
+    )
+    .unwrap();
+    // Answered once: a second answer finds nothing to answer.
+    let err = answer_json(&mut w, "worker", "yes").unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("nothing to answer (running)")),
+        "{err:?}"
+    );
+    assert_eq!(w.answered.len(), 1);
+}
+
+#[test]
+fn an_answer_with_nothing_pending_is_refused_and_never_typed() {
+    let mut w = World::new();
+    w.agent_session("worker");
+    let err = answer_json(&mut w, "worker", "no").unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("nothing to answer (idle)")),
+        "{err:?}"
+    );
+    assert!(w.answered.is_empty());
+    assert!(w.submitted.is_empty());
+}
+
+#[test]
+fn a_stale_answer_after_the_user_answered_in_the_pane_is_refused_never_typed() {
+    let mut w = World::new();
+    let id = asking(&mut w);
+    // The user answers in the pane; the tool it allowed runs on, its hooks silent until it finishes.
+    w.answer_hooks = false;
+    let mut pane = w.a.connect();
+    pane.notify(ClientNotification::SessionInput(SessionInput {
+        session: SessionId::new(&id),
+        data: b"\r".to_vec(),
+        kind: InputKind::Answer,
+    }));
+    // Run the world until nothing more happens: the fake agent has seen the user's key.
+    let _ = w.wait(&mut |_| false, LIVENESS);
+    let user = (id.clone(), b"\r".to_vec());
+    assert_eq!(w.answered, std::slice::from_ref(&user));
+    assert_eq!(status_of(&w, &id), Some(SessionStatus::WantsUser));
+
+    let err = answer_json(&mut w, "worker", "no").unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why) if why.contains("nothing to answer (wants-user)")),
+        "{err:?}"
+    );
+    // Only the user's key reached the agent.
+    assert_eq!(w.answered, [user]);
 }

@@ -394,7 +394,13 @@ fn permission_request_becomes_request_permission_naming_the_pending_tool() {
         fx!("PreToolUse.Bash"),
         fx!("PermissionRequest.Bash"),
     ]);
-    assert_eq!(methods(&drafts), vec![Some("session/request_permission")]);
+    assert_eq!(
+        methods(&drafts),
+        vec![
+            Some("session/request_permission"),
+            Some("_shepherd/agent/asked")
+        ]
+    );
     assert_eq!(drafts[0].dir, Dir::FromAgent);
     let AcpFrame::RequestPermission(r) = acp(&drafts[0]) else {
         panic!("expected request_permission");
@@ -419,7 +425,13 @@ fn permission_notification_becomes_request_permission() {
         fx!("UserPromptSubmit"),
         fx!("Notification.permission_prompt"),
     ]);
-    assert_eq!(methods(&drafts), vec![Some("session/request_permission")]);
+    assert_eq!(
+        methods(&drafts),
+        vec![
+            Some("session/request_permission"),
+            Some("_shepherd/agent/asked")
+        ]
+    );
     assert_eq!(drafts[0].dir, Dir::FromAgent);
     let AcpFrame::RequestPermission(r) = acp(&drafts[0]) else {
         panic!("expected request_permission");
@@ -794,7 +806,11 @@ fn a_permission_request_with_no_open_prompt_opens_a_continuation() {
     ]);
     assert_eq!(
         methods(&drafts),
-        vec![Some("session/prompt"), Some("session/request_permission")]
+        vec![
+            Some("session/prompt"),
+            Some("session/request_permission"),
+            Some("_shepherd/agent/asked")
+        ]
     );
     assert!(is_continuation(&drafts[0]));
 }

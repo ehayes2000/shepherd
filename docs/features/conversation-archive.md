@@ -221,6 +221,20 @@ acceptance:
   starts (prompted as soon as its `SessionStart` hook arrives); the printed reply is its last message; a prompt that
   needs a permission returns `wants-user`. Re-record `crates/archive/tests/fixtures/reply/` from those transcripts
   (Claude Code's one-line-per-content-block layout, Codex's `response_item` messages).
+- From T51: an answer round trip for both agents through a real host. Prompt something that needs a permission (a Bash
+  command), wait for `wants-user`, then `shepherd answer <session> yes|always|no --json`, each in a fresh session: the
+  dialog takes the host's keys (`core::host::answer` cites each) and does what the choice says (the tool runs, runs and
+  is remembered, or is declined), and the session goes on working (or idle, after no). Check each variant's keys and
+  what it offers: Claude Code's Bash prompt (Enter, Esc; `always` refused) and a file prompt (Edit: Shift+Tab selects
+  "allow for the rest of the session"); Codex's command approval (`y`, and `n` = Cancel, which should end the turn:
+  does any command approval offer Decline (`d`) or `a` after all, and should `always` then be typed?), its patch
+  approval (`y`, `a`, `n`), and a permissions or MCP request (only `yes` is typed: confirm its tool name in the hook).
+  Also open two dialogs at once (a subagent asking while the main agent's dialog is up) and confirm Claude Code queues
+  them, showing the first. For
+  Claude Code also ask an `AskUserQuestion` (prompt "ask me which of two colours I like with your question tool"):
+  `shepherd answer <session> 2` picks the second option (Down, then Enter, as separate writes) and `no` cancels it.
+  Then answer in the pane and check a later `shepherd answer` is refused (`nothing to answer (wants-user)`), and
+  re-record `PreToolUse.AskUserQuestion` and the permission fixtures from those hooks.
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get

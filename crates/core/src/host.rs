@@ -96,6 +96,7 @@
 //! fold"). [`Host::handle`] reads state and decides what to do. It never changes state: every change is a
 //! [`HostCommand::Append`] that the runtime seals, appends, and hands back to [`Host::apply`].
 
+pub mod answer;
 pub mod capture;
 pub mod launch;
 pub mod naming;
@@ -114,10 +115,10 @@ use serde_json::Value;
 
 use crate::acpp::acp::{AcpFrame, ContentBlock, PromptRequest};
 use crate::acpp::{
-    AgentExited, AgentStarted, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr, PromptBy,
-    SessionClosed, SessionCreated, SessionFailed, SessionPrompted, SessionRenamed, ShepherdFrame,
-    Source, SourceKind, Timestamp, UiLayout, WorkspaceSelected, WorktreeCreated, WorktreeHook,
-    WorktreeRemoved, WorktreeRemoving,
+    AgentExited, AgentStarted, Choice, Dir, Envelope, Frame, FrameDraft, MachineRenamed, Pr,
+    PromptBy, Seq, SessionAnswered, SessionClosed, SessionCreated, SessionFailed, SessionPrompted,
+    SessionRenamed, ShepherdFrame, Source, SourceKind, Timestamp, UiLayout, WorkspaceSelected,
+    WorktreeCreated, WorktreeHook, WorktreeRemoved, WorktreeRemoving,
 };
 use crate::agents::Translators;
 use crate::config::{AgentKind, DEFAULT_HOOK_TIMEOUT, WorkspaceHooks};
@@ -134,8 +135,8 @@ use crate::ports::worktrees::{
 use crate::session::SessionState;
 use crate::wire::{
     Busy, CleanupInfo, CloseWorktree, HostResult, InputKind, ReplyInfo, SCREEN_LINES_MAX,
-    SessionNewOk, SessionReplyOk, WireError, WorktreeCleanupOk, WorktreeInfo, WorktreeListOk,
-    WorktreeRemoveOk, WorktreeStatusOk,
+    SessionNewOk, SessionReplyOk, Status, WireError, WorktreeCleanupOk, WorktreeInfo,
+    WorktreeListOk, WorktreeRemoveOk, WorktreeStatusOk,
 };
 
 use self::capture::{AfterCapture, CaptureJob};
@@ -458,6 +459,16 @@ pub enum HostEvent {
         text: String,
         by: PromptBy,
     },
+    /// A client asked to answer the question a session's agent is blocked on with `choice` (`_shepherd/session/answer`),
+    /// on behalf of `by`.
+    Answer {
+        reply: ReplyTo,
+        session: SessionId,
+        choice: Choice,
+        /// The question meant: its `agent/asked` entry's seq. Refused unless that one is pending.
+        asked: Option<Seq>,
+        by: PromptBy,
+    },
     /// A client asked for a session's agent's last reply, written at or after `since` (`_shepherd/session/reply`).
     ReadReply {
         reply: ReplyTo,
@@ -735,6 +746,12 @@ struct Entry {
 }
 
 impl Entry {
+    /// What it is doing, as `docs/cli.md` spells a session's status, and as a client listing it would say.
+    fn status(&self) -> Status {
+        let exited = matches!(self.phase, Phase::Exited | Phase::Failed(_));
+        Status::of_state(exited, &self.state)
+    }
+
     /// Its worktree, if it has one closing could remove: made (its post-create hooks may still be running).
     fn removable_worktree(&self) -> Option<&(PathBuf, String)> {
         match self.phase {
@@ -1204,11 +1221,28 @@ impl Host {
                 session,
                 bytes,
                 kind,
-            } => vec![HostCommand::WritePty {
-                session,
-                bytes,
-                kind,
-            }],
+            } => {
+                // Typing into a question shepherd could answer: the user is answering it in the pane, so a later
+                // `session/answer` must not type into whatever comes next. Any key counts, moving around the dialog
+                // too (Enter confirms what the user moved to); the window's focus reports don't.
+                let asked = self
+                    .open(&session)
+                    .is_some_and(|e| e.state.question().is_some());
+                let mut commands = Vec::new();
+                if asked && kind != InputKind::Focus {
+                    let answered = ShepherdFrame::SessionAnswered(SessionAnswered {
+                        choice: None,
+                        by: PromptBy::Client,
+                    });
+                    commands.push(append(&session, answered));
+                }
+                commands.push(HostCommand::WritePty {
+                    session,
+                    bytes,
+                    kind,
+                });
+                commands
+            }
             HostEvent::Resize { session, size } => vec![HostCommand::ResizePty { session, size }],
             HostEvent::PtyExited { session, code } => {
                 let exited = ShepherdFrame::AgentExited(AgentExited { code, signal: None });
@@ -1378,6 +1412,13 @@ impl Host {
                 text,
                 by,
             } => self.prompt(reply, session, &text, by),
+            HostEvent::Answer {
+                reply,
+                session,
+                choice,
+                asked,
+                by,
+            } => self.answer(reply, session, choice, asked, by),
             HostEvent::ReadReply {
                 reply,
                 session,
@@ -1451,6 +1492,61 @@ impl Host {
                 sessions.chain(orphans).collect()
             }
         }
+    }
+
+    /// Types the agent's own keys for `choice` ([`answer::keys`]) into open session `session`, recording the answer
+    /// first, if its agent is blocked on a question shepherd may answer and `choice` answers it; otherwise refuses it,
+    /// typing nothing. Decided on the folded log as it stands, so an answer the user already gave in the pane (or the
+    /// agent's moving on) refuses it.
+    fn answer(
+        &self,
+        reply: ReplyTo,
+        session: SessionId,
+        choice: Choice,
+        meant: Option<Seq>,
+        by: PromptBy,
+    ) -> Vec<HostCommand> {
+        let Some(entry) = self.open(&session) else {
+            return vec![unknown_session(reply, session)];
+        };
+        let Some(agent) = entry
+            .agent
+            .filter(|a| matches!(a, AgentKind::ClaudeCode | AgentKind::Codex))
+        else {
+            let why = format!("{session} runs no agent: there is nothing to answer");
+            return vec![reply_err(reply, WireError::InvalidParams(why))];
+        };
+        // No PTY to type into before it runs; and an answer that names its question answers only that one.
+        let question = entry.state.question().filter(|_| {
+            entry.phase == Phase::Running
+                && meant.is_none_or(|seq| entry.state.question_seq() == Some(seq))
+        });
+        let Some(asked) = question else {
+            let status = entry.status();
+            return vec![reply_err(
+                reply,
+                WireError::NothingAsked { session, status },
+            )];
+        };
+        let writes = match answer::keys(agent, asked, choice) {
+            Ok(writes) => writes,
+            Err(why) => {
+                let why = format!("{choice} doesn't answer {session}: {why}");
+                return vec![reply_err(reply, WireError::InvalidParams(why))];
+            }
+        };
+        let answered = ShepherdFrame::SessionAnswered(SessionAnswered {
+            choice: Some(choice),
+            by,
+        });
+        let mut commands = vec![append(&session, answered)];
+        commands.extend(writes.into_iter().map(|bytes| HostCommand::WritePty {
+            session: session.clone(),
+            bytes,
+            kind: InputKind::Keys,
+        }));
+        commands.push(ack(reply));
+        commands
     }
 
     /// Types `text` into open session `session`'s agent as one prompt ([`prompt`]), recording it first, if the agent is

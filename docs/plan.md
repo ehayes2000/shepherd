@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T51 Answer an agent's pending question | [automation](features/automation.md) | merging | task/t51-answer @ ec3d014 | 3 | round 3 fixed as asked (agent_id linking; 3 tests, each mutation-proven); merging |
-| T59 Events feed and message line | [status-page](features/status-page.md) | review | task/t59-events-message @ 2c69c61 |  | built; feed from folded state; message line by: client; group report |
+| T59 Events feed and message line | [status-page](features/status-page.md) | fixing | task/t59-events-message @ 2c69c61 | 1 | round 1 CHANGES: multi-line paste truncated; machine target, offline skip, peer drop untested |
 
 ## Ready to start
 

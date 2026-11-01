@@ -7,6 +7,7 @@
 //! sessions ([`settle`]), asks what it needs ([`request`]), and names sessions the one way every command does
 //! ([`target`]). Human output is display-safe; errors go to stderr.
 
+pub mod answer;
 pub mod prompt;
 pub mod screen;
 pub mod sessions;

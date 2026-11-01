@@ -20,6 +20,7 @@ shepherd ui close <pane>                                                 [--json
 shepherd ui ratio <pane> R                                               [--json]
 shepherd ui screenshot [--size WxH] [--page P]                           [--json]
 shepherd screen <session> [--lines N]                                    [--json]
+shepherd answer <session> <yes | always | no | N> [--asked SEQ]          [--json]
 ```
 
 - Human output is display-safe (control characters in names, branches and paths are dropped). `--json` output is one
@@ -145,6 +146,33 @@ asking for more gives what there is), and at most 1 MiB of text, past which the 
 session's screen when they show it. A session that isn't running (it exited, or its worktree is still being made) is
 refused.
 
+## `shepherd answer`
+
+Answers the permission prompt or question the session's agent (or a subagent of its, whose dialog is in the session)
+is blocked on, without attaching, and prints `answered <name> <choice>: <what it asked>`. The host types the agent's
+own keys for the choice into the session, so every window sees the dialog close, and records it in the session's log
+(`_shepherd/session/answered`, with `by: "cli"`).
+
+- A permission takes `yes`, `always` (yes, and don't ask again) or `no`, where that dialog offers them. A choice the
+  dialog doesn't offer, or that shepherd can't tell it offers, is refused rather than guessed: Claude Code takes
+  `always` only on a file prompt (Edit, Write); Codex takes `always` only on a patch, and `no` on a patch or a command.
+  For a Codex command, `no` cancels: Codex stops its turn and waits for you to tell it what to do differently (its
+  command dialog offers no "no, but carry on").
+  `yes` is always offered.
+- A question takes the number of one of its options, from 1 in the order the agent lists them, or `no` to cancel it.
+  A question that takes several picks, or asks several questions at once, can only be answered in the pane.
+
+The answer names the question it means: the seq of its `_shepherd/agent/asked` entry in the session's log, as this
+command last saw it, or `--asked SEQ`. Only that question, still pending as the host sees it when the answer arrives,
+is answered. Otherwise nothing is typed and it is refused with the session's status: `<name> has nothing to answer
+(<status>)`. That covers an agent that asked nothing, one that has moved on (or asked something else since), one whose
+question the user is answering in the pane (any key typed into the session after it asked, including moving around
+the dialog, takes the question away from shepherd), and one that opened a second dialog while another was up (the
+agents queue them, so keys could land in the first). The last two stay `wants-user`, unanswerable here, until the
+agent's activity shows the dialogs closed (or, for a dialog about no tool the agent named, until its turn ends). The
+agent and a subagent asking about the same command are two dialogs. A choice the question doesn't take (`yes` for a
+question, a number past its last option) is refused too, saying why.
+
 ## Shapes
 
 These are stable: fields may be added, never renamed, removed or retyped. Times are RFC 3339. Paths are strings (a
@@ -222,9 +250,8 @@ This machine first, then the paired machines by name; sessions newest first.
   "session": "s_01jbx…",
   "status": "running" | "idle" | "wants-user" | "exited",
   "reply": "the agent's last reply" | null,  // prompt without --wait, wait, and a turn without one: null
-  "asked": "what it asked the user" | null   // with wants-user: the permission's title, or the subagent's question;
-                                             // null for a question the agent asks in its own TUI (no hook says
-                                             // what it is yet)
+  "asked": "what it asked the user" | null   // with wants-user: the permission's title, the agent's question, or
+                                             // the subagent's question
 }
 ```
 
@@ -298,3 +325,17 @@ A pane's `content` is what it shows: for a pane showing the selection (`selected
                                            // start below the screen's top row
 }
 ```
+
+### `answer --json`
+
+```json
+{
+  "session": "s_01jbx…",
+  "choice": "yes" | "always" | "no" | 2,     // as given: a word, or an option's number from 1
+  "asked": "what it asked the user" | null,  // as this command's client last saw it; the host decided
+  "question": 12 | null                      // the seq of the `agent/asked` entry it named (--asked, or as seen)
+}
+```
+
+A refused answer is an error (stderr, exit status 1). On the wire it is `_shepherd/session/answer { session, choice,
+asked?, by? }`, refused with error code 1003 and `data: { session, status }` when the question isn't pending.

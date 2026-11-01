@@ -658,7 +658,8 @@ pub fn refused_to_peers(request: &ClientRequest) -> Option<WireError> {
         | ClientRequest::WorktreeRemove(_)
         | ClientRequest::SessionPrompt(_)
         | ClientRequest::SessionReply(_)
-        | ClientRequest::SessionScreen(_) => false,
+        | ClientRequest::SessionScreen(_)
+        | ClientRequest::SessionAnswer(_) => false,
     };
     local_only.then(|| {
         WireError::InvalidParams(

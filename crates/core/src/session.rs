@@ -7,8 +7,9 @@ use crate::acpp::acp::{
     ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use crate::acpp::{
-    BlockKind, Correlated, Dir, Envelope, Frame, PendingRequests, PromptBy, RequestId, Response,
-    Seq, ShepherdFrame, SourceKind, SubagentBlocked, SubagentStarted, Timestamp,
+    AgentAsked, BlockKind, Correlated, Dir, Envelope, Frame, PendingRequests, PromptBy, RequestId,
+    Response, Seq, SessionAnswered, ShepherdFrame, SourceKind, SubagentBlocked, SubagentStarted,
+    Timestamp,
 };
 
 /// What the agent in a session is doing, as far as its log tells.
@@ -27,7 +28,8 @@ pub enum Activity {
     /// `tool_call_update` for that id clears it; if it wasn't (typical for hook-synthesized requests), any
     /// `tool_call` or `tool_call_update` does.
     NeedsPermission { title: String },
-    /// The agent asked the user a question. No frame in shepherd's ACP subset produces this yet.
+    /// The agent asked the user a question (`_shepherd/agent/asked` of a `question` with no permission request
+    /// open). It waits on the tool that asks it, and clears like a permission.
     NeedsInput,
     /// The agent is at its prompt with nothing to do.
     Idle,
@@ -115,12 +117,21 @@ struct Request {
     id: RequestId,
 }
 
-/// The permission request behind [`Activity::NeedsPermission`].
+/// What the agent waits on the user for: the permission request behind [`Activity::NeedsPermission`], or the
+/// question behind [`Activity::NeedsInput`]. Whatever clears one clears the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Permission {
-    request: Request,
+    /// The `session/request_permission` it came with; none for a question asked without one.
+    request: Option<Request>,
     /// The in-flight tool it names, if it named one when it arrived.
     waits_on: Option<String>,
+    /// What the agent asked (`_shepherd/agent/asked`), with that entry's seq; none before the asked frame arrives.
+    asked: Option<(Seq, AgentAsked)>,
+    /// The user typed into the session since it was asked: they are answering it in the pane, so shepherd won't.
+    in_pane: bool,
+    /// When a request was taken for the dialog already up (same tool): which subagent (none: the agent) asked that
+    /// one, so an ask from another shows they differ.
+    same_as: Option<Option<String>>,
 }
 
 /// The last prompt the host typed into a session's agent (`_shepherd/session/prompted`), and who asked for it.
@@ -143,6 +154,10 @@ pub struct SessionState {
     /// Tool calls in flight in this turn, oldest first.
     tools: Vec<ToolSummary>,
     permission: Option<Permission>,
+    /// Dialogs opened before the current wait that no activity has shown closed yet (the agents queue dialogs, so one
+    /// may still be up in front): each the tool it waits on, whose activity shows it closed; or none for one on no
+    /// known tool, which nothing but the turn ending shows closed.
+    covered: Vec<Option<String>>,
     prompt: Option<Request>,
     /// The seq at which the current wait on the user ([`Activity::Idle`] or [`Activity::NeedsPermission`]) began.
     waiting_since: Option<Seq>,
@@ -164,6 +179,7 @@ impl Default for SessionState {
             activity: Activity::Starting,
             tools: Vec::new(),
             permission: None,
+            covered: Vec::new(),
             prompt: None,
             waiting_since: None,
             pending: PendingRequests::default(),
@@ -268,17 +284,43 @@ impl SessionState {
         ) || self.subagent_blocked()
     }
 
-    /// What the agent asked the user, if it waits on them and said: the permission's title, else the first blocked
-    /// subagent's text. Raw: display it only through `display_safe`. A question the agent asks itself
-    /// ([`Activity::NeedsInput`]) has no text yet.
+    /// What the agent asked the user, if it waits on them and said: the permission's title, or the question, else the
+    /// first blocked subagent's text. Raw: display it only through `display_safe`.
     pub fn asked(&self) -> Option<&str> {
-        match &self.activity {
-            Activity::NeedsPermission { title } => Some(title),
+        let question = self
+            .permission
+            .as_ref()
+            .and_then(|p| p.asked.as_ref())
+            .map(|(_, q)| q);
+        match (&self.activity, question) {
+            (Activity::NeedsPermission { title }, _) => Some(title),
+            (Activity::NeedsInput, Some(question)) => Some(&question.text),
             _ => self.subagents.iter().find_map(|s| match &s.status {
                 SubagentStatus::Blocked { text, .. } => Some(text.as_str()),
                 _ => None,
             }),
         }
+    }
+
+    /// The question the agent is blocked on that shepherd may answer (`_shepherd/agent/asked`), if any. None while the
+    /// user is answering it in the pane, and while another dialog the agent opened before it may still be up in front
+    /// of it (the agents queue them): until the agent's activity shows each closed, keys could land in that one.
+    pub fn question(&self) -> Option<&AgentAsked> {
+        self.pending_question().map(|(_, q)| q)
+    }
+
+    /// The seq of the `_shepherd/agent/asked` entry behind [`SessionState::question`]: it names that question, so an
+    /// answer meant for it can't land on a later one.
+    pub fn question_seq(&self) -> Option<Seq> {
+        self.pending_question().map(|(seq, _)| seq)
+    }
+
+    fn pending_question(&self) -> Option<(Seq, &AgentAsked)> {
+        let wait = self.permission.as_ref()?;
+        if wait.in_pane || !self.covered.is_empty() {
+            return None;
+        }
+        wait.asked.as_ref().map(|(seq, q)| (*seq, q))
     }
 
     /// The last prompt the host typed into the agent, if any.
@@ -338,6 +380,8 @@ impl SessionState {
                 }
             }
             _ if matches!(self.activity, Activity::Exited { .. }) => {}
+            ShepherdFrame::AgentAsked(asked) => self.agent_asked(seq, asked),
+            ShepherdFrame::SessionAnswered(answered) => self.answered(answered),
             ShepherdFrame::SubagentStarted(s) => self.subagent_started(s),
             ShepherdFrame::SubagentBlocked(b) => self.subagent_blocked_at(seq, b),
             ShepherdFrame::SubagentWorking(w) => {
@@ -354,6 +398,97 @@ impl SessionState {
             }
             _ => {}
         }
+    }
+
+    /// What the agent asks: it describes the permission it is waiting on, if that has no description yet; a question
+    /// with nothing waiting waits on the user itself, on the latest tool in flight (the tool that asks it). Another
+    /// question while one is up is queued behind it ([`SessionState::cover`]). Outside a turn there is nothing to ask
+    /// about.
+    fn agent_asked(&mut self, seq: Seq, asked: &AgentAsked) {
+        if let Some(wait) = &self.permission {
+            match &wait.asked {
+                Some((_, same)) if same == asked => {}
+                Some(_) => {
+                    let waits_on = self.tools.last().map(|t| t.id.clone());
+                    let in_pane = self.cover();
+                    self.permission = Some(Permission {
+                        request: None,
+                        waits_on,
+                        asked: Some((seq, asked.clone())),
+                        in_pane,
+                        same_as: None,
+                    });
+                }
+                None => {
+                    // Taken for the dialog already up, but another agent asks it: that one may still be in front,
+                    // for as long as shepherd can't tell (the turn).
+                    let other = wait
+                        .same_as
+                        .as_ref()
+                        .is_some_and(|before| before.as_deref() != asked.subagent.as_deref());
+                    if other {
+                        self.still_covers(None);
+                    }
+                    if let Some(wait) = &mut self.permission {
+                        wait.asked = Some((seq, asked.clone()));
+                    }
+                }
+            }
+            return;
+        }
+        if asked.kind == BlockKind::Permission || !self.in_turn() {
+            return;
+        }
+        self.permission = Some(Permission {
+            request: None,
+            waits_on: self.tools.last().map(|t| t.id.clone()),
+            asked: Some((seq, asked.clone())),
+            in_pane: false,
+            same_as: None,
+        });
+        self.activity = Activity::NeedsInput;
+        self.waiting_since = Some(seq);
+    }
+
+    /// Before another dialog opens over the open wait: the agents queue dialogs and keep showing the first, so the
+    /// open one is remembered in `covered` until its tool's activity shows it closed (or the turn ends), and nothing is
+    /// answerable meanwhile. Forgets the open wait; returns whether the user had typed into it, which carries over.
+    fn cover(&mut self) -> bool {
+        let Some(open) = &self.permission else {
+            return false;
+        };
+        let in_pane = open.in_pane;
+        let waits_on = open.waits_on.clone();
+        self.still_covers(waits_on);
+        self.forget_permission();
+        in_pane
+    }
+
+    /// Remembers a dialog that may still be up in front, once: one per tool, and one for every dialog on no known tool.
+    fn still_covers(&mut self, waits_on: Option<String>) {
+        if !self.covered.contains(&waits_on) {
+            self.covered.push(waits_on);
+        }
+    }
+
+    /// An answer shepherd typed ends the wait, and a subagent that asked works on. Without a choice the user is
+    /// answering in the pane: the agent still waits, but the question is no longer shepherd's to answer.
+    fn answered(&mut self, answered: &SessionAnswered) {
+        let Some(wait) = &mut self.permission else {
+            return;
+        };
+        if answered.choice.is_none() {
+            wait.in_pane = true;
+            return;
+        }
+        let subagent = wait.asked.as_ref().and_then(|(_, a)| a.subagent.clone());
+        self.forget_permission();
+        if let Some(sub) = subagent.and_then(|id| self.subagent_mut(&id))
+            && matches!(sub.status, SubagentStatus::Blocked { .. })
+        {
+            sub.status = SubagentStatus::Working;
+        }
+        self.work();
     }
 
     fn subagent_mut(&mut self, id: &str) -> Option<&mut Subagent> {
@@ -455,9 +590,17 @@ impl SessionState {
     /// After a frame about tool `id`: clears a permission waiting on it (or on no known tool), then shows the
     /// current tool unless a permission is still pending.
     fn tool_activity(&mut self, id: &str) {
+        // A covered dialog for a known tool is shown closed by that tool's activity; one for no known tool never is.
+        self.covered
+            .retain(|w| w.as_deref().is_none_or(|w| w != id));
         if let Some(p) = &self.permission
             && p.waits_on.as_deref().is_none_or(|w| w == id)
         {
+            // A wait on no known tool clears on any activity, which doesn't prove its dialog closed: it stays
+            // covered (uncertain) until the turn ends, so no later dialog is answered into it.
+            if p.waits_on.is_none() {
+                self.still_covers(None);
+            }
             self.forget_permission();
         }
         if self.permission.is_none() {
@@ -474,10 +617,29 @@ impl SessionState {
             .or_else(|| known.map(|t| t.title.clone()))
             .unwrap_or_else(|| call.tool_call_id.clone());
         let waits_on = known.map(|t| t.id.clone());
+        // The same tool's request (e.g. after its question's `PreToolUse`) is the dialog already up; any other is
+        // queued behind it.
+        let same = self
+            .permission
+            .as_ref()
+            .is_some_and(|p| p.waits_on.is_some() && p.waits_on == waits_on);
+        // Taken for that dialog only if the same agent (or subagent) asks again, which its `agent/asked` says.
+        let same_as = self
+            .permission
+            .as_ref()
+            .filter(|_| same)
+            .and_then(|p| p.asked.as_ref().map(|(_, a)| a.subagent.clone()));
+        let in_pane = match same {
+            true => self.permission.as_ref().is_some_and(|p| p.in_pane),
+            false => self.cover(),
+        };
         self.forget_permission();
         self.permission = Some(Permission {
-            request: req,
+            request: Some(req),
             waits_on,
+            asked: None,
+            in_pane,
+            same_as,
         });
         self.activity = Activity::NeedsPermission { title };
         self.waiting_since = Some(seq);
@@ -502,7 +664,7 @@ impl SessionState {
     fn in_turn(&self) -> bool {
         matches!(
             self.activity,
-            Activity::Working { .. } | Activity::NeedsPermission { .. }
+            Activity::Working { .. } | Activity::NeedsPermission { .. } | Activity::NeedsInput
         )
     }
 
@@ -518,6 +680,7 @@ impl SessionState {
     fn end_turn(&mut self) {
         self.tools.clear();
         self.subagents.clear();
+        self.covered.clear();
         self.forget_permission();
         if let Some(r) = self.prompt.take() {
             self.pending.forget(&r.dir, &r.id);
@@ -526,8 +689,8 @@ impl SessionState {
 
     /// Clears the current permission, whose outcome was inferred rather than answered.
     fn forget_permission(&mut self) {
-        if let Some(p) = self.permission.take() {
-            self.pending.forget(&p.request.dir, &p.request.id);
+        if let Some(r) = self.permission.take().and_then(|p| p.request) {
+            self.pending.forget(&r.dir, &r.id);
         }
     }
 
