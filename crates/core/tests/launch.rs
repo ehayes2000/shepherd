@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use shepherd_core::agents::codex;
 use shepherd_core::config::{AgentKind, AgentProfile, Config, DEFAULT_IDLE_AFTER_QUIET, RawConfig};
 use shepherd_core::host::launch::{
-    self, Launch, LaunchContext, LaunchError, SESSION_VAR, SETTINGS_FILE, SOCKET_VAR,
+    self, Launch, LaunchContext, LaunchError, MCP_FILE, SESSION_VAR, SETTINGS_FILE, SOCKET_VAR,
 };
 use shepherd_core::ids::SessionId;
 use shepherd_core::ports::pty::PtySize;
@@ -38,6 +38,7 @@ fn profile(kind: AgentKind, command: &str, args: &[&str], env: &[(&str, &str)]) 
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         idle_after_quiet: DEFAULT_IDLE_AFTER_QUIET,
+        shepherd_mcp: false,
     }
 }
 
@@ -430,4 +431,112 @@ fn a_shell_session_cannot_be_resumed() {
         launch::plan_resume(&p, &ctx(), "x"),
         Err(LaunchError::CannotResume(AgentKind::Shell))
     );
+}
+
+// ---------- the project manager (shepherd's MCP server) ----------
+
+/// The built-in `pm` profile, as a config without a file resolves it.
+fn pm() -> AgentProfile {
+    Config::resolve(None, None)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .profile(shepherd_core::config::PM_PROFILE)
+        .cloned()
+        .unwrap_or_else(|| panic!("no built-in pm profile"))
+}
+
+/// The generated MCP config, parsed.
+fn mcp_config(launch: &Launch) -> Value {
+    let file = launch
+        .files
+        .iter()
+        .find(|f| f.name == MCP_FILE)
+        .unwrap_or_else(|| panic!("no {MCP_FILE} in {:?}", launch.files));
+    serde_json::from_slice(&file.contents).unwrap_or_else(|e| panic!("MCP config isn't JSON: {e}"))
+}
+
+#[test]
+fn the_pm_loads_shepherds_mcp_server_from_its_run_directory_before_the_settings() {
+    let mut pm = pm();
+    pm.args = vec!["--model".to_owned(), "opus".to_owned()];
+    let launch = plan(&pm);
+    assert_eq!(launch.spawn.command, "claude");
+    assert_eq!(
+        launch.spawn.args,
+        [
+            "--mcp-config",
+            "/home/me/.shepherd/run/s_1/mcp.json",
+            "--settings",
+            "/home/me/.shepherd/run/s_1/settings.json",
+            "--model",
+            "opus"
+        ]
+    );
+    let mut names: Vec<&str> = launch.files.iter().map(|f| f.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, [MCP_FILE, SETTINGS_FILE]);
+}
+
+#[test]
+fn the_mcp_config_runs_this_shepherds_mcp_command_for_this_session() {
+    let config = mcp_config(&plan(&pm()));
+    assert_eq!(
+        config,
+        json!({
+            "mcpServers": {
+                "shepherd": {
+                    "type": "stdio",
+                    "command": EXE,
+                    "args": ["mcp"],
+                    "env": { SESSION_VAR: "s_1" },
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn the_pm_touches_no_user_config_only_its_own_run_files_and_variables() {
+    let mut pm = pm();
+    pm.env = [("A".to_owned(), "1".to_owned())].into();
+    let launch = plan(&pm);
+    assert_eq!(
+        env_map(&launch),
+        BTreeMap::from([
+            ("A".to_owned(), "1".to_owned()),
+            (SESSION_VAR.to_owned(), "s_1".to_owned()),
+            (
+                SOCKET_VAR.to_owned(),
+                "/home/me/.shepherd/host.sock".to_owned()
+            ),
+        ]),
+        "no CLAUDE_CONFIG_DIR or other redirection of the user's config"
+    );
+    // Every path it is given is a file shepherd writes into the session's run directory.
+    for path in launch.spawn.args.iter().filter(|a| a.starts_with('/')) {
+        assert!(
+            path.starts_with("/home/me/.shepherd/run/s_1/"),
+            "{path} is outside the run directory"
+        );
+    }
+    assert!(!launch.spawn.args.iter().any(|a| a == "--strict-mcp-config"));
+    for file in &launch.files {
+        assert!(!file.name.contains('/'), "{} is a path", file.name);
+    }
+}
+
+#[test]
+fn a_profile_without_shepherds_tools_gets_no_mcp_config() {
+    let launch = plan(&profile(AgentKind::ClaudeCode, "claude", &[], &[]));
+    assert!(!launch.spawn.args.iter().any(|a| a == "--mcp-config"));
+    assert!(launch.files.iter().all(|f| f.name != MCP_FILE));
+}
+
+#[test]
+fn a_resumed_pm_gets_shepherds_mcp_server_again() {
+    let pm = pm();
+    let new = plan(&pm);
+    let resumed = plan_resume(&pm, "id-1");
+    assert_eq!(resumed.files, new.files);
+    assert_eq!(resumed.spawn.args[..4], new.spawn.args[..4]);
+    assert_eq!(resumed.spawn.args[4..], ["--resume", "id-1"]);
 }

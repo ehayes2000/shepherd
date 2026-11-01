@@ -718,6 +718,15 @@ pub mod builders {
         }
     }
 
+    /// A new session of the built-in `pm` profile (the project manager: Claude Code) with no name, otherwise a
+    /// [`claude_session_spec`].
+    pub fn pm_session_spec() -> NewSessionSpec {
+        NewSessionSpec {
+            profile: shepherd_core::config::PM_PROFILE.to_owned(),
+            ..claude_session_spec()
+        }
+    }
+
     /// A resume of a [`claude_session_spec`] session, running `claude --resume abc123` in `/home/test`.
     pub fn claude_resume_spec() -> ResumeSpec {
         ResumeSpec {

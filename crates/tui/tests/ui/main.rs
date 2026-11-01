@@ -4,6 +4,7 @@
 //! - `steps`: the harness's own steps and assertions.
 //! - `sidebar`, `popups`, `finder`: point-and-click tests ported from `mouse.rs` and `finder.rs`.
 //! - `layout`: the host's layout drawn: pages, split panes, focus, dividers and the pane menu (T49).
+//! - `pm`: the project manager's page (T60).
 //! - `status`: the status page's table (T57).
 //! - `status_feed`: the status page's events feed and message line (T59).
 //! - `status_preview`: the status page's preview and answering in place (T58).
@@ -13,6 +14,7 @@ mod finder;
 mod harness;
 mod invariants;
 mod layout;
+mod pm;
 mod popups;
 mod sidebar;
 mod status;

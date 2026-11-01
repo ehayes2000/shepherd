@@ -107,6 +107,7 @@ kind = "claude-code"
 command = "claude"
 args = ["--dangerously-skip-permissions"]
 env = { A = "1", B = "2" }
+shepherd_mcp = true
 
 [keys]
 prefix = "ctrl-a"
@@ -147,6 +148,7 @@ pre_remove = ["make clean"]
                         args: Some(vec!["--dangerously-skip-permissions".into()]),
                         env: Some(map(&[("A", "1"), ("B", "2")])),
                         idle_after_quiet_ms: None,
+                        shepherd_mcp: Some(true),
                     },
                 ),
             ])),

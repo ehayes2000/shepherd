@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/ui/pm.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │ 1   pm  +
+ ⌂ choose a workspace  │┌ pm-3 · local ──────────────────────── [≡] ┐┌ Project manager ─────── [≡] ┐
+ + New session ⊞ Layout││Claude Code                                ││                             │
+ ◌ pm-3               ×││> what should we work on?                  ││                             │
+   local · —           ││                                           ││                             │
+ ◌ docs               ×││                                           ││                             │
+   local · —           ││                                           ││                             │
+ ◌ fix-login          ×││                                           ││    Project manager isn't    │
+   local · —           ││                                           ││       available yet.        │
+                       ││                                           ││                             │
+                       ││                                           ││                             │
+                       ││                                           ││                             │
+                       ││                                           ││                             │
+                       ││                                           ││                             │
+                       ││                                           ││                             │
+ ctrl-b ? help Detach ?│└───────────────────────────────────────────┘└─────────────────────────────┘

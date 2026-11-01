@@ -412,7 +412,7 @@ fn open_menu(c: &mut ClientDriver, pane: PaneId) {
 }
 
 #[test]
-fn the_pane_menu_of_a_lone_pane_offers_splits_and_a_new_page() {
+fn the_pane_menu_of_a_lone_pane_offers_splits_a_new_page_and_the_project_manager() {
     let mut c = ClientDriver::with_sessions(&["s1"]);
     let pane = root(&c);
     open_menu(&mut c, pane);
@@ -429,7 +429,8 @@ fn the_pane_menu_of_a_lone_pane_offers_splits_and_a_new_page() {
         [
             PaneMenuItem::SplitRight,
             PaneMenuItem::SplitDown,
-            PaneMenuItem::NewPage
+            PaneMenuItem::NewPage,
+            PaneMenuItem::ProjectManager
         ]
     );
 }
@@ -446,7 +447,8 @@ fn the_pane_menu_of_a_split_pane_offers_close_and_move_session_here() {
             PaneMenuItem::SplitDown,
             PaneMenuItem::Close,
             PaneMenuItem::MoveSessionHere,
-            PaneMenuItem::NewPage
+            PaneMenuItem::NewPage,
+            PaneMenuItem::ProjectManager
         ]
     );
 }

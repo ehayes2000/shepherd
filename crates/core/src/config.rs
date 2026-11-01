@@ -63,6 +63,8 @@ pub struct RawAgent {
     pub env: Option<BTreeMap<String, String>>,
     /// How long an agent's PTY must stay quiet in a turn before its session is inferred idle. Agent kinds only.
     pub idle_after_quiet_ms: Option<u64>,
+    /// Launch it with shepherd's own MCP server (`shepherd mcp`) for that session only. Claude Code profiles only.
+    pub shepherd_mcp: Option<bool>,
 }
 
 /// `[keys]`.
@@ -117,6 +119,9 @@ pub enum ConfigError {
     /// A profile that is not built in must say what it is and how to run it.
     #[error("agent `{agent}`: missing `{field}`")]
     MissingField { agent: String, field: &'static str },
+    /// Only Claude Code sessions can be given shepherd's MCP server.
+    #[error("agent `{agent}`: shepherd_mcp needs kind claude-code, not {}", .kind.as_str())]
+    McpUnsupported { agent: String, kind: AgentKind },
     #[error("agent `{agent}`: command is empty")]
     EmptyCommand { agent: String },
     #[error("defaults.agent names unknown profile `{0}`")]
@@ -184,6 +189,9 @@ pub struct AgentProfile {
     /// How long the PTY of a session running this profile must be quiet during a turn before the host infers the
     /// agent went idle (`idle_after_quiet_ms`, default [`DEFAULT_IDLE_AFTER_QUIET`]). Ignored for shells.
     pub idle_after_quiet: SignedDuration,
+    /// Its sessions are launched with shepherd's own MCP server, `shepherd mcp`, configured for that session only (see
+    /// [`crate::host::launch`]). On for the built-in [`PM_PROFILE`]; Claude Code profiles only.
+    pub shepherd_mcp: bool,
 }
 
 /// How long an agent's PTY stays quiet during a turn before the host infers it went idle: agent TUIs animate a
@@ -309,11 +317,16 @@ pub const DEFAULT_CLEANUP_AFTER_DAYS: u32 = 7;
 /// The built-in default agent.
 pub const DEFAULT_AGENT: &str = "claude";
 
+/// The built-in project manager profile: Claude Code with shepherd's MCP server. A session started with it is the
+/// project manager: its `session/created` records this name, which is how a client finds it again (T60).
+pub const PM_PROFILE: &str = "pm";
+
 impl Config {
     /// Merges `raw` over the built-in defaults and validates the result. `None` (no config file) gives the
     /// built-in defaults.
     ///
-    /// Built-ins: `claude` (claude-code, `claude`), `codex` (codex, `codex`) and `shell` (shell, `login_shell`).
+    /// Built-ins: `claude` (claude-code, `claude`), `codex` (codex, `codex`), `pm` (claude-code, `claude`, with
+    /// `shepherd_mcp`; see [`PM_PROFILE`]) and `shell` (shell, `login_shell`).
     /// `login_shell` is the user's shell as the runtime found it (e.g. `$SHELL`); when it is `None` or empty the
     /// `shell` profile runs `sh`. A command set in `[agents.shell]` always wins, even `command = "sh"`.
     ///
@@ -329,6 +342,7 @@ impl Config {
     /// - `[notify] bell` defaults to off.
     /// - `[defaults] cleanup_after_days` defaults to [`DEFAULT_CLEANUP_AFTER_DAYS`].
     /// - `idle_after_quiet_ms` defaults to [`DEFAULT_IDLE_AFTER_QUIET`].
+    /// - `shepherd_mcp` defaults to off (on for `pm`), and only a `claude-code` profile may have it on.
     /// - `[machine] name` must not be empty or longer than [`crate::machine::MAX_NAME`] grapheme clusters once made
     ///   display-safe and trimmed.
     /// - `[machine] color`, if given, must name a [`MachineColor`].
@@ -502,8 +516,9 @@ fn builtin_profiles(login_shell: Option<String>) -> impl Iterator<Item = AgentPr
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "sh".to_owned());
     [
-        ("claude", AgentKind::ClaudeCode, "claude".to_owned()),
+        (DEFAULT_AGENT, AgentKind::ClaudeCode, "claude".to_owned()),
         ("codex", AgentKind::Codex, "codex".to_owned()),
+        (PM_PROFILE, AgentKind::ClaudeCode, "claude".to_owned()),
         ("shell", AgentKind::Shell, shell),
     ]
     .into_iter()
@@ -514,6 +529,7 @@ fn builtin_profiles(login_shell: Option<String>) -> impl Iterator<Item = AgentPr
         args: Vec::new(),
         env: BTreeMap::new(),
         idle_after_quiet: DEFAULT_IDLE_AFTER_QUIET,
+        shepherd_mcp: name == PM_PROFILE,
     })
 }
 
@@ -531,6 +547,9 @@ fn overlay(mut profile: AgentProfile, user: RawAgent) -> Result<AgentProfile, Co
     profile.env.extend(user.env.unwrap_or_default());
     if let Some(ms) = user.idle_after_quiet_ms {
         profile.idle_after_quiet = quiet_period(ms);
+    }
+    if let Some(mcp) = user.shepherd_mcp {
+        profile.shepherd_mcp = mcp;
     }
     check_command(profile)
 }
@@ -552,6 +571,7 @@ fn new_profile(name: String, user: RawAgent) -> Result<AgentProfile, ConfigError
         idle_after_quiet: user
             .idle_after_quiet_ms
             .map_or(DEFAULT_IDLE_AFTER_QUIET, quiet_period),
+        shepherd_mcp: user.shepherd_mcp.unwrap_or(false),
     })
 }
 
@@ -571,6 +591,12 @@ fn check_command(profile: AgentProfile) -> Result<AgentProfile, ConfigError> {
     if profile.command.trim().is_empty() {
         return Err(ConfigError::EmptyCommand {
             agent: profile.name,
+        });
+    }
+    if profile.shepherd_mcp && profile.kind != AgentKind::ClaudeCode {
+        return Err(ConfigError::McpUnsupported {
+            agent: profile.name,
+            kind: profile.kind,
         });
     }
     Ok(profile)

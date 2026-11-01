@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jiff::SignedDuration;
 use serde_json::{Value, json};
-use shepherd_core::config::{AgentKind, Config, ConfigError, KeyPrefix, RawConfig};
+use shepherd_core::config::{AgentKind, Config, ConfigError, KeyPrefix, PM_PROFILE, RawConfig};
 
 /// A `RawConfig` from JSON shaped like the TOML file.
 fn raw(value: Value) -> RawConfig {
@@ -31,13 +31,17 @@ fn missing_file_gives_builtin_profiles() {
     let config = Config::resolve(None, None).unwrap();
 
     let names: Vec<_> = config.profiles().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["claude", "codex", "shell"]);
+    assert_eq!(names, ["claude", "codex", "pm", "shell"]);
 
     let claude = config.profile("claude").unwrap();
     assert_eq!(claude.kind, AgentKind::ClaudeCode);
     assert_eq!(claude.command, "claude");
     assert!(claude.args.is_empty());
     assert!(claude.env.is_empty());
+    assert!(
+        !claude.shepherd_mcp,
+        "only the pm profile gets shepherd's tools"
+    );
 
     let codex = config.profile("codex").unwrap();
     assert_eq!(
@@ -153,7 +157,7 @@ fn new_profile_with_kind_and_command_is_added_beside_builtins() {
     .unwrap();
 
     let names: Vec<_> = config.profiles().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["claude", "codex", "shell", "yolo"]);
+    assert_eq!(names, ["claude", "codex", "pm", "shell", "yolo"]);
 
     let yolo = config.default_agent();
     assert_eq!(yolo.name, "yolo");
@@ -497,4 +501,68 @@ fn a_machine_name_may_have_64_grapheme_clusters_and_no_more() {
     assert_eq!(config.machine_name(), Some("\u{e9}".repeat(64).as_str()));
     let result = resolve(json!({ "machine": { "name": cluster.repeat(65) } }));
     assert_eq!(result, Err(ConfigError::LongMachineName { max: 64 }));
+}
+
+// ---------- the project manager ----------
+
+#[test]
+fn the_builtin_pm_profile_runs_claude_code_with_shepherds_tools() {
+    let config = Config::resolve(None, None).unwrap();
+    let pm = config.profile(PM_PROFILE).unwrap();
+    assert_eq!(PM_PROFILE, "pm");
+    assert_eq!(pm.kind, AgentKind::ClaudeCode);
+    assert_eq!(pm.command, "claude");
+    assert!(pm.args.is_empty());
+    assert!(pm.env.is_empty());
+    assert!(pm.shepherd_mcp);
+    assert_eq!(
+        config.default_agent().name,
+        "claude",
+        "the pm isn't the default"
+    );
+}
+
+#[test]
+fn the_user_can_override_the_pm_profile_field_by_field() {
+    let config = resolve(json!({ "agents": { "pm": {
+        "command": "/opt/claude", "args": ["--model", "opus"], "env": { "A": "1" } } } }))
+    .unwrap();
+    let pm = config.profile("pm").unwrap();
+    assert_eq!(pm.command, "/opt/claude");
+    assert_eq!(pm.args, ["--model", "opus"]);
+    assert_eq!(pm.env, env(&[("A", "1")]));
+    assert_eq!(pm.kind, AgentKind::ClaudeCode, "kind kept from built-in");
+    assert!(pm.shepherd_mcp, "shepherd's tools kept from built-in");
+}
+
+#[test]
+fn any_claude_code_profile_can_turn_shepherds_tools_on_or_off() {
+    let config = resolve(json!({ "agents": {
+        "claude": { "shepherd_mcp": true },
+        "pm": { "shepherd_mcp": false },
+        "boss": { "kind": "claude-code", "command": "claude", "shepherd_mcp": true },
+    } }))
+    .unwrap();
+    assert!(config.profile("claude").unwrap().shepherd_mcp);
+    assert!(!config.profile("pm").unwrap().shepherd_mcp);
+    assert!(config.profile("boss").unwrap().shepherd_mcp);
+}
+
+#[test]
+fn shepherds_tools_on_a_profile_that_isnt_claude_code_is_an_error() {
+    assert_eq!(
+        resolve(json!({ "agents": { "codex": { "shepherd_mcp": true } } })),
+        Err(ConfigError::McpUnsupported {
+            agent: "codex".into(),
+            kind: AgentKind::Codex,
+        })
+    );
+    // Also when the pm is made into another kind and keeps its tools.
+    assert_eq!(
+        resolve(json!({ "agents": { "pm": { "kind": "shell", "command": "sh" } } })),
+        Err(ConfigError::McpUnsupported {
+            agent: "pm".into(),
+            kind: AgentKind::Shell,
+        })
+    );
 }

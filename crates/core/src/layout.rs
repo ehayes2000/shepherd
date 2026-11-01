@@ -335,6 +335,20 @@ pub enum LayoutOp {
         #[serde(default, skip_serializing_if = "is_empty")]
         content: Content,
     },
+    /// Add a page after the others, split in two along `dir`: `a` takes `ratio` of it and `b` the rest. Then select
+    /// it. Unnamed, it is numbered. A page opened like this is what [`LayoutOp::PageNew`] and then a
+    /// [`LayoutOp::Split`] of its pane make, in one step.
+    PageNewSplit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        dir: SplitDir,
+        #[serde(default)]
+        ratio: Ratio,
+        #[serde(default, skip_serializing_if = "is_empty")]
+        a: Content,
+        #[serde(default, skip_serializing_if = "is_empty")]
+        b: Content,
+    },
     PageSelect {
         page: PageId,
     },
@@ -495,6 +509,14 @@ impl Layout {
         op: &LayoutOp,
         listed: impl Fn(&SessionId) -> bool,
     ) -> Result<Layout, LayoutError> {
+        self.apply_listed(op, &listed)
+    }
+
+    fn apply_listed(
+        &self,
+        op: &LayoutOp,
+        listed: &dyn Fn(&SessionId) -> bool,
+    ) -> Result<Layout, LayoutError> {
         let shown = |content: &Content| {
             content.check().map_err(LayoutError::InvalidSession)?;
             match content {
@@ -518,6 +540,29 @@ impl Layout {
                 let page = next.fresh_page(name, content.clone());
                 next.current = page.id;
                 next.pages.push(page);
+            }
+            LayoutOp::PageNewSplit {
+                name,
+                dir,
+                ratio,
+                a,
+                b,
+            } => {
+                let page = self.apply_listed(
+                    &LayoutOp::PageNew {
+                        name: name.clone(),
+                        content: a.clone(),
+                    },
+                    listed,
+                )?;
+                let pane = page.current_page().root.id();
+                let split = LayoutOp::Split {
+                    pane,
+                    dir: *dir,
+                    ratio: *ratio,
+                    content: b.clone(),
+                };
+                return page.apply_listed(&split, listed);
             }
             LayoutOp::PageSelect { page } => {
                 next.page_index(*page)?;

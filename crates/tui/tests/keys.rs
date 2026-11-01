@@ -67,6 +67,7 @@ fn each_prefix_binding_runs_its_command_and_returns_keys_to_the_terminal() {
         (ch('x'), Intent::BeginClose),
         (ch('?'), Intent::ShowHelp),
         (ch('q'), Intent::Quit),
+        (ch('p'), Intent::OpenPm),
     ];
     for (key, intent) in table {
         assert_eq!(

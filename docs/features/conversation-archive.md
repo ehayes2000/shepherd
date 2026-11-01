@@ -235,6 +235,13 @@ acceptance:
   `shepherd answer <session> 2` picks the second option (Down, then Enter, as separate writes) and `no` cancels it.
   Then answer in the pane and check a later `shepherd answer` is refused (`nothing to answer (wants-user)`), and
   re-record `PreToolUse.AskUserQuestion` and the permission fixtures from those hooks.
+- From T60: a project manager round through a real host. `shepherd new --profile pm` (Claude Code launched with
+  `--mcp-config <run dir>/mcp.json`), then `shepherd prompt <pm> "list my sessions with your shepherd status tool" --wait
+  --json`: the PM calls `mcp__shepherd__status` (no approval prompt for a `--mcp-config` server, or note the one it
+  shows), the reply names the other sessions, and the throwaway `CLAUDE_CONFIG_DIR` is the only Claude config touched
+  (no `mcpServers` written to it). Also have it `send` to another session and check that session's
+  `session/prompted` says `by: mcp:<pm session>` (the server's `env` names it). Settle whether Claude Code passes its
+  own environment to stdio servers, and whether `--mcp-config` swallows a positional profile arg placed after it.
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get
