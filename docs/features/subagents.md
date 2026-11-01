@@ -66,6 +66,8 @@ acceptance:
   "go to parent").
 - Tests: a fixture transcript rendered (snapshot), live append, a transcript that's gone or refused shows why, hostile
   content display-safe.
+- From T47's review: the Transcripts adapter's missing-vs-failed split (crates/shepherd/src/archive.rs ~192) is untested
+  for an unreadable file: add a contract or adapter case with a chmod-000 transcript asserting `Failed`, not `reply: null`.
 scope: crates/core, crates/tui, crates/shepherd
 
 ### F57: Subagent task pairing: cross-turn repeat start and failed guessed call

@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | fixing | task/t47-prompt-wait @ d8ba6d4 | 1 | round 1 CHANGES: closed session hangs --wait; since choice unproven; + 7 minors |
+| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | merging | task/t47-prompt-wait @ 08d681d | 2 | round 2 APPROVE; minors → T56, T61 |
 | T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | building | task/t50-ui-cli |  |  |
 | T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | building | task/t55-subagent-tree |  |  |
 

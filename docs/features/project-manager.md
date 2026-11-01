@@ -49,4 +49,6 @@ acceptance:
 - Tests through the harness for the mock's three variants (snapshots): morning briefing, dispatching, the PM asking with
   Claude Code's picker (the picker is the PM's own PTY content; the panel shows the question in WAITING). Empty sections
   say so. Hostile text display-safe.
+- From T47's review: `session/prompted`'s `by` is the client's own claim (any local client can write `mcp:<session>`); the
+  panel treats it as a label, never as proof of who sent it.
 scope: crates/tui, crates/core
