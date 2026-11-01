@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/ui/status.rs
+expression: ui.region(pane(&ui))
+---
+ 1   status  +
+ ▲ 1 need you   ● 2 working   ○ 1 idle   ✕ 1 exited   ↳ 2 subagents   1 machine · 1 online
+┌ agents ────────────────────────────────────────────────────────────────────────[g: by state]─┐
+│   NAME                      AGENT   MACHINE    SUB  DOING                          PR        │
+│ studio  this machine  · 5                                                                    │
+│ ▲ t28-hello-build           claude  studio     —    asks: Bash(cargo test)         #416 ✗    │
+│ ● docs-arch                 shell   studio     —    working                        —         │
+│ ● f36-cleanup-view          claude  studio     ↳2   Edit cleanup.rs                #417 …    │
+│ ○ fix-login                 claude  studio     —    at its prompt                  #409 ✓    │
+│ ✕ wire-v2                   claude  studio     —    exited                         —         │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘

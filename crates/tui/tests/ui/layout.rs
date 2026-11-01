@@ -159,10 +159,11 @@ fn a_three_way_split_in_a_tiny_window() {
 fn views_and_empty_panes_are_titled_placeholders() {
     let mut ui = Ui::with_sessions(&["fix-login"], 100, 12);
     let pane = root(&ui);
+    // A view not built yet (the status page is, T57).
     ui.host_layout(split(
         pane,
         SplitDir::Horizontal,
-        Content::View(ViewKind::Status),
+        Content::View(ViewKind::Machines),
     ));
     let left = leaves(&ui)[0];
     ui.host_layout(split(left, SplitDir::Vertical, Content::Empty));

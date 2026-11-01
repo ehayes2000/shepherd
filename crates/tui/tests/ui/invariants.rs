@@ -10,7 +10,9 @@
 //!   session above it) since the selection or the window last changed, some cell of the sidebar hits it (while no
 //!   popup covers it and the sidebar has room for a row), however the subagent trees above it change;
 //! - the focused pane is a pane of the current page, and the session it shows (if it has room for a terminal) was last
-//!   sized by this window to exactly that terminal.
+//!   sized by this window to exactly that terminal;
+//! - a status page's rows hit listed sessions, and after a key that moves the focused status table's selection (or
+//!   regroups it), the selected session's row is visible.
 //!
 //! Seeded and bounded by count (cases x steps), not time. A failure prints its seed and its (shrunk) steps. Run another
 //! seed with `PROPTEST_RNG_SEED=<n> cargo test -p shepherd-tui --test ui invariants`.
@@ -22,8 +24,8 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Position;
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind};
-use shepherd_core::client::Popup;
 use shepherd_core::client::panes::{Area, arrange};
+use shepherd_core::client::{Focus, Popup};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
 use shepherd_core::ports::pty::PtySize;
@@ -97,6 +99,8 @@ enum Step {
     SubagentFinish(Index, u8),
     /// A session's agent ends its turn, dropping its subagents.
     TurnEnd(Index),
+    /// `ctrl-b s`: the status page.
+    OpenStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +134,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => (any::<u16>(), any::<u16>()).prop_map(|(x, y)| Step::ClickAt(x, y)),
         2 => (any::<u16>(), any::<u16>(), -8i32..8).prop_map(|(x, y, by)| Step::Scroll(x, y, by)),
         3 => any::<Index>().prop_map(Step::Key),
-        2 => prop::sample::select(vec!['n', 'y', 'q', '?', 'r', 'x', 'd', '日']).prop_map(Step::Type),
+        2 => prop::sample::select(vec!['n', 'y', 'q', '?', 'r', 'x', 'd', '日', 'g', 'j', 'k']).prop_map(Step::Type),
+        1 => Just(Step::OpenStatus),
         1 => "[a-z/ ]{0,6}(\n[a-z]{0,3})?".prop_map(Step::Paste),
         2 => (1u16..=120, 1u16..=40).prop_map(|(w, h)| Step::Resize(w, h)),
         1 => Just(Step::HostNew),
@@ -176,6 +181,8 @@ struct Run {
     /// The sidebar's scroll may have left the selection since the selection or the window last changed: the user
     /// wheeled it, or the host listed a session above it.
     unfitted: bool,
+    /// The last step was a key that moved the focused status table's selection or regrouped it.
+    status_moved: bool,
 }
 
 impl Run {
@@ -197,6 +204,9 @@ impl Run {
     fn apply(&mut self, step: &Step) {
         let before = self.ui.client().selected().cloned();
         let popup = self.ui.client().popup().is_some();
+        let on_status =
+            !popup && self.ui.client().focus() == Focus::Terminal && self.status_focused();
+        self.status_moved = false;
         match step {
             Step::Click(at) => {
                 if let Some(p) = self.word(at) {
@@ -223,9 +233,15 @@ impl Run {
             Step::Key(at) => {
                 let (code, modifiers) = KEYS[at.index(KEYS.len())];
                 self.ui.key_with(code, modifiers);
+                let moves = matches!(code, KeyCode::Up | KeyCode::Down | KeyCode::PageDown);
+                self.status_moved = on_status && moves && modifiers == KeyModifiers::NONE;
             }
             Step::Type(ch) => {
                 self.ui.type_text(&ch.to_string());
+                self.status_moved = on_status && matches!(ch, 'g' | 'j' | 'k');
+            }
+            Step::OpenStatus => {
+                self.ui.ctrl('b').key(KeyCode::Char('s'));
             }
             Step::Paste(text) => {
                 self.ui.paste(text);
@@ -389,7 +405,75 @@ impl Run {
         self.buttons_are_hittable()?;
         self.narrow_trees_toggle()?;
         self.selection_is_visible()?;
-        self.focused_pane_is_sized()
+        self.focused_pane_is_sized()?;
+        self.status_rows_hit_listed_sessions()?;
+        self.status_selection_is_visible()
+    }
+
+    /// Whether the focused pane shows the status page.
+    fn status_focused(&self) -> bool {
+        let client = self.ui.client();
+        matches!(
+            client.host_layout().pane(client.focused_pane()),
+            Some(Pane::Leaf {
+                content: Content::View(ViewKind::Status),
+                ..
+            })
+        )
+    }
+
+    /// Each session a line of a status page hits as a status row (a row is a whole line of its table, so one column
+    /// of each line is enough).
+    fn status_rows(&self) -> Vec<SessionId> {
+        let pane = layout(self.ui.window()).pane;
+        let view = Area {
+            x: pane.x,
+            y: pane.y,
+            cols: pane.width,
+            rows: pane.height,
+        };
+        let arranged = arrange(&self.ui.client().host_layout(), view);
+        arranged
+            .panes
+            .iter()
+            .filter(|p| p.content == Content::View(ViewKind::Status))
+            .filter_map(|p| p.terminal())
+            .flat_map(|t| (t.y..t.y + t.rows).map(move |y| (t.x.saturating_add(2), y)))
+            .filter_map(|(x, y)| match self.ui.hit_at(x, y) {
+                Some(Target::StatusRow { session, .. }) => Some(session),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn status_rows_hit_listed_sessions(&self) -> Result<(), String> {
+        let sessions = self.ui.client().sessions();
+        match self
+            .status_rows()
+            .into_iter()
+            .find(|id| !sessions.iter().any(|s| &s.id == id))
+        {
+            Some(id) => Err(format!("a status row hits {id}, which isn't listed")),
+            None => Ok(()),
+        }
+    }
+
+    fn status_selection_is_visible(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        if !self.status_moved || client.popup().is_some() || !self.status_focused() {
+            return Ok(());
+        }
+        let Some(selected) = client.status_selected() else {
+            return Ok(());
+        };
+        let rows = self.status_rows();
+        // A table too small for any line (or a pane too small for a table) shows no rows at all.
+        if rows.is_empty() || rows.contains(selected) {
+            return Ok(());
+        }
+        Err(format!(
+            "the status table's selection {selected} has no visible row"
+        ))
     }
 
     fn focused_pane_is_sized(&self) -> Result<(), String> {
@@ -562,6 +646,7 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
         made: 0,
         subagents: 0,
         unfitted: false,
+        status_moved: false,
     };
     let fail = |run: &Run, after: &str, why: String| {
         TestCaseError::fail(format!("{why}, after {after}:\n{}", run.ui.screen()))
@@ -607,6 +692,7 @@ fn the_invariants_see_a_selection_scrolled_out_of_view() {
         made: 0,
         subagents: 0,
         unfitted: false,
+        status_moved: false,
     };
     assert_eq!(run.check(), Ok(()));
     run.ui.scroll("name-15", 20);

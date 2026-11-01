@@ -1,7 +1,7 @@
 //! Pure rendering of client state and key mapping. See `docs/architecture.md`.
 //!
 //! - [`render`] draws the sidebar ([`sidebar`]), the host's layout in the pane area ([`layout`]): its page bar and
-//!   panes, each showing its session's terminal (`panes`), and any popup or menu. [`cursor_style`] is the cursor shape to go with it, which a ratatui frame can't carry.
+//!   panes, each showing its session's terminal (`panes`) or the status page (`status`), and any popup or menu. [`cursor_style`] is the cursor shape to go with it, which a ratatui frame can't carry.
 //! - [`map_event`] / [`map_key`] turn terminal events into client [`Intent`](shepherd_core::client::Intent)s, with input
 //!   for the session encoded by [`encode`] for its [`Screen::modes`].
 //!
@@ -33,6 +33,7 @@ mod panes;
 mod popup;
 mod screen;
 pub mod sidebar;
+mod status;
 mod width;
 
 use std::collections::BTreeMap;

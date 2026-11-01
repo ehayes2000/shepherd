@@ -32,13 +32,14 @@ use crate::width::{columns, cut, cut_left, pad, tail};
 use crate::{cleanup, finder};
 
 /// The prefix bindings, as the help lists them.
-pub const BINDINGS: [(&str, &str); 9] = [
+pub const BINDINGS: [(&str, &str); 10] = [
     ("ctrl-b n", "new session"),
     ("ctrl-b j / ↓", "next session"),
     ("ctrl-b k / ↑", "previous session"),
     ("ctrl-b r", "rename session"),
     ("ctrl-b x", "close session"),
     ("ctrl-b ⇥", "show or hide subagents"),
+    ("ctrl-b s", "status page"),
     ("ctrl-b ?", "this help"),
     ("ctrl-b q", "detach (agents keep running)"),
     ("ctrl-b ctrl-b", "send ctrl-b to the session"),

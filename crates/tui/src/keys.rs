@@ -28,7 +28,7 @@ use shepherd_term::{Modes, MouseTracking};
 
 use crate::encode;
 use crate::layout::{Target, hit, layout, pane_size, sidebar_rows};
-use crate::{cleanup, finder, panes, popup};
+use crate::{cleanup, finder, panes, popup, status};
 
 /// The prefix key. Configurable later.
 pub const PREFIX: char = 'b';
@@ -52,6 +52,7 @@ pub fn map_key(key: &KeyEvent, client: &Client, modes: &Modes) -> Vec<Intent> {
             intents
         }
         Focus::Terminal if is_prefix(key) => vec![Intent::SetFocus(Focus::Command)],
+        Focus::Terminal if status::focused(client) => status_key(key, client).into_iter().collect(),
         Focus::Terminal => input(key_kind(key), encode::key(key, modes)),
     }
 }
@@ -177,6 +178,11 @@ fn map_mouse(
         && layout
             .sidebar
             .contains(Position::new(mouse.column, mouse.row));
+    let over_status = client
+        .popup()
+        .is_none()
+        .then(|| status::under(client, layout.pane, mouse.column, mouse.row))
+        .flatten();
     let over_popup = matches!(
         target,
         Some(
@@ -238,6 +244,15 @@ fn map_mouse(
         },
         MouseEventKind::ScrollDown if over_sidebar => vec![Intent::ScrollSidebar(1)],
         MouseEventKind::ScrollUp if over_sidebar => vec![Intent::ScrollSidebar(-1)],
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if over_status.is_some() => {
+            let by = if mouse.kind == MouseEventKind::ScrollDown {
+                1
+            } else {
+                -1
+            };
+            let shown = over_status.unwrap_or_default();
+            vec![Intent::StatusScroll { by, shown }]
+        }
         MouseEventKind::ScrollDown => scroll_popup(1),
         MouseEventKind::ScrollUp => scroll_popup(-1),
         _ => Vec::new(),
@@ -302,6 +317,23 @@ fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
         // Dragged, not clicked.
         Target::Divider(_) => Vec::new(),
         Target::Popup => Vec::new(),
+        // A click on the focused pane's selected row attaches it; any other selects it, focusing its pane.
+        Target::StatusRow {
+            pane,
+            session,
+            shown,
+        } => {
+            if pane == client.focused_pane() && client.status_selected() == Some(&session) {
+                return vec![Intent::StatusAttach(session)];
+            }
+            vec![
+                Intent::FocusPane(pane),
+                Intent::StatusSelect { session, shown },
+            ]
+        }
+        Target::StatusGroupBy { pane, by, shown } => {
+            vec![Intent::FocusPane(pane), Intent::StatusGroupBy { by, shown }]
+        }
     }
 }
 
@@ -348,8 +380,32 @@ fn command(key: &KeyEvent, client: &Client, modes: &Modes) -> Option<Intent> {
         KeyCode::Char('?') => Intent::ShowHelp,
         KeyCode::Char('q') => Intent::Quit,
         KeyCode::Tab => Intent::ToggleSubagents(client.selected()?.clone()),
+        KeyCode::Char('s') => Intent::OpenStatus,
         _ => return None,
     })
+}
+
+/// A key while the focused pane shows the status page: `g` switches the grouping, `↑`/`↓` (or `k`/`j`) and page up and
+/// down move the table's selection, and `⏎` attaches it. Other keys do nothing: there is no session to type into.
+fn status_key(key: &KeyEvent, client: &Client) -> Option<Intent> {
+    if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
+        return None;
+    }
+    let shown = status::focused_shown(client);
+    let page = i32::try_from(shown.saturating_sub(1).max(1)).unwrap_or(i32::MAX);
+    let step = |by| Some(Intent::StatusStep { by, shown });
+    match key.code {
+        KeyCode::Char('g') => Some(Intent::StatusGroupBy {
+            by: client.status_grouping().other(),
+            shown,
+        }),
+        KeyCode::Down | KeyCode::Char('j') => step(1),
+        KeyCode::Up | KeyCode::Char('k') => step(-1),
+        KeyCode::PageDown => step(page),
+        KeyCode::PageUp => step(-page),
+        KeyCode::Enter => Some(Intent::StatusAttach(client.status_selected()?.clone())),
+        _ => None,
+    }
 }
 
 fn popup_key(key: &KeyEvent, popup: &Popup) -> Option<Intent> {
