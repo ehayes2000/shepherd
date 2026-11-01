@@ -15,7 +15,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | fixing | task/t47-prompt-wait @ d8ba6d4 | 1 | round 1 CHANGES: closed session hangs --wait; since choice unproven; + 7 minors |
-| T49 Render pages and split panes | [automation](features/automation.md) | merging | task/t49-render-layout @ 4f41e42 | 2 | round 2 APPROVE; footer-height minor → F56 |
 | T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | building | task/t50-ui-cli |  |  |
 | T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | building | task/t55-subagent-tree |  |  |
 
@@ -37,6 +36,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
+| T57 Status table | [status-page](features/status-page.md) | todo | T49 |
 | F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
@@ -46,7 +46,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 3 | 6 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 4 | 5 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |

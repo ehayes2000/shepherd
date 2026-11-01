@@ -18,7 +18,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T46 | CLI client: list and start sessions | done | 627e4d3 | 2 | round 2 APPROVE; 2 minors → T47 |
 | T47 | Prompt an agent and wait for its reply | fixing | task/t47-prompt-wait @ d8ba6d4 | 1 | round 1 CHANGES: closed session hangs --wait; since choice unproven; + 7 minors |
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
-| T49 | Render pages and split panes | merging | task/t49-render-layout @ 4f41e42 | 2 | round 2 APPROVE; footer-height minor → F56 |
+| T49 | Render pages and split panes | done | 18a0aff | 2 | round 2 APPROVE; footer-height minor → F56 |
 | T50 | `shepherd ui` CLI and screenshots | building | task/t50-ui-cli |  |  |
 | T51 | Answer an agent's pending question | todo |  |  |  |
 | T52 | Read a session's screen as text | todo |  |  |  |
