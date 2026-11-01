@@ -12,7 +12,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T57 | Status table | merging | task/t57-status-table @ 10a2eab | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
+| T57 | Status table | done | 27c7f26 | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
 | T58 | Preview and answer in place | todo |  |  |  |
 | T59 | Events feed and message line | todo |  |  |  |
 

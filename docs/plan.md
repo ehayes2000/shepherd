@@ -16,7 +16,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ 26668f8 | 2 | round 2 CHANGES: Codex Bash no → n (Cancel, documented); in_pane carry, same-tool, end_turn clear untested; unknown-tool fail-safe |
 | T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | building | task/t32b-link-kind |  |  |
-| T57 Status table | [status-page](features/status-page.md) | merging | task/t57-status-table @ 10a2eab | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
 
 ## Ready to start
 
@@ -34,6 +33,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
+| T59 Events feed and message line | [status-page](features/status-page.md) | todo | T57, T47 |
 | T56 Read a subagent's transcript | [subagents](features/subagents.md) | todo | T55, T47 |
 | F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
@@ -55,7 +55,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
-| [Status page](features/status-page.md) | M5 | 0 | 3 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
+| [Status page](features/status-page.md) | M5 | 1 | 2 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
 | [Subagents](features/subagents.md) | M5 | 2 | 2 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
 | [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
