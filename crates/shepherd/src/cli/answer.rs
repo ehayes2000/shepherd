@@ -8,6 +8,7 @@
 
 use std::io::Write;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use shepherd_core::acpp::{Choice, PromptBy, Seq};
 use shepherd_core::client::AskError;
@@ -29,18 +30,44 @@ pub struct Answer {
 }
 
 /// `{ session, choice, asked, question }` (docs/cli.md).
-#[derive(Serialize)]
-struct Answered {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AnsweredJson {
     session: String,
+    /// As given: a word, or an option's number from 1.
+    #[schemars(schema_with = "choice_schema")]
     choice: Choice,
+    /// What it asked the user, as this command's client last saw it; the host decided.
     asked: Option<String>,
+    /// The seq of the `agent/asked` entry it named.
+    #[schemars(with = "Option<u64>")]
     question: Option<Seq>,
+}
+
+/// A [`Choice`]'s schema: `yes`, `always`, `no`, or an option's number from 1.
+pub(crate) fn choice_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "oneOf": [
+            { "type": "string", "enum": ["yes", "always", "no"] },
+            { "type": "integer", "minimum": 1 }
+        ]
+    })
 }
 
 /// `shepherd answer`: has the session's host answer its agent's pending question with `answer.choice`.
 pub fn answer(
     drive: &mut impl Drive,
     answer: &Answer,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<(), CliError> {
+    answer_by(drive, answer, PromptBy::Cli, json, out)
+}
+
+/// [`answer`], recorded in the session's log as answered `by` someone other than the CLI (`shepherd mcp`'s `answer`).
+pub fn answer_by(
+    drive: &mut impl Drive,
+    answer: &Answer,
+    by: PromptBy,
     json: bool,
     out: &mut impl Write,
 ) -> Result<(), CliError> {
@@ -55,7 +82,7 @@ pub fn answer(
         session: id.clone(),
         choice: answer.choice,
         asked: question,
-        by: Some(PromptBy::Cli),
+        by: Some(by),
     });
     match ask_host(drive, Some(session.machine), body)? {
         Ok(_) => {}
@@ -72,7 +99,7 @@ pub fn answer(
     }
     let choice = answer.choice;
     if json {
-        let answered = Answered {
+        let answered = AnsweredJson {
             session: id.to_string(),
             choice,
             asked,

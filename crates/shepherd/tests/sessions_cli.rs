@@ -195,6 +195,7 @@ fn new_prints_the_id_of_the_session_the_host_made_and_sessions_lists_it() {
             "machine_id",
             "name",
             "pr",
+            "question",
             "starting",
             "status",
             "workspace",
@@ -213,6 +214,7 @@ fn new_prints_the_id_of_the_session_the_host_made_and_sessions_lists_it() {
     assert_eq!(session["pr"], Value::Null);
     assert_eq!(session["starting"], false);
     assert_eq!(session["failed"], Value::Null);
+    assert_eq!(session["question"], Value::Null);
 
     let human = running.ok(&["sessions"]);
     assert!(
@@ -418,4 +420,214 @@ fn commands_run_in_a_repo_never_make_the_host_select_it_as_its_workspace() {
     let made: Value =
         serde_json::from_str(&running.ok_in(&repo, &["new", "--cwd", &cwd, "--json"])).unwrap();
     assert_eq!(made["session"]["workspace"], Value::Null, "{made}");
+}
+
+#[test]
+fn stop_closes_a_session_without_a_worktree() {
+    let running = start_host();
+    let cwd = running.dir("project");
+    let id = running.ok(&["new", "--cwd", &cwd, "--name", "worker"]);
+    let id = id.trim_end();
+    let stopped = running.json(&["stop", "worker", "--json"]);
+    assert_eq!(
+        stopped,
+        serde_json::json!({ "session": id, "worktree": null, "unsaved": [] })
+    );
+    let stderr = running.fails(&["stop", "nobody"]);
+    assert!(stderr.contains("nobody"), "{stderr}");
+    for args in [
+        &["stop"][..],
+        &["stop", "a", "b"],
+        &["stop", "a", "--bogus"],
+    ] {
+        let stderr = running.fails(args);
+        assert!(
+            stderr.contains("usage: shepherd stop"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// `shepherd mcp`, run as an agent runs its MCP server: stdin and stdout carry the protocol, one message per line.
+/// Killed when dropped (on failure too): exactly this pid, never by name.
+struct McpServer {
+    child: Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: mpsc::Receiver<String>,
+    next: u64,
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Running {
+    /// `shepherd mcp`, launched from session `caller`'s environment.
+    fn mcp(&self, caller: &str) -> McpServer {
+        let mut child = Command::new(SHEPHERD)
+            .arg("mcp")
+            .env("HOME", self.home.path())
+            .env("SHELL", "/bin/sh")
+            .env(shepherd::mcp::CALLER_VAR, caller)
+            .current_dir(&self.here)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let stdin = child.stdin.take();
+        McpServer {
+            child,
+            stdin,
+            lines,
+            next: 1,
+        }
+    }
+}
+
+impl McpServer {
+    fn send(&mut self, message: &Value) {
+        let stdin = self.stdin.as_mut().unwrap();
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// Sends request `method` and waits for its response.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        );
+        loop {
+            let line = self
+                .lines
+                .recv_timeout(LIVENESS)
+                .expect("the server answered");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["id"] == serde_json::json!(id) {
+                return message;
+            }
+        }
+    }
+
+    /// Calls tool `name`: its result.
+    fn call(&mut self, name: &str, arguments: Value) -> Value {
+        let response = self.request(
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": arguments }),
+        );
+        assert!(response["error"].is_null(), "{response}");
+        response["result"].clone()
+    }
+
+    /// Hangs up, as the agent does when it exits: the server exits too, successfully.
+    fn hang_up(mut self) {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + LIVENESS;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success(), "{status}");
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server exits once stdin closes"
+            );
+            std::thread::yield_now();
+        }
+    }
+}
+
+#[test]
+fn mcp_serves_the_tools_over_stdio_on_this_machines_host() {
+    let running = start_host();
+    let mut mcp = running.mcp("s_pm");
+    let init = mcp.request(
+        "initialize",
+        serde_json::json!({ "protocolVersion": "2025-06-18", "capabilities": {},
+                            "clientInfo": { "name": "test", "version": "0" } }),
+    );
+    assert_eq!(init["result"]["serverInfo"]["name"], "shepherd", "{init}");
+    assert!(
+        init["result"]["capabilities"]["tools"].is_object(),
+        "{init}"
+    );
+    mcp.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+
+    let tools = mcp.request("tools/list", serde_json::json!({}));
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "status",
+            "read_pane",
+            "send",
+            "answer",
+            "new_session",
+            "stop"
+        ]
+    );
+
+    let cwd = running.dir("project");
+    let made = mcp.call(
+        "new_session",
+        serde_json::json!({ "cwd": cwd, "name": "worker" }),
+    );
+    let id = made["structuredContent"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        made["structuredContent"]["session"]["agent"], "shell",
+        "{made}"
+    );
+
+    // What the tools see is what the commands print.
+    let status = mcp.call("status", serde_json::json!({}));
+    assert_eq!(
+        status["structuredContent"],
+        running.json(&["sessions", "--json"])
+    );
+    let pane = mcp.call("read_pane", serde_json::json!({ "session": "worker" }));
+    assert_eq!(pane["structuredContent"]["rows"], 24, "{pane}");
+
+    let shell = mcp.call(
+        "send",
+        serde_json::json!({ "session": "worker", "text": "ls" }),
+    );
+    assert_eq!(shell["isError"], true, "{shell}");
+    assert!(
+        shell["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("runs no agent"),
+        "{shell}"
+    );
+
+    let stopped = mcp.call("stop", serde_json::json!({ "session": id }));
+    assert_eq!(
+        stopped["structuredContent"],
+        serde_json::json!({ "session": id, "worktree": null, "unsaved": [] })
+    );
+    mcp.hang_up();
 }

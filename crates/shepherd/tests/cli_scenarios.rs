@@ -5,26 +5,32 @@
 
 mod support;
 
+use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use shepherd::cli::prompt::Prompt;
 use shepherd::cli::sessions::{New, new, sessions};
+use shepherd::cli::stop::Stop;
 use shepherd::cli::ui::{Screenshot, Ui, prepare, screenshot, ui};
 use shepherd::cli::{CliError, Drive, WaitError, target};
 use shepherd::client::{ClientError, ClientRuntime, Connector};
+use shepherd::mcp::{Connect, Server};
 use shepherd_core::acpp::{
-    Dir, Envelope, Frame, FrameDraft, PeerTrusted, Seq, ShepherdFrame, Source, SourceKind,
-    Timestamp,
+    Dir, Envelope, Frame, FrameDraft, PeerTrusted, PromptBy, Seq, ShepherdFrame, Source,
+    SourceKind, Timestamp,
 };
 use shepherd_core::client::automation::SessionStatus;
 use shepherd_core::client::{AskId, Client, MachineStatus};
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, Pane, PaneId, SplitDir};
+use shepherd_core::ports::Worktrees;
+use shepherd_core::ports::worktrees::{WorktreeError, WorktreePath};
 use shepherd_core::ports::{EventLog, Link, LinkEvent, LinkEventSink, LogId, Reply};
 use shepherd_core::wire::{
     ClientMessage, ClientNotification, ClientRequest, CloseWorktree, Hello, HookFrame,
@@ -38,6 +44,7 @@ use shepherd_testkit::fakes::link::{FakeLink, FakeNetwork};
 use shepherd_testkit::fakes::pty::{ProgramInput, ScriptedProcess};
 use shepherd_testkit::fakes::worktrees::FakeWorktrees;
 use support::*;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
 const KEY_A: [u8; 32] = [0xaa; 32];
 const KEY_B: [u8; 32] = [0xbb; 32];
@@ -162,6 +169,8 @@ fn transcript_of(session: &str) -> PathBuf {
 /// its `claude`; B's host, letting A in unless told not to; and a command-line client on A's host.
 struct World {
     _tmp: tempfile::TempDir,
+    /// A's worktrees.
+    worktrees: FakeWorktrees,
     a: HostHarness,
     b: HostHarness,
     client: Runtime,
@@ -212,7 +221,7 @@ impl World {
             .machine_key(KEY_A)
             .env(env.clone())
             .log(a_log)
-            .worktrees(worktrees)
+            .worktrees(worktrees.clone())
             .program(CLAUDE, agent.program())
             .program(SHELL, painter("on testbox", agent.shell()))
             .start();
@@ -248,6 +257,7 @@ impl World {
         let hooks = a.connect();
         Self {
             _tmp: tmp,
+            worktrees,
             a,
             b,
             client,
@@ -1547,4 +1557,516 @@ fn a_stale_answer_after_the_user_answered_in_the_pane_is_refused_never_typed() {
     );
     // Only the user's key reached the agent.
     assert_eq!(w.answered, [user]);
+}
+
+// ---------- stop (T53) ----------
+
+/// What `shepherd stop [--force] [--json]` prints, or why it failed.
+fn stop_out(w: &mut World, session: &str, force: bool, json: bool) -> Result<String, CliError> {
+    let mut out = Vec::new();
+    let stop = Stop {
+        session: session.to_owned(),
+        force,
+    };
+    shepherd::cli::stop::stop(w, &stop, json, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+/// A shell session named `name` in a new managed worktree of A's workspace, once that is made. Returns its id and
+/// its worktree.
+fn worktree_session(w: &mut World, name: &str) -> (SessionId, PathBuf) {
+    let made = w
+        .new_json(New {
+            name: Some(name.into()),
+            ..New::default()
+        })
+        .unwrap();
+    let id = SessionId::new(made["session"]["id"].as_str().unwrap());
+    let worktree = |c: &Client| {
+        c.sessions()
+            .iter()
+            .find(|s| s.id == id && !s.creating_worktree)
+            .and_then(|s| s.worktree.clone())
+    };
+    w.wait(&mut |c| worktree(c).is_some(), LIVENESS).unwrap();
+    let path = worktree(w.client.client()).unwrap();
+    (id, path)
+}
+
+/// Runs the world until session `id` is no longer listed (or nothing more happens).
+fn until_gone(w: &mut World, id: &SessionId) {
+    let _ = w.wait(&mut |c| c.sessions().iter().all(|s| s.id != *id), LIVENESS);
+}
+
+fn worktree_exists(w: &World, worktree: &Path) -> bool {
+    w.worktrees.status(&WorktreePath::new(worktree)).is_ok()
+}
+
+/// How session `id`'s `session/closed` says closing went: whether its worktree was removed, and why it was kept when
+/// closing tried to remove it (none when the close asked to keep it).
+fn closed(w: &World, id: &SessionId) -> (bool, Option<String>) {
+    w.a.log()
+        .read(LogId::Session(id.clone()), Seq::ZERO)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.frame() {
+            Frame::Shepherd(m) => match m.body() {
+                ShepherdFrame::SessionClosed(c) => {
+                    Some((c.worktree_removed, c.worktree_kept.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the session was closed")
+}
+
+#[test]
+fn stop_closes_a_session_whose_worktree_loses_nothing_and_removes_the_worktree() {
+    let mut w = World::new();
+    let (id, worktree) = worktree_session(&mut w, "api");
+    assert_eq!(
+        stop_out(&mut w, "api", false, false).unwrap(),
+        "stopped api, removing its worktree\n"
+    );
+    until_gone(&mut w, &id);
+    assert!(w.a.host().sessions().is_empty());
+    assert!(!worktree_exists(&w, &worktree), "{worktree:?}");
+}
+
+#[test]
+fn stop_refuses_a_session_with_unsaved_work_and_force_stops_it_keeping_the_worktree() {
+    let mut w = World::new();
+    let (id, worktree) = worktree_session(&mut w, "api");
+    w.worktrees.set_dirty(&worktree, true);
+
+    let err = stop_out(&mut w, "api", false, true).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why)
+            if why.contains("api has unsaved work in its worktree (uncommitted changes): it was not stopped")),
+        "{err:?}"
+    );
+    let _ = w.wait(&mut |_| false, LIVENESS);
+    assert_eq!(w.a.host().sessions().len(), 1, "nothing was closed");
+
+    let stopped: Value =
+        serde_json::from_str(&stop_out(&mut w, "api", true, true).unwrap()).unwrap();
+    assert_eq!(
+        stopped,
+        json!({ "session": id, "worktree": "keep", "unsaved": ["uncommitted changes"] })
+    );
+    until_gone(&mut w, &id);
+    assert!(w.a.host().sessions().is_empty());
+    assert!(worktree_exists(&w, &worktree), "kept");
+    // Kept because the close asked to keep it, not because removing it was tried and refused.
+    assert_eq!(closed(&w, &id), (false, None));
+}
+
+#[test]
+fn stop_refuses_when_the_host_cannot_tell_what_the_worktree_holds_and_force_keeps_it() {
+    let mut w = World::new();
+    let (id, worktree) = worktree_session(&mut w, "api");
+    w.worktrees
+        .fail_status(&worktree, WorktreeError::NoDefaultBranch(worktree.clone()));
+
+    let err = stop_out(&mut w, "api", false, true).unwrap_err();
+    assert!(
+        matches!(&err, CliError::Failed(why)
+            if why.contains("can't tell whether api has unsaved work in its worktree")
+                && why.contains("it was not stopped")),
+        "{err:?}"
+    );
+    let _ = w.wait(&mut |_| false, LIVENESS);
+    assert_eq!(w.a.host().sessions().len(), 1, "nothing was closed");
+
+    let stopped: Value =
+        serde_json::from_str(&stop_out(&mut w, "api", true, true).unwrap()).unwrap();
+    assert_eq!(
+        stopped,
+        json!({ "session": id, "worktree": "keep", "unsaved": [] })
+    );
+    until_gone(&mut w, &id);
+    assert!(w.a.host().sessions().is_empty());
+    assert_eq!(closed(&w, &id), (false, None));
+}
+
+// ---------- shepherd mcp (T53) ----------
+
+/// The world, shared by a test and the MCP server it drives: each tool call borrows it as its client.
+struct Shared(Rc<RefCell<World>>);
+
+struct Borrowed<'a>(RefMut<'a, World>);
+
+impl Drive for Borrowed<'_> {
+    fn client(&self) -> &Client {
+        Drive::client(&*self.0)
+    }
+
+    fn screens(&self) -> &shepherd_tui::Screens {
+        Drive::screens(&*self.0)
+    }
+
+    fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
+        Drive::ask(&mut *self.0, machine, request)
+    }
+
+    fn wait(
+        &mut self,
+        done: &mut dyn FnMut(&Client) -> bool,
+        limit: Duration,
+    ) -> Result<(), WaitError> {
+        Drive::wait(&mut *self.0, done, limit)
+    }
+}
+
+impl Connect for Shared {
+    fn connect(&mut self) -> Result<Box<dyn Drive + '_>, String> {
+        Ok(Box::new(Borrowed(self.0.borrow_mut())))
+    }
+}
+
+/// An MCP client of `shepherd mcp`'s server, talking to it over a pipe as over stdio: one JSON-RPC message per line.
+struct Mcp {
+    world: Rc<RefCell<World>>,
+    runtime: tokio::runtime::Runtime,
+    local: tokio::task::LocalSet,
+    reader: BufReader<ReadHalf<DuplexStream>>,
+    writer: WriteHalf<DuplexStream>,
+    next: u64,
+}
+
+/// The session the server is launched from, in the tests that don't say otherwise.
+const PM: &str = "s_pm";
+
+impl Mcp {
+    /// A server on `world`, its calls by session [`PM`], initialized as an MCP client does.
+    fn new(world: World) -> Self {
+        Self::by(world, shepherd::mcp::caller(Some(PM)))
+    }
+
+    fn by(world: World, by: PromptBy) -> Self {
+        let here = world.here();
+        let world = Rc::new(RefCell::new(world));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let server = Server::new(Shared(world.clone()), by, here);
+        local.spawn_local(async move {
+            let _ = shepherd::mcp::serve(server, tokio::io::split(theirs)).await;
+        });
+        let (reader, writer) = tokio::io::split(ours);
+        let mut mcp = Self {
+            world,
+            runtime,
+            local,
+            reader: BufReader::new(reader),
+            writer,
+            next: 1,
+        };
+        let init = mcp.request(
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" } }),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "shepherd", "{init}");
+        mcp.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        mcp
+    }
+
+    fn world(&self) -> RefMut<'_, World> {
+        self.world.borrow_mut()
+    }
+
+    fn send(&mut self, message: Value) {
+        let Self {
+            runtime,
+            local,
+            writer,
+            ..
+        } = self;
+        local.block_on(runtime, async {
+            let line = format!("{message}\n");
+            writer.write_all(line.as_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+        });
+    }
+
+    /// Sends request `method` and waits for its response (skipping anything else the server says).
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        let Self {
+            runtime,
+            local,
+            reader,
+            ..
+        } = self;
+        local.block_on(runtime, async {
+            loop {
+                let mut line = String::new();
+                let read = tokio::time::timeout(LIVENESS, reader.read_line(&mut line))
+                    .await
+                    .expect("the server answered in time")
+                    .unwrap();
+                assert!(read > 0, "the server hung up");
+                let message: Value = serde_json::from_str(&line).unwrap();
+                if message["id"] == json!(id) {
+                    return message;
+                }
+            }
+        })
+    }
+
+    /// Calls tool `name`: its result (a tool error too).
+    fn call(&mut self, name: &str, arguments: Value) -> Value {
+        let response = self.request(
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        );
+        assert!(response["error"].is_null(), "{response}");
+        response["result"].clone()
+    }
+
+    /// Calls tool `name`, which must succeed: its structured content, which is also its text.
+    fn ok(&mut self, name: &str, arguments: Value) -> Value {
+        let result = self.call(name, arguments);
+        assert_ne!(result["isError"], true, "{result}");
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, result["structuredContent"], "{result}");
+        result["structuredContent"].clone()
+    }
+
+    /// Calls tool `name`, which must fail: why.
+    fn fails(&mut self, name: &str, arguments: Value) -> String {
+        let result = self.call(name, arguments);
+        assert_eq!(result["isError"], true, "{result}");
+        result["content"][0]["text"].as_str().unwrap().to_owned()
+    }
+}
+
+/// Who each `session/answered` entry in A's logs says answered.
+fn answered_by(w: &World) -> Vec<String> {
+    let log = w.a.log();
+    log.logs()
+        .unwrap()
+        .into_iter()
+        .flat_map(|id| log.read(id, Seq::ZERO).unwrap())
+        .filter_map(|e| match e.frame() {
+            Frame::Shepherd(m) => match m.body() {
+                ShepherdFrame::SessionAnswered(a) => Some(a.by.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_lists_each_tool_with_its_input_and_output_schema() {
+    let mut mcp = Mcp::new(World::new());
+    let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
+    let names: Vec<&str> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "status",
+            "read_pane",
+            "send",
+            "answer",
+            "new_session",
+            "stop"
+        ]
+    );
+    insta::assert_snapshot!(serde_json::to_string_pretty(&tools).unwrap());
+}
+
+#[test]
+fn mcp_status_is_what_sessions_prints() {
+    let mut mcp = Mcp::new(World::new());
+    session_on(&mut mcp.world().a, "mine");
+    session_on(&mut mcp.world().b, "theirs");
+    let status = mcp.ok("status", json!({}));
+    assert_eq!(field(&status, "name"), ["theirs", "mine"]);
+    assert_eq!(status, mcp.world().sessions_json());
+}
+
+#[test]
+fn mcp_starts_a_session_reads_its_pane_and_stops_it() {
+    let mut mcp = Mcp::new(World::new());
+    let made = mcp.ok("new_session", json!({ "cwd": "app", "name": "plain" }));
+    let id = made["session"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(made["session"]["name"], "plain", "{made}");
+    assert!(made["session"]["worktree"].is_null(), "no worktree: {made}");
+
+    let pane = mcp.ok("read_pane", json!({ "session": "plain" }));
+    assert_eq!(pane["session"], id.as_str());
+    assert_eq!(pane["lines"][0], "on testbox first line!", "{pane}");
+
+    let stopped = mcp.ok("stop", json!({ "session": id }));
+    assert_eq!(
+        stopped,
+        json!({ "session": id, "worktree": null, "unsaved": [] })
+    );
+    until_gone(&mut mcp.world(), &SessionId::new(&id));
+    assert!(mcp.world().a.host().sessions().is_empty());
+}
+
+#[test]
+fn mcp_send_waits_for_the_reply_and_is_recorded_as_by_the_calling_session() {
+    let mut mcp = Mcp::new(World::new());
+    let id = mcp.world().agent_session("worker");
+    let replied = mcp.ok(
+        "send",
+        json!({ "session": "worker", "text": "fix it", "wait": true, "timeout": 60 }),
+    );
+    assert_eq!(
+        replied,
+        json!({ "session": id, "status": "idle", "reply": "Done: fix it", "asked": null })
+    );
+    assert_eq!(
+        mcp.world().prompted(),
+        [("fix it".to_owned(), "mcp:s_pm".to_owned())]
+    );
+}
+
+#[test]
+fn mcp_send_from_outside_any_session_is_recorded_as_by_mcp() {
+    let mut mcp = Mcp::by(World::new(), shepherd::mcp::caller(None));
+    let id = mcp.world().agent_session("worker");
+    let sent = mcp.ok("send", json!({ "session": "worker", "text": "go" }));
+    assert_eq!(
+        sent,
+        json!({ "session": id, "status": "running", "reply": null, "asked": null })
+    );
+    assert_eq!(
+        mcp.world().prompted(),
+        [("go".to_owned(), "mcp".to_owned())]
+    );
+}
+
+#[test]
+fn mcp_send_to_a_busy_agent_is_a_tool_error_and_types_nothing() {
+    let mut mcp = Mcp::new(World::new());
+    mcp.world().agent_session("worker");
+    mcp.world().answers.push_back(Answer::Silent);
+    mcp.ok("send", json!({ "session": "worker", "text": "one" }));
+    let why = mcp.fails("send", json!({ "session": "worker", "text": "two" }));
+    assert!(why.contains("worker is busy (running)"), "{why}");
+    assert_eq!(mcp.world().submitted, ["one"]);
+}
+
+#[test]
+fn mcp_answers_the_question_status_shows_by_its_seq_recorded_as_by_the_calling_session() {
+    let mut mcp = Mcp::new(World::new());
+    let id = asking(&mut mcp.world());
+    let asked = mcp.world().asked_seq(&id).get();
+
+    let status = mcp.ok("status", json!({}));
+    assert_eq!(
+        status["sessions"][0]["question"],
+        json!({ "seq": asked, "text": "Bash", "choices": null }),
+        "{status}"
+    );
+    let answered = mcp.ok(
+        "answer",
+        json!({ "session": "worker", "choice": "yes", "asked": asked }),
+    );
+    assert_eq!(
+        answered,
+        json!({ "session": id, "choice": "yes", "asked": "Bash", "question": asked })
+    );
+    assert_eq!(mcp.world().answered, [(id.clone(), b"\r".to_vec())]);
+    assert_eq!(answered_by(&mcp.world()), ["mcp:s_pm"]);
+}
+
+#[test]
+fn mcp_answer_naming_a_question_no_longer_pending_is_a_tool_error_and_types_nothing() {
+    let mut mcp = Mcp::new(World::new());
+    let id = asking(&mut mcp.world());
+    let stale = mcp.world().asked_seq(&id).get() - 1;
+    let why = mcp.fails(
+        "answer",
+        json!({ "session": "worker", "choice": "yes", "asked": stale }),
+    );
+    assert!(
+        why.contains("worker has nothing to answer (wants-user)"),
+        "{why}"
+    );
+    assert!(mcp.world().answered.is_empty());
+    assert!(answered_by(&mcp.world()).is_empty());
+}
+
+#[test]
+fn mcp_answer_with_nothing_to_answer_is_a_tool_error_and_types_nothing() {
+    let mut mcp = Mcp::new(World::new());
+    mcp.world().agent_session("worker");
+    let why = mcp.fails("answer", json!({ "session": "worker", "choice": 1 }));
+    assert!(why.contains("worker has nothing to answer (idle)"), "{why}");
+    assert!(mcp.world().answered.is_empty());
+    assert!(mcp.world().submitted.is_empty());
+}
+
+#[test]
+fn mcp_a_tool_naming_an_unknown_session_is_a_tool_error() {
+    let mut mcp = Mcp::new(World::new());
+    session_on(&mut mcp.world().a, "mine");
+    for (tool, arguments) in [
+        ("read_pane", json!({ "session": "ghost" })),
+        ("send", json!({ "session": "ghost", "text": "boo" })),
+        ("answer", json!({ "session": "ghost", "choice": "yes" })),
+        ("stop", json!({ "session": "ghost" })),
+    ] {
+        let why = mcp.fails(tool, arguments);
+        assert!(
+            why.contains("no session is called `ghost`") && why.contains("mine"),
+            "{tool}: {why}"
+        );
+    }
+}
+
+#[test]
+fn mcp_stop_refuses_unsaved_work_unless_forced() {
+    let mut mcp = Mcp::new(World::new());
+    let (id, worktree) = worktree_session(&mut mcp.world(), "api");
+    mcp.world().worktrees.set_dirty(&worktree, true);
+    let why = mcp.fails("stop", json!({ "session": "api" }));
+    assert!(
+        why.contains("api has unsaved work in its worktree"),
+        "{why}"
+    );
+    assert_eq!(mcp.world().a.host().sessions().len(), 1);
+
+    let stopped = mcp.ok("stop", json!({ "session": "api", "force": true }));
+    assert_eq!(
+        stopped,
+        json!({ "session": id, "worktree": "keep", "unsaved": ["uncommitted changes"] })
+    );
+}
+
+#[test]
+fn mcp_refuses_an_unknown_tool_and_arguments_its_schema_does_not_take() {
+    let mut mcp = Mcp::new(World::new());
+    let invalid = |response: &Value| response["error"]["code"] == json!(-32602);
+    let unknown = mcp.request("tools/call", json!({ "name": "rm", "arguments": {} }));
+    assert!(invalid(&unknown), "{unknown}");
+    let no_text = mcp.request(
+        "tools/call",
+        json!({ "name": "send", "arguments": { "session": "worker" } }),
+    );
+    assert!(invalid(&no_text), "{no_text}");
+    let extra = mcp.request(
+        "tools/call",
+        json!({ "name": "status", "arguments": { "all": true } }),
+    );
+    assert!(invalid(&extra), "{extra}");
 }

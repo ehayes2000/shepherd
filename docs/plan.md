@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T53 Shepherd MCP server for agents | [automation](features/automation.md) | merging | task/t53-mcp-server @ 3f97c12 | 1 | round 1 fixed as asked (mutations shown); merging |
-| T58 Preview and answer in place | [status-page](features/status-page.md) | fixing | task/t58-preview-answer |  | built; PM: preview must show at the mock's 120 cols (table gives up columns) |
+| T58 Preview and answer in place | [status-page](features/status-page.md) | review | task/t58-preview-answer @ a9254d4 |  | built; preview at 120 cols (table drops SUB, AGENT) |
 
 ## Ready to start
 

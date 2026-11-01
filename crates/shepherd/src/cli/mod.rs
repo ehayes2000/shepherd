@@ -1,5 +1,6 @@
 //! The command-line client for scripts and agents (T46, decision 0022): `shepherd sessions`, `shepherd new`, the
 //! session commands built on them, and `shepherd ui` (T50). `docs/cli.md` documents each command and its `--json` shape.
+//! `shepherd mcp` ([`crate::mcp`]) runs these same functions as MCP tools.
 //!
 //! A command is a short-lived client of the local host (launching it if none is running), over the same link and
 //! tunnels as the TUI: it runs the client's own core ([`Client`]) headless through a [`Drive`], so it folds the same
@@ -11,6 +12,7 @@ pub mod answer;
 pub mod prompt;
 pub mod screen;
 pub mod sessions;
+pub mod stop;
 pub mod ui;
 
 use std::fmt;
@@ -123,6 +125,51 @@ pub trait Drive {
         done: &mut dyn FnMut(&Client) -> bool,
         limit: Duration,
     ) -> Result<(), WaitError>;
+}
+
+/// A borrowed client drives as the client itself does: `shepherd mcp` hands each tool call one.
+impl<D: Drive + ?Sized> Drive for &mut D {
+    fn client(&self) -> &Client {
+        (**self).client()
+    }
+
+    fn screens(&self) -> &Screens {
+        (**self).screens()
+    }
+
+    fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
+        (**self).ask(machine, request)
+    }
+
+    fn wait(
+        &mut self,
+        done: &mut dyn FnMut(&Client) -> bool,
+        limit: Duration,
+    ) -> Result<(), WaitError> {
+        (**self).wait(done, limit)
+    }
+}
+
+impl<D: Drive + ?Sized> Drive for Box<D> {
+    fn client(&self) -> &Client {
+        (**self).client()
+    }
+
+    fn screens(&self) -> &Screens {
+        (**self).screens()
+    }
+
+    fn ask(&mut self, machine: Option<MachineId>, request: ClientRequest) -> AskId {
+        (**self).ask(machine, request)
+    }
+
+    fn wait(
+        &mut self,
+        done: &mut dyn FnMut(&Client) -> bool,
+        limit: Duration,
+    ) -> Result<(), WaitError> {
+        (**self).wait(done, limit)
+    }
 }
 
 impl<L, C, H> Drive for ClientRuntime<L, C, H>
