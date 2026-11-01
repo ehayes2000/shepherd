@@ -448,3 +448,137 @@ fn a_stray_question_outside_a_turn_is_ignored() {
     assert_eq!(run.state.activity(), &Activity::Idle);
     assert!(!run.state.wants_user());
 }
+
+/// The main agent's `PermissionRequest` for the question its `AskUserQuestion` call asks.
+fn question_request() -> Value {
+    let ask = cc!("PreToolUse.AskUserQuestion");
+    let request = with(
+        cc!("PermissionRequest.Bash"),
+        "tool_name",
+        json!("AskUserQuestion"),
+    );
+    with(request, "tool_input", ask["tool_input"].clone())
+}
+
+#[test]
+fn typing_into_a_dialog_carries_over_to_the_one_queued_behind_it() {
+    // The user moved around the Bash dialog; once Bash's activity shows that one closed, the subagent's dialog is
+    // what the user's keys went to, as far as shepherd can tell: still not shepherd's to answer.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    run.host(answered(None));
+    run.hooks(vec![
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+        cc!("PostToolUse.Bash"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn a_request_for_the_tool_whose_dialog_is_up_is_that_dialog() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.AskUserQuestion"),
+        question_request(),
+    ]);
+    assert_eq!(run.question(), Some(&framework(None)));
+
+    // Typed into before its request arrived: still the user's.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.AskUserQuestion"),
+    ]);
+    run.host(answered(None));
+    run.hook(question_request());
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn the_same_question_asked_again_is_still_answerable() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.AskUserQuestion"),
+    ]);
+    run.host(ShepherdFrame::AgentAsked(framework(None)));
+    assert_eq!(run.question(), Some(&framework(None)));
+}
+
+#[test]
+fn the_turn_ending_shows_every_queued_dialog_closed() {
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+    ]);
+    assert_eq!(run.question(), None);
+    // The next turn asks about a tool neither queued dialog was for: nothing of theirs shows them closed but the
+    // turn's end.
+    let read = with(cc!("PermissionRequest.Bash"), "tool_name", json!("Read"));
+    let read = with(
+        read,
+        "tool_input",
+        cc!("PreToolUse.Read")["tool_input"].clone(),
+    );
+    run.hooks(vec![
+        cc!("Stop"),
+        cc!("UserPromptSubmit.second"),
+        cc!("PreToolUse.Read"),
+        read,
+    ]);
+    assert!(run.question().is_some());
+}
+
+#[test]
+fn a_dialog_on_no_known_tool_is_never_shown_closed_by_other_tools() {
+    // The parent's Bash request names no tool it started; the subagent's Grep dialog queues behind it. A tool
+    // unrelated to either running proves neither closed.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Bash"),
+        cc!("PermissionRequest.Grep.subagent"),
+        cc!("PreToolUse.Read"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn a_dialog_on_no_known_tool_cleared_by_other_activity_may_still_be_up() {
+    // A Bash request on no known tool; a subagent's tool runs (which drops it, though it may still be on screen),
+    // then the subagent asks: not answerable until the turn ends.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PermissionRequest.Bash"),
+        cc!("PreToolUse.Grep.subagent"),
+        cc!("PermissionRequest.Grep.subagent"),
+    ]);
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+    run.hooks(vec![
+        cc!("Stop"),
+        cc!("UserPromptSubmit.second"),
+        cc!("PreToolUse.Bash"),
+        cc!("PermissionRequest.Bash"),
+    ]);
+    assert!(run.question().is_some());
+}

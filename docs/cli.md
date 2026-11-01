@@ -156,6 +156,8 @@ own keys for the choice into the session, so every window sees the dialog close,
 - A permission takes `yes`, `always` (yes, and don't ask again) or `no`, where that dialog offers them. A choice the
   dialog doesn't offer, or that shepherd can't tell it offers, is refused rather than guessed: Claude Code takes
   `always` only on a file prompt (Edit, Write); Codex takes `always` only on a patch, and `no` on a patch or a command.
+  For a Codex command, `no` cancels: Codex stops its turn and waits for you to tell it what to do differently (its
+  command dialog offers no "no, but carry on").
   `yes` is always offered.
 - A question takes the number of one of its options, from 1 in the order the agent lists them, or `no` to cancel it.
   A question that takes several picks, or asks several questions at once, can only be answered in the pane.
@@ -167,7 +169,7 @@ is answered. Otherwise nothing is typed and it is refused with the session's sta
 question the user is answering in the pane (any key typed into the session after it asked, including moving around
 the dialog, takes the question away from shepherd), and one that opened a second dialog while another was up (the
 agents queue them, so keys could land in the first). The last two stay `wants-user`, unanswerable here, until the
-agent's activity shows the dialogs closed. A choice the question doesn't take (`yes` for a question, a number past its
+agent's activity shows the dialogs closed (or, for a dialog about no tool the agent named, until its turn ends). A choice the question doesn't take (`yes` for a question, a number past its
 last option) is refused too, saying why.
 
 ## Shapes

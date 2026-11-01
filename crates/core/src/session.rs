@@ -152,7 +152,8 @@ pub struct SessionState {
     tools: Vec<ToolSummary>,
     permission: Option<Permission>,
     /// Dialogs opened before the current wait that no activity has shown closed yet (the agents queue dialogs, so one
-    /// may still be up in front): each the tool it waits on, or none for one any tool activity closes.
+    /// may still be up in front): each the tool it waits on, whose activity shows it closed; or none for one on no
+    /// known tool, which nothing but the turn ending shows closed.
     covered: Vec<Option<String>>,
     prompt: Option<Request>,
     /// The seq at which the current wait on the user ([`Activity::Idle`] or [`Activity::NeedsPermission`]) began.
@@ -443,9 +444,17 @@ impl SessionState {
             return false;
         };
         let in_pane = open.in_pane;
-        self.covered.push(open.waits_on.clone());
+        let waits_on = open.waits_on.clone();
+        self.still_covers(waits_on);
         self.forget_permission();
         in_pane
+    }
+
+    /// Remembers a dialog that may still be up in front, once: one per tool, and one for every dialog on no known tool.
+    fn still_covers(&mut self, waits_on: Option<String>) {
+        if !self.covered.contains(&waits_on) {
+            self.covered.push(waits_on);
+        }
     }
 
     /// An answer shepherd typed ends the wait, and a subagent that asked works on. Without a choice the user is
@@ -567,11 +576,17 @@ impl SessionState {
     /// After a frame about tool `id`: clears a permission waiting on it (or on no known tool), then shows the
     /// current tool unless a permission is still pending.
     fn tool_activity(&mut self, id: &str) {
+        // A covered dialog for a known tool is shown closed by that tool's activity; one for no known tool never is.
         self.covered
-            .retain(|w| w.as_deref().is_some_and(|w| w != id));
+            .retain(|w| w.as_deref().is_none_or(|w| w != id));
         if let Some(p) = &self.permission
             && p.waits_on.as_deref().is_none_or(|w| w == id)
         {
+            // A wait on no known tool clears on any activity, which doesn't prove its dialog closed: it stays
+            // covered (uncertain) until the turn ends, so no later dialog is answered into it.
+            if p.waits_on.is_none() {
+                self.still_covers(None);
+            }
             self.forget_permission();
         }
         if self.permission.is_none() {

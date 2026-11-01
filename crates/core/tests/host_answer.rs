@@ -301,7 +301,7 @@ fn claude_code_is_answered_always_only_on_a_prompt_that_offers_it() {
 
 #[test]
 fn a_codex_approval_is_answered_with_its_overlays_own_keys_for_that_kind_of_request() {
-    // A command: approve, or deny ("No, continue without running it"), never Cancel's `n`; whether it offers
+    // A command: approve, or Cancel (`n`, which ends the turn): the dialog offers no Decline. Whether it offers
     // "for this session" isn't in the hook, so always is refused.
     assert_eq!(
         typed(codex_permission(), Choice::Yes),
@@ -309,7 +309,7 @@ fn a_codex_approval_is_answered_with_its_overlays_own_keys_for_that_kind_of_requ
     );
     assert_eq!(
         typed(codex_permission(), Choice::No),
-        Some(vec![b"d".to_vec()])
+        Some(vec![b"n".to_vec()])
     );
     assert_eq!(typed(codex_permission(), Choice::Always), None);
     // A patch's three options are fixed.
@@ -336,11 +336,18 @@ fn an_answer_naming_its_question_answers_only_that_one() {
     agent.hooks(vec![
         cc!("SessionStart.startup"),
         cc!("UserPromptSubmit"),
+        cc!("PreToolUse.Bash"),
         cc!("PermissionRequest.Bash"),
     ]);
     let first = agent.last_asked();
-    // The user answers it in the pane and the agent moves on to another question.
-    agent.hooks(vec![cc!("PreToolUse.Read"), cc!("PermissionRequest.Bash")]);
+    // It was answered (the tool ran) and the agent moves on to ask about another.
+    let read = with(cc!("PermissionRequest.Bash"), "tool_name", json!("Read"));
+    let read = with(
+        read,
+        "tool_input",
+        cc!("PreToolUse.Read")["tool_input"].clone(),
+    );
+    agent.hooks(vec![cc!("PostToolUse.Bash"), cc!("PreToolUse.Read"), read]);
     let second = agent.last_asked();
     assert_ne!(first, second);
     let (reply, commands) = agent.answer_to(first, Choice::Yes);

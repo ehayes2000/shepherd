@@ -482,18 +482,19 @@ fn unknown_frames_do_not_change_state() {
 #[test]
 fn inferred_permission_clears_do_not_accumulate_pending_requests() {
     // Each permission here is cleared by a tool update, never answered. If the fold kept every unanswered
-    // permission request, the state after many cycles would differ from the state with none.
+    // permission request, the state after many cycles would differ from the state after one.
     let mut cycles = vec![prompt(1, "hi"), tool_call("t1", "ls")];
     for i in 0..20 {
         cycles.push(permission(100 + i, "x", "Allow?"));
         cycles.push(tool_update("t1", "in_progress"));
     }
-    let without = fold(&[
+    let once = fold(&[
         prompt(1, "hi"),
         tool_call("t1", "ls"),
+        permission(100, "x", "Allow?"),
         tool_update("t1", "in_progress"),
     ]);
-    assert_eq!(fold(&cycles), without);
+    assert_eq!(fold(&cycles), once);
 }
 
 // ---------- attention ----------

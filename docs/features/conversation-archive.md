@@ -226,8 +226,8 @@ acceptance:
   dialog takes the host's keys (`core::host::answer` cites each) and does what the choice says (the tool runs, runs and
   is remembered, or is declined), and the session goes on working (or idle, after no). Check each variant's keys and
   what it offers: Claude Code's Bash prompt (Enter, Esc; `always` refused) and a file prompt (Edit: Shift+Tab selects
-  "allow for the rest of the session"); Codex's command approval (`y`, and `d` = "No, continue without running it":
-  is Decline always among its `available_decisions`? is `a` ever, and should `always` then be typed?), its patch
+  "allow for the rest of the session"); Codex's command approval (`y`, and `n` = Cancel, which should end the turn:
+  does any command approval offer Decline (`d`) or `a` after all, and should `always` then be typed?), its patch
   approval (`y`, `a`, `n`), and a permissions or MCP request (only `yes` is typed: confirm its tool name in the hook).
   Also open two dialogs at once (a subagent asking while the main agent's dialog is up) and confirm Claude Code queues
   them, showing the first. For

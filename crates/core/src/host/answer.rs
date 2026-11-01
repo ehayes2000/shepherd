@@ -25,9 +25,11 @@
 //! depend on the request:
 //! - `apply_patch` (`patch_options`, fixed): `always` is `a` (`approve_for_session`, "Yes, and don't ask again for
 //!   these files"); `no` is `n` (`decline`, "No, and tell Codex what to do differently", its only no).
-//! - a command (`Bash`, `exec_options`): the options follow the request's `available_decisions`, which the hook
-//!   doesn't carry. `no` is `d` (`deny`, "No, continue without running it"), not `n`, whose Cancel aborts the turn.
-//!   `always` (`a`, only with `AcceptForSession` offered) is refused: shepherd can't tell.
+//! - a command (`Bash`, `exec_options`): the options follow the request's `available_decisions`. The command
+//!   approval passes none (`codex-rs/core/src/tools/approvals.rs`, `available_decisions: None`), so the dialog shows
+//!   `default_available_decisions`: Accept, maybe AcceptWithExecpolicyAmendment, and Cancel, with no Decline. So `no`
+//!   is `n` (`decline`, Cancel: "No, and tell Codex what to do differently"), which ends the agent's turn; `d` would
+//!   match nothing. `always` (`a`, only with `AcceptForSession` offered) is refused.
 //! - anything else (permissions, MCP): only `yes`; their no keys differ (`permissions_options` binds `d` and not `n`).
 //!
 //! Codex has no hook for a question (`agents::codex`), so it is never asked one shepherd could answer. Neither agent is
@@ -89,8 +91,7 @@ pub fn keys(agent: AgentKind, asked: &AgentAsked, choice: Choice) -> Result<Vec<
             _ => not_offered(),
         },
         (AgentKind::Codex, BlockKind::Permission, Choice::No) => match tool {
-            Some("apply_patch") => key(b"n"),
-            Some("Bash") => key(b"d"),
+            Some("apply_patch" | "Bash") => key(b"n"),
             _ => not_offered(),
         },
         (_, BlockKind::Permission, Choice::Option(_)) => {
