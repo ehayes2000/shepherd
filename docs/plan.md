@@ -15,8 +15,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | review | task/t47-prompt-wait @ d8ba6d4 |  | built; fresh agent counts idle after SessionStart; SessionBusy wire error |
-| T49 Render pages and split panes | [automation](features/automation.md) | review | task/t49-render-layout @ 4f41e42 | 1 | round 1 fixed (Layout button in sidebar header; shared fit_screens); round 2 review |
-| T54 Subagent lifecycle in the event log | [subagents](features/subagents.md) | merging | task/t54-subagent-events @ fa40b4e | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
+| T49 Render pages and split panes | [automation](features/automation.md) | merging | task/t49-render-layout @ 4f41e42 | 2 | round 2 APPROVE; footer-height minor → F56 |
+| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | building | task/t50-ui-cli |  |  |
+| T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | building | task/t55-subagent-tree |  |  |
 
 ## Ready to start
 
@@ -24,7 +25,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Depends |
 |---|---|---|---|
-| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | todo | T48, T46 |
 | T52 Read a session's screen as text | [automation](features/automation.md) | todo | T46 |
 | F54 Record each session's launch agent home | [conversation-archive](features/conversation-archive.md) | todo | T42b |
 | T44 Real-agent end-to-end suite | [conversation-archive](features/conversation-archive.md) | todo | T43 |
@@ -37,6 +37,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
+| F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |
 | F39 T26 leftovers | [worktrees](features/worktrees.md) | todo | T26 |
 
@@ -56,7 +57,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Status page](features/status-page.md) | M5 | 0 | 3 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
-| [Subagents](features/subagents.md) | M5 | 0 | 4 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
+| [Subagents](features/subagents.md) | M5 | 1 | 3 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
 | [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 1 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 

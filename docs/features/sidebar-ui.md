@@ -213,5 +213,7 @@ acceptance:
   backgrounds, like T62's machine-color readability test); snapshot of a selected starting session.
 - From T62's review: build `UnknownMachineColor`'s list of names from `MachineColor::ALL` (core config.rs ~139), and pin
   one id that maps to LightMagenta in `the_color_of_an_id_is_pinned_across_builds`.
+- From T49's review: the collapsed sidebar's `footer_height` is always 3 but `⊞` is drawn only when
+  `inner.height >= HEADER_HEIGHT + 3` (sidebar.rs ~222); make the footer height follow the same condition.
 scope: crates/tui, crates/core
 

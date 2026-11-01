@@ -18,8 +18,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T46 | CLI client: list and start sessions | done | 627e4d3 | 2 | round 2 APPROVE; 2 minors → T47 |
 | T47 | Prompt an agent and wait for its reply | review | task/t47-prompt-wait @ d8ba6d4 |  | built; fresh agent counts idle after SessionStart; SessionBusy wire error |
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
-| T49 | Render pages and split panes | review | task/t49-render-layout @ 4f41e42 | 1 | round 1 fixed (Layout button in sidebar header; shared fit_screens); round 2 review |
-| T50 | `shepherd ui` CLI and screenshots | todo |  |  |  |
+| T49 | Render pages and split panes | merging | task/t49-render-layout @ 4f41e42 | 2 | round 2 APPROVE; footer-height minor → F56 |
+| T50 | `shepherd ui` CLI and screenshots | building | task/t50-ui-cli |  |  |
 | T51 | Answer an agent's pending question | todo |  |  |  |
 | T52 | Read a session's screen as text | todo |  |  |  |
 | T53 | Shepherd MCP server for agents | todo |  |  |  |

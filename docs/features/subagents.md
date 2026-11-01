@@ -11,8 +11,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T54 | Subagent lifecycle in the event log | merging | task/t54-subagent-events @ fa40b4e | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
-| T55 | Subagent tree in the sidebar | todo |  |  |  |
+| T54 | Subagent lifecycle in the event log | done | 7157843 | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
+| T55 | Subagent tree in the sidebar | building | task/t55-subagent-tree |  |  |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 | F57 | Subagent task pairing: cross-turn repeat start and failed guessed call | todo |  |  |  |
 
