@@ -14,6 +14,7 @@
 //!   dialog: a key the client marks as one (Enter, Esc, Ctrl-C, a printable key) or a paste. Moving around the
 //!   dialog, focus and mouse reports, and the screen's own query replies (which the runtime writes without telling
 //!   the watch) are not answers.
+//! - **NeedsInput**: a question the agent asked (`_shepherd/agent/asked`) is a dialog too, watched the same way.
 //! - **A blocked subagent** (`_shepherd/subagent/blocked`) counts as a permission request, whatever the agent itself is
 //!   doing: the parent waits on the subagent, whose dialog is just as quiet. Each new block needs its own answer.
 //! - Anything else, and shell sessions always, are left alone. Output never makes a session working again: only a
@@ -87,15 +88,17 @@ enum Answer {
 impl Watched {
     /// Whether a dialog is open: the agent's own permission request, or a subagent's block.
     fn asking(&self) -> bool {
-        matches!(self.state.activity(), Activity::NeedsPermission { .. })
-            || self.state.subagent_blocked()
+        matches!(
+            self.state.activity(),
+            Activity::NeedsPermission { .. } | Activity::NeedsInput
+        ) || self.state.subagent_blocked()
     }
 
     /// What it would be inferred as, and from when, if it stayed quiet.
     fn due(&self) -> Option<(jiff::Timestamp, IdleInference)> {
         let in_turn = matches!(
             self.state.activity(),
-            Activity::Working { .. } | Activity::NeedsPermission { .. }
+            Activity::Working { .. } | Activity::NeedsPermission { .. } | Activity::NeedsInput
         );
         let inference = match (in_turn, self.asking()) {
             (true, false) => IdleInference::Quiet,
@@ -179,7 +182,10 @@ impl QuietWatch {
         let asks = watched.asking();
         let new_request = match env.frame() {
             Frame::Acp(m) => matches!(m.body(), AcpFrame::RequestPermission(_)),
-            Frame::Shepherd(m) => matches!(m.body(), ShepherdFrame::SubagentBlocked(_)),
+            Frame::Shepherd(m) => matches!(
+                m.body(),
+                ShepherdFrame::SubagentBlocked(_) | ShepherdFrame::AgentAsked(_)
+            ),
             _ => false,
         };
         if asks && (!was_asking || new_request) {

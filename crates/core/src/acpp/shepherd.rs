@@ -3,6 +3,8 @@
 //! Params use snake_case field names. Fields a producer may not know yet (a plain shell session has no worktree
 //! or agent) are optional.
 
+use std::num::NonZeroU32;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,7 +22,9 @@ pub enum ShepherdFrame {
     SessionFailed(SessionFailed),
     SessionPr(SessionPr),
     SessionPrompted(SessionPrompted),
+    SessionAnswered(SessionAnswered),
     AgentStarted(AgentStarted),
+    AgentAsked(AgentAsked),
     AgentIdle(AgentIdle),
     AgentExited(AgentExited),
     SubagentStarted(SubagentStarted),
@@ -47,7 +51,9 @@ impl ShepherdFrame {
             Self::SessionFailed(_) => "_shepherd/session/failed",
             Self::SessionPr(_) => "_shepherd/session/pr",
             Self::SessionPrompted(_) => "_shepherd/session/prompted",
+            Self::SessionAnswered(_) => "_shepherd/session/answered",
             Self::AgentStarted(_) => "_shepherd/agent/started",
+            Self::AgentAsked(_) => "_shepherd/agent/asked",
             Self::AgentIdle(_) => "_shepherd/agent/idle",
             Self::AgentExited(_) => "_shepherd/agent/exited",
             Self::SubagentStarted(_) => "_shepherd/subagent/started",
@@ -76,7 +82,9 @@ impl ShepherdFrame {
             Self::SessionFailed(p) => to_params(p),
             Self::SessionPr(p) => to_params(p),
             Self::SessionPrompted(p) => to_params(p),
+            Self::SessionAnswered(p) => to_params(p),
             Self::AgentStarted(p) => to_params(p),
+            Self::AgentAsked(p) => to_params(p),
             Self::AgentIdle(p) => to_params(p),
             Self::AgentExited(p) => to_params(p),
             Self::SubagentStarted(p) => to_params(p),
@@ -109,7 +117,9 @@ impl ShepherdFrame {
             "_shepherd/session/failed" => Self::SessionFailed(p(params)?),
             "_shepherd/session/pr" => Self::SessionPr(p(params)?),
             "_shepherd/session/prompted" => Self::SessionPrompted(p(params)?),
+            "_shepherd/session/answered" => Self::SessionAnswered(p(params)?),
             "_shepherd/agent/started" => Self::AgentStarted(p(params)?),
+            "_shepherd/agent/asked" => Self::AgentAsked(p(params)?),
             "_shepherd/agent/idle" => Self::AgentIdle(p(params)?),
             "_shepherd/agent/exited" => Self::AgentExited(p(params)?),
             "_shepherd/subagent/started" => Self::SubagentStarted(p(params)?),
@@ -281,6 +291,103 @@ impl From<PromptBy> for String {
 impl std::fmt::Display for PromptBy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&String::from(self.clone()))
+    }
+}
+
+/// The agent is blocked on a question to the user (T51): a permission dialog for a tool, or a question it asked. It
+/// stays asked until it is answered (`session/answered`, or the agent's own activity moving on) or the turn ends.
+/// Text is the agent's, raw: display it only through `display_safe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAsked {
+    pub kind: BlockKind,
+    /// What it asks, for the user: the tool and its main argument, or the question.
+    pub text: String,
+    /// A question's options, in the order the agent shows them (an answer's index counts from 1). Absent for a
+    /// permission, and for a question that can't be answered by picking one option (several questions, or several
+    /// picks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    /// The subagent that asked, by the agent's id for it, when a subagent did: its dialog is in the parent's TUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<String>,
+}
+
+/// The agent's pending question was answered (T51): the host typed `choice` for it on behalf of `by`
+/// (`_shepherd/session/answer`), or, without a `choice`, a client typed into the session while it was asked, so the
+/// user is answering it in the pane and shepherd must not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAnswered {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Choice>,
+    pub by: PromptBy,
+}
+
+/// An answer to an agent's question: `yes`, `always` (yes, and don't ask again), `no`, or a question's option by its
+/// place in the list, from 1. On the wire a word or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ChoiceRepr", into = "ChoiceRepr")]
+pub enum Choice {
+    Yes,
+    Always,
+    No,
+    Option(NonZeroU32),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ChoiceRepr {
+    Index(u32),
+    Word(String),
+}
+
+impl TryFrom<ChoiceRepr> for Choice {
+    type Error = String;
+
+    fn try_from(repr: ChoiceRepr) -> Result<Self, String> {
+        match repr {
+            ChoiceRepr::Index(i) => NonZeroU32::new(i)
+                .map(Self::Option)
+                .ok_or_else(|| "a choice's number counts from 1".to_owned()),
+            ChoiceRepr::Word(word) => word.parse(),
+        }
+    }
+}
+
+impl From<Choice> for ChoiceRepr {
+    fn from(choice: Choice) -> Self {
+        match choice {
+            Choice::Option(i) => Self::Index(i.get()),
+            word => Self::Word(word.to_string()),
+        }
+    }
+}
+
+impl std::str::FromStr for Choice {
+    type Err = String;
+
+    /// `yes`, `always`, `no`, or an option's number from 1.
+    fn from_str(text: &str) -> Result<Self, String> {
+        match text {
+            "yes" => Ok(Self::Yes),
+            "always" => Ok(Self::Always),
+            "no" => Ok(Self::No),
+            _ => text.parse::<NonZeroU32>().map(Self::Option).map_err(|_| {
+                format!(
+                    "{text:?} is not a choice: give yes, always, no, or an option's number from 1"
+                )
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Yes => f.write_str("yes"),
+            Self::Always => f.write_str("always"),
+            Self::No => f.write_str("no"),
+            Self::Option(i) => write!(f, "{i}"),
+        }
     }
 }
 

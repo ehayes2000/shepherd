@@ -273,6 +273,7 @@ impl FakeHost {
             | ClientRequest::SessionPrompt(_)
             | ClientRequest::SessionReply(_)
             | ClientRequest::SessionScreen(_)
+            | ClientRequest::SessionAnswer(_)
             | ClientRequest::PairWait(_)
             | ClientRequest::PairJoin(_)
             | ClientRequest::PeerList(_)

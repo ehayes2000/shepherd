@@ -221,6 +221,16 @@ acceptance:
   starts (prompted as soon as its `SessionStart` hook arrives); the printed reply is its last message; a prompt that
   needs a permission returns `wants-user`. Re-record `crates/archive/tests/fixtures/reply/` from those transcripts
   (Claude Code's one-line-per-content-block layout, Codex's `response_item` messages).
+- From T51: an answer round trip for both agents through a real host. Prompt something that needs a permission (a Bash
+  command), wait for `wants-user`, then `shepherd answer <session> yes|always|no --json`, each in a fresh session: the
+  dialog takes the host's keys (Claude Code: Enter, Shift+Tab, Esc; Codex: `y`, `a`, `n`; `core::host::answer` cites
+  each) and does what the choice says (the tool runs, runs and is remembered, or is declined), and the session goes on
+  working (or idle, after no). Check what Shift+Tab does on a Claude Code prompt that offers no "for the rest of the
+  session" option (a Bash prompt offers "don't ask again" instead), and whether `always` should then be refused. For
+  Claude Code also ask an `AskUserQuestion` (prompt "ask me which of two colours I like with your question tool"):
+  `shepherd answer <session> 2` picks the second option (Down, then Enter, as separate writes) and `no` cancels it.
+  Then answer in the pane and check a later `shepherd answer` is refused (`nothing to answer (wants-user)`), and
+  re-record `PreToolUse.AskUserQuestion` and the permission fixtures from those hooks.
 scope: crates/archive (e2e, behind a feature or separate package not built by the gate), scripts
 notes: (binding) Decision 0020: outside the gate. Builders write it and dry-run everything except the agent calls; only the
 user runs `scripts/e2e-agents.sh` (or the PM, with the user's go-ahead each time). How the throwaway agent dirs get

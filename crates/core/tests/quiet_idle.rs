@@ -430,6 +430,32 @@ fn a_permission_dialog_answered_and_redrawn_then_quiet_goes_idle_inferred_quiet_
 }
 
 #[test]
+fn a_question_dialog_is_watched_like_a_permission_dialog() {
+    // An `AskUserQuestion` (T51) waits untouched however long it is quiet; cancelled with Esc, which may fire no
+    // hook, it redraws and goes quiet like a permission answered "No".
+    let ask = shepherd(
+        "_shepherd/agent/asked",
+        json!({ "kind": "question", "text": "Which?", "choices": ["a", "b"] }),
+    );
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, tool_call("q1"));
+    d.append(500, ask.clone());
+    d.output(600);
+    assert_eq!(d.state().activity(), &Activity::NeedsInput);
+    assert_eq!(d.deadline(), None);
+    assert_eq!(d.tick(600_000), vec![]);
+
+    let mut d = Driver::claude();
+    d.append(0, prompt(1));
+    d.append(100, tool_call("q1"));
+    d.append(500, ask);
+    d.input(900);
+    d.output(1000);
+    assert_eq!(d.tick(4000), vec![IdleInference::QuietAfterPermission]);
+}
+
+#[test]
 fn an_answer_with_no_redraw_after_it_stays_put() {
     let mut d = Driver::claude();
     d.append(0, prompt(1));

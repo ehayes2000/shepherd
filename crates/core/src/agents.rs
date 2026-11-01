@@ -16,6 +16,22 @@ use crate::ids::SessionId;
 use self::claude::ClaudeTranslation;
 use self::codex::CodexTranslation;
 
+/// `_shepherd/agent/asked`: what the agent (or its `subagent`) is blocked on asking the user (T51).
+fn asked(
+    kind: crate::acpp::BlockKind,
+    text: String,
+    choices: Option<Vec<String>>,
+    subagent: Option<&str>,
+) -> crate::acpp::Frame {
+    crate::acpp::ShepherdFrame::AgentAsked(crate::acpp::AgentAsked {
+        kind,
+        text,
+        choices,
+        subagent: subagent.map(str::to_owned),
+    })
+    .to_frame()
+}
+
 /// One session's translation state, by agent kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "agent", content = "state", rename_all = "kebab-case")]

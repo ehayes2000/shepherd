@@ -42,6 +42,7 @@ value or one the reference lists. Inferred means a value we picked that fits the
 | `SubagentStop.internal` | internal agents (prompt suggestions, `/btw`) fire `SubagentStop` with `agent_type` `""` when the session runs without `--agent` | `agent-9c1d` |
 | `SubagentStart.internal` | | that an internal agent's `SubagentStart`, if it fires, also has an empty `agent_type` (the reference only says so of `SubagentStop`) |
 | `PostToolUse.Grep.subagent` | as `PreToolUse.Grep.subagent`; `tool_response` | the response shape |
+| `PreToolUse.AskUserQuestion` | as below, from the main agent (no `agent_id`) | `toolu_08ASK123`; that its `PreToolUse` fires as the question appears |
 | `PreToolUse.AskUserQuestion.subagent` | tool `AskUserQuestion`, `tool_input.questions[]` with `question`, `header`, `options`, `multiSelect` (the reference's example) | that a subagent can ask one, and its `PreToolUse` fires as the question appears |
 | `PreToolUse.Agent.hostile`, `SubagentStart.hostile` | | escape sequences, NUL, CR/LF, bidi override and zero-width text in `subagent_type`/`agent_type` and `description` |
 

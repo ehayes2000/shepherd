@@ -10,7 +10,7 @@
 //! | `UserPromptSubmit` | `session/prompt` request (`to_agent`) + `user_message_chunk` |
 //! | `PreToolUse` | `tool_call` `in_progress`, `toolCallId` = `tool_use_id`; after a continuation prompt if needed |
 //! | `PostToolUse` | `tool_call_update` `completed` |
-//! | `PermissionRequest` | `session/request_permission` (`from_agent`); after a continuation prompt if needed |
+//! | `PermissionRequest` | `session/request_permission` (`from_agent`), then `_shepherd/agent/asked { kind: permission }`; after a continuation prompt if needed |
 //! | `Stop` | the open prompt's response with `end_turn`, or `_shepherd/agent/idle` if none is open |
 //! | `Interrupt` | the open prompt's response with `cancelled`, or `_shepherd/agent/idle` if none is open |
 //! | `SessionStart` | `_shepherd/agent/started { agent_session_id }`, except after compaction (`source: compact`) |
@@ -493,14 +493,17 @@ fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     .into_synthesized()
     .ok()?;
     out.push((Dir::FromAgent, frame));
-    if let Some(agent) = hook.str("agent_id") {
-        let text = tool_title(name, input);
-        let frame =
-            state
-                .subagents
-                .block(agent, hook.str("agent_type"), BlockKind::Permission, text);
+    let text = tool_title(name, input);
+    let agent = hook.str("agent_id");
+    if let Some(agent) = agent {
+        let kind = BlockKind::Permission;
+        let frame = state
+            .subagents
+            .block(agent, hook.str("agent_type"), kind, text.clone());
         out.extend(frame.map(|f| (Dir::Internal, f)));
     }
+    let asked = super::asked(BlockKind::Permission, text, None, agent);
+    out.push((Dir::Internal, asked));
     Some(out)
 }
 

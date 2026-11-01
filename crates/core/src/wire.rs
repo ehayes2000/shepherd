@@ -11,18 +11,18 @@ mod message;
 
 pub use build::{BuildId, DigestHasher, ExeDigest};
 pub use codec::{Decoder, LineTooLong, MAX_LINE};
-pub use error::{Busy, WireError, code};
+pub use error::{Busy, Status, WireError, code};
 pub use message::{
     CleanupInfo, ClientMessage, ClientNotification, ClientRequest, CloseWorktree, DecodeError,
     Hello, HelloOk, HookFrame, HostMessage, HostNotification, HostResponse, HostResult,
     HostUpgrade, InputKind, LogEntry, Method, Notify, PROTOCOL_VERSION, PairJoin, PairOutcome,
     PairStart, PairStartOk, PairWait, PeerInfo, PeerList, PeerListOk, PeerRemove, ProfileInfo,
     PtyOutput, RawResponse, ReplyInfo, Request, RequestError, SCREEN_LINES_MAX, SCREEN_TEXT_MAX,
-    SessionClose, SessionInput, SessionNew, SessionNewOk, SessionPrompt, SessionRename,
-    SessionReply, SessionReplyOk, SessionResize, SessionResume, SessionScreen, SessionScreenOk,
-    Subscribe, SubscribeFrom, Tunnel, UiApply, UiGet, UpgradeAnswer, ViewSize, WorkspaceSelect,
-    WorktreeCheck, WorktreeCleanup, WorktreeCleanupOk, WorktreeInfo, WorktreeList, WorktreeListOk,
-    WorktreeRemove, WorktreeRemoveOk, WorktreeStatusOk, decode_client_message, decode_host_message,
-    encode_client_notification, encode_host_notification, encode_request, encode_response,
-    negotiate,
+    SessionAnswer, SessionClose, SessionInput, SessionNew, SessionNewOk, SessionPrompt,
+    SessionRename, SessionReply, SessionReplyOk, SessionResize, SessionResume, SessionScreen,
+    SessionScreenOk, Subscribe, SubscribeFrom, Tunnel, UiApply, UiGet, UpgradeAnswer, ViewSize,
+    WorkspaceSelect, WorktreeCheck, WorktreeCleanup, WorktreeCleanupOk, WorktreeInfo, WorktreeList,
+    WorktreeListOk, WorktreeRemove, WorktreeRemoveOk, WorktreeStatusOk, decode_client_message,
+    decode_host_message, encode_client_notification, encode_host_notification, encode_request,
+    encode_response, negotiate,
 };

@@ -9,8 +9,8 @@
 //! | `PreToolUse` | `tool_call` `in_progress`, `toolCallId` = `tool_use_id`; after a continuation prompt if needed |
 //! | `PostToolUse` | `tool_call_update` `completed` |
 //! | `PostToolUseFailure`, `PermissionDenied` | `tool_call_update` `failed` |
-//! | `PermissionRequest` | `session/request_permission` (`from_agent`); after a continuation prompt if needed |
-//! | `Notification` `permission_prompt` | `session/request_permission`, unless one is already open |
+//! | `PermissionRequest` | `session/request_permission` (`from_agent`), then `_shepherd/agent/asked` (`permission`, or `question` with its options for `AskUserQuestion`); after a continuation prompt if needed |
+//! | `Notification` `permission_prompt` | `session/request_permission` and `_shepherd/agent/asked { kind: permission }`, unless one is already open (or a question is) |
 //! | `Notification` `idle_prompt` | `_shepherd/agent/idle` |
 //! | `Stop` | the open prompt's response with `end_turn` (`from_agent`), or `_shepherd/agent/idle` if none is open |
 //! | `StopFailure` | `_claude-code/StopFailure` + `_shepherd/agent/idle` |
@@ -21,6 +21,7 @@
 //! | `PostToolUse` of `Agent` naming an announced subagent with another task | also a corrective `_shepherd/subagent/started` |
 //! | `SubagentStop` | `_shepherd/subagent/finished { id }`; an internal agent's is a vendor frame |
 //! | a subagent's `PermissionRequest`, or `PreToolUse` of `AskUserQuestion` | also `_shepherd/subagent/blocked { id, kind, text }` (`permission`, or `question`) |
+//! | `PreToolUse` of `AskUserQuestion` | also `_shepherd/agent/asked { kind: question, text, choices? }` (`choices`: its option labels, when it asks one single-pick question), then counts as an open permission |
 //! | a blocked subagent's next `PreToolUse`, `PostToolUse`, `PostToolUseFailure` or `PermissionDenied` | also `_shepherd/subagent/working { id }` |
 //! | anything else | `_claude-code/<hook_name>` with the raw payload (`_claude-code/unknown` without a usable name) |
 //!
@@ -355,7 +356,8 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         let task = field("description").or(field("prompt"));
         state.subagents.spawn(id, agent_type, task);
     }
-    if let Some(agent) = hook.str("agent_id") {
+    let agent = hook.str("agent_id");
+    if let Some(agent) = agent {
         let frame = if name == QUESTION_TOOL {
             let text = question(input).unwrap_or_else(|| tool_title(name, input));
             let kind = BlockKind::Question;
@@ -366,6 +368,13 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
             state.subagents.active(agent)
         };
         out.extend(frame.map(|f| (Dir::Internal, f)));
+    }
+    if name == QUESTION_TOOL {
+        // The question's dialog is up: the permission notification that follows it is not another question.
+        let text = question(input).unwrap_or_else(|| tool_title(name, input));
+        let frame = super::asked(BlockKind::Question, text, choices(input), agent);
+        out.push((Dir::Internal, frame));
+        state.permission_open = true;
     }
     Some(out)
 }
@@ -419,16 +428,19 @@ fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         .map(|t| t.id.clone());
     let mut out = continuation(state, hook)?;
     out.extend(permission(state, hook, tool, &tool_title(name, input))?);
-    if let Some(agent) = hook.str("agent_id") {
-        let (kind, text) = match question(input).filter(|_| name == QUESTION_TOOL) {
-            Some(text) => (BlockKind::Question, text),
-            None => (BlockKind::Permission, tool_title(name, input)),
-        };
-        let frame = state
-            .subagents
-            .block(agent, hook.str("agent_type"), kind, text);
+    let (kind, text, choices) = match question(input).filter(|_| name == QUESTION_TOOL) {
+        Some(text) => (BlockKind::Question, text, choices(input)),
+        None => (BlockKind::Permission, tool_title(name, input), None),
+    };
+    let agent = hook.str("agent_id");
+    if let Some(agent) = agent {
+        let frame =
+            state
+                .subagents
+                .block(agent, hook.str("agent_type"), kind.clone(), text.clone());
         out.extend(frame.map(|f| (Dir::Internal, f)));
     }
+    out.push((Dir::Internal, super::asked(kind, text, choices, agent)));
     Some(out)
 }
 
@@ -440,6 +452,24 @@ fn question(input: Option<&Value>) -> Option<String> {
         .get("question")?
         .as_str()
         .map(str::to_owned)
+}
+
+/// The option labels of an `AskUserQuestion` input, in order, when picking one of them answers it: exactly one
+/// question, not multi-select, every option labelled.
+fn choices(input: Option<&Value>) -> Option<Vec<String>> {
+    let [question] = input?.get("questions")?.as_array()?.as_slice() else {
+        return None;
+    };
+    if question.get("multiSelect").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let labels = question
+        .get("options")?
+        .as_array()?
+        .iter()
+        .map(|o| o.get("label").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Option<Vec<_>>>()?;
+    (!labels.is_empty()).then_some(labels)
 }
 
 /// A subagent started. An empty `agent_type` is one of Claude Code's internal agents, not the session's subagent.
@@ -465,7 +495,10 @@ fn notification(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
                 .unwrap_or("Permission needed")
                 .to_owned();
             let tool = state.tools.last().map(|t| t.id.clone());
-            permission(state, hook, tool, &title)
+            let mut out = permission(state, hook, tool, &title)?;
+            let frame = super::asked(BlockKind::Permission, title, None, None);
+            out.push((Dir::Internal, frame));
+            Some(out)
         }
         "idle_prompt" => {
             state.end_turn();

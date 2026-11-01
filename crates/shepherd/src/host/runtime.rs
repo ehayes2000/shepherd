@@ -2412,6 +2412,15 @@ impl<
                     by: prompt.by.unwrap_or(PromptBy::Client),
                 });
             }
+            ClientRequest::SessionAnswer(answer) => {
+                let reply = self.reply_to(conn, id);
+                self.dispatch(HostEvent::Answer {
+                    reply,
+                    session: answer.session,
+                    choice: answer.choice,
+                    by: answer.by.unwrap_or(PromptBy::Client),
+                });
+            }
             ClientRequest::SessionReply(asked) => {
                 let reply = self.reply_to(conn, id);
                 self.dispatch(HostEvent::ReadReply {

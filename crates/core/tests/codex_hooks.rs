@@ -347,7 +347,13 @@ fn permission_request_names_the_pending_tool_even_with_the_added_description() {
         fx!("PreToolUse.Bash"),
         fx!("PermissionRequest.Bash"),
     ]);
-    assert_eq!(methods(&drafts), vec![Some("session/request_permission")]);
+    assert_eq!(
+        methods(&drafts),
+        vec![
+            Some("session/request_permission"),
+            Some("_shepherd/agent/asked")
+        ]
+    );
     assert_eq!(drafts[0].dir, Dir::FromAgent);
     let AcpFrame::RequestPermission(r) = acp(&drafts[0]) else {
         panic!("expected request_permission");
