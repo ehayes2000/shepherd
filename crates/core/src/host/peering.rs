@@ -559,7 +559,7 @@ impl Peering {
                 self.connected.remove(&peer);
                 // Clients that were told a path hear it is gone.
                 let told = self.paths.remove(&peer).is_some();
-                let commands = match told && self.trusted.contains_key(&peer) {
+                let commands = match told {
                     true => vec![HostCommand::PeerChanged(self.info(&peer))],
                     false => Vec::new(),
                 };

@@ -298,6 +298,16 @@ fn a_peers_link_from_the_list_is_on_its_machine_header() {
 }
 
 #[test]
+fn a_peer_listed_again_without_a_link_shows_none() {
+    let (mut net, _) = Machines::from_peer_list(&[json!({
+        "id": "m_b", "name": "laptop", "connected": true, "link": "relay", "rtt_ms": 86
+    })]);
+    net.reach("m_b");
+    relist(&mut net, &[("m_b", "laptop")]);
+    assert_eq!(header_link(&net, "m_b"), Some((None, None)));
+}
+
+#[test]
 fn a_link_that_changes_updates_the_machine_header() {
     let mut net = Machines::connected(&[("m_b", "laptop"), ("m_c", "tower")]);
     assert_eq!(

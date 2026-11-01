@@ -19,9 +19,12 @@
 //! - **Paths** (T32b). Each held link connection is looked at on [`PATH_SAMPLE`] ticks from when it is held until it
 //!   closes, through iroh's `Connection::paths()`: the path it has selected for sending is relayed
 //!   (`Path::is_relay`) or direct (`Path::is_ip`), with that path's round-trip estimate (`Path::rtt`). It is reported
-//!   ([`PeersEvent::Path`]) when it differs from the last one reported, its time rounded to whole milliseconds, and
-//!   only for the peer's first held connection (the one [`PeersEvent::Connected`] announced). So a kind change shows
-//!   within one tick, and a jittery round trip costs at most one event per peer per tick.
+//!   ([`PeersEvent::Path`]), its time rounded to whole milliseconds, after the peer's `Connected` and never after its
+//!   `Disconnected` (the contract checks both). By design, though no test can make it happen on cue (two connections
+//!   held with one peer at once, a round trip that holds still on localhost): a path is reported again only when it
+//!   differs from the last one, and only for the peer's first held connection (the one [`PeersEvent::Connected`]
+//!   announced). So a kind change shows within one tick, and a jittery round trip costs at most one event per held
+//!   connection per tick.
 //! - **Tickets** are [`iroh_tickets`] of kind `shepherd`: postcard of the inviter's address (its relay URL and at most
 //!   [`TICKET_IPS`] LAN addresses), its name and the token, in base32.
 //! - **Addresses** learned from pairing go into a `MemoryLookup`, and into the last-address cache
@@ -283,13 +286,23 @@ impl Shared {
         true
     }
 
-    /// Whether `conn` is the first connection held with `peer`: the one whose path is reported.
-    fn is_first(&self, peer: EndpointId, conn: &Connection) -> bool {
-        self.state()
+    /// Reports `path` for `peer` if `conn` is the first connection held with it, and says whether it did. Checked and
+    /// sent under the state lock, as `Connected` and `Disconnected` are, so a path never comes before its peer's
+    /// `Connected` or after its `Disconnected`.
+    fn report_path(&self, peer: EndpointId, conn: &Connection, path: PeerPath) -> bool {
+        let state = self.state();
+        let first = state
             .conns
             .get(&peer)
             .and_then(|held| held.first())
-            .is_some_and(|first| first.stable_id() == conn.stable_id())
+            .is_some_and(|first| first.stable_id() == conn.stable_id());
+        if first {
+            self.send(PeersEvent::Path {
+                peer: machine(peer),
+                path,
+            });
+        }
+        first
     }
 
     /// `conn` with `peer` closed: the last one gone announces it, unless it was dropped on purpose already.
@@ -897,14 +910,9 @@ async fn watch_path(conn: Connection, shared: Arc<Shared>) {
         let Some(path) = selected_path(&conn) else {
             continue;
         };
-        if last == Some(path) || !shared.is_first(peer, &conn) {
-            continue;
+        if last != Some(path) && shared.report_path(peer, &conn, path) {
+            last = Some(path);
         }
-        last = Some(path);
-        shared.send(PeersEvent::Path {
-            peer: machine(peer),
-            path,
-        });
     }
 }
 

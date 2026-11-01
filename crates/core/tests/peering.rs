@@ -879,6 +879,50 @@ fn a_path_of_a_peer_not_connected_is_ignored_and_a_disconnected_peer_lists_none(
     assert_eq!(d.list(), vec![info("bb", "laptop", true)]);
 }
 
+/// `peer`, connected, goes over `path`.
+fn connected_over(d: &mut Driver, id: &str, path: PeerPath) {
+    d.peers(PeersEvent::Connected { peer: m(id) });
+    d.peers(PeersEvent::Path { peer: m(id), path });
+}
+
+#[test]
+fn unpairing_a_peer_answers_and_forgets_its_path() {
+    let mut d = Driver::trusting(&[("bb", "laptop"), ("cc", "tower")]);
+    d.peering.sync();
+    connected_over(&mut d, "bb", path(LinkKind::Relayed, 86));
+    let to = d.reply_to();
+    let commands = d.handle(PeeringEvent::Remove {
+        reply: to,
+        peer: "laptop".into(),
+    });
+    assert!(
+        commands.contains(&reply(
+            to,
+            HostResult::PeerRemove(info("bb", "laptop", false))
+        )),
+        "the answer has no link: {commands:?}"
+    );
+    // Paired again and connected: no path until the port says.
+    d.record(ShepherdFrame::PeerTrusted(PeerTrusted {
+        node: m("bb"),
+        name: "laptop".into(),
+    }));
+    d.peering.sync();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.list()[0], info("bb", "laptop", true));
+}
+
+#[test]
+fn going_offline_forgets_every_path() {
+    let mut d = Driver::trusting(&[("bb", "laptop")]);
+    d.peering.sync();
+    connected_over(&mut d, "bb", path(LinkKind::Relayed, 86));
+    d.peering.suspend();
+    d.peering.resume();
+    d.peers(PeersEvent::Connected { peer: m("bb") });
+    assert_eq!(d.list(), vec![info("bb", "laptop", true)]);
+}
+
 #[test]
 fn refusals_and_failed_dials_change_nothing() {
     let mut d = Driver::trusting(&[("bb", "laptop")]);
