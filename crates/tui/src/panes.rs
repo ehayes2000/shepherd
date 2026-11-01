@@ -327,7 +327,7 @@ fn render_pane(
             terminal,
             buf,
         ),
-        Shown::View(ViewKind::Status) => crate::status::render(client, terminal, buf),
+        Shown::View(ViewKind::Status) => crate::status::render(client, screens, terminal, buf),
         Shown::View(kind) => {
             let line = format!("{} isn't available yet.", cut(&view_name(kind), NAME_MAX));
             placeholder(&[&line], terminal, buf);

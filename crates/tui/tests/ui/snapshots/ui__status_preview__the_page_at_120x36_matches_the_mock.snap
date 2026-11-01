@@ -1,0 +1,40 @@
+---
+source: crates/tui/tests/ui/status_preview.rs
+expression: ui.region(pane(&ui))
+---
+ 1   status  +
+ ▲ 1 need you   ● 2 working   ○ 1 idle   ✕ 1 exited   ↳ 2 subagents   1 machine · 1 online
+┌ agents ────────────────────────────────[g: by machine]─┐┌ t28-hello-build ────────────studio─┐
+│   NAME              MACHINE    DOING         PR        ││Bash command                        │
+│ NEEDS YOU  1                                           ││                                    │
+│ ▲ t28-hello-build   studio     asks: Bash(c… #416 ✗    ││  cargo test -p shepherd-core wire  │
+│                                                        ││                                    │
+│ WORKING  2                                             ││Do you want to proceed?             │
+│ ● docs-arch         studio     working       —         ││                                    │
+│ ● f36-cleanup-view  studio     Edit cleanup… #417 …    ││                                    │
+│                                                        ││                                    │
+│ IDLE  1                                                ││                                    │
+│ ○ fix-login         studio     at its prompt #409 ✓    ││                                    │
+│                                                        ││                                    │
+│ EXITED  1                                              ││                                    │
+│ ✕ wire-v2           studio     exited        —         ││                                    │
+│                                                        ││                                    │
+│                                                        ││                                    │
+│                                                        ││                                    │
+│                                                        ││                                    │
+│                                                        ││                                    │
+│                                                        ││────────────────────────────────────│
+│                                                        ││ ▲ Bash(cargo test)                 │
+│                                                        ││ [y yes] a always [n no] [⏎ attach] │
+│                                                        ││ always: its Bash dialog doesn't of…│
+└────────────────────────────────────────────────────────┘└────────────────────────────────────┘
+┌ events ──────────────────────────────────────────────────────────────────────────────────────┐
+│       studio      t28-hello-build       + created                                            │
+│       studio      docs-arch             + created                                            │
+│       studio      fix-login             ✓ PR         #409 open · checks passing              │
+│       studio      f36-cleanup-view      … PR         #417 open · checks pending              │
+│       studio      t28-hello-build       ✗ PR         #416 open · checks failing              │
+│       studio      wire-v2               ✕ exited     code 1                                  │
+│       studio      t28-hello-build       ▲ asked      Bash(cargo test)                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+ ❯ [to t28-hello-build] click to message · tab: widen the target                         [send]

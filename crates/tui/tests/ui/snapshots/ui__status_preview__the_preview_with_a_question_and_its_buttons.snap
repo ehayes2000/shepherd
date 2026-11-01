@@ -1,0 +1,44 @@
+---
+source: crates/tui/tests/ui/status_preview.rs
+expression: ui.region(pane(&ui))
+---
+ 1   status  +
+ ▲ 1 need you   ● 2 working   ○ 1 idle   ✕ 1 exited   ↳ 2 subagents   1 machine · 1 online
+┌ agents ────────────────────────────────────────────────────────[g: by machine]─┐┌ t28-hello-build ────────────────────────────studio─┐
+│   NAME                   AGENT   MACHINE    SUB  DOING               PR        ││Bash command                                        │
+│ NEEDS YOU  1                                                                   ││                                                    │
+│ ▲ t28-hello-build        claude  studio     —    asks: Bash(cargo t… #416 ✗    ││  cargo test                                        │
+│                                                                                ││                                                    │
+│ WORKING  2                                                                     ││Do you want to proceed?                             │
+│ ● docs-arch              shell   studio     —    working             —         ││                                                    │
+│ ● f36-cleanup-view       claude  studio     ↳2   Edit cleanup.rs     #417 …    ││                                                    │
+│                                                                                ││                                                    │
+│ IDLE  1                                                                        ││                                                    │
+│ ○ fix-login              claude  studio     —    at its prompt       #409 ✓    ││                                                    │
+│                                                                                ││                                                    │
+│ EXITED  1                                                                      ││                                                    │
+│ ✕ wire-v2                claude  studio     —    exited              —         ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││                                                    │
+│                                                                                ││────────────────────────────────────────────────────│
+│                                                                                ││ ▲ Bash(cargo test)                                 │
+│                                                                                ││ [y yes] [a always] [n no] [⏎ attach]               │
+└────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────┘
+┌ events ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│       studio      t28-hello-build       + created                                                                                    │
+│       studio      docs-arch             + created                                                                                    │
+│       studio      fix-login             ✓ PR         #409 open · checks passing                                                      │
+│       studio      f36-cleanup-view      … PR         #417 open · checks pending                                                      │
+│       studio      t28-hello-build       ✗ PR         #416 open · checks failing                                                      │
+│       studio      wire-v2               ✕ exited     code 1                                                                          │
+│       studio      t28-hello-build       ▲ asked      Bash(cargo test)                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ❯ [to t28-hello-build] click to message · tab: widen the target                                                                 [send]

@@ -1,7 +1,7 @@
 //! Random sequences of what a user does (clicks on drawn words, keys, the wheel, pastes, resizes down to 1x1, dragging
 //! dividers) and of what the host does (including layout ops from elsewhere: pages, splits, closes, what panes show,
-//! ratios, subagents starting, blocking, finishing and dropping at a turn's end, prompts typed for someone, and answers to
-//! the prompts the message line sent) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
+//! ratios, subagents starting, blocking, finishing and dropping at a turn's end, prompts typed for someone, answers to
+//! the prompts the message line sent, agents asking permission or a question, and answers to the preview's answers) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
 //! after each step.
 //!
 //! - every button drawn whole is hittable: a click on its first cell finds a control, not nothing, the popup's body,
@@ -14,7 +14,10 @@
 //!   sized by this window to exactly that terminal;
 //! - a status page's rows hit listed sessions, and after a key that moves the focused status table's selection (or
 //!   regroups it), the selected session's row is visible; while its message line takes the keys, keys type instead;
-//! - a line of a status page's events feed hits a session the feed has an event of.
+//! - a line of a status page's events feed hits a session the feed has an event of;
+//! - a status page's preview button that answers hits the question its session is asked now, with an answer the host
+//!   would accept; and no key, paste, click or wheel step types into a session while the focused pane shows a status
+//!   page.
 //!
 //! Seeded and bounded by count (cases x steps), not time. A failure prints its seed and its (shrunk) steps. Run another
 //! seed with `PROPTEST_RNG_SEED=<n> cargo test -p shepherd-tui --test ui invariants`.
@@ -26,12 +29,15 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Position;
 use serde_json::json;
 use shepherd_core::acpp::{Source, SourceKind};
+use shepherd_core::client::ClientCommand;
+use shepherd_core::client::answer::Answers;
 use shepherd_core::client::panes::{Area, arrange};
 use shepherd_core::client::{Focus, Popup};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
 use shepherd_core::ports::pty::PtySize;
-use shepherd_core::wire::{Busy, Method, WireError};
+use shepherd_core::wire::{Busy, ClientMessage, ClientNotification, Method, Status, WireError};
+use shepherd_testkit::builders::claude_session_spec;
 use shepherd_tui::Target;
 use shepherd_tui::layout::{layout, pane_size, sidebar_rows};
 
@@ -109,7 +115,26 @@ enum Step {
     HostPrompted(Index, Index),
     /// The host answers the newest prompt the message line sent: typed in (`true`) or refused as busy.
     AnswerPrompt(bool),
+    /// A new Claude Code session's agent asks something (one of [`ASKS`]).
+    HostAsks(Index),
+    /// The host answers the newest answer the preview sent: typed in (`true`) or refused as nothing asked.
+    AnswerAnswer(bool),
 }
+
+/// What an agent asks: a permission for a tool, or a question with options.
+const ASKS: &[(&str, &str, &[&str])] = &[
+    ("permission", "Edit", &[]),
+    ("permission", "Bash", &[]),
+    ("question", "AskUserQuestion", &["h3", "shepherd/1"]),
+    (
+        "question",
+        "AskUserQuestion",
+        &[
+            "evil\u{1b}[31m\u{202e}option",
+            "an option much longer than any button could ever show",
+        ],
+    ),
+];
 
 const PROMPTS: &[&str] = &[
     "rebase on main",
@@ -150,10 +175,10 @@ fn step() -> impl Strategy<Value = Step> {
         1 => (any::<u16>(), any::<u16>()).prop_map(|(x, y)| Step::ClickAt(x, y)),
         2 => (any::<u16>(), any::<u16>(), -8i32..8).prop_map(|(x, y, by)| Step::Scroll(x, y, by)),
         3 => any::<Index>().prop_map(Step::Key),
-        2 => prop::sample::select(vec!['n', 'y', 'q', '?', 'r', 'x', 'd', '日', 'g', 'j', 'k']).prop_map(Step::Type),
+        2 => prop::sample::select(vec!['n', 'y', 'a', '1', 'q', '?', 'r', 'x', 'd', '日', 'g', 'j', 'k']).prop_map(Step::Type),
         1 => Just(Step::OpenStatus),
         1 => "[a-z/ ]{0,6}(\n[a-z]{0,3})?".prop_map(Step::Paste),
-        2 => (1u16..=120, 1u16..=40).prop_map(|(w, h)| Step::Resize(w, h)),
+        2 => (1u16..=170, 1u16..=40).prop_map(|(w, h)| Step::Resize(w, h)),
         1 => Just(Step::HostNew),
         1 => (any::<Index>(), any::<Index>()).prop_map(|(s, n)| Step::HostRename(s, n)),
         1 => any::<Index>().prop_map(Step::HostExit),
@@ -166,6 +191,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => any::<Index>().prop_map(Step::TurnEnd),
         1 => (any::<Index>(), any::<Index>()).prop_map(|(s, t)| Step::HostPrompted(s, t)),
         1 => any::<bool>().prop_map(Step::AnswerPrompt),
+        1 => any::<Index>().prop_map(Step::HostAsks),
+        1 => any::<bool>().prop_map(Step::AnswerAnswer),
     ]
 }
 
@@ -179,7 +206,7 @@ struct Case {
 fn case() -> impl Strategy<Value = Case> {
     (
         0usize..20,
-        (1u16..=120, 1u16..=40),
+        (1u16..=170, 1u16..=40),
         prop::collection::vec(step(), 0..=MAX_STEPS),
     )
         .prop_map(|(sessions, size, steps)| Case {
@@ -351,6 +378,39 @@ impl Run {
                     });
                 }
             }
+            Step::HostAsks(which) => {
+                self.made += 1;
+                let id = format!("q{}", self.made);
+                let (kind, tool, choices) = ASKS[which.index(ASKS.len())];
+                let ask = json!({ "jsonrpc": "2.0", "id": 9, "method": "session/request_permission",
+                    "params": { "sessionId": "a1", "toolCall": { "toolCallId": "t9", "title": format!("{tool}(x)") },
+                                "options": [] } });
+                let asked = json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/asked",
+                    "params": { "kind": kind, "text": "evil\u{1b}]52;c;x\u{7} asks", "tool": tool,
+                                "choices": (!choices.is_empty()).then_some(choices) } });
+                self.ui.on_host(|h| {
+                    h.new_session_with(&id, claude_session_spec());
+                    h.user_prompt(&id, "work");
+                    let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+                    if kind == "permission" {
+                        h.append(Some(&id), hook.clone(), ask);
+                    }
+                    h.append(Some(&id), hook, asked);
+                });
+                self.unfitted = true;
+            }
+            Step::AnswerAnswer(typed) => {
+                if self.ui.unanswered(Method::SessionAnswer) > 0 {
+                    let result = match typed {
+                        true => Ok(json!({})),
+                        false => Err(WireError::NothingAsked {
+                            session: SessionId::new("x"),
+                            status: Status::Running,
+                        }),
+                    };
+                    self.ui.answer(Method::SessionAnswer, result);
+                }
+            }
             Step::AnswerPrompt(typed) => {
                 if self.ui.unanswered(Method::SessionPrompt) > 0 {
                     let result = match typed {
@@ -454,7 +514,72 @@ impl Run {
         self.focused_pane_is_sized()?;
         self.status_rows_hit_listed_sessions()?;
         self.status_selection_is_visible()?;
-        self.feed_lines_hit_their_sessions()
+        self.feed_lines_hit_their_sessions()?;
+        self.preview_buttons_answer_the_pending_question()
+    }
+
+    /// Each preview button that answers must answer the question its session is asked now, with an answer the host
+    /// would accept.
+    fn preview_buttons_answer_the_pending_question(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        if client.popup().is_some() {
+            return Ok(());
+        }
+        let pane = layout(self.ui.window()).pane;
+        for at in pane.positions() {
+            let Some(Target::StatusAnswer {
+                session,
+                asked,
+                choice,
+                ..
+            }) = self.ui.hit_at(at.x, at.y)
+            else {
+                continue;
+            };
+            let ok = match client.asked_of(&session).map(|a| a.answers) {
+                Some(Answers::Open {
+                    asked: pending,
+                    buttons,
+                }) => {
+                    pending == asked
+                        && buttons
+                            .iter()
+                            .any(|b| b.choice == choice && b.refused.is_none())
+                }
+                _ => false,
+            };
+            if !ok {
+                return Err(format!(
+                    "a preview button at ({}, {}) answers {session}'s question {asked:?} with {choice}, which it doesn't take now",
+                    at.x, at.y
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Nothing was typed into a session while the focused pane showed a status page: the preview is read-only.
+    fn status_types_nothing(&self, typed_before: usize, on_status: bool) -> Result<(), String> {
+        if on_status && self.typed() > typed_before {
+            return Err("a step on the status page typed into a session".to_owned());
+        }
+        Ok(())
+    }
+
+    /// How many inputs the client has sent to sessions.
+    fn typed(&self) -> usize {
+        self.ui
+            .sent()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    ClientCommand::Send(ClientMessage::Notification(
+                        ClientNotification::SessionInput(_)
+                    ))
+                )
+            })
+            .count()
     }
 
     /// Each session a line of a status page's events feed hits must have an event in the feed.
@@ -727,9 +852,28 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
     };
     run.check().map_err(|why| fail(&run, "the start", why))?;
     for (i, step) in case.steps.iter().enumerate() {
+        // A key, a paste, a click or the wheel while the focused pane shows a status page, with no popup and the keys
+        // not prefixed: none reaches a session (a click elsewhere focuses another pane first, without typing).
+        let client = run.ui.client();
+        let on_status = client.popup().is_none()
+            && client.focus() == Focus::Terminal
+            && run.status_focused()
+            && matches!(
+                step,
+                Step::Key(_)
+                    | Step::Type(_)
+                    | Step::Paste(_)
+                    | Step::Click(_)
+                    | Step::RightClick(_)
+                    | Step::ClickAt(..)
+                    | Step::Scroll(..)
+            );
+        let typed = run.typed();
         run.apply(step);
-        run.check()
-            .map_err(|why| fail(&run, &format!("step {i} ({step:?})"), why))?;
+        let after = format!("step {i} ({step:?})");
+        run.check().map_err(|why| fail(&run, &after, why))?;
+        run.status_types_nothing(typed, on_status)
+            .map_err(|why| fail(&run, &after, why))?;
     }
     Ok(())
 }

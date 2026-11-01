@@ -10,8 +10,9 @@ including how to take over in-flight work, is `docs/pm.md`.
 ## How this project is built
 
 This project is built by agents. The main session is the **project manager (PM)**. It owns the plan,
-writes task specs, dispatches work, and merges. Feature work is done by `builder` subagents (one task
-each, in an isolated worktree) and checked by `reviewer` subagents that see only the diff and the spec.
+writes task specs, dispatches work, and merges. Feature work is done by builder agents (one task
+each, in an isolated worktree) and checked by reviewer agents that see only the diff and the spec. Both run as Codex
+agents (Codex Sol, Fast tier) through `scripts/codex-agent.sh`; their role files are `.claude/agents/{builder,reviewer}.md`.
 
 The PM does not write feature code. It may edit docs, the plan, and the gate tooling.
 

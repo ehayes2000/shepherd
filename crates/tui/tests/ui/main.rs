@@ -6,6 +6,7 @@
 //! - `layout`: the host's layout drawn: pages, split panes, focus, dividers and the pane menu (T49).
 //! - `status`: the status page's table (T57).
 //! - `status_feed`: the status page's events feed and message line (T59).
+//! - `status_preview`: the status page's preview and answering in place (T58).
 //! - `invariants`: random step sequences that never panic and keep the UI's invariants.
 
 mod finder;
@@ -16,5 +17,6 @@ mod popups;
 mod sidebar;
 mod status;
 mod status_feed;
+mod status_preview;
 mod steps;
 mod subagents;

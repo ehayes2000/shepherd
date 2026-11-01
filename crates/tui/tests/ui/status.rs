@@ -207,7 +207,8 @@ fn the_header_counts_each_group() {
 
 #[test]
 fn a_row_shows_agent_machine_subagents_doing_and_pr() {
-    let ui = status_page(120, 30);
+    // Wide enough for every column beside the preview (T58), which narrows the table in a 120-column window.
+    let ui = status_page(200, 30);
     let row = row_of(&ui, "f36-cleanup-view");
     let text = ui.region(row);
     for part in ["●", "claude", "studio", "↳2", "Edit cleanup.rs", "#417 …"] {
@@ -409,7 +410,7 @@ fn hostile_names_are_drawn_display_safe() {
 
 // ---------- machines ----------
 
-fn peer(c: &mut ClientDriver, machine: &str, event: PeerEvent) -> Vec<ClientCommand> {
+pub(crate) fn peer(c: &mut ClientDriver, machine: &str, event: PeerEvent) -> Vec<ClientCommand> {
     c.handle(ClientEvent::Peer {
         machine: MachineId::new(machine),
         event,
@@ -440,7 +441,7 @@ fn answer_peer(
 }
 
 /// Reaches peer `machine`, whose host's log is `host`'s.
-fn reach(c: &mut ClientDriver, machine: &str, host: &HostDriver) {
+pub(crate) fn reach(c: &mut ClientDriver, machine: &str, host: &HostDriver) {
     let tunnel = peer(
         c,
         machine,
