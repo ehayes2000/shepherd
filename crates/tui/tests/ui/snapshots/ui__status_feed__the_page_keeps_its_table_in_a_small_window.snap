@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/ui/status_feed.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │ 1   status  +
+ ⌂ choose a workspace  │ ▲ 1 need you   ● 3 working   ○ 0 idle   ✕ 1 exited   ↳
+ + New session ⊞ Layout│┌ agents ──────────────────────────────[g: by machine]─┐
+ ● docs-arch          ×││   NAME     AGENT   MACHINE    DOING        PR        │
+   studio · —          ││ NEEDS YOU  1                                         │
+▌▲ t28-hello-build    ×││ ▲ t28-hel… claude  studio     asks: Bash(… #416 ✗    │
+▌  studio · #416 ✗     ││                                                      │
+ ● f36-cleanup-vi ▸2  ×││ WORKING  3                                           │
+   studio · #417 …     ││ ● docs-ar… shell   studio     working      —         │
+ ✕ wire-v2            ×││ ● f36-cle… claude  studio     Edit cleanu… #417 …    │
+   studio · —          │└──────────────────────────────────────────────────────┘
+ ● fix-login          ×│┌ events ──────────────────────────────────────────────┐
+   studio · #409 ✓     ││  59s  t28-hello-b… ▲ asked      Bash(cargo test)     │
+                       ││  59s  fix-login    ❯ prompted   by mcp:s9: rebase on…│
+                       │└──────────────────────────────────────────────────────┘
+ ctrl-b ? help Detach ?│ ❯ [to t28-hello-build] click to message · tab:… [send]

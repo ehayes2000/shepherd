@@ -22,3 +22,13 @@ expression: ui.region(pane(&ui))
 │                                                                                              │
 │                                                                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ events ──────────────────────────────────────────────────────────────────────────────────────┐
+│       studio      t28-hello-build       + created                                            │
+│       studio      docs-arch             + created                                            │
+│       studio      fix-login             ✓ PR         #409 open · checks passing              │
+│       studio      f36-cleanup-view      … PR         #417 open · checks pending              │
+│       studio      t28-hello-build       ✗ PR         #416 open · checks failing              │
+│       studio      wire-v2               ✕ exited     code 1                                  │
+│       studio      t28-hello-build       ▲ asked      Bash(cargo test)                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+ ❯ [to t28-hello-build] click to message · tab: widen the target                         [send]

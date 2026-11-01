@@ -257,6 +257,15 @@ impl Ui {
             .retain(|id, _| sessions.iter().any(|s| &s.id == id));
     }
 
+    /// The runtime's regular tick, at `at` (an RFC 3339 instant), then a redraw.
+    pub fn tick(&mut self, at: &str) -> &mut Self {
+        let at = shepherd_testkit::builders::ts(at);
+        let commands = self.driver.handle(ClientEvent::Tick { at });
+        self.sent.extend(commands);
+        self.draw();
+        self
+    }
+
     /// Session `id`'s PTY wrote `bytes`.
     pub fn pty(&mut self, id: &str, bytes: &[u8]) -> &mut Self {
         self.host(HostMessage::Notification(HostNotification::PtyOutput(
@@ -359,6 +368,14 @@ impl Ui {
             });
         self.answered.push(id.clone());
         self.host(HostMessage::Response(RawResponse { id, result }))
+    }
+
+    /// How many requests for `method` the client has sent that haven't been answered.
+    pub fn unanswered(&self, method: Method) -> usize {
+        self.requests_with_ids()
+            .into_iter()
+            .filter(|r| r.body.method() == method && !self.answered.contains(&r.id))
+            .count()
     }
 
     /// Draws the window with [`render_page`]: page `page` of `layout` instead of the host's shown page. The next step

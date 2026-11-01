@@ -1,6 +1,7 @@
 //! Random sequences of what a user does (clicks on drawn words, keys, the wheel, pastes, resizes down to 1x1, dragging
 //! dividers) and of what the host does (including layout ops from elsewhere: pages, splits, closes, what panes show,
-//! ratios, and subagents starting, blocking, finishing and dropping at a turn's end) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
+//! ratios, subagents starting, blocking, finishing and dropping at a turn's end, prompts typed for someone, and answers to
+//! the prompts the message line sent) never panic and keep these invariants after every step. Layout ops the client asks for are done by the host
 //! after each step.
 //!
 //! - every button drawn whole is hittable: a click on its first cell finds a control, not nothing, the popup's body,
@@ -12,7 +13,8 @@
 //! - the focused pane is a pane of the current page, and the session it shows (if it has room for a terminal) was last
 //!   sized by this window to exactly that terminal;
 //! - a status page's rows hit listed sessions, and after a key that moves the focused status table's selection (or
-//!   regroups it), the selected session's row is visible.
+//!   regroups it), the selected session's row is visible; while its message line takes the keys, keys type instead;
+//! - a line of a status page's events feed hits a session the feed has an event of.
 //!
 //! Seeded and bounded by count (cases x steps), not time. A failure prints its seed and its (shrunk) steps. Run another
 //! seed with `PROPTEST_RNG_SEED=<n> cargo test -p shepherd-tui --test ui invariants`.
@@ -29,6 +31,7 @@ use shepherd_core::client::{Focus, Popup};
 use shepherd_core::ids::{MachineId, SessionId};
 use shepherd_core::layout::{Content, LayoutOp, Pane, PaneId, Ratio, SplitDir, ViewKind};
 use shepherd_core::ports::pty::PtySize;
+use shepherd_core::wire::{Busy, Method, WireError};
 use shepherd_tui::Target;
 use shepherd_tui::layout::{layout, pane_size, sidebar_rows};
 
@@ -102,7 +105,19 @@ enum Step {
     TurnEnd(Index),
     /// `ctrl-b s`: the status page.
     OpenStatus,
+    /// The host types a prompt into a session's agent for someone (`_shepherd/session/prompted`).
+    HostPrompted(Index, Index),
+    /// The host answers the newest prompt the message line sent: typed in (`true`) or refused as busy.
+    AnswerPrompt(bool),
 }
+
+const PROMPTS: &[&str] = &[
+    "rebase on main",
+    "[x] done",
+    "evil\u{1b}[31m\u{202e}text\u{7}",
+    "a prompt much longer than any feed line could ever show, so it is cut at the box",
+    "日本語",
+];
 
 #[derive(Debug, Clone)]
 enum LayoutStep {
@@ -149,6 +164,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => (any::<Index>(), any::<u8>()).prop_map(|(s, a)| Step::SubagentBlock(s, a)),
         1 => (any::<Index>(), any::<u8>()).prop_map(|(s, a)| Step::SubagentFinish(s, a)),
         1 => any::<Index>().prop_map(Step::TurnEnd),
+        1 => (any::<Index>(), any::<Index>()).prop_map(|(s, t)| Step::HostPrompted(s, t)),
+        1 => any::<bool>().prop_map(Step::AnswerPrompt),
     ]
 }
 
@@ -205,8 +222,11 @@ impl Run {
     fn apply(&mut self, step: &Step) {
         let before = self.ui.client().selected().cloned();
         let popup = self.ui.client().popup().is_some();
-        let on_status =
-            !popup && self.ui.client().focus() == Focus::Terminal && self.status_focused();
+        // While the message line takes the keys, they type into it: none moves the table.
+        let on_status = !popup
+            && self.ui.client().focus() == Focus::Terminal
+            && self.status_focused()
+            && !self.ui.client().composing();
         self.status_moved = false;
         match step {
             Step::Click(at) => {
@@ -321,6 +341,28 @@ impl Run {
                     self.subagent_frame(&id, "_shepherd/agent/idle", json!({}));
                 }
             }
+            Step::HostPrompted(session, text) => {
+                if let Some(id) = self.session(session) {
+                    let text = PROMPTS[text.index(PROMPTS.len())];
+                    let frame = json!({ "jsonrpc": "2.0", "method": "_shepherd/session/prompted",
+                        "params": { "text": text, "by": "mcp:s1" } });
+                    self.ui.on_host(|h| {
+                        h.append(Some(&id), Source::new(SourceKind::Shepherd, None), frame);
+                    });
+                }
+            }
+            Step::AnswerPrompt(typed) => {
+                if self.ui.unanswered(Method::SessionPrompt) > 0 {
+                    let result = match typed {
+                        true => Ok(json!({})),
+                        false => Err(WireError::SessionBusy {
+                            session: SessionId::new("x"),
+                            status: Busy::Running,
+                        }),
+                    };
+                    self.ui.answer(Method::SessionPrompt, result);
+                }
+            }
         }
         self.ui.apply_layout_ops();
         if self.ui.client().selected() != before.as_ref() {
@@ -411,7 +453,23 @@ impl Run {
         self.selection_is_visible()?;
         self.focused_pane_is_sized()?;
         self.status_rows_hit_listed_sessions()?;
-        self.status_selection_is_visible()
+        self.status_selection_is_visible()?;
+        self.feed_lines_hit_their_sessions()
+    }
+
+    /// Each session a line of a status page's events feed hits must have an event in the feed.
+    fn feed_lines_hit_their_sessions(&self) -> Result<(), String> {
+        let client = self.ui.client();
+        for (x, y) in self.status_cells() {
+            if let Some(Target::StatusEvent { session, .. }) = self.ui.hit_at(x, y)
+                && !client.events().any(|e| e.session == session)
+            {
+                return Err(format!(
+                    "a feed line at ({x}, {y}) hits {session}, which has no event"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Whether the focused pane shows the status page.
@@ -426,9 +484,9 @@ impl Run {
         )
     }
 
-    /// Each session a line of a status page hits as a status row (a row is a whole line of its table, so one column
+    /// A cell of each line of each status page: its third column (rows and feed lines are whole lines, so one column
     /// of each line is enough).
-    fn status_rows(&self) -> Vec<SessionId> {
+    fn status_cells(&self) -> Vec<(u16, u16)> {
         let pane = layout(self.ui.window()).pane;
         let view = Area {
             x: pane.x,
@@ -443,6 +501,13 @@ impl Run {
             .filter(|p| p.content == Content::View(ViewKind::Status))
             .filter_map(|p| p.terminal())
             .flat_map(|t| (t.y..t.y + t.rows).map(move |y| (t.x.saturating_add(2), y)))
+            .collect()
+    }
+
+    /// Each session a line of a status page hits as a status row.
+    fn status_rows(&self) -> Vec<SessionId> {
+        self.status_cells()
+            .into_iter()
             .filter_map(|(x, y)| match self.ui.hit_at(x, y) {
                 Some(Target::StatusRow { session, .. }) => Some(session),
                 _ => None,
@@ -562,6 +627,11 @@ impl Run {
         for (at, word) in self.ui.words() {
             // A pane's menu button is under the popup's backdrop like everything else outside it.
             if popup && word.starts_with("[≡") {
+                continue;
+            }
+            // Every other word outside the popup that hits its backdrop is skipped too (the status page's message target
+            // and send button among them): a word starting there may run into the popup's border.
+            if popup && self.ui.hit_at(at.x, at.y) == Some(Target::Backdrop) {
                 continue;
             }
             // Help's prose names `[≡]`; in a narrow help it is cut at the border, leaving `[│`.

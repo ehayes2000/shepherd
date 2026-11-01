@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use ratatui::layout::{Position, Rect};
+use shepherd_core::client::message::MessageTarget;
 use shepherd_core::client::panes::Divider;
 use shepherd_core::client::status::Grouping;
 use shepherd_core::client::{Client, FinderItem, MenuItem, PaneMenuItem, SidebarEntry};
@@ -136,6 +137,19 @@ pub enum Target {
         by: Grouping,
         shown: usize,
     },
+    /// A line of the status page's events feed, in pane `pane`, about session `session`: selects it in the table
+    /// (shown `shown` lines at once), if it is still listed.
+    StatusEvent {
+        pane: PaneId,
+        session: SessionId,
+        shown: usize,
+    },
+    /// The status page's message target (`[to …]`) in pane `pane`: widens (or narrows back) the target to `next`.
+    StatusTarget { pane: PaneId, next: MessageTarget },
+    /// The status page's message line, off its target and send button, in pane `pane`: it takes the keys.
+    StatusMessage { pane: PaneId },
+    /// The status page's `[send]` in pane `pane`: sends the message line's text to its target.
+    StatusSend { pane: PaneId },
     /// The open popup, off its controls.
     Popup,
     /// Anywhere outside the open popup.

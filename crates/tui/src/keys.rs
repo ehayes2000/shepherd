@@ -111,6 +111,15 @@ pub fn map_event(
                 vec![Intent::EditFind(format!("{query}{}", first_line(text)))]
             }
             (Some(_), _) => Vec::new(),
+            (None, Focus::Terminal) if status::focused(client) => match client.composing() {
+                // The whole paste: a prompt may have many lines, and the host types them all.
+                true => vec![Intent::EditMessage(format!(
+                    "{}{}",
+                    client.message_text(),
+                    text.replace("\r\n", "\n").replace('\r', "\n")
+                ))],
+                false => Vec::new(),
+            },
             (None, Focus::Command) => vec![
                 Intent::SetFocus(Focus::Terminal),
                 Intent::Input(InputKind::Paste, encode::paste(text, modes)),
@@ -334,6 +343,21 @@ fn click(target: Target, client: &Client, at: Cell) -> Vec<Intent> {
         Target::StatusGroupBy { pane, by, shown } => {
             vec![Intent::FocusPane(pane), Intent::StatusGroupBy { by, shown }]
         }
+        Target::StatusEvent {
+            pane,
+            session,
+            shown,
+        } => vec![
+            Intent::FocusPane(pane),
+            Intent::StatusSelect { session, shown },
+        ],
+        Target::StatusTarget { pane, next } => {
+            vec![Intent::FocusPane(pane), Intent::MessageTarget(next)]
+        }
+        Target::StatusMessage { pane } => {
+            vec![Intent::FocusPane(pane), Intent::ComposeMessage(true)]
+        }
+        Target::StatusSend { pane } => vec![Intent::FocusPane(pane), Intent::SendMessage],
     }
 }
 
@@ -385,9 +409,24 @@ fn command(key: &KeyEvent, client: &Client, modes: &Modes) -> Option<Intent> {
     })
 }
 
-/// A key while the focused pane shows the status page: `g` switches the grouping, `↑`/`↓` (or `k`/`j`) and page up and
-/// down move the table's selection, and `⏎` attaches it. Other keys do nothing: there is no session to type into.
+/// A key while the focused pane shows the status page: `tab` widens the message line's target. While the message line
+/// takes the keys (it was clicked), keys edit it, `⏎` sends it and `esc` gives the keys back to the table. Otherwise
+/// `g` switches the grouping, `↑`/`↓` (or `k`/`j`) and page up and down move the table's selection, and `⏎` attaches
+/// it. Other keys do nothing: there is no session to type into.
 fn status_key(key: &KeyEvent, client: &Client) -> Option<Intent> {
+    if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+        return Some(Intent::MessageTarget(client.next_message_target()));
+    }
+    if client.composing() {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        return match key.code {
+            KeyCode::Enter => Some(Intent::SendMessage),
+            KeyCode::Esc => Some(Intent::ComposeMessage(false)),
+            _ => edit_key(key, client.message_text(), plain, Intent::EditMessage),
+        };
+    }
     if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
         return None;
     }
@@ -445,6 +484,13 @@ fn input_key(
     match key.code {
         KeyCode::Enter => Some(Intent::Confirm),
         KeyCode::Esc => Some(Intent::Dismiss),
+        _ => edit_key(key, text, plain, edit),
+    }
+}
+
+/// An editing key in a text input holding `text`: backspace, `ctrl-u` to clear, or a character typed.
+fn edit_key(key: &KeyEvent, text: &str, plain: bool, edit: fn(String) -> Intent) -> Option<Intent> {
+    match key.code {
         KeyCode::Backspace => {
             let mut text = text.to_owned();
             text.pop();

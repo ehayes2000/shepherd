@@ -4,6 +4,7 @@
 
 use serde_json::{Value, json};
 use shepherd_core::acpp::{Envelope, Seq, Source, SourceKind, Timestamp};
+use shepherd_core::client::message::{MessageTarget, Outcome, Refusal, Skip};
 use shepherd_core::client::{
     AskError, AskId, Cell, CleanupOutcome, Client, ClientCommand, ClientEvent, Intent,
     MachineStatus, MenuItem, NOTICE_TIMEOUT, PEER_RETRY, PEER_RETRY_MAX, PeerEvent, Popup,
@@ -2027,4 +2028,136 @@ fn without_a_limit_a_peer_catches_up_however_long_it_takes() {
         MachineStatus::Connected
     );
     assert!(!net.c.client().settled());
+}
+
+// ---------- the events feed (T59) ----------
+
+#[test]
+fn a_peers_events_are_in_the_feed_once_even_after_it_is_dropped_and_listed_again() {
+    let mut net = with_peer_session_selected();
+    let from_b = |net: &Machines| {
+        net.c
+            .client()
+            .events()
+            .filter(|e| e.machine == m("m_b"))
+            .count()
+    };
+    let before = from_b(&net);
+    assert!(before > 0, "b1 was made on laptop");
+    relist(&mut net, &[]);
+    relist(&mut net, &[("m_b", "laptop")]);
+    // A fresh fold of laptop: its whole log again.
+    if let Some(peer) = net.peers.iter_mut().find(|(id, ..)| id == "m_b") {
+        peer.2 = 0;
+    }
+    net.reach("m_b");
+    assert!(
+        net.c.client().sessions().iter().any(|s| s.id == sid("b1")),
+        "laptop is listed again"
+    );
+    assert_eq!(from_b(&net), before);
+}
+
+/// An idle Claude Code session `id` on the host `host` drives.
+fn idle_agent(host: &mut HostDriver, id: &str) {
+    host.new_session_with(id, claude_session_spec());
+    host.rename(id, id);
+    let idle = json!({ "jsonrpc": "2.0", "method": "_shepherd/agent/idle", "params": {} });
+    let hook = Source::new(SourceKind::Hook, Some("claude-code".to_owned()));
+    host.append(Some(id), hook, idle);
+}
+
+/// Idle agents `a1` on this machine and `b1` on peer `m_b` (laptop), both reached.
+fn agents_on_two_machines() -> Machines {
+    let (mut net, _) = Machines::new(&[("m_b", "laptop")]);
+    idle_agent(net.c.host(), "a1");
+    net.c.sync();
+    idle_agent(net.host("m_b"), "b1");
+    net.reach("m_b");
+    net
+}
+
+/// Sends `text` to `target`.
+fn message(net: &mut Machines, target: MessageTarget, text: &str) -> Vec<ClientCommand> {
+    net.user(Intent::MessageTarget(target));
+    net.user(Intent::EditMessage(text.to_owned()));
+    net.user(Intent::SendMessage)
+}
+
+/// The prompts among `commands` sent on the conn to `machine` (`None`: this machine's host).
+fn prompted(commands: &[ClientCommand], machine: Option<&str>) -> Vec<SessionId> {
+    let found: Vec<&Request> = match machine {
+        Some(machine) => peer_requests(commands, machine),
+        None => requests(commands),
+    };
+    found
+        .into_iter()
+        .filter_map(|r| match &r.body {
+            ClientRequest::SessionPrompt(p) => Some(p.session.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn outcomes(net: &Machines) -> Vec<(SessionId, Outcome)> {
+    net.c
+        .client()
+        .message_report()
+        .map(|r| {
+            r.deliveries
+                .iter()
+                .map(|d| (d.session.clone(), d.outcome.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_message_to_a_machine_prompts_only_its_sessions_through_its_own_host() {
+    let mut net = agents_on_two_machines();
+    let sent = message(&mut net, MessageTarget::Machine(m("m_b")), "hello");
+    assert_eq!(prompted(&sent, Some("m_b")), [sid("b1")]);
+    assert_eq!(prompted(&sent, None), Vec::<SessionId>::new(), "{sent:?}");
+    let sent = message(&mut net, MessageTarget::Machine(m("m_test")), "hi");
+    assert_eq!(prompted(&sent, None), [sid("a1")]);
+    assert_eq!(prompted(&sent, Some("m_b")), Vec::<SessionId>::new());
+}
+
+#[test]
+fn a_group_message_skips_an_offline_peers_sessions() {
+    let mut net = agents_on_two_machines();
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    assert!(net.c.client().offline(&sid("b1")));
+    let sent = message(&mut net, MessageTarget::Idle, "rebase");
+    assert_eq!(prompted(&sent, Some("m_b")), Vec::<SessionId>::new());
+    assert_eq!(prompted(&sent, None), [sid("a1")]);
+    let got = outcomes(&net);
+    assert!(
+        got.contains(&(sid("b1"), Outcome::Skipped(Skip::Offline))),
+        "{got:?}"
+    );
+}
+
+/// Whether the last send's only delivery is `b1`, refused because its link dropped, and the send is done.
+fn refused_as_dropped(net: &Machines) -> bool {
+    let got = outcomes(net);
+    let dropped = matches!(&got[..], [(s, Outcome::Refused(Refusal::Other(why)))]
+        if *s == sid("b1") && why.contains("dropped"));
+    dropped && net.c.client().message_report().is_some_and(|r| r.done())
+}
+
+#[test]
+fn a_peer_that_drops_before_answering_refuses_its_prompts() {
+    let mut net = agents_on_two_machines();
+    message(&mut net, MessageTarget::Machine(m("m_b")), "hello");
+    net.handle(peer("m_b", PeerEvent::Disconnected));
+    assert!(refused_as_dropped(&net), "{:?}", outcomes(&net));
+}
+
+#[test]
+fn a_peer_no_longer_listed_refuses_the_prompts_it_hadnt_answered() {
+    let mut net = agents_on_two_machines();
+    message(&mut net, MessageTarget::Machine(m("m_b")), "hello");
+    relist(&mut net, &[]);
+    assert!(refused_as_dropped(&net), "{:?}", outcomes(&net));
 }
