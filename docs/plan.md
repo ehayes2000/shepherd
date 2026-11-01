@@ -14,9 +14,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ ec3d014 | 3 | round 3 CHANGES: request linked by name+input across agents (main+subagent same command) |
-| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | merging | task/t32b-link-kind @ 5cb096f | 1 | round 1 fixed as asked (mutations shown); merged without a 2nd review |
-| T59 Events feed and message line | [status-page](features/status-page.md) | building | task/t59-events-message |  |  |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | merging | task/t51-answer @ ec3d014 | 3 | round 3 fixed as asked (agent_id linking; 3 tests, each mutation-proven); merging |
+| T59 Events feed and message line | [status-page](features/status-page.md) | review | task/t59-events-message @ 2c69c61 |  | built; feed from folded state; message line by: client; group report |
 
 ## Ready to start
 
@@ -31,6 +30,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
+| T63 Flat sidebar by default; group by machine on demand | [multi-machine](features/multi-machine.md) | todo | T32b, T62 |
+| T64 Machines panel | [multi-machine](features/multi-machine.md) | todo | T32b, T62, T49 |
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
@@ -51,7 +52,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
 | [Host daemon and client runtime](features/host-and-client.md) | M1 | 9 | 1 | A long-lived host owns the sessions; clients attach over a link, reconnect, and see startup errors |
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 6 | 1 | A new build replaces the running host in place without stopping sessions |
-| [Multi-machine](features/multi-machine.md) | M4 | 8 | 5 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
+| [Multi-machine](features/multi-machine.md) | M4 | 9 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
