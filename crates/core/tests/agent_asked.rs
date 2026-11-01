@@ -87,6 +87,15 @@ impl Run {
             .collect()
     }
 
+    /// The tool call the latest hook's `session/request_permission` names.
+    fn requested_tool(&self) -> Option<String> {
+        self.last
+            .iter()
+            .find(|d| d.frame.method() == Some("session/request_permission"))
+            .and_then(|d| d.frame.raw()["params"]["toolCall"]["toolCallId"].as_str())
+            .map(str::to_owned)
+    }
+
     fn question(&self) -> Option<&AgentAsked> {
         self.state.question()
     }
@@ -581,4 +590,81 @@ fn a_dialog_on_no_known_tool_cleared_by_other_activity_may_still_be_up() {
         cc!("PermissionRequest.Bash"),
     ]);
     assert!(run.question().is_some());
+}
+
+/// `payload` as a hook from subagent `agent-7f3a` (an `Explore`), its tool call `tool_use_id`.
+fn from_subagent(payload: Value, tool_use_id: &str) -> Value {
+    let payload = with(payload, "agent_id", json!("agent-7f3a"));
+    let payload = with(payload, "agent_type", json!("Explore"));
+    match payload.get("tool_use_id") {
+        Some(_) => with(payload, "tool_use_id", json!(tool_use_id)),
+        None => payload,
+    }
+}
+
+#[test]
+fn the_agent_and_a_subagent_asking_for_the_same_command_are_two_dialogs() {
+    // Both run `npm test`. A `PermissionRequest` names no tool call: each is linked to its own agent's call, so the
+    // subagent's request is queued behind the agent's dialog, which Claude Code keeps in front.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("SubagentStart"),
+        cc!("PreToolUse.Bash"),
+        from_subagent(cc!("PreToolUse.Bash"), "toolu_09SUB456"),
+    ]);
+    run.hook(cc!("PermissionRequest.Bash"));
+    assert_eq!(run.requested_tool().as_deref(), Some("toolu_01ABC123"));
+    run.hook(from_subagent(cc!("PermissionRequest.Bash"), ""));
+    assert_eq!(run.requested_tool().as_deref(), Some("toolu_09SUB456"));
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn a_codex_subagents_request_is_linked_to_its_own_call() {
+    // The main thread and a subagent run the same command; the main thread's request comes first.
+    let sub = |p: Value| {
+        let p = with(p, "agent_id", json!("agent-7f3a"));
+        with(p, "agent_type", json!("explorer"))
+    };
+    let mut run = Run::new(AgentKind::Codex);
+    run.hooks(vec![
+        cx!("UserPromptSubmit"),
+        cx!("SubagentStart"),
+        cx!("PreToolUse.Bash"),
+        with(
+            sub(cx!("PreToolUse.Bash")),
+            "tool_use_id",
+            json!("call_sub_same"),
+        ),
+    ]);
+    run.hook(cx!("PermissionRequest.Bash"));
+    assert_eq!(run.requested_tool().as_deref(), Some("call_bash_1"));
+    run.hook(sub(cx!("PermissionRequest.Bash")));
+    assert_eq!(run.requested_tool().as_deref(), Some("call_sub_same"));
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
+}
+
+#[test]
+fn a_request_taken_for_the_dialog_up_but_asked_by_another_agent_is_not_answerable() {
+    // Should a request still be linked to the tool whose dialog is up, an ask from a different (sub)agent shows it is
+    // another dialog.
+    let mut run = Run::new(AgentKind::ClaudeCode);
+    run.hooks(vec![
+        cc!("UserPromptSubmit"),
+        cc!("PreToolUse.AskUserQuestion"),
+    ]);
+    let request = json!({ "jsonrpc": "2.0", "id": "p-other", "method": "session/request_permission",
+                          "params": { "sessionId": "abc123",
+                                      "toolCall": { "toolCallId": "toolu_08ASK123", "title": "Bash: npm test" },
+                                      "options": [] } });
+    let env = run.log.from_agent(request);
+    run.state.apply(&env);
+    let mut theirs = permission("Bash: npm test", Some("Bash"));
+    theirs.subagent = Some("agent-7f3a".to_owned());
+    run.host(ShepherdFrame::AgentAsked(theirs));
+    assert_eq!(run.question(), None);
+    assert!(run.state.wants_user());
 }

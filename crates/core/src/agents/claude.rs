@@ -120,6 +120,9 @@ struct OpenTool {
     id: String,
     name: String,
     input: Option<Value>,
+    /// The subagent that runs it (its hooks' `agent_id`); none for the main agent.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 impl ClaudeTranslation {
@@ -347,6 +350,7 @@ fn pre_tool_use(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         id: id.to_owned(),
         name: name.to_owned(),
         input: input.cloned(),
+        agent: hook.str("agent_id").map(str::to_owned),
     });
     state.permission_open = false;
     out.push((Dir::FromAgent, frame));
@@ -416,7 +420,8 @@ fn tool_done(
     Some(out)
 }
 
-/// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input.
+/// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input, run by the
+/// same agent (the same subagent `agent_id`, or none for the main agent).
 fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
     let name = hook.str("tool_name").unwrap_or("Tool");
     let input = hook.field("tool_input");
@@ -424,7 +429,11 @@ fn permission_request(state: &mut ClaudeTranslation, hook: &Hook) -> Frames {
         .tools
         .iter()
         .rev()
-        .find(|t| t.name == name && t.input.as_ref() == input)
+        .find(|t| {
+            t.name == name
+                && t.input.as_ref() == input
+                && t.agent.as_deref() == hook.str("agent_id")
+        })
         .map(|t| t.id.clone());
     let mut out = continuation(state, hook)?;
     out.extend(permission(state, hook, tool, &tool_title(name, input))?);

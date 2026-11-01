@@ -129,6 +129,9 @@ struct Permission {
     asked: Option<(Seq, AgentAsked)>,
     /// The user typed into the session since it was asked: they are answering it in the pane, so shepherd won't.
     in_pane: bool,
+    /// When a request was taken for the dialog already up (same tool): which subagent (none: the agent) asked that
+    /// one, so an ask from another shows they differ.
+    same_as: Option<Option<String>>,
 }
 
 /// The last prompt the host typed into a session's agent (`_shepherd/session/prompted`), and who asked for it.
@@ -413,9 +416,19 @@ impl SessionState {
                         waits_on,
                         asked: Some((seq, asked.clone())),
                         in_pane,
+                        same_as: None,
                     });
                 }
                 None => {
+                    // Taken for the dialog already up, but another agent asks it: that one may still be in front,
+                    // for as long as shepherd can't tell (the turn).
+                    let other = wait
+                        .same_as
+                        .as_ref()
+                        .is_some_and(|before| before.as_deref() != asked.subagent.as_deref());
+                    if other {
+                        self.still_covers(None);
+                    }
                     if let Some(wait) = &mut self.permission {
                         wait.asked = Some((seq, asked.clone()));
                     }
@@ -431,6 +444,7 @@ impl SessionState {
             waits_on: self.tools.last().map(|t| t.id.clone()),
             asked: Some((seq, asked.clone())),
             in_pane: false,
+            same_as: None,
         });
         self.activity = Activity::NeedsInput;
         self.waiting_since = Some(seq);
@@ -609,6 +623,12 @@ impl SessionState {
             .permission
             .as_ref()
             .is_some_and(|p| p.waits_on.is_some() && p.waits_on == waits_on);
+        // Taken for that dialog only if the same agent (or subagent) asks again, which its `agent/asked` says.
+        let same_as = self
+            .permission
+            .as_ref()
+            .filter(|_| same)
+            .and_then(|p| p.asked.as_ref().map(|(_, a)| a.subagent.clone()));
         let in_pane = match same {
             true => self.permission.as_ref().is_some_and(|p| p.in_pane),
             false => self.cover(),
@@ -619,6 +639,7 @@ impl SessionState {
             waits_on,
             asked: None,
             in_pane,
+            same_as,
         });
         self.activity = Activity::NeedsPermission { title };
         self.waiting_since = Some(seq);

@@ -227,6 +227,9 @@ struct OpenTool {
     id: String,
     name: String,
     input: Option<Value>,
+    /// The subagent that runs it (its hooks' `agent_id`); none for the main thread.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 impl CodexTranslation {
@@ -420,6 +423,7 @@ fn pre_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
         id: id.to_owned(),
         name: name.to_owned(),
         input: input.cloned(),
+        agent: hook.str("agent_id").map(str::to_owned),
     });
     out.push((Dir::FromAgent, frame));
     if name == SPAWN_TOOL {
@@ -463,8 +467,9 @@ fn post_tool_use(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     Some(out)
 }
 
-/// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input. Codex
-/// adds `tool_input.description` to the permission request, so that field is left out of the comparison.
+/// `PermissionRequest` has no `tool_use_id`, so it names the latest open tool with the same name and input, run by the
+/// same agent (`agent_id`, none for the main thread). Codex adds `tool_input.description` to the permission request,
+/// so that field is left out of the comparison.
 fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
     let name = hook.str("tool_name").unwrap_or("Tool");
     let input = hook.field("tool_input");
@@ -472,7 +477,11 @@ fn permission_request(state: &mut CodexTranslation, hook: &Hook) -> Frames {
         .tools
         .iter()
         .rev()
-        .find(|t| t.name == name && same_input(t.input.as_ref(), input))
+        .find(|t| {
+            t.name == name
+                && same_input(t.input.as_ref(), input)
+                && t.agent.as_deref() == hook.str("agent_id")
+        })
         .map(|t| t.id.clone());
     let mut out = continuation(state, hook)?;
     let id = state.new_id("permission");

@@ -169,8 +169,9 @@ is answered. Otherwise nothing is typed and it is refused with the session's sta
 question the user is answering in the pane (any key typed into the session after it asked, including moving around
 the dialog, takes the question away from shepherd), and one that opened a second dialog while another was up (the
 agents queue them, so keys could land in the first). The last two stay `wants-user`, unanswerable here, until the
-agent's activity shows the dialogs closed (or, for a dialog about no tool the agent named, until its turn ends). A choice the question doesn't take (`yes` for a question, a number past its
-last option) is refused too, saying why.
+agent's activity shows the dialogs closed (or, for a dialog about no tool the agent named, until its turn ends). The
+agent and a subagent asking about the same command are two dialogs. A choice the question doesn't take (`yes` for a
+question, a number past its last option) is refused too, saying why.
 
 ## Shapes
 
