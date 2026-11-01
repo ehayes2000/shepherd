@@ -12,7 +12,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T54 | Subagent lifecycle in the event log | done | 7157843 | 5 | round 5: merged with rare cross-turn repeat-start residual → F57 |
-| T55 | Subagent tree in the sidebar | merging | task/t55-subagent-tree @ d8fb33b | 2 | round 2 APPROVE; minors → F55 |
+| T55 | Subagent tree in the sidebar | done | 1b91ee4 | 2 | round 2 APPROVE; minors → F55 |
 | T56 | Read a subagent's transcript | todo |  |  |  |
 | F57 | Subagent task pairing: cross-turn repeat start and failed guessed call | todo |  |  |  |
 
