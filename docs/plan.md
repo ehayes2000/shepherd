@@ -14,9 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | fixing | task/t50-ui-cli @ 0ad7fb0 | 1 | round 1 CHANGES: --page hack → tui render-page; row cut, 400x200 replay, id-over-name, ambiguous page, put keyword precedence untested |
+| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | review | task/t50-ui-cli @ c316135 | 1 | round 1 fixed (render_page); rebased over T47 with conflicts; round 2 review |
 | T51 Answer an agent's pending question | [automation](features/automation.md) | building | task/t51-answer |  |  |
-| T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | review | task/t55-subagent-tree @ e2b7d46 |  | built; narrow sidebar toggle key-only (PM: must be clickable) |
+| T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | merging | task/t55-subagent-tree @ d8fb33b | 2 | round 2 APPROVE; minors → F55 |
 
 ## Ready to start
 

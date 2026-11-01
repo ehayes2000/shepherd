@@ -19,7 +19,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T47 | Prompt an agent and wait for its reply | done | 1f2c898 | 2 | round 2 APPROVE; minors → T56, T61 |
 | T48 | Host-owned layout: pages and splits in core | done | f27c9dc | 1 | APPROVE; seeded property tests (b0b110b) |
 | T49 | Render pages and split panes | done | 18a0aff | 2 | round 2 APPROVE; footer-height minor → F56 |
-| T50 | `shepherd ui` CLI and screenshots | fixing | task/t50-ui-cli @ 0ad7fb0 | 1 | round 1 CHANGES: --page hack → tui render-page; row cut, 400x200 replay, id-over-name, ambiguous page, put keyword precedence untested |
+| T50 | `shepherd ui` CLI and screenshots | review | task/t50-ui-cli @ c316135 | 1 | round 1 fixed (render_page); rebased over T47 with conflicts; round 2 review |
 | T51 | Answer an agent's pending question | building | task/t51-answer |  |  |
 | T52 | Read a session's screen as text | todo |  |  |  |
 | T53 | Shepherd MCP server for agents | todo |  |  |  |

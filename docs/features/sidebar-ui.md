@@ -199,6 +199,10 @@ acceptance:
 - Re-fit the scroll whenever the session list changes (new, closed, renamed reordering), not only on selection or resize.
 - Remove the known-gap exemption in `crates/tui/tests/ui/invariants.rs` (~150) so the property test checks host-made
   sessions too, and it passes. (T45's review: the exemption currently skips ~10% of selection checks, not just the gap.)
+- From T55's review: `a_tree_shrinking_above_the_selection_keeps_the_selection_in_view` passes without the scroll (put
+  sessions below s1 so the clamp can't do the work); the `tree_above_selection() != tree_above` half of the refresh
+  condition is untested (test a new session above leaves the scroll, or simplify to `in_view`); assert the narrow
+  sidebar's subagent glyph next to `└` hits `Target::Subagent`, not the branch toggle.
 - From T45's review: `Ui::event`'s doc says it handles events as the runtime does, but it skips `from_legacy_terminal`
   (the runtime applies it when the keyboard isn't enhanced); say the harness models an enhanced terminal.
 scope: crates/core, crates/tui (tests)
