@@ -1,8 +1,9 @@
 # Shepherd from the command line
 
-Commands for scripts and agents (decision 0022): see every session, start one, prompt them, arrange the screen and see
-it drawn, and (in later tasks) answer them. Each command is a short-lived client of this machine's host (started if it
-isn't running), and reaches the paired machines through it, as the TUI does.
+Commands for scripts and agents (decision 0022): see every session, start one, prompt them, answer them, stop them,
+arrange the screen and see it drawn. Each command is a short-lived client of this machine's host (started if it isn't
+running), and reaches the paired machines through it, as the TUI does. An agent gets the same commands as MCP tools
+from [`shepherd mcp`](#shepherd-mcp).
 
 ```
 shepherd sessions                                                        [--json]
@@ -21,6 +22,8 @@ shepherd ui ratio <pane> R                                               [--json
 shepherd ui screenshot [--size WxH] [--page P]                           [--json]
 shepherd screen <session> [--lines N]                                    [--json]
 shepherd answer <session> <yes | always | no | N> [--asked SEQ]          [--json]
+shepherd stop <session> [--force]                                        [--json]
+shepherd mcp
 ```
 
 - Human output is display-safe (control characters in names, branches and paths are dropped). `--json` output is one
@@ -51,6 +54,9 @@ Every session on this machine and on each paired machine the host can reach, new
 per session: `<id>  <name>  <status>  <agent>  <machine>  <branch>  <#pr>  <workspace>` (`-` for what it hasn't), then
 `(<machine> is unreachable: <why>)` for each machine that couldn't be reached.
 
+MCP tool `status`: input `{}`; output [`sessions --json`](#sessions---json). A session's `question` names what its
+agent waits on the user for, by the seq `answer` takes.
+
 ## `shepherd new`
 
 Starts a session on `--machine` (this one by default) with `--profile` (the host's default profile by default), and
@@ -64,11 +70,15 @@ It fails, making nothing, when the profile is unknown, the machine is unknown or
 doesn't exist. It returns once the session exists; its worktree may still be being made (`starting: true`), and a
 session whose worktree then can't be made shows `status: "exited"` with the reason in `failed`.
 
+MCP tool `new_session`: input `{ profile?: string, machine?: string, cwd?: string, name?: string }`, each its flag (a
+relative `cwd` is relative to where `shepherd mcp` runs); output [`new --json`](#new---json).
+
 ## `shepherd prompt`
 
 Has the session's host type `<text>` into its agent as one prompt (`-` reads the text from stdin), and prints
 `prompted <name>` once it is typed. The host types it, as a paste and then Enter, so every window showing the session
-sees it, and records it in the session's log (`_shepherd/session/prompted`, with `by: "cli"`). Newlines are kept;
+sees it, and records it in the session's log (`_shepherd/session/prompted`, with `by: "cli"`; from the MCP tool,
+[`mcp:<session>`](#shepherd-mcp)). Newlines are kept;
 other control characters, and the invisible characters Claude Code would refuse to send, are left out.
 
 Only an agent at its prompt is typed into: one that is working or waiting on the user is refused (`<name> is busy
@@ -82,6 +92,9 @@ or a subagent of its does, it returns at once with `wants-user` and what it aske
 A turn that ends with no reply of its own (nothing written since the prompt) prints `<name> is idle, with no reply`;
 an agent that exits, or a session closed, before its turn ends gives `exited`. `--timeout` bounds `--queue` and `--wait` together; when it runs out the
 prompt (if it was sent) stays: nothing is withdrawn.
+
+MCP tool `send`: input `{ session: string, text: string, wait?: bool, queue?: bool, timeout?: integer }` (`timeout` in
+seconds); output [`prompt --json`](#prompt---json-reply---json-wait---json). A timeout is an error, as for the command.
 
 ## `shepherd reply`
 
@@ -146,12 +159,14 @@ asking for more gives what there is), and at most 1 MiB of text, past which the 
 session's screen when they show it. A session that isn't running (it exited, or its worktree is still being made) is
 refused.
 
+MCP tool `read_pane`: input `{ session: string, lines?: integer }`; output [`screen --json`](#screen---json).
+
 ## `shepherd answer`
 
 Answers the permission prompt or question the session's agent (or a subagent of its, whose dialog is in the session)
 is blocked on, without attaching, and prints `answered <name> <choice>: <what it asked>`. The host types the agent's
 own keys for the choice into the session, so every window sees the dialog close, and records it in the session's log
-(`_shepherd/session/answered`, with `by: "cli"`).
+(`_shepherd/session/answered`, with `by: "cli"`; from the MCP tool, [`mcp:<session>`](#shepherd-mcp)).
 
 - A permission takes `yes`, `always` (yes, and don't ask again) or `no`, where that dialog offers them. A choice the
   dialog doesn't offer, or that shepherd can't tell it offers, is refused rather than guessed: Claude Code takes
@@ -172,6 +187,53 @@ agents queue them, so keys could land in the first). The last two stay `wants-us
 agent's activity shows the dialogs closed (or, for a dialog about no tool the agent named, until its turn ends). The
 agent and a subagent asking about the same command are two dialogs. A choice the question doesn't take (`yes` for a
 question, a number past its last option) is refused too, saying why.
+
+MCP tool `answer`: input `{ session: string, choice: "yes" | "always" | "no" | integer, asked?: integer }` (`choice`
+an option's number from 1; `asked` the question's seq, as `status` shows it in the session's `question`, like
+`--asked`); output [`answer --json`](#answer---json). Pass `asked` to be sure the answer lands on the question it was
+chosen for.
+
+## `shepherd stop`
+
+Stops a session, as the sidebar's Close does: its host kills its process at once and closes it. Like the Close dialog,
+it first asks the host what removing the session's worktree would lose: its uncommitted changes, and its commits that
+are neither pushed nor merged. Nothing: the session is closed and the worktree removed (after its pre-remove hooks;
+should it have something to lose by then, it is kept). Something, or the host can't tell: nothing is closed, and it is
+refused saying what (`<name> has unsaved work in its worktree (uncommitted changes): it was not stopped; …`). With
+`--force` it is stopped anyway and its worktree **kept**: `stop` never throws work away (the cleanup view can remove
+the worktree later). A session with no worktree (or one still being made) is just closed. It prints `stopped <name>`,
+saying what happens to the worktree, once the host has started closing it; the session leaves the list once its
+worktree is dealt with.
+
+MCP tool `stop`: input `{ session: string, force?: bool }`; output [`stop --json`](#stop---json).
+
+## `shepherd mcp`
+
+Serves the commands above to an agent as MCP tools, over stdin and stdout (newline-delimited JSON-RPC, MCP's stdio
+transport), until the agent hangs up. Configure it as a stdio MCP server whose command is `shepherd mcp`. Its tools
+mirror the commands one to one, and run the commands' own code: each call is a short-lived client of this machine's
+host (started if it isn't running), as a command is, so a tool can do nothing its command can't.
+
+| tool | command | input | output |
+|---|---|---|---|
+| `status` | `sessions` | `{}` | [`sessions --json`](#sessions---json) |
+| `read_pane` | `screen` | `{ session, lines? }` | [`screen --json`](#screen---json) |
+| `send` | `prompt` | `{ session, text, wait?, queue?, timeout? }` | [`prompt --json`](#prompt---json-reply---json-wait---json) |
+| `answer` | `answer` | `{ session, choice, asked? }` | [`answer --json`](#answer---json) |
+| `new_session` | `new` | `{ profile?, machine?, cwd?, name? }` | [`new --json`](#new---json) |
+| `stop` | `stop` | `{ session, force? }` | [`stop --json`](#stop---json) |
+
+- `tools/list` gives each tool's input and output as JSON Schema (generated from the types the commands print, so
+  they can't drift from the shapes below). Arguments are each command's flags by name; unknown arguments, or a
+  missing required one, are refused as invalid params (`-32602`), as is an unknown tool.
+- A call's result is its command's `--json` output, as `structuredContent` and as text. A call its command would fail
+  is a tool error (`isError: true`) whose text is the command's error (what it would print after `shepherd: `),
+  timeouts included.
+- Calls are served one at a time, in order: a `send` that waits holds later calls until it returns.
+- Who asked: what `send` and `answer` type is recorded in the session's log with `by: "mcp:<session>"`, the session
+  the server runs in, named by `SHEPHERD_SESSION` (shepherd sets it, with `SHEPHERD_SOCK`, in every session it
+  spawns), or `by: "mcp"` when the server wasn't started from a session. `new_session` and `stop` record no origin
+  (the host's session-new and session-close requests don't carry one).
 
 ## Shapes
 
@@ -194,9 +256,24 @@ path that isn't UTF-8 is shown lossily).
   "pr": PR | null,
   "starting": false,                       // its worktree (or its post-create hooks) is still being made
   "failed": "why it couldn't start" | null,
-  "created_at": "<time>"
+  "created_at": "<time>",
+  "question": Question | null              // what its agent waits on the user for, that `answer` can answer
 }
 ```
+
+Question:
+
+```json
+{
+  "seq": 12,                               // its `_shepherd/agent/asked` entry's seq: `answer --asked` takes it
+  "text": "what it asks",                  // the tool and its main argument, or the question
+  "choices": ["one", "two"] | null         // a question's options in order (answered by number, from 1);
+                                           // null for a permission, or a question only the pane can answer
+}
+```
+
+`question` is `null` when nothing is pending that `answer` could answer, including while the user is answering in the
+pane: a session can be `wants-user` with no `question`.
 
 `status`:
 - `running`: its process runs and isn't known to be waiting: the agent is in a turn or still starting, or it runs no
@@ -339,3 +416,17 @@ A pane's `content` is what it shows: for a pane showing the selection (`selected
 
 A refused answer is an error (stderr, exit status 1). On the wire it is `_shepherd/session/answer { session, choice,
 asked?, by? }`, refused with error code 1003 and `data: { session, status }` when the question isn't pending.
+
+### `stop --json`
+
+```json
+{
+  "session": "s_01jbx…",
+  "worktree": "remove" | "keep" | null,    // what happens to its worktree; null: it has none
+  "unsaved": ["uncommitted changes", "2 commits not pushed or merged"]
+                                           // with --force: what the kept worktree holds; otherwise []
+}
+```
+
+A refused stop is an error (stderr, exit status 1), and closes nothing. On the wire it is
+`_shepherd/worktree/status { session }`, then `_shepherd/session/close { session, worktree: "keep"? }`.

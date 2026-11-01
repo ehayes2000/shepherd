@@ -1,0 +1,747 @@
+---
+source: crates/shepherd/tests/cli_scenarios.rs
+expression: "serde_json::to_string_pretty(&tools).unwrap()"
+---
+[
+  {
+    "name": "status",
+    "description": "Every session on this machine and on each paired machine shepherd can reach, newest first, with its status (running, idle, wants-user, exited) and the question it waits on, if any. As `shepherd sessions --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "StatusArgs",
+      "description": "`status` takes nothing.",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MachineJson": {
+          "description": "A machine.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "local": {
+              "description": "This machine.",
+              "type": "boolean"
+            },
+            "status": {
+              "description": "`connected`, `unreachable` or `incompatible`.",
+              "type": "string"
+            },
+            "why": {
+              "description": "Why it can't be reached.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "local",
+            "status"
+          ]
+        },
+        "SessionJson": {
+          "description": "A session.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "machine": {
+              "description": "What the machine is called.",
+              "type": "string"
+            },
+            "machine_id": {
+              "type": "string"
+            },
+            "agent": {
+              "description": "`claude-code`, `codex` or `shell`; null from a host older than recording it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`running`, `idle` (at its prompt), `wants-user` (waits on the user) or `exited`.",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "The workspace it was started in.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PrJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "starting": {
+              "description": "Its worktree (or its post-create hooks) is still being made.",
+              "type": "boolean"
+            },
+            "failed": {
+              "description": "Why it couldn't start.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "description": "RFC 3339.",
+              "type": "string"
+            },
+            "question": {
+              "description": "What its agent waits on the user for, which `answer` can answer.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QuestionJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "machine",
+            "machine_id",
+            "status",
+            "starting",
+            "created_at"
+          ]
+        },
+        "PrJson": {
+          "description": "A pull request.",
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "state": {
+              "description": "`open`, `closed`, `merged` or `other`.",
+              "type": "string"
+            },
+            "checks": {
+              "description": "`none`, `pending`, `passing`, `failing` or `other`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "state",
+            "checks"
+          ]
+        },
+        "QuestionJson": {
+          "description": "The question a session's agent waits on the user for, which `shepherd answer` can answer: its seq names it.",
+          "type": "object",
+          "properties": {
+            "seq": {
+              "description": "The seq of its `agent/asked` entry in the session's log: `answer` names the question by it.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "text": {
+              "description": "What it asks: the tool and its main argument, or the question.",
+              "type": "string"
+            },
+            "choices": {
+              "description": "A question's options, in order (`answer` takes an option's number, from 1); null for a permission.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "seq",
+            "text"
+          ]
+        }
+      },
+      "required": [
+        "machines",
+        "sessions"
+      ],
+      "type": "object",
+      "properties": {
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineJson"
+          }
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionJson"
+          }
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "read_pane",
+    "description": "What a session's terminal shows now, as text, one string per row, with optional scrollback above. As `shepherd screen --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ReadPaneArgs",
+      "type": "object",
+      "properties": {
+        "session": {
+          "description": "The session, by id or by its name when no other session has it.",
+          "type": "string"
+        },
+        "lines": {
+          "description": "Up to this many lines of scrollback above the screen (at most 1000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session"
+      ]
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "session",
+        "cols",
+        "rows",
+        "scrollback",
+        "lines",
+        "truncated"
+      ],
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "cols": {
+          "description": "The session's terminal size.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "scrollback": {
+          "description": "How many of `lines` are scrollback, before the screen's rows.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lines": {
+          "description": "Scrollback (oldest first), then every row of the screen, top to bottom.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "description": "Past 1 MiB of text the oldest lines are left out.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send",
+    "description": "Types a prompt into a session's agent, only while it is at its prompt (or, with queue, once it is). With wait, returns once its turn ends: its reply, or what it asked the user (status wants-user). As `shepherd prompt --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SendArgs",
+      "type": "object",
+      "properties": {
+        "session": {
+          "description": "The session, by id or by its name when no other session has it.",
+          "type": "string"
+        },
+        "text": {
+          "description": "The prompt, typed into the agent as one paste, then Enter.",
+          "type": "string"
+        },
+        "wait": {
+          "description": "Wait for the prompt's turn to end, and return the agent's reply (or what it asked the user).",
+          "type": "boolean",
+          "default": false
+        },
+        "queue": {
+          "description": "Wait for the agent to be at its prompt before sending, instead of being refused as busy.",
+          "type": "boolean",
+          "default": false
+        },
+        "timeout": {
+          "description": "How many seconds `wait` and `queue` may take together; without it, as long as it takes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "text"
+      ]
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "session",
+        "status"
+      ],
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`running`, `idle`, `wants-user` or `exited`.",
+          "type": "string"
+        },
+        "reply": {
+          "description": "The agent's last reply of the turn; null without one (and when not waited for).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "asked": {
+          "description": "With `wants-user`: what it asked the user.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "answer",
+    "description": "Answers the permission prompt or question a session's agent waits on (status wants-user), naming it by the seq `status` shows, so it can't land on another. Refused, typing nothing, when that question isn't pending. As `shepherd answer --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AnswerArgs",
+      "type": "object",
+      "properties": {
+        "session": {
+          "description": "The session, by id or by its name when no other session has it.",
+          "type": "string"
+        },
+        "choice": {
+          "description": "`yes`, `always` or `no` for a permission; an option's number (from 1), or `no`, for a question.",
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "yes",
+                "always",
+                "no"
+              ]
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "asked": {
+          "description": "The question meant: its `seq`, as `status` shows it. Without it, the question pending when the tool looks.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "choice"
+      ]
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "session",
+        "choice"
+      ],
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "choice": {
+          "description": "As given: a word, or an option's number from 1.",
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "yes",
+                "always",
+                "no"
+              ]
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "asked": {
+          "description": "What it asked the user, as this command's client last saw it; the host decided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "question": {
+          "description": "The seq of the `agent/asked` entry it named.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "new_session",
+    "description": "Starts a session on this or a paired machine, and returns it once its host has made it. As `shepherd new --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "NewSessionArgs",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "description": "The profile to start (the host's default without it).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "machine": {
+          "description": "The machine to start it on, by id or name (this one without it).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cwd": {
+          "description": "Run it in this directory, with no worktree; without it, it gets a managed worktree in the host's workspace.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "description": "What to call it (and its worktree's branch).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SessionJson": {
+          "description": "A session.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "machine": {
+              "description": "What the machine is called.",
+              "type": "string"
+            },
+            "machine_id": {
+              "type": "string"
+            },
+            "agent": {
+              "description": "`claude-code`, `codex` or `shell`; null from a host older than recording it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`running`, `idle` (at its prompt), `wants-user` (waits on the user) or `exited`.",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "The workspace it was started in.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PrJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "starting": {
+              "description": "Its worktree (or its post-create hooks) is still being made.",
+              "type": "boolean"
+            },
+            "failed": {
+              "description": "Why it couldn't start.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "description": "RFC 3339.",
+              "type": "string"
+            },
+            "question": {
+              "description": "What its agent waits on the user for, which `answer` can answer.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QuestionJson"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "machine",
+            "machine_id",
+            "status",
+            "starting",
+            "created_at"
+          ]
+        },
+        "PrJson": {
+          "description": "A pull request.",
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "state": {
+              "description": "`open`, `closed`, `merged` or `other`.",
+              "type": "string"
+            },
+            "checks": {
+              "description": "`none`, `pending`, `passing`, `failing` or `other`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "state",
+            "checks"
+          ]
+        },
+        "QuestionJson": {
+          "description": "The question a session's agent waits on the user for, which `shepherd answer` can answer: its seq names it.",
+          "type": "object",
+          "properties": {
+            "seq": {
+              "description": "The seq of its `agent/asked` entry in the session's log: `answer` names the question by it.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "text": {
+              "description": "What it asks: the tool and its main argument, or the question.",
+              "type": "string"
+            },
+            "choices": {
+              "description": "A question's options, in order (`answer` takes an option's number, from 1); null for a permission.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "seq",
+            "text"
+          ]
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionJson"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "stop",
+    "description": "Stops (closes) a session, removing its worktree when that loses nothing. Refused when its worktree has unsaved work, unless force, which stops it and keeps the worktree. As `shepherd stop --json`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "StopArgs",
+      "type": "object",
+      "properties": {
+        "session": {
+          "description": "The session, by id or by its name when no other session has it.",
+          "type": "string"
+        },
+        "force": {
+          "description": "Stop it even though its worktree has unsaved work (or that can't be told), keeping the worktree.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session"
+      ]
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "required": [
+        "session",
+        "unsaved"
+      ],
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "worktree": {
+          "description": "What happens to its worktree: `remove` (it loses nothing) or `keep`; null when it has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unsaved": {
+          "description": "What the kept worktree holds that removing it would lose.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true
+    }
+  }
+]

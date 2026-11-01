@@ -4,8 +4,9 @@
 use std::io::Write;
 use std::path::Path;
 
+use schemars::JsonSchema;
 use serde::Serialize;
-use shepherd_core::acpp::{Pr, PrChecks, PrState};
+use shepherd_core::acpp::{Pr, PrChecks, PrState, Seq};
 use shepherd_core::client::automation::{SessionStatus, newest_first, resolve_machine};
 use shepherd_core::client::{Client, ClientSession, MachineGroup, MachineStatus};
 use shepherd_core::wire::{ClientRequest, HostResult, SessionNew};
@@ -18,21 +19,55 @@ const NEW_USAGE: &str =
 
 // ---- JSON shapes (docs/cli.md) ----
 
-#[derive(Serialize)]
+/// A session.
+#[derive(Serialize, JsonSchema)]
 struct SessionJson {
     id: String,
     name: String,
+    /// What the machine is called.
     machine: String,
     machine_id: String,
+    /// `claude-code`, `codex` or `shell`; null from a host older than recording it.
     agent: Option<&'static str>,
+    /// `running`, `idle` (at its prompt), `wants-user` (waits on the user) or `exited`.
     status: &'static str,
+    /// The workspace it was started in.
     workspace: Option<String>,
     worktree: Option<String>,
     branch: Option<String>,
     pr: Option<PrJson>,
+    /// Its worktree (or its post-create hooks) is still being made.
     starting: bool,
+    /// Why it couldn't start.
     failed: Option<String>,
+    /// RFC 3339.
     created_at: String,
+    /// What its agent waits on the user for, which `answer` can answer.
+    question: Option<QuestionJson>,
+}
+
+/// The question a session's agent waits on the user for, which `shepherd answer` can answer: its seq names it.
+#[derive(Serialize, JsonSchema)]
+struct QuestionJson {
+    /// The seq of its `agent/asked` entry in the session's log: `answer` names the question by it.
+    #[schemars(with = "u64")]
+    seq: Seq,
+    /// What it asks: the tool and its main argument, or the question.
+    text: String,
+    /// A question's options, in order (`answer` takes an option's number, from 1); null for a permission.
+    choices: Option<Vec<String>>,
+}
+
+impl QuestionJson {
+    fn of(client: &Client, s: &ClientSession) -> Option<Self> {
+        let state = client.state(&s.id)?;
+        let asked = state.question()?;
+        Some(Self {
+            seq: state.question_seq()?,
+            text: asked.text.clone(),
+            choices: asked.choices.clone(),
+        })
+    }
 }
 
 impl SessionJson {
@@ -51,16 +86,20 @@ impl SessionJson {
             starting: s.creating_worktree,
             failed: s.failed.clone(),
             created_at: s.created.to_string(),
+            question: QuestionJson::of(client, s),
         }
     }
 }
 
-/// A pull request, spelled by the CLI rather than the log, so the shape stays what `docs/cli.md` says whatever the
-/// log learns: a state or checks value this build doesn't know is `other`.
-#[derive(Serialize)]
+// Spelled by the CLI rather than the log, so the shape stays what `docs/cli.md` says whatever the log learns: a state or
+// checks value this build doesn't know is `other`.
+/// A pull request.
+#[derive(Serialize, JsonSchema)]
 struct PrJson {
     number: u64,
+    /// `open`, `closed`, `merged` or `other`.
     state: &'static str,
+    /// `none`, `pending`, `passing`, `failing` or `other`.
     checks: &'static str,
 }
 
@@ -85,13 +124,30 @@ impl From<&Pr> for PrJson {
     }
 }
 
-#[derive(Serialize)]
+/// A machine.
+#[derive(Serialize, JsonSchema)]
 struct MachineJson {
     id: String,
     name: String,
+    /// This machine.
     local: bool,
+    /// `connected`, `unreachable` or `incompatible`.
     status: &'static str,
+    /// Why it can't be reached.
     why: Option<String>,
+}
+
+/// `{ machines, sessions }`: this machine first, then the paired machines by name; sessions newest first.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SessionsJson {
+    machines: Vec<MachineJson>,
+    sessions: Vec<SessionJson>,
+}
+
+/// `{ session }`: the session made.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MadeJson {
+    session: SessionJson,
 }
 
 impl From<&MachineGroup> for MachineJson {
@@ -138,14 +194,9 @@ pub fn sessions(drive: &mut impl Drive, json: bool, out: &mut impl Write) -> Res
     let listed = listed(client);
     let machines = client.machines();
     if json {
-        #[derive(Serialize)]
-        struct Sessions {
-            machines: Vec<MachineJson>,
-            sessions: Vec<SessionJson>,
-        }
         return write_json(
             out,
-            &Sessions {
+            &SessionsJson {
                 machines: machines.iter().map(MachineJson::from).collect(),
                 sessions: listed.iter().map(|s| SessionJson::of(client, s)).collect(),
             },
@@ -254,13 +305,9 @@ pub fn new(
         return Err(format!("session {session} was made but isn't listed"));
     };
     if json {
-        #[derive(Serialize)]
-        struct Made {
-            session: SessionJson,
-        }
         return write_json(
             out,
-            &Made {
+            &MadeJson {
                 session: SessionJson::of(client, listed),
             },
         );

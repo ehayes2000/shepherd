@@ -7,6 +7,7 @@ pub mod cli;
 pub mod client;
 pub mod hook;
 pub mod host;
+pub mod mcp;
 pub mod peers;
 pub mod screen_guard;
 pub mod screen_text;

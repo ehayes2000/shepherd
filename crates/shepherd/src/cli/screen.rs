@@ -3,6 +3,7 @@
 
 use std::io::Write;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use shepherd_core::display::display_safe;
 use shepherd_core::wire::{ClientRequest, HostResult, SessionScreen};
@@ -12,13 +13,17 @@ use super::{Args, CliError, Drive, request, settle, target, write, write_json};
 const SCREEN_USAGE: &str = "usage: shepherd screen <session> [--lines N] [--json]";
 
 /// `{ session, cols, rows, scrollback, lines, truncated }` (docs/cli.md).
-#[derive(Serialize)]
-struct Shown {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ShownJson {
     session: String,
+    /// The session's terminal size.
     cols: u16,
     rows: u16,
+    /// How many of `lines` are scrollback, before the screen's rows.
     scrollback: u32,
+    /// Scrollback (oldest first), then every row of the screen, top to bottom.
     lines: Vec<String>,
+    /// Past 1 MiB of text the oldest lines are left out.
     truncated: bool,
 }
 
@@ -42,7 +47,7 @@ pub fn screen(
         other => return Err(format!("the host answered something else: {other:?}").into()),
     };
     if json {
-        let shown = Shown {
+        let shown = ShownJson {
             session: session.id.to_string(),
             cols: shown.cols,
             rows: shown.rows,

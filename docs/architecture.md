@@ -866,4 +866,13 @@ not handle splits or tabs". Decision:
 - Panes show `Selected` (each window's own sidebar selection; the default), a pinned `Session { machine?, id }` (a peer's
   session too), `Empty` or a `View`. Sidebar selection never changes the host's layout.
 Consequences: feature `docs/features/automation.md` (T45-T50); `docs/cli.md` documents every `--json` shape.
+Amended (T53): `shepherd mcp` serves the CLI to agents as MCP tools over stdio, one tool per command, each run by that
+command's own code with `--json` (so no tool can do what the CLI can't), each call a short-lived client of the local
+host. It uses the official MCP Rust SDK, `rmcp` (3.x, `server` + `transport-io` + `local`), with `schemars` for the
+tools' schemas (generated from the very types the commands print) and one current-thread tokio runtime and `LocalSet`
+in the `mcp` process only; all three are allowed in `crates/shepherd` only. `local` because a call runs the CLI's
+synchronous, non-`Send` client (decision 0011) on that thread, so calls are served one at a time. A tool's typing is
+recorded `by: mcp:<session>`, the session named by `SHEPHERD_SESSION` (set in every session shepherd spawns), else
+`by: mcp`. `shepherd stop` joins the CLI so the `stop` tool has a command to mirror: it refuses a session whose worktree
+has unsaved work unless `--force`, which closes it keeping the worktree.
 

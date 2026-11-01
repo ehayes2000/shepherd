@@ -24,13 +24,14 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::env::args().skip(2).collect();
             shepherd::cli::sessions::new_main(&args)
         }
-        Some(command @ ("prompt" | "reply" | "wait" | "screen" | "answer")) => {
+        Some(command @ ("prompt" | "reply" | "wait" | "screen" | "answer" | "stop")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let result = match command {
                 "prompt" => shepherd::cli::prompt::prompt_main(&args),
                 "reply" => shepherd::cli::prompt::reply_main(&args),
                 "screen" => shepherd::cli::screen::screen_main(&args),
                 "answer" => shepherd::cli::answer::answer_main(&args),
+                "stop" => shepherd::cli::stop::stop_main(&args),
                 _ => shepherd::cli::prompt::wait_main(&args),
             };
             return match result {
@@ -44,6 +45,10 @@ fn main() -> ExitCode {
                     ExitCode::from(error.exit_code())
                 }
             };
+        }
+        Some("mcp") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            shepherd::mcp::main(&args)
         }
         Some("ui") => {
             let args: Vec<String> = std::env::args().skip(2).collect();

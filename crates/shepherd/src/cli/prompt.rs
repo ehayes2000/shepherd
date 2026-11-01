@@ -9,6 +9,7 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use shepherd_core::acpp::{PromptBy, Seq};
 use shepherd_core::client::automation::SessionStatus;
@@ -43,11 +44,14 @@ pub struct Prompt {
 }
 
 /// `{ session, status, reply, asked }` (docs/cli.md).
-#[derive(Serialize)]
-struct Outcome {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct OutcomeJson {
     session: String,
+    /// `running`, `idle`, `wants-user` or `exited`.
     status: &'static str,
+    /// The agent's last reply of the turn; null without one (and when not waited for).
     reply: Option<String>,
+    /// With `wants-user`: what it asked the user.
     asked: Option<String>,
 }
 
@@ -131,7 +135,12 @@ fn read_reply(
 }
 
 /// Prints `outcome`: as JSON, or (for a human, display-safe) the reply, or what the agent is waiting for.
-fn print(out: &mut impl Write, outcome: &Outcome, name: &str, json: bool) -> Result<(), CliError> {
+fn print(
+    out: &mut impl Write,
+    outcome: &OutcomeJson,
+    name: &str,
+    json: bool,
+) -> Result<(), CliError> {
     if json {
         return Ok(write_json(out, outcome)?);
     }
@@ -159,6 +168,17 @@ pub fn prompt(
     json: bool,
     out: &mut impl Write,
 ) -> Result<(), CliError> {
+    prompt_by(drive, prompt, PromptBy::Cli, json, out)
+}
+
+/// [`prompt`], recorded in the session's log as typed `by` someone other than the CLI (`shepherd mcp`'s `send`).
+pub fn prompt_by(
+    drive: &mut impl Drive,
+    prompt: &Prompt,
+    by: PromptBy,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<(), CliError> {
     settle(drive)?;
     let session = target(drive, &prompt.session)?;
     let (id, machine, name) = (session.id, session.machine, session.name);
@@ -180,7 +200,7 @@ pub fn prompt(
         let body = ClientRequest::SessionPrompt(SessionPrompt {
             session: id.clone(),
             text: prompt.text.clone(),
-            by: Some(PromptBy::Cli),
+            by: Some(by.clone()),
         });
         match ask_host(drive, Some(machine.clone()), body)? {
             Ok(_) => break before,
@@ -197,7 +217,7 @@ pub fn prompt(
     };
     if !prompt.wait {
         if json {
-            let outcome = Outcome {
+            let outcome = OutcomeJson {
                 session: id.to_string(),
                 status: SessionStatus::Running.as_str(),
                 reply: None,
@@ -236,7 +256,7 @@ pub fn prompt(
         SessionStatus::WantsUser => None,
         _ => read_reply(drive, &machine, &id, since)?,
     };
-    let outcome = Outcome {
+    let outcome = OutcomeJson {
         session: id.to_string(),
         status: status.as_str(),
         reply,
@@ -257,7 +277,7 @@ pub fn reply(
     let reply = read_reply(drive, &session.machine, &session.id, None)?;
     let client = drive.client();
     let status = status_of(client, &session.id).unwrap_or(SessionStatus::Exited);
-    let outcome = Outcome {
+    let outcome = OutcomeJson {
         session: session.id.to_string(),
         status: status.as_str(),
         reply,
@@ -293,7 +313,7 @@ pub fn wait(
     let status = status_of(client, &id).unwrap_or(SessionStatus::Exited);
     let asked = asked(client, &id);
     if json {
-        let outcome = Outcome {
+        let outcome = OutcomeJson {
             session: id.to_string(),
             status: status.as_str(),
             reply: None,
