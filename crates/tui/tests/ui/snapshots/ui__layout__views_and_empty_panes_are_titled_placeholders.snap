@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/ui/layout.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │┌ fix-login · local ──────────── [≡] ┐┌ Status ─────────────────────── [≡] ┐
+ ⌂ choose a workspace  ││                                    ││                                    │
+ + New session ⊞ Layout││                                    ││                                    │
+ ◌ fix-login          ×││                                    ││                                    │
+   local · —           ││                                    ││                                    │
+                       │└────────────────────────────────────┘│     Status isn't available yet.    │
+                       │┌ empty ──────────────────────── [≡] ┐│                                    │
+                       ││          Nothing here yet.         ││                                    │
+                       ││ Select a session, then choose Move ││                                    │
+                       ││  session here in this pane's menu. ││                                    │
+                       ││                                    ││                                    │
+ ctrl-b ? help Detach ?│└────────────────────────────────────┘└────────────────────────────────────┘

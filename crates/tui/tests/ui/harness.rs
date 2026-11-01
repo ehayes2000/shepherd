@@ -26,14 +26,18 @@ use ratatui::layout::{Position, Rect};
 use serde_json::Value;
 use shepherd_core::acpp::RequestId;
 use shepherd_core::client::{Client, ClientCommand, ClientEvent, Intent};
+use shepherd_core::host::HostCommand;
 use shepherd_core::ids::SessionId;
+use shepherd_core::layout::LayoutOp;
 use shepherd_core::wire::{
-    ClientMessage, ClientRequest, HostMessage, HostNotification, Method, PtyOutput, RawResponse,
-    Request, WireError,
+    ClientMessage, ClientRequest, HostMessage, HostNotification, HostResult, Method, PtyOutput,
+    RawResponse, Request, UiApply, WireError,
 };
 use shepherd_term::Screen;
 use shepherd_testkit::builders::{ClientDriver, HostDriver};
-use shepherd_tui::{Pointer, Screens, Target, hit, layout, map_event, render};
+use shepherd_tui::{
+    Pointer, Screens, Target, fit_screens, hit, layout, map_event, render, screen_size,
+};
 
 /// A headless window onto a client. See the module docs.
 pub struct Ui {
@@ -77,7 +81,7 @@ impl Ui {
 
     // ---------- steps ----------
 
-    /// A terminal event, as the runtime handles it: mapped by the TUI with the selected session's input modes, each
+    /// A terminal event, as the runtime handles it: mapped by the TUI with the focused session's input modes, each
     /// intent handled by the client in order. Then redraws.
     pub fn event(&mut self, event: Event) -> &mut Self {
         if let Event::Resize(cols, rows) = event {
@@ -85,8 +89,8 @@ impl Ui {
         }
         let modes = self
             .client()
-            .selected()
-            .and_then(|id| self.screens.get(id))
+            .focused_session()
+            .and_then(|id| self.screens.get(&id))
             .map(Screen::modes)
             .unwrap_or_default();
         let intents = map_event(
@@ -113,8 +117,15 @@ impl Ui {
         }
         let commands = self.driver.user(intent);
         self.sent.extend(commands);
+        self.fit_screens();
         self.draw();
         self
+    }
+
+    /// Resizes each session's terminal to the size the client last gave it (its pane's), as the runtime does after
+    /// every event, with the same code.
+    fn fit_screens(&mut self) {
+        fit_screens(self.driver.client(), &mut self.screens);
     }
 
     /// A left click on the first cell of `label`, which must be drawn exactly once.
@@ -213,11 +224,12 @@ impl Ui {
     }
 
     /// A message from the host, as the runtime handles it: a session's PTY output is fed to its terminal (made at the
-    /// client's size on first output) before the client sees it, and a log entry drops the terminals of sessions that
-    /// are gone.
+    /// size the client gave the session, else the client's size, on first output) before the client sees it, and a
+    /// log entry drops the terminals of sessions that are gone.
     pub fn host(&mut self, message: HostMessage) -> &mut Self {
         if let HostMessage::Notification(HostNotification::PtyOutput(out)) = &message {
-            let (cols, rows) = self.client().size().map_or((80, 24), |s| (s.cols, s.rows));
+            let (cols, rows) =
+                screen_size(self.client(), &out.session).map_or((80, 24), |s| (s.cols, s.rows));
             let screen = self
                 .screens
                 .entry(out.session.clone())
@@ -234,6 +246,7 @@ impl Ui {
         if log_entry {
             self.drop_closed_screens();
         }
+        self.fit_screens();
         self.draw();
         self
     }
@@ -261,8 +274,74 @@ impl Ui {
         let commands = self.driver.sync();
         self.sent.extend(commands);
         self.drop_closed_screens();
+        self.fit_screens();
         self.draw();
         self
+    }
+
+    /// The host applies `op` to its layout, as a `_shepherd/ui/apply` from another client or the CLI would.
+    pub fn host_layout(&mut self, op: LayoutOp) -> &mut Self {
+        self.on_host(|h| {
+            h.ui_apply(op);
+        })
+    }
+
+    /// The layout ops the client has asked the host for (`_shepherd/ui/apply`), in order, answered or not.
+    pub fn layout_ops(&self) -> Vec<LayoutOp> {
+        self.requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::UiApply(UiApply { op }) => Some(op.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Lets the host do every layout op the client has asked for and not had answered, in order, as the host does:
+    /// applied (or refused), recorded and broadcast, then answered.
+    pub fn apply_layout_ops(&mut self) -> &mut Self {
+        let asked: Vec<(RequestId, LayoutOp)> = self
+            .requests_with_ids()
+            .into_iter()
+            .filter(|r| !self.answered.contains(&r.id))
+            .filter_map(|r| match &r.body {
+                ClientRequest::UiApply(UiApply { op }) => Some((r.id.clone(), op.clone())),
+                _ => None,
+            })
+            .collect();
+        for (id, op) in asked {
+            let mut replies = Vec::new();
+            self.on_host(|h| replies = h.ui_apply(op));
+            let result = replies
+                .into_iter()
+                .find_map(|c| match c {
+                    HostCommand::Reply { result, .. } => Some(result),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("Ui: the host didn't answer a ui/apply"))
+                .map(|ok| match ok {
+                    HostResult::Layout(layout) => {
+                        serde_json::to_value(layout).unwrap_or_else(|e| panic!("{e}"))
+                    }
+                    other => panic!("Ui: ui/apply answered {other:?}"),
+                });
+            self.answered.push(id.clone());
+            self.host(HostMessage::Response(RawResponse { id, result }));
+        }
+        self
+    }
+
+    /// A left press at `from`, the mouse dragged to `to`, and released there.
+    pub fn drag(&mut self, from: Position, to: Position) -> &mut Self {
+        use ratatui::crossterm::event::MouseButton::Left;
+        self.mouse(MouseEventKind::Down(Left), from.x, from.y);
+        self.mouse(MouseEventKind::Drag(Left), to.x, to.y);
+        self.mouse(MouseEventKind::Up(Left), to.x, to.y)
+    }
+
+    /// The terminal of session `id`, as the runtime keeps it.
+    pub fn screen_of(&self, id: &str) -> Option<&Screen> {
+        self.screens.get(&SessionId::new(id))
     }
 
     /// Answers the newest unanswered request for `method` with `result`. Panics, naming what was sent, if there is
@@ -294,6 +373,12 @@ impl Ui {
     /// The window's area.
     pub fn window(&self) -> Rect {
         self.buffer().area
+    }
+
+    /// Where the frame's cursor is, while it is shown.
+    pub fn cursor(&self) -> Option<Position> {
+        let backend = self.terminal.backend();
+        backend.cursor_visible().then(|| backend.cursor_position())
     }
 
     /// What is drawn, without styles.

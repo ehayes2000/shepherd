@@ -7,7 +7,7 @@ Buffer {
     content: [
         " ⌕ Search…             │                                                        ",
         " ⌂ app                 │                                                        ",
-        " + New session         │                                                        ",
+        " + New session ⊞ Layout│                                                        ",
         " ≡ studio              │                                                        ",
         "   this machine        │                                                        ",
         " ◌ api                ×│                                                        ",
@@ -42,6 +42,7 @@ Buffer {
         x: 24, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 1, y: 2, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
         x: 14, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 15, y: 2, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
         x: 23, y: 2, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
         x: 24, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 1, y: 3, fg: Gray, bg: Reset, underline: Reset, modifier: NONE,

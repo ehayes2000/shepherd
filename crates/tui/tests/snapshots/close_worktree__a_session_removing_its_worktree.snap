@@ -4,7 +4,7 @@ expression: "text(&buffer(&c, Rect::new(0, 0, 80, 6)))"
 ---
  ⌕ Search…             │
  ⌂ shepherd            │
- + New session         │
+ + New session ⊞ Layout│
  ✕ refactor           ×│
    removing worktree…  │
  Cleanup       Detach ?│

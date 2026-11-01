@@ -16,12 +16,14 @@ use shepherd::client::{
 };
 use shepherd::terminal::{TerminalSetup, with_terminal};
 use shepherd_core::acpp::Timestamp;
+use shepherd_core::client::panes::{Area, arrange};
 use shepherd_core::client::{
     Client, Connection, HELLO_TIMEOUT, Intent, MAX_CONNECT_ATTEMPTS, NOTICE_TIMEOUT, Popup,
     RETRY_INTERVAL,
 };
 use shepherd_core::config::AgentKind;
 use shepherd_core::ids::{MachineId, SessionId};
+use shepherd_core::layout::{Content, LayoutOp, Ratio, SplitDir};
 use shepherd_core::ports::LaunchError;
 use shepherd_core::ports::pty::PtySize;
 use shepherd_core::wire::{BuildId, ExeDigest, SessionNew, UpgradeAnswer, ViewSize};
@@ -1277,4 +1279,53 @@ fn a_stale_host_is_asked_to_update_itself_and_the_reconnect_says_it_did() {
     assert_eq!(h.runtime.client().notice(), Some("host updated"));
     assert_eq!(h.runtime.client().popup(), None);
     assert_eq!((h.launcher.launches(), h.launcher.terminations()), (1, 0));
+}
+
+#[test]
+fn split_panes_each_size_their_session_and_keys_use_the_focused_session_s_modes() {
+    let mut h = Harness::ready();
+    h.keys(&[ctrl('b'), ch('n'), ctrl('b'), ch('n')]);
+    let (s1, s2) = (SessionId::new("s1"), SessionId::new("s2"));
+    // s1 prints while it fills the pane, so the client already has its screen at that size.
+    h.user(Intent::SelectSession(s1.clone()));
+    h.typed("x");
+    h.user(Intent::SelectSession(s2.clone()));
+    let root = h.runtime.client().host_layout().current_page().root.id();
+    h.user(Intent::ApplyLayout(LayoutOp::Split {
+        pane: root,
+        dir: SplitDir::Horizontal,
+        ratio: Ratio::default(),
+        content: Content::session(s1.clone()),
+    }));
+    let pane = layout(Rect::new(0, 0, WINDOW.0, WINDOW.1)).pane;
+    let arranged = arrange(
+        &h.runtime.client().layout(),
+        Area {
+            x: pane.x,
+            y: pane.y,
+            cols: pane.width,
+            rows: pane.height,
+        },
+    );
+    let [left, right] = &arranged.panes[..] else {
+        panic!("two panes: {arranged:?}")
+    };
+    let (left_t, right_t) = (left.terminal().unwrap(), right.terminal().unwrap());
+    // The left pane (the selection, s2) is focused: s2's first output makes its screen at its pane's size.
+    h.typed("y");
+    let size = |h: &Harness, s: &SessionId| h.runtime.screen(s).map(Screen::size);
+    assert_eq!(size(&h, &s2), Some((left_t.cols, left_t.rows)));
+    // Focusing the right pane sizes s1, and its screen follows.
+    h.user(Intent::FocusPane(right.pane));
+    assert_eq!(size(&h, &s1), Some((right_t.cols, right_t.rows)));
+    // Keys go to s1 now (the fake host echoes them): this turns on its SGR mouse reporting, while s2's stays off.
+    h.user(Intent::keys(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+    h.term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: right_t.x + 2,
+        row: right_t.y + 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    let last = h.inputs().last().cloned();
+    assert_eq!(last, Some(("s1".into(), "\x1b[<64;3;2M".into())));
 }

@@ -4,7 +4,7 @@ expression: "text(&buffer(&c, WIDE))"
 ---
  ⌕ Search…             │
  ⌂ choose a workspace  │
- + New session         │
+ + New session ⊞ Layout│
  ◌ docs               ×│
    local · —           │
  ◌ fix-login          ×│

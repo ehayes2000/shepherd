@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/ui/layout.rs
+expression: ui.screen()
+---
+ ⌕│┌ api · lo…  [≡] ┐┌ fix-login…  [≡] ┐
+ ⌂││in api          ││    Too small    │
+ +││                │└─────────────────┘
+ ⊞││                │┌ docs · lo…  [≡] ┐
+ ⏏││                ││    Too small    │
+ ?│└────────────────┘└─────────────────┘

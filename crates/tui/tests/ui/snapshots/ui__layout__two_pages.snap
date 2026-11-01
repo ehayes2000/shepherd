@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/ui/layout.rs
+expression: ui.screen()
+---
+ ⌕ Search…             │ 1   review  +
+ ⌂ choose a workspace  │in docs
+ + New session ⊞ Layout│
+ ◌ docs               ×│
+   local · —           │
+ ◌ fix-login          ×│
+   local · —           │
+                       │
+                       │
+ ctrl-b ? help Detach ?│

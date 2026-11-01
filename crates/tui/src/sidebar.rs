@@ -24,8 +24,10 @@
 //! `Detach` and `?` buttons on the right, and a `Cleanup` button on the left while connected with a workspace on this
 //! machine ([`Client::local_workspace`]; it then takes the hint's place).
 //!
-//! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⏏` (detach) and `?`
-//! buttons on the last two lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
+//! The third line also has `⊞ Layout` at its right, which opens the focused pane's menu.
+//!
+//! Collapsed (narrow windows), only the `+`, the attention bar and glyph are drawn, with the `⊞` (layout), `⏏`
+//! (detach) and `?` buttons on the last three lines; the footer shows `^B` instead while the prefix is pending. Rows have no `×` there:
 //! a right click opens the row's menu, which has Close.
 //!
 //! [`crate::hit`] reads the same geometry ([`search_field`], [`workspace_button`], [`new_session_button`], [`visible_rows`],
@@ -114,6 +116,10 @@ const SEARCH_COLLAPSED: &str = "⌕";
 /// The button's label, and the collapsed sidebar's.
 const NEW_SESSION: &str = "+ New session";
 const NEW_SESSION_COLLAPSED: &str = "+";
+/// The button that opens the focused pane's menu (split, close, move a session, pages), always shown so the layout can
+/// be changed by click even when the pane's session takes the mouse (decision 0014).
+const LAYOUT: &str = "⊞ Layout";
+const LAYOUT_COLLAPSED: &str = "⊞";
 
 /// The sidebar left of its border.
 fn inner(layout: &Layout) -> Rect {
@@ -182,6 +188,21 @@ pub(crate) fn new_session_button(layout: &Layout) -> Rect {
     header_button(layout, 2, label)
 }
 
+/// Where the full sidebar's `⊞ Layout` button is: on the third line, right of `+ New session`, ending in the last column.
+/// Collapsed, it is a footer button ([`footer_buttons`]).
+pub(crate) fn layout_button(layout: &Layout) -> Rect {
+    let inner = inner(layout);
+    let width = u16::try_from(columns(LAYOUT)).unwrap_or(u16::MAX);
+    if layout.collapsed || inner.height <= 2 || inner.width < width {
+        return Rect::default();
+    }
+    let x = inner.right() - width;
+    if x <= new_session_button(layout).right() {
+        return Rect::default();
+    }
+    Rect::new(x, inner.y + 2, width, 1)
+}
+
 /// A row's close button, drawn as `×`.
 const CLOSE: &str = "×";
 const DETACH: &str = "Detach";
@@ -198,7 +219,7 @@ const DETACH_COLLAPSED: &str = "⏏";
 
 /// Lines below the list: the footer, and in the collapsed sidebar the `⏏` line above it.
 fn footer_height(layout: &Layout) -> u16 {
-    if layout.collapsed { 2 } else { 1 }
+    if layout.collapsed { 3 } else { 1 }
 }
 
 /// Where the close button of the session drawn on `row` is: the last cell of its first line. The collapsed sidebar
@@ -235,10 +256,18 @@ pub(crate) fn footer_buttons(
             y: help.y - 1,
             ..help
         };
-        return vec![
+        let mut buttons = vec![
             (detach, Target::Detach, DETACH_COLLAPSED),
             (help, Target::Help, HELP),
         ];
+        if inner.height >= HEADER_HEIGHT + 3 {
+            let at = Rect {
+                y: detach.y - 1,
+                ..detach
+            };
+            buttons.insert(0, (at, Target::LayoutMenu, LAYOUT_COLLAPSED));
+        }
+        return buttons;
     }
     let width = u16::try_from(columns(DETACH)).unwrap_or(u16::MAX);
     if inner.height < HEADER_HEIGHT + 1 || inner.width < width + 6 {
@@ -406,6 +435,11 @@ pub(crate) fn render(client: &Client, layout: &Layout, buf: &mut Buffer) {
     let style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let width = usize::from(button.width);
     draw::set(buf, button.x, button.y, &shown(label), width, style);
+    let button = layout_button(layout);
+    if button.width > 0 {
+        let width = usize::from(button.width);
+        draw::set(buf, button.x, button.y, &shown(LAYOUT), width, style);
+    }
     if layout.collapsed {
         render_collapsed(client, layout, buf);
     } else {

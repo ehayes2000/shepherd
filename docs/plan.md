@@ -14,7 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | review | task/t47-prompt-wait @ d8ba6d4 |  | built; fresh agent counts idle after SessionStart; SessionBusy wire error |
+| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | fixing | task/t47-prompt-wait @ d8ba6d4 | 1 | round 1 CHANGES: closed session hangs --wait; since choice unproven; + 7 minors |
 | T49 Render pages and split panes | [automation](features/automation.md) | merging | task/t49-render-layout @ 4f41e42 | 2 | round 2 APPROVE; footer-height minor → F56 |
 | T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | building | task/t50-ui-cli |  |  |
 | T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | building | task/t55-subagent-tree |  |  |
