@@ -14,8 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ 26668f8 | 2 | round 2 CHANGES: Codex Bash no → n (Cancel, documented); in_pane carry, same-tool, end_turn clear untested; unknown-tool fail-safe |
-| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | building | task/t32b-link-kind |  |  |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ ec3d014 | 3 | round 3 CHANGES: request linked by name+input across agents (main+subagent same command) |
+| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | merging | task/t32b-link-kind @ 5cb096f | 1 | round 1 fixed as asked (mutations shown); merged without a 2nd review |
+| T59 Events feed and message line | [status-page](features/status-page.md) | building | task/t59-events-message |  |  |
 
 ## Ready to start
 
@@ -33,7 +34,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
-| T59 Events feed and message line | [status-page](features/status-page.md) | todo | T57, T47 |
 | T56 Read a subagent's transcript | [subagents](features/subagents.md) | todo | T55, T47 |
 | F57 Subagent task pairing: cross-turn repeat start and failed guessed call | [subagents](features/subagents.md) | todo | T54 |
 | F01 Event-driven Pty pump | [terminal](features/terminal.md) | todo | T08 |

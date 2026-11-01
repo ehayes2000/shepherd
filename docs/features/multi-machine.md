@@ -16,7 +16,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | T31a | Tunnel to a peer's host over iroh | done | 74308b3 | 2 | round 2 APPROVE; swap-path tunnel close + flush_closed TimedOut-on-give-up filed to F50 |
 | T31b | Merged sidebar across machines | done | a92e8f3 | 2 | round 2 APPROVE; alerts home filter minor → F52 |
 | T32 | Create sessions on any machine | done | 482db06 | 2 | round 2 APPROVE; untarget test minors → T32b |
-| T32b | Show whether each machine's link is relayed or direct | building | task/t32b-link-kind |  |  |
+| T32b | Show whether each machine's link is relayed or direct | merging | task/t32b-link-kind @ 5cb096f | 1 | round 1 fixed as asked (mutations shown); merged without a 2nd review |
 | F52 | Peer conn hardening after the tunnel | done | cc35bba | 2 | round 2 APPROVE; minor: other-end opening answer likely unreachable (defensive) |
 | F53 | iroh link contract flakes under load | todo |  |  |  |
 | T62 | Machine colors | done | 8719d79 | 1 | APPROVE; rebased over T48 |
