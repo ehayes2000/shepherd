@@ -629,8 +629,8 @@ impl Run {
             if popup && word.starts_with("[≡") {
                 continue;
             }
-            // So are the status page's message target and send button; a word starting there may run into the popup's
-            // border.
+            // Every other word outside the popup that hits its backdrop is skipped too (the status page's message target
+            // and send button among them): a word starting there may run into the popup's border.
             if popup && self.ui.hit_at(at.x, at.y) == Some(Target::Backdrop) {
                 continue;
             }

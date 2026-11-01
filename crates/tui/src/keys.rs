@@ -112,10 +112,11 @@ pub fn map_event(
             }
             (Some(_), _) => Vec::new(),
             (None, Focus::Terminal) if status::focused(client) => match client.composing() {
+                // The whole paste: a prompt may have many lines, and the host types them all.
                 true => vec![Intent::EditMessage(format!(
                     "{}{}",
                     client.message_text(),
-                    first_line(text)
+                    text.replace("\r\n", "\n").replace('\r', "\n")
                 ))],
                 false => Vec::new(),
             },

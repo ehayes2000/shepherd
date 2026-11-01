@@ -207,8 +207,21 @@ fn a_paste_goes_into_the_message_line_while_it_takes_the_keys() {
     ui.paste("not yet");
     assert_eq!(ui.client().message_text(), "");
     ui.click_in(message_line(&ui), "click to message");
-    ui.paste("first line\nsecond");
-    assert_eq!(ui.client().message_text(), "first line");
+    ui.paste("first line\r\nsecond\rthird");
+    assert_eq!(ui.client().message_text(), "first line\nsecond\nthird");
+    assert!(
+        ui.region(message_line(&ui))
+            .contains("first line↵second↵third"),
+        "{}",
+        ui.region(message_line(&ui))
+    );
+    ui.key(KeyCode::Enter);
+    let sent: Vec<String> = prompts(&ui).into_iter().map(|p| p.text).collect();
+    assert_eq!(
+        sent,
+        ["first line\nsecond\nthird"],
+        "the whole paste is sent"
+    );
 }
 
 #[test]

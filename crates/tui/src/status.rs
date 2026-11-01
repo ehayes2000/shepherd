@@ -81,6 +81,8 @@ const EVENTS_MAX: u16 = 9;
 /// The table's box keeps at least this many lines (six of its own) when the events feed is shown.
 const TABLE_MIN: u16 = 9;
 const SEND: &str = "[send]";
+/// What a line break in the message line's text is drawn as.
+const NEWLINE: &str = "↵";
 
 struct Table {
     frame: Rect,
@@ -870,7 +872,9 @@ fn render_message(client: &Client, message: &Message, buf: &mut Buffer) {
     let cursor = Style::new().add_modifier(Modifier::REVERSED);
     let text = client.message_text();
     if !text.is_empty() {
-        let typed = cut_left(text, room.saturating_sub(usize::from(client.composing())));
+        // One line: each line break shows as a glyph (`display_safe` would drop it).
+        let text = text.replace('\n', NEWLINE);
+        let typed = cut_left(&text, room.saturating_sub(usize::from(client.composing())));
         let (end, _) = draw::set(buf, field.x, field.y, &shown(&typed), room, Style::new());
         if client.composing() && end < field.right() {
             buf.set_style(Rect::new(end, field.y, 1, 1), cursor);

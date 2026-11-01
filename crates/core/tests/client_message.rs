@@ -273,3 +273,32 @@ fn the_target_names_who_it_reaches() {
     c.user(Intent::MessageTarget(MessageTarget::Working));
     assert_eq!(c.client().message_recipients(), [sid("sh"), sid("a2")]);
 }
+
+#[test]
+fn the_text_is_kept_when_no_one_could_be_sent_to() {
+    let mut c = agents(&["a1"]);
+    c.user(Intent::StatusSelect {
+        session: sid("sh"),
+        shown: 10,
+    });
+    let sent = send(&mut c, "hello");
+    assert!(prompts(&sent).is_empty());
+    assert_eq!(
+        report(&c),
+        [("sh".to_owned(), Outcome::Skipped(Skip::NoAgent))]
+    );
+    assert_eq!(
+        c.client().message_text(),
+        "hello",
+        "kept, to send elsewhere"
+    );
+}
+
+#[test]
+fn a_machine_the_client_doesnt_list_is_no_target() {
+    let mut c = agents(&["a1"]);
+    c.user(Intent::MessageTarget(MessageTarget::Machine(
+        MachineId::new("m_nowhere"),
+    )));
+    assert_eq!(c.client().message_target(), &MessageTarget::Selected);
+}
