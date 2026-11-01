@@ -15,7 +15,8 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T51 Answer an agent's pending question | [automation](features/automation.md) | fixing | task/t51-answer @ 26668f8 | 2 | round 2 CHANGES: Codex Bash no → n (Cancel, documented); in_pane carry, same-tool, end_turn clear untested; unknown-tool fail-safe |
-| T57 Status table | [status-page](features/status-page.md) | fixing | task/t57-status-table @ 10a2eab | 1 | round 1 CHANGES: help clipped at 80x24; attach paths (pinned, resize, current page first) untested |
+| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | building | task/t32b-link-kind |  |  |
+| T57 Status table | [status-page](features/status-page.md) | merging | task/t57-status-table @ 10a2eab | 1 | round 1 fixed exactly as asked, each mutation shown; merged without a 2nd review |
 
 ## Ready to start
 
@@ -29,7 +30,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F05 Validated types can't be deserialized around their validation | [foundation](features/foundation.md) | todo | T04 |
 | F13 Client reconnect backoff | [host-and-client](features/host-and-client.md) | todo | T12 |
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
-| T32b Show whether each machine's link is relayed or direct | [multi-machine](features/multi-machine.md) | ready | T32 |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
