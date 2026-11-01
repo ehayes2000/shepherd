@@ -14,9 +14,9 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T47 Prompt an agent and wait for its reply | [automation](features/automation.md) | merging | task/t47-prompt-wait @ 08d681d | 2 | round 2 APPROVE; minors → T56, T61 |
-| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | building | task/t50-ui-cli |  |  |
-| T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | building | task/t55-subagent-tree |  |  |
+| T50 `shepherd ui` CLI and screenshots | [automation](features/automation.md) | fixing | task/t50-ui-cli @ 0ad7fb0 | 1 | round 1 CHANGES: --page hack → tui render-page; row cut, 400x200 replay, id-over-name, ambiguous page, put keyword precedence untested |
+| T51 Answer an agent's pending question | [automation](features/automation.md) | building | task/t51-answer |  |  |
+| T55 Subagent tree in the sidebar | [subagents](features/subagents.md) | review | task/t55-subagent-tree @ e2b7d46 |  | built; narrow sidebar toggle key-only (PM: must be clickable) |
 
 ## Ready to start
 
@@ -46,7 +46,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Feature | Milestone | Done | Open | Goal |
 |---|---|---|---|---|
 | [Agent sessions: Claude Code and Codex](features/agents.md) | M2 | 15 | 0 | Claude Code and Codex run in sessions with live status, attention and resume after restart |
-| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 4 | 5 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
+| [Automation: drive agents and the UI from a CLI](features/automation.md) | M5 | 5 | 4 | Agents and scripts can run shepherd without a human: start sessions, prompt an agent and get its reply, and arrange the screen (pages, splits), and every UI change is testable headless |
 | [Conversation archive](features/conversation-archive.md) | M3+ | 7 | 2 | Every agent conversation is kept on this device, indexed by repo and commit, so cleanup never loses context and a cleaned-up session can be restored and resumed |
 | [Display-safe text](features/display-safety.md) | M2–M3 | 2 | 0 | Text that agents, hooks or git can name never reaches the screen or stderr raw |
 | [Foundation: log, wire and core](features/foundation.md) | M0–M1 | 12 | 2 | The ACP++ event log, the host session registry, the wire protocol and the private filesystem everything sits on |
@@ -59,7 +59,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Status page](features/status-page.md) | M5 | 0 | 3 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
 | [Subagents](features/subagents.md) | M5 | 1 | 3 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
-| [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 1 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
+| [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |
 
 <!-- tasks:end -->
 

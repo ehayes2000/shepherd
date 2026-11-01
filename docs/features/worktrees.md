@@ -28,6 +28,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 | F39 | T26 leftovers | todo |  |  |  |
 | F48 | repo_root returns an uncanonical /tmp path under load | done | df99fff | 2 | round 2 APPROVE; not reproduced (accepted); signal death → Other; fixture drops prove ownership; r4 24-copy 0 failures. Minor: ps retries have no pause (F51) |
 | F51 | Test cleanup never signals a pid it can't prove is ours | done | dada354 | 2 | round 2 APPROVE; ps retry pause untestable (accepted) |
+| F58 | A worktree session on a peer world exits at once in cli_scenarios | todo |  |  |  |
 
 ## Specs
 
@@ -369,4 +370,15 @@ scope: crates/adapters, scripts/check-arch.sh
 notes: git's messages are localized: if NotARepo keys on stderr text, the port must run git with a fixed locale
 (`LC_ALL=C`) or use a check that doesn't depend on text (e.g. `git rev-parse --is-inside-work-tree` semantics); say which.
 Never kill processes by pattern; tests never exec a just-written file.
+
+### F58: A worktree session on a peer world exits at once in cli_scenarios
+depends: T50
+touches: shepherd tests (cli_scenarios), possibly host worktree creation
+goal: From T50's builder: in `crates/shepherd/tests/cli_scenarios.rs`, a session made on machine A with a worktree
+(`session_on(&mut w.a, …)`) logs `agent/exited` straight after `worktree/created`, so it is never running. Find out whether
+it's a fake-worktree quirk in the test world or a real bug in how the host spawns into a new worktree.
+acceptance:
+- Reproduce, find the cause; if it's a real bug, regression test first (fix-bug) and fix; if it's the fake, fix the fake
+  so a worktree session runs like a `--cwd` one, and switch T50's tests back to the worktree path where that was the intent.
+scope: crates/shepherd (tests), crates/testkit, and the host only if it's a real bug
 
