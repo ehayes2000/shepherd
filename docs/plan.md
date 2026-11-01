@@ -14,8 +14,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T60 Project manager session and page | [project-manager](features/project-manager.md) | building | task/t60-pm-session |  |  |
-| T58 Preview and answer in place | [status-page](features/status-page.md) | merging | task/t58-preview-answer @ a9254d4 | 1 | round 1 fixed as asked (mutations shown); merging |
+| T60 Project manager session and page | [project-manager](features/project-manager.md) | fixing | task/t60-pm-session @ 960014c | 1 | round 1 CHANGES (Codex review): lost PM start sticks; local filter, newest-exited untested; e2e-script finding overruled (T44) |
 
 ## Ready to start
 
@@ -56,7 +55,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
 | [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
-| [Status page](features/status-page.md) | M5 | 2 | 1 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
+| [Status page](features/status-page.md) | M5 | 3 | 0 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
 | [Subagents](features/subagents.md) | M5 | 2 | 2 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |
 | [Terminal: PTYs and the emulator](features/terminal.md) | M1 | 10 | 1 | Sessions run in real PTYs with backpressure, and the client renders them through shepherd-term |
 | [Workspaces and worktrees](features/worktrees.md) | M3 | 18 | 2 | Every new session gets a managed worktree from the latest origin default branch, with hooks, naming, close, cleanup and search |

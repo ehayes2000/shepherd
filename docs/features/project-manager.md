@@ -13,7 +13,7 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T60 | Project manager session and page | building | task/t60-pm-session |  |  |
+| T60 | Project manager session and page | fixing | task/t60-pm-session @ 960014c | 1 | round 1 CHANGES (Codex review): lost PM start sticks; local filter, newest-exited untested; e2e-script finding overruled (T44) |
 | T61 | Project manager panel | todo |  |  |  |
 
 ## Specs
