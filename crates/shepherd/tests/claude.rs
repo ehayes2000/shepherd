@@ -239,6 +239,44 @@ fn a_claude_session_runs_claude_with_generated_hook_settings_and_shepherds_varia
 }
 
 #[test]
+fn a_pm_session_runs_claude_with_shepherds_mcp_server_for_that_session_only() {
+    let mut c = Claude::start();
+    let mut client = c.h.connect();
+    let session = c.new_session(&mut client, Some("pm")).unwrap();
+
+    let spec = c.spawned();
+    assert_eq!(spec.command, CLAUDE);
+    let dir = c.h.run_root().join(session.as_str());
+    let mcp = dir.join("mcp.json");
+    let settings = dir.join("settings.json");
+    assert_eq!(
+        spec.args,
+        [
+            "--mcp-config",
+            mcp.to_str().unwrap(),
+            "--settings",
+            settings.to_str().unwrap()
+        ]
+    );
+    assert_eq!(mode(&mcp), 0o600);
+    assert_eq!(
+        read_json(&mcp),
+        json!({ "mcpServers": { "shepherd": {
+            "type": "stdio",
+            "command": SHEPHERD_EXE,
+            "args": ["mcp"],
+            "env": { "SHEPHERD_SESSION": session.as_str() },
+        } } })
+    );
+    // Only shepherd's own variables: nothing points Claude Code at another config.
+    let names: Vec<&str> = spec.env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["SHEPHERD_SESSION", "SHEPHERD_SOCK"]);
+    // It is the PM because its `session/created` says which profile it started with.
+    let listed = c.h.host().sessions();
+    assert_eq!(listed[0].profile.as_deref(), Some("pm"));
+}
+
+#[test]
 fn closing_a_claude_session_removes_its_run_files() {
     let mut c = Claude::start();
     let mut client = c.h.connect();

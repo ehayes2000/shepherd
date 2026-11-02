@@ -447,6 +447,7 @@ fn pty_exit_appends_agent_exited() {
             removing_worktree: false,
             pr: None,
             agent: Some(AgentKind::Shell),
+            profile: Some("shell".to_owned()),
         }]
     );
 }

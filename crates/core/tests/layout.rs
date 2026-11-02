@@ -257,6 +257,75 @@ fn a_new_page_can_open_on_a_session_or_a_view() {
     );
 }
 
+fn new_split_page(a: Content, b: Content) -> LayoutOp {
+    LayoutOp::PageNewSplit {
+        name: Some("pm".into()),
+        dir: SplitDir::Horizontal,
+        ratio: Ratio::from_permille(600),
+        a,
+        b,
+    }
+}
+
+#[test]
+fn a_new_split_page_shows_two_things_side_by_side_and_is_selected() {
+    let before = Layout::default();
+    let layout = ok(
+        &before,
+        new_split_page(
+            Content::session(sid("s1")),
+            Content::View(ViewKind::PmPanel),
+        ),
+    );
+    assert_eq!(page_names(&layout), ["1", "pm"]);
+    let page = layout.current_page();
+    assert_eq!(page.name, "pm");
+    let Pane::Split { dir, ratio, .. } = &page.root else {
+        panic!("not split: {:?}", page.root);
+    };
+    assert_eq!((*dir, ratio.permille()), (SplitDir::Horizontal, 600));
+    let shown: Vec<Content> = leaves(&page.root).into_iter().map(|(_, c)| c).collect();
+    assert_eq!(
+        shown,
+        [
+            Content::session(sid("s1")),
+            Content::View(ViewKind::PmPanel)
+        ]
+    );
+    // Fresh ids for the page, the split and both halves.
+    let mut ids: Vec<u64> = vec![page.id.get(), page.root.id().get()];
+    ids.extend(leaves(&page.root).iter().map(|(id, _)| id.get()));
+    let fresh: BTreeSet<u64> = ids.iter().copied().collect();
+    assert_eq!(fresh.len(), 4);
+    assert!(before.pages()[0].root.find(PaneId::new(ids[1])).is_none());
+}
+
+#[test]
+fn a_new_split_page_is_refused_like_a_new_page_and_a_split() {
+    assert_eq!(
+        err(
+            &Layout::default(),
+            new_split_page(Content::session(sid("gone")), Content::Empty)
+        ),
+        LayoutError::UnknownSession(sid("gone"))
+    );
+    assert_eq!(
+        err(
+            &Layout::default(),
+            new_split_page(Content::Empty, Content::session(sid("gone")))
+        ),
+        LayoutError::UnknownSession(sid("gone"))
+    );
+    let mut full = Layout::default();
+    for _ in 1..MAX_PAGES {
+        full = ok(&full, new_page(None));
+    }
+    assert_eq!(
+        err(&full, new_split_page(Content::Empty, Content::Empty)),
+        LayoutError::TooManyPages { max: MAX_PAGES }
+    );
+}
+
 #[test]
 fn a_new_page_on_a_session_that_is_not_listed_is_refused() {
     let op = LayoutOp::PageNew {
@@ -886,6 +955,19 @@ fn ops_on_the_wire() {
     );
     let op: LayoutOp = serde_json::from_value(json!({ "kind": "page-new" })).unwrap();
     assert_eq!(op, new_page(None));
+    let op: LayoutOp = serde_json::from_value(json!({ "kind": "page-new-split", "dir": "vertical",
+        "a": "selected", "b": { "view": "pm-panel" } }))
+    .unwrap();
+    assert_eq!(
+        op,
+        LayoutOp::PageNewSplit {
+            name: None,
+            dir: SplitDir::Vertical,
+            ratio: Ratio::default(),
+            a: Content::Selected,
+            b: Content::View(ViewKind::PmPanel),
+        }
+    );
     for op in [
         new_page(Some("x")),
         LayoutOp::PageSelect {
@@ -902,6 +984,10 @@ fn ops_on_the_wire() {
             pane: PaneId::new(2),
         },
         put(PaneId::new(2), Content::View(ViewKind::PmPanel)),
+        new_split_page(
+            Content::session(sid("s1")),
+            Content::View(ViewKind::PmPanel),
+        ),
     ] {
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(serde_json::from_value::<LayoutOp>(value).unwrap(), op);
@@ -972,6 +1058,7 @@ fn a_malformed_layout_does_not_read() {
 enum Step {
     /// The op, with pane and page ids picked by index from the layout as it is then.
     PageNew(Option<u8>, u8),
+    PageNewSplit(bool, u16, u8, u8),
     PageSelect(u8),
     PageRename(u8, u8),
     PageClose(u8),
@@ -988,6 +1075,8 @@ enum Step {
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
         (proptest::option::of(0u8..4), 0u8..10).prop_map(|(n, c)| Step::PageNew(n, c)),
+        (any::<bool>(), any::<u16>(), 0u8..10, 0u8..10)
+            .prop_map(|(d, r, a, b)| Step::PageNewSplit(d, r, a, b)),
         any::<u8>().prop_map(Step::PageSelect),
         (any::<u8>(), 0u8..4).prop_map(|(p, n)| Step::PageRename(p, n)),
         any::<u8>().prop_map(Step::PageClose),
@@ -1105,6 +1194,13 @@ proptest! {
         for step in steps {
             let op = match step {
                 Step::PageNew(name, c) => LayoutOp::PageNew { name: name.map(|n| format!("p{n}")), content: content(c) },
+                Step::PageNewSplit(d, r, a, b) => LayoutOp::PageNewSplit {
+                    name: None,
+                    dir: if d { SplitDir::Horizontal } else { SplitDir::Vertical },
+                    ratio: Ratio::from_permille(r),
+                    a: content(a),
+                    b: content(b),
+                },
                 Step::PageSelect(p) => LayoutOp::PageSelect { page: pick_page(&layout, p) },
                 Step::PageRename(p, n) => LayoutOp::PageRename { page: pick_page(&layout, p), name: format!("r{n}") },
                 Step::PageClose(p) => LayoutOp::PageClose { page: pick_page(&layout, p) },

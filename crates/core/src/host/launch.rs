@@ -7,6 +7,16 @@
 //! project and local settings files and merges hooks across all of them, so the user's own hooks keep running
 //! (<https://code.claude.com/docs/en/settings>, <https://code.claude.com/docs/en/hooks>, read 2026-10-29).
 //!
+//! A profile with `shepherd_mcp` (the built-in `pm`, see [`crate::config::PM_PROFILE`]) also gets shepherd's own MCP
+//! server, `shepherd mcp`, for that session only: a generated [`MCP_FILE`] in the run directory that `claude` loads with
+//! `--mcp-config <file>` ("Load MCP servers from JSON files or strings (space-separated)";
+//! <https://code.claude.com/docs/en/cli-reference>, read 2026-11-01). Its format is the `mcpServers` object of
+//! <https://code.claude.com/docs/en/mcp> (read 2026-11-01). Without `--strict-mcp-config` the user's own MCP servers
+//! still load, and shepherd writes nothing under `~/.claude*`. The flag takes several values, so it goes first,
+//! right before `--settings`, which ends its list. The server is this very `shepherd` executable by absolute path, and
+//! its `env` names the session, so what its tools type is recorded `by: mcp:<session>` (decision 0022) even if Claude
+//! Code didn't pass its own environment on.
+//!
 //! A Codex session gets shepherd's hooks the same way, as one config override: `codex -c hooks=<inline table>`.
 //! Codex parses each `-c` value as TOML into its session-flags config layer, which sits above the user's and
 //! project's config, and loads hooks from every layer, so the user's own hooks keep running and `~/.codex` is never
@@ -39,6 +49,11 @@ pub const SESSION_VAR: &str = "SHEPHERD_SESSION";
 pub const SOCKET_VAR: &str = "SHEPHERD_SOCK";
 /// The generated Claude Code settings, in the session's run directory.
 pub const SETTINGS_FILE: &str = "settings.json";
+/// The generated Claude Code MCP config naming shepherd's MCP server, in the session's run directory, for a profile with
+/// `shepherd_mcp`.
+pub const MCP_FILE: &str = "mcp.json";
+/// What shepherd's MCP server is called in the agent: its tools are `mcp__shepherd__<tool>`.
+pub const MCP_SERVER: &str = "shepherd";
 
 /// What the runtime knows about where a session runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,13 +138,23 @@ fn build(
 
     let (mut args, files) = match profile.kind {
         AgentKind::ClaudeCode => {
+            let mut args = Vec::new();
+            let mut files = Vec::new();
+            if profile.shepherd_mcp {
+                let mcp = ctx.run_dir.join(MCP_FILE);
+                args.extend(["--mcp-config".to_owned(), utf8(&mcp)?.to_owned()]);
+                files.push(RunFile {
+                    name: MCP_FILE.to_owned(),
+                    contents: claude_mcp_config(utf8(&ctx.shepherd)?, &ctx.session),
+                });
+            }
             let settings = ctx.run_dir.join(SETTINGS_FILE);
-            let args = vec!["--settings".to_owned(), utf8(&settings)?.to_owned()];
-            let file = RunFile {
+            args.extend(["--settings".to_owned(), utf8(&settings)?.to_owned()]);
+            files.push(RunFile {
                 name: SETTINGS_FILE.to_owned(),
                 contents: claude_settings(utf8(&ctx.shepherd)?),
-            };
-            (args, vec![file])
+            });
+            (args, files)
         }
         AgentKind::Codex => {
             let command = format!(
@@ -174,6 +199,25 @@ fn claude_settings(shepherd: &str) -> Vec<u8> {
         .map(|event| ((*event).to_owned(), handler.clone()))
         .collect();
     let mut contents = serde_json::to_vec_pretty(&json!({ "hooks": hooks }))
+        .unwrap_or_else(|e| unreachable!("a JSON value always serializes: {e}"));
+    contents.push(b'\n');
+    contents
+}
+
+/// An MCP config with one stdio server, [`MCP_SERVER`]: `shepherd mcp`, run by absolute path, told which session it
+/// serves.
+fn claude_mcp_config(shepherd: &str, session: &SessionId) -> Vec<u8> {
+    let config = json!({
+        "mcpServers": {
+            MCP_SERVER: {
+                "type": "stdio",
+                "command": shepherd,
+                "args": ["mcp"],
+                "env": { SESSION_VAR: session.as_str() },
+            }
+        }
+    });
+    let mut contents = serde_json::to_vec_pretty(&config)
         .unwrap_or_else(|e| unreachable!("a JSON value always serializes: {e}"));
     contents.push(b'\n');
     contents

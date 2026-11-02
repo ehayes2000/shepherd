@@ -687,6 +687,9 @@ pub struct HostSession {
     /// What it runs, from its `session/created`. `None` in logs older than resume, or for a kind this build doesn't
     /// know.
     pub agent: Option<AgentKind>,
+    /// The agent profile it started with, by name, from its `session/created`: `pm` for the project manager (see
+    /// [`crate::config::PM_PROFILE`]). `None` in logs older than resume.
+    pub profile: Option<String>,
 }
 
 /// Where a session is in its life, as far as its PTY goes.
@@ -890,6 +893,7 @@ impl Host {
                 removing_worktree: e.removing,
                 pr: e.pr.clone(),
                 agent: e.agent,
+                profile: e.profile.clone(),
             })
             .collect()
     }

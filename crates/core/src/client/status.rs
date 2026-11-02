@@ -372,7 +372,10 @@ pub const STATUS_PAGE: &str = "status";
 
 /// The first leaf whose content `wanted` takes, the current page's leaves first, then each other page's in order: its
 /// page and its id.
-fn find_leaf(layout: &Layout, wanted: impl Fn(&Content) -> bool) -> Option<(PageId, PaneId)> {
+pub(super) fn find_leaf(
+    layout: &Layout,
+    wanted: impl Fn(&Content) -> bool,
+) -> Option<(PageId, PaneId)> {
     fn walk(pane: &Pane, wanted: &dyn Fn(&Content) -> bool) -> Option<PaneId> {
         match pane {
             Pane::Leaf { id, content } => wanted(content).then_some(*id),

@@ -32,7 +32,7 @@ use crate::width::{columns, cut, cut_left, pad, tail};
 use crate::{cleanup, finder};
 
 /// The prefix bindings, as the help lists them.
-pub const BINDINGS: [(&str, &str); 10] = [
+pub const BINDINGS: [(&str, &str); 11] = [
     ("ctrl-b n", "new session"),
     ("ctrl-b j / ↓", "next session"),
     ("ctrl-b k / ↑", "previous session"),
@@ -40,6 +40,7 @@ pub const BINDINGS: [(&str, &str); 10] = [
     ("ctrl-b x", "close session"),
     ("ctrl-b ⇥", "show or hide subagents"),
     ("ctrl-b s", "status page"),
+    ("ctrl-b p", "project manager"),
     ("ctrl-b ?", "this help"),
     ("ctrl-b q", "detach (agents keep running)"),
     ("ctrl-b ctrl-b", "send ctrl-b to the session"),
@@ -287,6 +288,7 @@ fn pane_menu_label(item: PaneMenuItem) -> &'static str {
         PaneMenuItem::MoveSessionHere => "Move session here",
         PaneMenuItem::NewPage => "New page",
         PaneMenuItem::ClosePage => "Close page",
+        PaneMenuItem::ProjectManager => "Project manager",
     }
 }
 
@@ -671,7 +673,7 @@ fn help_lines() -> Vec<ShownLine> {
     let key = Style::new().fg(Color::Cyan);
     let plain = |text: &str| draw::line(shown(text), Style::new());
     let mut lines: Vec<ShownLine> = MOUSE.iter().map(|l| plain(l)).collect();
-    lines.push(plain(""));
+    // No blank line before the keys either: the gray heading sets them apart.
     lines.push(draw::line(
         shown("Or use the keys:"),
         Style::new().fg(Color::Gray),
@@ -682,7 +684,7 @@ fn help_lines() -> Vec<ShownLine> {
             (shown(what), Style::new()),
         ])
     }));
-    // No blank line before it: the help fits a default 80x24 window whole.
+    // No blank lines: the help fits a default 80x24 window whole.
     lines.push(draw::line(
         shown("Other keys go to the session. Any key closes this."),
         Style::new().fg(Color::Gray).add_modifier(Modifier::DIM),

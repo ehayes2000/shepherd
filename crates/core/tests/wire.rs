@@ -785,6 +785,10 @@ fn hello_ok_lists_the_hosts_profiles_and_names_the_default() {
                 agent: AgentKind::Codex
             },
             ProfileInfo {
+                name: "pm".into(),
+                agent: AgentKind::ClaudeCode
+            },
+            ProfileInfo {
                 name: "review".into(),
                 agent: AgentKind::ClaudeCode
             },

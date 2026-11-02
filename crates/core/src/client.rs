@@ -83,6 +83,9 @@
 //! message line, which prompts the table's selected agent or every eligible agent of a group, `by: client`, and keeps
 //! how that went. Beside the table (T58), the preview answers the selected agent's question in place ([`answer`]).
 //!
+//! Project manager (T60): `ctrl-b p` ([`Intent::OpenPm`]) or the pane menu's "Project manager" shows the page with the PM
+//! session (the session started with the `pm` profile, see [`pm`]) beside the PM panel, starting a PM when there is none.
+//!
 //! [`Client::handle`] is pure. Request ids are a per-client counter, and time arrives in events
 //! ([`ClientEvent::ConnectFailed`], [`ClientEvent::Tick`]).
 
@@ -93,6 +96,7 @@ pub mod events;
 pub mod finder;
 pub mod message;
 pub mod panes;
+pub mod pm;
 pub mod status;
 
 pub use cleanup::{CleanupCheck, CleanupItem, CleanupListing, CleanupOutcome, CleanupRow};
@@ -364,6 +368,8 @@ pub enum Intent {
     PaneMenuChoose(PaneMenuItem),
     /// Show the status page (`ctrl-b s`): focus a pane showing it, or ask the host for a page showing it.
     OpenStatus,
+    /// Show the project manager's page (`ctrl-b p`), starting the PM session if there is none (see [`pm`]).
+    OpenPm,
     /// Group the status page's table by `by` (its toggle, or `g`), when it shows `shown` lines at once.
     StatusGroupBy {
         by: status::Grouping,
@@ -487,6 +493,8 @@ pub enum PaneMenuItem {
     NewPage,
     /// Close its page and everything on it. Offered while there is another page.
     ClosePage,
+    /// Show the project manager's page, as [`Intent::OpenPm`] does. Always offered.
+    ProjectManager,
 }
 
 /// One line of the open context menu: [`Client::menu`].
@@ -633,6 +641,8 @@ pub struct ClientSession {
     pub pr: Option<Pr>,
     /// What it runs, see [`crate::host::HostSession::agent`].
     pub agent: Option<AgentKind>,
+    /// The agent profile it started with, see [`crate::host::HostSession::profile`].
+    pub profile: Option<String>,
     /// Its agent's subagents, see [`SessionState::subagents`].
     pub subagents: Vec<Subagent>,
 }
@@ -722,6 +732,8 @@ pub struct Client {
     chosen: bool,
     /// A session the user created, to select once it is listed.
     select_when_listed: Option<SessionId>,
+    /// The request that started a PM session for the project manager's page, until it is listed or refused.
+    pm_wanted: Option<RequestId>,
     focus: Focus,
     /// The terminal window has focus. Assumed until the terminal says otherwise.
     window_focused: bool,
@@ -968,6 +980,7 @@ impl Client {
             selected: None,
             chosen: false,
             select_when_listed: None,
+            pm_wanted: None,
             focus: Focus::default(),
             window_focused: true,
             popup: None,
@@ -1111,6 +1124,7 @@ impl Client {
         if layout.pages().len() > 1 {
             items.push(PaneMenuItem::ClosePage);
         }
+        items.push(PaneMenuItem::ProjectManager);
         items
     }
 
@@ -1949,6 +1963,8 @@ impl Client {
         error: &str,
     ) -> Vec<ClientCommand> {
         self.local.pending.clear();
+        // A PM start asked for on the lost link went with it: a later open asks again.
+        self.pm_wanted = None;
         if attempt >= MAX_CONNECT_ATTEMPTS {
             return self.fail(format!(
                 "could not connect to the shepherd host after {attempt} attempts: {error}. \
@@ -1976,6 +1992,7 @@ impl Client {
             // A new outage.
             Connection::Ready | Connection::Incompatible => {
                 self.local.pending.clear();
+                self.pm_wanted = None;
                 self.drop_asks(&At::Local);
                 // Only an accepted update outlives its link: the drop is the host re-executing.
                 let dropped = self.upgrade.take_if(|u| u.phase != UpgradePhase::Accepted);
@@ -2188,6 +2205,10 @@ impl Client {
         result: Result<HostResult, WireError>,
     ) -> Vec<ClientCommand> {
         match (method, result) {
+            (Method::SessionNew, Err(e)) if self.pm_asked(id) => {
+                self.pm_refused(refusal(e));
+                Vec::new()
+            }
             (Method::SessionPrompt, result) if self.message_asked(id) => {
                 self.message_answered(id, result);
                 Vec::new()
@@ -2487,8 +2508,15 @@ impl Client {
             .collect()
     }
 
-    /// Rebuilds the list from the folds, keeps the selection valid, and selects a session the user created.
+    /// Rebuilds the list from the folds, keeps the selection valid, selects a session the user created, and opens the
+    /// project manager's page once a PM started for it is listed.
     fn refresh(&mut self) -> Vec<ClientCommand> {
+        let mut commands = self.refresh_list();
+        commands.extend(self.pm_listed());
+        commands
+    }
+
+    fn refresh_list(&mut self) -> Vec<ClientCommand> {
         let old_index = self.selected_index();
         let tree_above = self.tree_above_selection();
         let in_view = self.selection_in_view();
@@ -2581,6 +2609,7 @@ impl Client {
                     removing_worktree: s.removing_worktree,
                     pr: s.pr,
                     agent: s.agent,
+                    profile: s.profile,
                     subagents: state.subagents().to_vec(),
                 });
             }
@@ -2872,6 +2901,7 @@ impl Client {
                         Some(page) => LayoutOp::PageClose { page },
                         None => return Vec::new(),
                     },
+                    PaneMenuItem::ProjectManager => return self.open_pm(),
                 };
                 self.user_request(ClientRequest::UiApply(UiApply { op }))
             }
@@ -3118,6 +3148,7 @@ impl Client {
                 Vec::new()
             }
             Intent::OpenStatus => self.open_status(),
+            Intent::OpenPm => self.open_pm(),
             Intent::StatusGroupBy { by, shown } => self.status_group_by(by, shown),
             Intent::StatusSelect { session, shown } => self.status_select(session, shown),
             Intent::StatusStep { by, shown } => self.status_step(by, shown),

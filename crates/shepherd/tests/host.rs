@@ -330,6 +330,7 @@ fn hello_is_answered_with_the_host_version_machine_and_profiles() {
             "profiles": [
                 { "name": "claude", "agent": "claude-code" },
                 { "name": "codex", "agent": "codex" },
+                { "name": "pm", "agent": "claude-code" },
                 { "name": "shell", "agent": "shell" },
             ],
             "default_profile": "shell",

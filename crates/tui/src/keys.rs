@@ -423,6 +423,7 @@ fn command(key: &KeyEvent, client: &Client, modes: &Modes) -> Option<Intent> {
         KeyCode::Char('q') => Intent::Quit,
         KeyCode::Tab => Intent::ToggleSubagents(client.selected()?.clone()),
         KeyCode::Char('s') => Intent::OpenStatus,
+        KeyCode::Char('p') => Intent::OpenPm,
         _ => return None,
     })
 }
