@@ -16,7 +16,6 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 |---|---|---|---|---|---|
 | T63 Flat sidebar by default; group by machine on demand | [multi-machine](features/multi-machine.md) | fixing | task/t63-flat-sidebar @ baa04e8 |  | built on Codex; 72 snapshots updated for the flat default |
 | T64 Machines panel | [multi-machine](features/multi-machine.md) | building | task/t64-machines-panel |  | blocked→decided: built_at commit time for staleness (0018 amendment) |
-| T60 Project manager session and page | [project-manager](features/project-manager.md) | merging | task/t60-pm-session @ 960014c | 1 | round 1 fixed as asked (mutations shown); merging |
 
 ## Ready to start
 
@@ -32,6 +31,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | F49 Shutdown exits without flushing closed connections | [host-hot-swap](features/host-hot-swap.md) | todo | F47 |
 | F53 iroh link contract flakes under load | [multi-machine](features/multi-machine.md) | todo | T31a |
 | T65 New session: machine first, then agent | [multi-machine](features/multi-machine.md) | todo | T32, T62 |
+| T61 Project manager panel | [project-manager](features/project-manager.md) | ready | T60, T51, T54 |
 | F55 A new session can push the selection out of view | [sidebar-ui](features/sidebar-ui.md) | todo | T45 |
 | F56 The starting glyph is invisible on a selected row | [sidebar-ui](features/sidebar-ui.md) | todo | T62 |
 | T56 Read a subagent's transcript | [subagents](features/subagents.md) | todo | T55, T47 |
@@ -53,7 +53,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | [Host hot-swap](features/host-hot-swap.md) | M3 | 6 | 1 | A new build replaces the running host in place without stopping sessions |
 | [Multi-machine](features/multi-machine.md) | M4 | 9 | 4 | Named machines peer over iroh, and one sidebar drives sessions on any machine (decision 0019) |
 | [PR status](features/pr-status.md) | M3 | 2 | 0 | Each session's PR and its checks show in the sidebar |
-| [Project manager view](features/project-manager.md) | M5 | 0 | 2 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
+| [Project manager view](features/project-manager.md) | M5 | 1 | 1 | A Claude Code session you talk to runs your other agents through shepherd's MCP tools, with a panel showing what they're doing and what's waiting on you |
 | [Sidebar and point-and-click UI](features/sidebar-ui.md) | M1–M1.5 | 9 | 2 | The sidebar, terminal focus, menus, dialogs and popups, all usable with the mouse (decision 0014) |
 | [Status page](features/status-page.md) | M5 | 3 | 0 | One page lists every agent on every machine, triaged by what you owe it, and lets you answer or message agents without attaching |
 | [Subagents](features/subagents.md) | M5 | 2 | 2 | Each session shows its agent's live subagents as a tree in the sidebar, attention from a blocked subagent bubbles up, and a subagent's transcript can be read |

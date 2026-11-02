@@ -13,8 +13,8 @@ Status is one of: todo, ready, building, review, fixing, merging, blocked, parke
 
 | Task | Title | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
-| T60 | Project manager session and page | merging | task/t60-pm-session @ 960014c | 1 | round 1 fixed as asked (mutations shown); merging |
-| T61 | Project manager panel | todo |  |  |  |
+| T60 | Project manager session and page | done | 5838621 | 2 | round 1 fixed as asked (mutations shown) |
+| T61 | Project manager panel | ready |  |  |  |
 
 ## Specs
 
