@@ -15,7 +15,7 @@ Requests from the user land in `docs/inbox.md` first. Background reading: `manif
 | Task | Feature | Status | Branch / merge | Rounds | Notes |
 |---|---|---|---|---|---|
 | T63 Flat sidebar by default; group by machine on demand | [multi-machine](features/multi-machine.md) | fixing | task/t63-flat-sidebar @ baa04e8 |  | built on Codex; 72 snapshots updated for the flat default |
-| T64 Machines panel | [multi-machine](features/multi-machine.md) | building | task/t64-machines-panel |  | blocked→decided: built_at commit time for staleness (0018 amendment) |
+| T64 Machines panel | [multi-machine](features/multi-machine.md) | fixing | task/t64-machines-panel |  | blocked→decided: built_at commit time for staleness (0018 amendment) |
 
 ## Ready to start
 
